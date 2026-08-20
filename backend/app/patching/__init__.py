@@ -1,7 +1,12 @@
 """Safe patch generation, deterministic verification, and conditional criticism package for RepoLens."""
 
 from app.patching.agent import PatchGeneratorAgent
-from app.patching.applier import apply_patch_hunk, apply_unified_diff_to_directory
+from app.patching.applier import (
+    PatchApplyError,
+    apply_patch_hunk,
+    apply_unified_diff_to_directory,
+    parse_unified_diff,
+)
 from app.patching.critic import PatchCriticAgent, should_escalate_to_critic
 from app.patching.schemas import (
     CriticVerdict,
@@ -21,6 +26,7 @@ from app.patching.workflow import PatchWorkflowCoordinator
 
 __all__ = [
     "CriticVerdict",
+    "PatchApplyError",
     "PatchCriticAgent",
     "PatchCriticReport",
     "PatchGeneratorAgent",
@@ -37,6 +43,8 @@ __all__ = [
     "apply_patch_hunk",
     "apply_unified_diff_to_directory",
     "parse_diff_files",
+    "parse_unified_diff",
     "should_escalate_to_critic",
     "validate_patch_proposal",
 ]
+

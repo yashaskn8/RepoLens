@@ -70,7 +70,7 @@ def validate_patch_proposal(
         rejection_reasons.append("Malformed diff: contains headers but no actual line additions (+) or deletions (-).")
 
     # =========================================================================
-    # Rule 2: Fabricated File Paths Check
+    # Rule 2 & 3: Fabricated File Paths & FixPlan Scope Confinement
     # =========================================================================
     parsed_files = parse_diff_files(diff_text)
     known_repo_files: Set[str] = set()
@@ -80,27 +80,27 @@ def validate_patch_proposal(
     if manifest:
         known_repo_files.update(f.path.replace("\\", "/").lstrip("/") for f in manifest.files)
 
-    if known_repo_files:
-        for f in parsed_files:
-            if f not in known_repo_files:
-                rejection_reasons.append(
-                    f"Patch modifies fabricated file not present in repository: '{f}'"
-                )
-
-    # =========================================================================
-    # Rule 3: Unrelated File Modifications (Outside FixPlan)
-    # =========================================================================
+    allowed_plan_files: Set[str] = set()
     if fix_plan:
         allowed_plan_files = set(f.replace("\\", "/").lstrip("/") for f in fix_plan.files_expected_to_change)
         for step in fix_plan.ordered_changes:
             allowed_plan_files.add(step.target_file.replace("\\", "/").lstrip("/"))
 
+    if known_repo_files:
+        for f in parsed_files:
+            if f not in known_repo_files and f not in allowed_plan_files:
+                rejection_reasons.append(
+                    f"Patch modifies fabricated file not present in repository: '{f}'"
+                )
+
+    if fix_plan:
         for f in parsed_files:
             if f not in allowed_plan_files:
                 rejection_reasons.append(
                     f"Patch modifies unauthorized file '{f}' outside approved FixPlan. "
                     f"Approved files: {sorted(list(allowed_plan_files))}"
                 )
+
 
     is_valid = len(rejection_reasons) == 0
     status = PatchValidationStatus.VALID if is_valid else PatchValidationStatus.REJECTED

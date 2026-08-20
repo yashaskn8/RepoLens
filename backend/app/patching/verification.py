@@ -450,7 +450,7 @@ class PatchVerificationService:
             patch_id=proposal.id,
             finding_id=finding.id,
             status=overall_status,
-            syntax_valid=syntax_clean,
+            syntax_valid=(apply_succeeded and syntax_clean),
             security_clean=secrets_clean,
             contract_aligned=(c7_status == CheckStatus.PASSED),
             target_finding_resolved=(finding_resolved_status == CheckStatus.PASSED),
@@ -459,3 +459,4 @@ class PatchVerificationService:
             checks_failed=checks_failed,
             explanation=explanation,
         )
+

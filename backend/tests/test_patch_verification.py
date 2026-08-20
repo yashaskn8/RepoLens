@@ -345,9 +345,10 @@ async def test_patch_verification_rejects_broken_syntax():
         broken_diff = (
             "--- a/app/main.py\n"
             "+++ b/app/main.py\n"
-            "@@ -1,2 +1,3 @@\n"
+            "@@ -1,3 +1,4 @@\n"
             " from fastapi import FastAPI\n"
             "+def broken_syntax( { [\n"
+            " \n"
             " app = FastAPI()\n"
         )
 
@@ -405,9 +406,10 @@ async def test_patch_verification_rejects_scope_overreach():
         unauthorized_diff = (
             "--- a/app/main.py\n"
             "+++ b/app/main.py\n"
-            "@@ -1,2 +1,3 @@\n"
+            "@@ -1,3 +1,4 @@\n"
             " from fastapi import FastAPI\n"
             "+# Unauthorized edit\n"
+            " \n"
             " app = FastAPI()\n"
         )
 
@@ -469,7 +471,9 @@ async def test_adversarial_fake_clean_patch_cannot_obtain_12_of_12_when_scanners
             "+++ b/app/db/query.py\n"
             "@@ -6,2 +6,2 @@\n"
             "-    query = f\"SELECT * FROM accounts WHERE user_id = '{user_id}'\"\n"
+            "-    cursor.execute(query)\n"
             "+    query = \"SELECT * FROM accounts WHERE user_id = ?\"\n"
+            "+    cursor.execute(query, (user_id,))\n"
         )
 
         proposal = PatchProposal(
@@ -497,6 +501,7 @@ async def test_adversarial_fake_clean_patch_cannot_obtain_12_of_12_when_scanners
         c10 = next(c for c in result.checks if c.check_name == "check_10_scanners_clean")
         assert c10.status == CheckStatus.UNAVAILABLE
         assert not c10.passed
+
 
 
 @pytest.mark.asyncio
