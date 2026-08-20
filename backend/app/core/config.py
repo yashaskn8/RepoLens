@@ -66,6 +66,13 @@ class Settings(BaseSettings):
     TRIVY_ENABLED: bool = True
     OSV_SCANNER_ENABLED: bool = True
 
+    # Embedding Model Settings
+    EMBEDDING_MODEL_PRIMARY: str = "nvidia/nv-embedcode-7b-v1"
+    EMBEDDING_MODEL_FALLBACK: str = "Qwen/Qwen3-Embedding-0.6B"
+    EMBEDDING_DIMENSIONS_PRIMARY: int = 4096
+    EMBEDDING_DIMENSIONS_FALLBACK: int = 1024
+
+
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
     def assemble_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:
