@@ -221,3 +221,39 @@ export interface RepositoryGraphData {
   edge_counts_by_kind: Record<string, number>;
   contract_report?: ContractMatchReport | null;
 }
+
+export type ChunkSymbolKind = 'FUNCTION' | 'CLASS' | 'METHOD' | 'ROUTE' | 'FILE';
+
+export interface CodeChunk {
+  chunk_id: string;
+  commit_sha: string;
+  file_path: string;
+  language?: string | null;
+  symbol: string;
+  symbol_kind: ChunkSymbolKind;
+  start_line: number;
+  end_line: number;
+  content: string;
+  content_hash: string;
+  index_version: number;
+}
+
+export type RetrievalChannel = 'exact' | 'lexical' | 'dense' | 'graph';
+
+export interface RetrievalResult {
+  chunk_id: string;
+  score: number;
+  source_channels: RetrievalChannel[];
+  chunk: CodeChunk;
+  reranked_score?: number | null;
+  provenance: Record<string, unknown>;
+}
+
+export interface RetrievalQuery {
+  query: string;
+  top_k?: number;
+  use_reranker?: boolean;
+  file_path_filter?: string | null;
+  symbol_kind_filter?: string | null;
+}
+
