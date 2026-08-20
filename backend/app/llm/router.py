@@ -99,6 +99,13 @@ class LLMRouter:
                     (LLMProvider.NVIDIA, settings.MODEL_BUG_REASONING),
                 ],
             ),
+            TaskPolicy.PATCH_GENERATION: (
+                (LLMProvider.HUGGINGFACE, settings.MODEL_INTEGRATION_CODE),
+                [
+                    (LLMProvider.NVIDIA, settings.MODEL_BUG_REASONING),
+                    (LLMProvider.GEMINI, settings.MODEL_ARCHITECTURE),
+                ],
+            ),
         }
 
         return routes.get(

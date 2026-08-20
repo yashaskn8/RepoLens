@@ -26,6 +26,7 @@ class TaskPolicy(str, Enum):
     VERIFICATION = "verification"
     RESEARCH = "research"
     FIX_PLANNING = "fix_planning"
+    PATCH_GENERATION = "patch_generation"
 
 
 class LLMMessage(BaseModel):
