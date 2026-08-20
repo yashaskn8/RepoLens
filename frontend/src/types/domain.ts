@@ -257,3 +257,77 @@ export interface RetrievalQuery {
   symbol_kind_filter?: string | null;
 }
 
+export type PatchStatus = 'DRAFT' | 'VERIFIED' | 'NEEDS_REVIEW' | 'REJECTED' | 'APPROVED';
+
+export interface VerificationCheckItem {
+  check_name: string;
+  passed: boolean;
+  details?: string | null;
+}
+
+export interface PatchVerificationResult {
+  id: string;
+  patch_id: string;
+  finding_id: string;
+  status: 'PASSED' | 'NEEDS_REVIEW' | 'FAILED';
+  syntax_valid: boolean;
+  security_clean: boolean;
+  contract_aligned: boolean;
+  target_finding_resolved: boolean;
+  checks: VerificationCheckItem[];
+  checks_passed: string[];
+  checks_failed: string[];
+  explanation: string;
+  verified_at: string;
+}
+
+export type CriticVerdict = 'APPROVE' | 'REVISE' | 'REJECT';
+
+export interface PatchCriticReport {
+  id: string;
+  patch_id: string;
+  finding_id: string;
+  verdict: CriticVerdict;
+  critic_score: number;
+  concerns: string[];
+  required_revisions?: string | null;
+  evidence_notes: string;
+  escalation_reasons: string[];
+  created_at: string;
+}
+
+export interface PatchResponse {
+  id: string;
+  finding_id: string;
+  plan_id?: string | null;
+  scan_id: string;
+  status: PatchStatus;
+  unified_diff: string;
+  files_modified: string[];
+  explanation: string;
+  expected_behavior_change: string;
+  generated_tests_or_test_plan?: string[] | null;
+  verification_report?: PatchVerificationResult | null;
+  critic_report?: PatchCriticReport | null;
+  user_feedback?: string | null;
+  approved_by?: string | null;
+  approved_at?: string | null;
+  rejected_reason?: string | null;
+  model_metadata?: ModelExecutionMetadata | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PatchReviewRequest {
+  approved_by?: string;
+  notes?: string;
+}
+
+export interface PatchRejectRequest {
+  reason: string;
+}
+
+export interface PatchReviseRequest {
+  user_feedback: string;
+}
+

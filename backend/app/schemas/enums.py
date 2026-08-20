@@ -37,3 +37,13 @@ class VerificationVerdict(str, Enum):
     CONFIRMED = "CONFIRMED"
     POSSIBLE = "POSSIBLE"
     REJECTED = "REJECTED"
+
+
+class PatchStatus(str, Enum):
+    """Lifecycle and approval status of a remediation patch."""
+
+    DRAFT = "DRAFT"
+    VERIFIED = "VERIFIED"
+    NEEDS_REVIEW = "NEEDS_REVIEW"
+    REJECTED = "REJECTED"
+    APPROVED = "APPROVED"
