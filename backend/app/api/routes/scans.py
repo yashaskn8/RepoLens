@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.agents.graph import run_analysis_workflow
 from app.analysis.service import get_intelligence_service
+from app.context.runtime import ScanIntelligenceRuntime
 from app.core.database import SessionLocal, get_db
 from app.ingestion.clone import InvalidRepositoryURLError, clone_repository, validate_github_url
 from app.models.finding import EvidenceModel, FindingModel
@@ -63,11 +64,19 @@ async def execute_background_scan(scan_id: str, repo_url: str, branch: Optional[
             branch=branch,
         )
 
-        # 4. Run LangGraph multi-agent analysis & verification workflow
+        # 4. Assemble canonical ScanIntelligenceRuntime from EvidenceStore
+        runtime = await ScanIntelligenceRuntime.build(
+            evidence_store=evidence_store,
+            repo_dir=workspace_dir,
+        )
+
+        # 5. Run LangGraph multi-agent analysis & verification workflow with ContextEngine and RepositoryGraph
         final_state = await run_analysis_workflow(
             evidence_store=evidence_store,
             scan_id=scan_id,
             repo_dir=workspace_dir,
+            context_engine=runtime.context_engine,
+            repository_graph=runtime.repository_graph,
         )
 
         # 5. Persist verified findings into database

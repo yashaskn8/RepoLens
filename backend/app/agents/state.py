@@ -44,3 +44,7 @@ class AnalysisState(TypedDict):
     model_executions: Annotated[List[ModelExecutionMetadata], operator.add]
     errors: Annotated[List[str], operator.add]
     status: str
+
+    # Repository intelligence runtime abstractions (ContextEngine & RepositoryGraph)
+    context_engine: Optional[Any]
+    repository_graph: Optional[Any]

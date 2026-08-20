@@ -4,6 +4,7 @@ from uuid import UUID
 from typing import Any, Dict
 from app.agents.helpers import parse_llm_findings, safe_to_uuid
 from app.agents.state import AnalysisState
+from app.context.runtime import get_scan_context_engine
 from app.llm.router import get_llm_router
 from app.llm.types import LLMMessage, LLMRequest, TaskPolicy
 
@@ -15,7 +16,8 @@ async def run_architecture_agent(state: AnalysisState) -> Dict[str, Any]:
     languages = state.get("languages", {})
     frameworks = state.get("frameworks", [])
     overview = state.get("architecture_overview", "")
-    context_engine = state.get("context_engine")
+    context_engine = state.get("context_engine") or get_scan_context_engine(str(scan_id))
+
 
     # Retrieve targeted context bundle
     targeted_code = ""

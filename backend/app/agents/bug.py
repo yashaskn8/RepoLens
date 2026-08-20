@@ -4,6 +4,7 @@ from uuid import UUID
 from typing import Any, Dict
 from app.agents.helpers import parse_llm_findings, safe_to_uuid
 from app.agents.state import AnalysisState
+from app.context.runtime import get_scan_context_engine
 from app.llm.router import get_llm_router
 from app.llm.types import LLMMessage, LLMRequest, TaskPolicy
 
@@ -11,9 +12,10 @@ from app.llm.types import LLMMessage, LLMRequest, TaskPolicy
 async def run_bug_agent(state: AnalysisState) -> Dict[str, Any]:
     """Analyze code logic, exception handling, resource management, and asynchronous patterns using targeted ContextBundle."""
     scan_id = safe_to_uuid(state["scan_id"])
-    context_engine = state.get("context_engine")
+    context_engine = state.get("context_engine") or get_scan_context_engine(str(scan_id))
     manifest = state.get("manifest_summary", {})
     routes = state.get("routes", [])
+
 
     targeted_code = ""
     if context_engine:

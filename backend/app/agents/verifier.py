@@ -6,10 +6,12 @@ import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 from app.agents.helpers import extract_json_block
 from app.agents.state import AnalysisState
+from app.context.runtime import get_scan_context_engine
 from app.llm.router import get_llm_router
 from app.llm.types import LLMMessage, LLMProvider, LLMRequest, TaskPolicy
 from app.schemas.enums import FindingStatus, Severity, VerificationVerdict
 from app.schemas.finding import Finding
+
 
 
 def _normalize_title_key(title: str) -> str:
@@ -69,7 +71,9 @@ async def run_verifier_agent(state: AnalysisState) -> Dict[str, Any]:
     """
     candidate_findings: List[Finding] = state.get("candidate_findings", [])
     repo_dir = state.get("repo_dir", "")
-    context_engine = state.get("context_engine")
+    scan_id = state.get("scan_id", "")
+    context_engine = state.get("context_engine") or get_scan_context_engine(str(scan_id))
+
 
     verified_findings: List[Finding] = []
     rejected_findings: List[Dict[str, Any]] = []
