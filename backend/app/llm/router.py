@@ -92,6 +92,13 @@ class LLMRouter:
                     (LLMProvider.NVIDIA, settings.MODEL_BUG_REASONING),
                 ],
             ),
+            TaskPolicy.FIX_PLANNING: (
+                (LLMProvider.GEMINI, settings.MODEL_ARCHITECTURE),
+                [
+                    (LLMProvider.GROQ, settings.MODEL_SECURITY_REASONING),
+                    (LLMProvider.NVIDIA, settings.MODEL_BUG_REASONING),
+                ],
+            ),
         }
 
         return routes.get(

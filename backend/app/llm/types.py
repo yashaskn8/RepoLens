@@ -25,6 +25,7 @@ class TaskPolicy(str, Enum):
     LIGHTWEIGHT_CLASSIFICATION = "lightweight_classification"
     VERIFICATION = "verification"
     RESEARCH = "research"
+    FIX_PLANNING = "fix_planning"
 
 
 class LLMMessage(BaseModel):
