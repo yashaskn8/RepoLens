@@ -29,3 +29,11 @@ class ScanStatus(str, Enum):
     RUNNING = "RUNNING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+
+
+class VerificationVerdict(str, Enum):
+    """Verification verdict for candidate findings."""
+
+    CONFIRMED = "CONFIRMED"
+    POSSIBLE = "POSSIBLE"
+    REJECTED = "REJECTED"

@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 from uuid import UUID, uuid4
 from pydantic import BaseModel, Field
-from app.schemas.enums import FindingStatus, Severity
+from app.schemas.enums import FindingStatus, Severity, VerificationVerdict
 from app.schemas.evidence import Evidence, EvidenceCreate
 from app.schemas.metadata import ModelExecutionMetadata
 
@@ -24,6 +24,8 @@ class FindingBase(BaseModel):
     rule_id: Optional[str] = Field(default=None, description="Identifier of the rule or pattern matched")
     category: Optional[str] = Field(default=None, description="Category (e.g. security, performance, style, architecture)")
     mitigation_guidance: Optional[str] = Field(default=None, description="Recommended remediation steps or code diff")
+    verification_verdict: Optional[VerificationVerdict] = Field(default=None, description="Verification verdict: CONFIRMED, POSSIBLE, REJECTED")
+    verification_reason: Optional[str] = Field(default=None, description="Detailed rationale provided by the Verifier")
 
 
 class FindingCreate(FindingBase):

@@ -1,0 +1,39 @@
+"""Typed LangGraph shared state for multi-agent repository analysis workflow."""
+
+import operator
+from typing import Annotated, Any, Dict, List, Optional
+from typing_extensions import TypedDict
+
+from app.schemas.finding import Finding
+from app.schemas.metadata import ModelExecutionMetadata
+
+
+class AnalysisState(TypedDict):
+    """Explicit shared state schema for the LangGraph multi-agent analysis workflow."""
+
+    scan_id: str
+    repository_url: str
+    commit_hash: str
+    branch: Optional[str]
+    repo_dir: str
+
+    # Structural facts populated by Repository Mapper
+    manifest_summary: Dict[str, Any]
+    languages: Dict[str, int]
+    frameworks: List[str]
+    architecture_overview: Optional[str]
+    routes: List[Dict[str, Any]]
+    frontend_calls: List[Dict[str, Any]]
+    static_findings: List[Dict[str, Any]]
+
+    # Candidate findings aggregated from parallel specialists
+    candidate_findings: Annotated[List[Finding], operator.add]
+
+    # Grounded findings verified by Verifier agent
+    verified_findings: List[Finding]
+    rejected_findings: List[Dict[str, Any]]
+
+    # Observability & telemetry
+    model_executions: Annotated[List[ModelExecutionMetadata], operator.add]
+    errors: Annotated[List[str], operator.add]
+    status: str
