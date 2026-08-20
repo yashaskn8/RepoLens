@@ -50,3 +50,42 @@ class PatchProposal(BaseModel):
     validation_report: Optional[PatchValidationReport] = Field(default=None, description="Deterministic diff syntax and boundary validation report")
     model_metadata: Optional[ModelExecutionMetadata] = Field(default=None, description="LLM execution metadata")
     created_at: datetime = Field(default_factory=_utc_now, description="Timestamp of patch creation")
+
+
+class VerificationStatus(str, Enum):
+    """Overall status of deterministic patch verification."""
+
+    PASSED = "PASSED"
+    NEEDS_REVIEW = "NEEDS_REVIEW"
+    FAILED = "FAILED"
+
+
+class VerificationCheckItem(BaseModel):
+    """Individual verification check result."""
+
+    check_name: str = Field(..., description="Canonical name of the verification check")
+    passed: bool = Field(..., description="True if the check passed, False otherwise")
+    details: Optional[str] = Field(default=None, description="Diagnostic notes or failure explanation")
+
+
+class PatchVerificationResult(BaseModel):
+    """Rigorous, deterministic multi-step verification result for a candidate patch.
+    
+    Guarantees:
+    - Never runs untrusted repository tests or package scripts.
+    - Verified strictly in an isolated temporary sandbox.
+    """
+
+    id: UUID = Field(default_factory=uuid4, description="Unique verification report identifier")
+    patch_id: UUID = Field(..., description="UUID of the evaluated PatchProposal")
+    finding_id: UUID = Field(..., description="UUID of the target finding")
+    status: VerificationStatus = Field(..., description="Overall verdict: PASSED, NEEDS_REVIEW, or FAILED")
+    syntax_valid: bool = Field(..., description="True if all modified files still parse cleanly with Tree-sitter")
+    security_clean: bool = Field(..., description="True if no new secrets or high/critical vulnerabilities were introduced")
+    contract_aligned: bool = Field(..., description="True if route contracts and relationships remain intact")
+    target_finding_resolved: bool = Field(..., description="True if original defect evidence was remediated")
+    checks: List[VerificationCheckItem] = Field(default_factory=list, description="All 12 individual check results")
+    checks_passed: List[str] = Field(default_factory=list, description="Names of all passed checks")
+    checks_failed: List[str] = Field(default_factory=list, description="Names of any failed checks")
+    explanation: str = Field(..., description="Summary explanation of verification findings")
+    verified_at: datetime = Field(default_factory=_utc_now, description="Verification timestamp")
