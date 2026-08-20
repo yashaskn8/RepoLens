@@ -147,3 +147,58 @@ export async function revisePatch(
 
   return response.json();
 }
+
+export async function fetchFinding(findingId: string): Promise<Finding> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/findings/${findingId}`, {
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json' },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch finding (${response.status})`);
+  }
+
+  return response.json();
+}
+
+export async function requestFindingResearch(findingId: string): Promise<import('@/types/domain').ResearchResult> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/findings/${findingId}/research`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to research finding (${response.status})`);
+  }
+
+  return response.json();
+}
+
+export async function requestFixPlan(findingId: string): Promise<import('@/types/domain').FixPlan> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/findings/${findingId}/plan`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to generate fix plan (${response.status})`);
+  }
+
+  return response.json();
+}
+
+export async function requestPatchGeneration(findingId: string): Promise<import('@/types/domain').PatchWorkflowResult> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/findings/${findingId}/patch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to generate patch (${response.status})`);
+  }
+
+  return response.json();
+}

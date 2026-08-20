@@ -318,6 +318,70 @@ export interface PatchResponse {
   updated_at: string;
 }
 
+export interface ResearchEvidence {
+  source_url: string;
+  source_title: string;
+  source_tier: string;
+  supported_claim: string;
+  confidence: number;
+}
+
+export interface ResearchResult {
+  id: string;
+  finding_id?: string | null;
+  target_framework: string;
+  detected_version?: string | null;
+  recommended_version?: string | null;
+  migration_summary: string;
+  repository_impact: string;
+  evidences: ResearchEvidence[];
+  model_metadata?: ModelExecutionMetadata | null;
+  created_at: string;
+}
+
+export interface OrderedChangeStep {
+  step_number: number;
+  target_file: string;
+  description: string;
+  rationale: string;
+}
+
+export interface FixPlan {
+  id: string;
+  finding_id: string;
+  root_cause: string;
+  objective: string;
+  files_expected_to_change: string[];
+  ordered_changes: OrderedChangeStep[];
+  validation_plan: string[];
+  estimated_scope?: string | null;
+  model_metadata?: ModelExecutionMetadata | null;
+  created_at: string;
+}
+
+export interface PatchProposal {
+  id: string;
+  finding_id: string;
+  plan_id?: string | null;
+  unified_diff: string;
+  files_modified: string[];
+  explanation: string;
+  expected_behavior_change: string;
+  generated_tests_or_test_plan?: string[] | null;
+  model_metadata?: ModelExecutionMetadata | null;
+  created_at: string;
+}
+
+export interface PatchWorkflowResult {
+  finding_id: string;
+  proposal: PatchProposal;
+  verification_result: PatchVerificationResult;
+  critic_escalated: boolean;
+  critic_report?: PatchCriticReport | null;
+  revision_count: number;
+  final_verdict: 'APPROVED' | 'REJECTED' | 'NEEDS_HUMAN_REVIEW';
+}
+
 export interface PatchReviewRequest {
   approved_by?: string;
   notes?: string;

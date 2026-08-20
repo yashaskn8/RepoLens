@@ -9,6 +9,7 @@ import {
   VerificationVerdict,
 } from '@/types/domain';
 import { fetchHealth, fetchScan, fetchScanFindings, startScan } from '@/lib/api';
+import { RemediationLifecycle } from '@/components/RemediationLifecycle';
 
 export default function HomePage() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
@@ -20,6 +21,7 @@ export default function HomePage() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [severityFilter, setSeverityFilter] = useState<string>('ALL');
   const [verdictFilter, setVerdictFilter] = useState<string>('ALL');
+  const [expandedFindingId, setExpandedFindingId] = useState<string | null>(null);
 
   // 1. Initial health check
   useEffect(() => {
@@ -379,6 +381,32 @@ export default function HomePage() {
                     <div style={{ marginTop: '0.75rem', fontSize: '0.85rem', color: '#a7f3d0' }}>
                       <strong>Remediation: </strong>
                       {finding.mitigation_guidance}
+                    </div>
+                  )}
+
+                  {/* Remediation Lifecycle Action Button */}
+                  <div style={{ marginTop: '1rem', display: 'flex', justifyContent: 'flex-end' }}>
+                    <button
+                      type="button"
+                      className="filter-btn"
+                      style={{
+                        background: expandedFindingId === finding.id ? 'rgba(56, 189, 248, 0.2)' : 'rgba(30, 41, 59, 0.8)',
+                        borderColor: expandedFindingId === finding.id ? '#38bdf8' : 'rgba(71, 85, 105, 0.5)',
+                        color: expandedFindingId === finding.id ? '#38bdf8' : '#cbd5e1',
+                        fontSize: '0.8rem',
+                        fontWeight: 600,
+                        padding: '0.4rem 0.85rem',
+                      }}
+                      onClick={() => setExpandedFindingId(expandedFindingId === finding.id ? null : finding.id)}
+                    >
+                      {expandedFindingId === finding.id ? 'Hide Remediation & Patch ▴' : '🛠️ Remediate & Safe Patch ▾'}
+                    </button>
+                  </div>
+
+                  {/* Embedded Remediation Lifecycle */}
+                  {expandedFindingId === finding.id && (
+                    <div style={{ marginTop: '1.25rem' }}>
+                      <RemediationLifecycle finding={finding} />
                     </div>
                   )}
                 </div>

@@ -1,0 +1,205 @@
+"""API endpoints for finding inspection, technical research, fix planning, and patch generation."""
+
+import logging
+from typing import Optional
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+from app.analysis.store import EvidenceStore
+from app.context.engine import ContextEngine
+from app.core.database import get_db
+from app.ingestion.schemas import RepositoryManifest
+from app.models.finding import FindingModel
+from app.models.patch import PatchModel
+from app.models.scan import ScanModel
+from app.patching.critic import PatchCriticAgent
+from app.patching.schemas import PatchProposal, PatchWorkflowResult
+from app.patching.service import PatchService
+from app.patching.verification import PatchVerificationService
+from app.patching.workflow import PatchWorkflowCoordinator
+from app.planning.schemas import FixPlan
+from app.planning.service import FixPlanningService
+from app.research.schemas import ResearchResult
+from app.research.service import ResearchService
+from app.schemas.enums import FindingStatus, PatchStatus, Severity, VerificationVerdict
+from app.schemas.evidence import Evidence
+from app.schemas.finding import Finding
+from app.schemas.metadata import ModelExecutionMetadata
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/findings", tags=["Findings & Remediation"])
+
+
+def _finding_model_to_schema(fm: FindingModel) -> Finding:
+    """Convert FindingModel ORM object into validated Finding domain schema."""
+    evidences = [
+        Evidence(
+            id=UUID(em.id),
+            file_path=em.file_path,
+            start_line=em.start_line,
+            end_line=em.end_line,
+            code_snippet=em.code_snippet,
+            context_notes=em.context_notes,
+        )
+        for em in fm.evidences
+    ]
+    metadata = None
+    if fm.model_metadata and isinstance(fm.model_metadata, dict):
+        try:
+            metadata = ModelExecutionMetadata(**fm.model_metadata)
+        except Exception:
+            pass
+
+    return Finding(
+        id=UUID(fm.id),
+        scan_id=UUID(fm.scan_id),
+        title=fm.title,
+        description=fm.description,
+        severity=Severity(fm.severity),
+        status=FindingStatus(fm.status),
+        rule_id=fm.rule_id,
+        category=fm.category,
+        mitigation_guidance=fm.mitigation_guidance,
+        verification_verdict=VerificationVerdict(fm.verification_verdict) if fm.verification_verdict else None,
+        verification_reason=fm.verification_reason,
+        evidences=evidences,
+        model_metadata=metadata,
+        created_at=fm.created_at,
+        updated_at=fm.updated_at,
+    )
+
+
+@router.get("/{finding_id}", response_model=Finding)
+def get_finding_by_id(finding_id: UUID, db: Session = Depends(get_db)) -> Finding:
+    """Retrieve detailed information and evidence for a specific finding."""
+    fm = db.query(FindingModel).filter(FindingModel.id == str(finding_id)).first()
+    if not fm:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Finding with ID '{finding_id}' not found.",
+        )
+    return _finding_model_to_schema(fm)
+
+
+@router.post("/{finding_id}/research", response_model=ResearchResult)
+async def request_finding_research(
+    finding_id: UUID,
+    db: Session = Depends(get_db),
+) -> ResearchResult:
+    """Execute evidence-grounded technical research and upgrade intelligence for a confirmed finding."""
+    fm = db.query(FindingModel).filter(FindingModel.id == str(finding_id)).first()
+    if not fm:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Finding with ID '{finding_id}' not found.",
+        )
+
+    finding_schema = _finding_model_to_schema(fm)
+    service = ResearchService()
+    return await service.research_finding(finding_schema)
+
+
+@router.post("/{finding_id}/plan", response_model=FixPlan)
+async def request_fix_plan(
+    finding_id: UUID,
+    db: Session = Depends(get_db),
+) -> FixPlan:
+    """Generate and validate a structured, minimal-scope FixPlan for a confirmed finding."""
+    fm = db.query(FindingModel).filter(FindingModel.id == str(finding_id)).first()
+    if not fm:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Finding with ID '{finding_id}' not found.",
+        )
+
+    finding_schema = _finding_model_to_schema(fm)
+    manifest = RepositoryManifest(
+        repository_url="https://github.com/repo",
+        commit_hash="main",
+        total_files=0,
+        total_size_bytes=0,
+        languages={},
+        frameworks=[],
+        files=[],
+    )
+    evidence_store = EvidenceStore(manifest=manifest)
+    context_engine = ContextEngine(evidence_store=evidence_store)
+    service = FixPlanningService()
+
+    return await service.create_fix_plan(
+        finding=finding_schema,
+        context_engine=context_engine,
+    )
+
+
+@router.post("/{finding_id}/patch", response_model=PatchWorkflowResult)
+async def request_patch_generation(
+    finding_id: UUID,
+    db: Session = Depends(get_db),
+) -> PatchWorkflowResult:
+    """Generate, verify in sandbox, conditionally critique, and persist a candidate patch proposal."""
+    fm = db.query(FindingModel).filter(FindingModel.id == str(finding_id)).first()
+    if not fm:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Finding with ID '{finding_id}' not found.",
+        )
+
+    finding_schema = _finding_model_to_schema(fm)
+    manifest = RepositoryManifest(
+        repository_url="https://github.com/repo",
+        commit_hash="current",
+        total_files=0,
+        total_size_bytes=0,
+        languages={"python": 1},
+        frameworks=[],
+        files=[],
+    )
+    evidence_store = EvidenceStore(manifest=manifest)
+    context_engine = ContextEngine(evidence_store=evidence_store)
+
+    # 1. Generate FixPlan first
+    planning_service = FixPlanningService()
+    fix_plan = await planning_service.create_fix_plan(
+        finding=finding_schema,
+        context_engine=context_engine,
+    )
+
+    # 2. Execute Patch Workflow (Generator -> Sandbox Verifier -> Critic)
+    coordinator = PatchWorkflowCoordinator()
+
+    workflow_result = await coordinator.execute_patch_workflow(
+        finding=finding_schema,
+        fix_plan=fix_plan,
+        context_engine=context_engine,
+        original_repo_dir=".",
+        manifest=manifest,
+    )
+
+    # 3. Persist Patch Proposal into database
+    patch_status = PatchStatus.VERIFIED if workflow_result.final_verdict == "APPROVED" else (
+        PatchStatus.REJECTED if workflow_result.final_verdict == "REJECTED" else PatchStatus.NEEDS_REVIEW
+    )
+
+    proposal = workflow_result.proposal
+    patch_model = PatchModel(
+        id=str(proposal.id),
+        finding_id=str(finding_id),
+        plan_id=str(proposal.plan_id) if proposal.plan_id else None,
+        scan_id=str(fm.scan_id),
+        status=patch_status.value,
+        unified_diff=proposal.unified_diff,
+        files_modified=proposal.files_modified,
+        explanation=proposal.explanation,
+        expected_behavior_change=proposal.expected_behavior_change,
+        generated_tests_or_test_plan=proposal.generated_tests_or_test_plan,
+        verification_report=workflow_result.verification_result.model_dump(mode="json") if workflow_result.verification_result else None,
+        critic_report=workflow_result.critic_report.model_dump(mode="json") if workflow_result.critic_report else None,
+        model_metadata=proposal.model_metadata.model_dump(mode="json") if proposal.model_metadata else None,
+    )
+    db.add(patch_model)
+    db.commit()
+
+    return workflow_result
