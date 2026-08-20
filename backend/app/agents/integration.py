@@ -2,7 +2,7 @@
 
 from uuid import UUID
 from typing import Any, Dict
-from app.agents.helpers import parse_llm_findings
+from app.agents.helpers import parse_llm_findings, safe_to_uuid
 from app.agents.state import AnalysisState
 from app.llm.router import get_llm_router
 from app.llm.types import LLMMessage, LLMRequest, TaskPolicy
@@ -10,7 +10,7 @@ from app.llm.types import LLMMessage, LLMRequest, TaskPolicy
 
 async def run_integration_agent(state: AnalysisState) -> Dict[str, Any]:
     """Analyze API contracts, frontend-backend alignment, and route consistency using targeted ContextBundle."""
-    scan_id = UUID(state["scan_id"])
+    scan_id = safe_to_uuid(state["scan_id"])
     context_engine = state.get("context_engine")
     routes = state.get("routes", [])
     frontend_calls = state.get("frontend_calls", [])
@@ -92,6 +92,7 @@ async def run_integration_agent(state: AnalysisState) -> Dict[str, Any]:
 
     return {
         "candidate_findings": candidate_findings,
+        "completed_nodes": ["integration"],
         "model_executions": model_executions,
         "errors": errors,
     }

@@ -3,12 +3,23 @@
 import json
 import re
 from typing import Any, Dict, List
+import uuid
 from uuid import UUID
 
 from app.schemas.enums import FindingStatus, Severity
 from app.schemas.evidence import Evidence
 from app.schemas.finding import Finding
 from app.schemas.metadata import ModelExecutionMetadata
+
+
+def safe_to_uuid(val: Any) -> UUID:
+    """Safely convert any UUID or string identifier to a valid UUID object."""
+    if isinstance(val, UUID):
+        return val
+    try:
+        return UUID(str(val))
+    except Exception:
+        return uuid.uuid5(uuid.NAMESPACE_DNS, str(val))
 
 
 def extract_json_block(text: str) -> str:
@@ -22,12 +33,13 @@ def extract_json_block(text: str) -> str:
 
 def parse_llm_findings(
     raw_content: str,
-    scan_id: UUID,
+    scan_id: Any,
     default_category: str,
     model_metadata: ModelExecutionMetadata,
 ) -> List[Finding]:
     """Parse JSON array of findings from LLM output into validated canonical Finding objects."""
     findings: List[Finding] = []
+    clean_scan_id = safe_to_uuid(scan_id)
     json_str = extract_json_block(raw_content)
 
     try:
@@ -65,7 +77,7 @@ def parse_llm_findings(
             )
 
             finding = Finding(
-                scan_id=scan_id,
+                scan_id=clean_scan_id,
                 title=title,
                 description=description,
                 severity=severity,

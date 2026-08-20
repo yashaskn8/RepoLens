@@ -1,11 +1,13 @@
-"""LangGraph multi-agent workflow construction and execution."""
+"""Durable LangGraph multi-agent workflow construction, SQLite checkpointer integration, and execution."""
 
 import asyncio
+import logging
 from typing import Any, Dict, Optional
 from langgraph.graph import END, START, StateGraph
 
 from app.agents.architecture import run_architecture_agent
 from app.agents.bug import run_bug_agent
+from app.agents.checkpointer import get_sqlite_checkpointer
 from app.agents.integration import run_integration_agent
 from app.agents.mapper import run_repository_mapper
 from app.agents.security import run_security_agent
@@ -13,9 +15,11 @@ from app.agents.state import AnalysisState
 from app.agents.verifier import run_verifier_agent
 from app.analysis.store import EvidenceStore
 
+logger = logging.getLogger(__name__)
 
-def build_analysis_graph() -> Any:
-    """Construct and compile the parallel specialist LangGraph analysis workflow."""
+
+def build_analysis_graph(checkpointer: Optional[Any] = None) -> Any:
+    """Construct and compile the parallel specialist LangGraph analysis workflow with optional checkpointer."""
     workflow = StateGraph(AnalysisState)
 
     # 1. Register specialist nodes
@@ -40,17 +44,46 @@ def build_analysis_graph() -> Any:
 
     workflow.add_edge("verifier", END)
 
-    return workflow.compile()
+    return workflow.compile(checkpointer=checkpointer)
 
 
 async def run_analysis_workflow(
     evidence_store: EvidenceStore,
     scan_id: str,
     repo_dir: str,
+    checkpointer: Optional[Any] = None,
+    resume_if_exists: bool = True,
 ) -> AnalysisState:
-    """Initialize state from EvidenceStore and execute the compiled LangGraph workflow."""
-    summary = evidence_store.get_summary()
+    """Execute or resume the durable LangGraph multi-agent analysis workflow using scan_id as thread identifier.
+    
+    Guarantees:
+    - Large code files remain outside state; persists structured summaries, routes, and IDs only.
+    - Checkpoint saves state after every super-step.
+    - An interrupted scan resumes from the last completed node without re-executing finished agents.
+    - Failed nodes or terminal failures capture errors without corrupting the checkpointer.
+    """
+    config = {"configurable": {"thread_id": scan_id}}
+    app = build_analysis_graph(checkpointer=checkpointer)
 
+    # Check for existing checkpoint state for this scan_id thread
+    if checkpointer is not None and resume_if_exists:
+        try:
+            current_state = await app.aget_state(config)
+            if current_state and current_state.values:
+                # If all nodes already finished, return the completed state directly
+                if not current_state.next:
+                    logger.info("Scan %s already completed in checkpointer. Returning cached result.", scan_id)
+                    return current_state.values
+
+                # Interrupted scan: resume execution from last completed super-step
+                logger.info("Resuming scan %s from checkpoint (next nodes: %s)...", scan_id, current_state.next)
+                resumed_result = await app.ainvoke(None, config=config)
+                return resumed_result
+        except Exception as exc:
+            logger.warning("Failed to check or resume existing checkpoint for %s: %s. Starting fresh.", scan_id, str(exc))
+
+    # Fresh scan initialization
+    summary = evidence_store.get_summary()
     initial_state: AnalysisState = {
         "scan_id": scan_id,
         "repository_url": evidence_store.manifest.repository_url,
@@ -67,11 +100,18 @@ async def run_analysis_workflow(
         "candidate_findings": [],
         "verified_findings": [],
         "rejected_findings": [],
+        "completed_nodes": [],
         "model_executions": [],
         "errors": [],
         "status": "RUNNING",
     }
 
-    graph = build_analysis_graph()
-    final_state = await graph.ainvoke(initial_state)
-    return final_state
+    try:
+        final_state = await app.ainvoke(initial_state, config=config)
+        return final_state
+    except Exception as exc:
+        logger.error("Terminal workflow failure for scan %s: %s", scan_id, str(exc))
+        # Attempt to record failure in state
+        initial_state["status"] = "FAILED"
+        initial_state["errors"].append(f"Terminal execution failure: {str(exc)}")
+        return initial_state

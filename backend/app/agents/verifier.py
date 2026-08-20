@@ -80,6 +80,7 @@ async def run_verifier_agent(state: AnalysisState) -> Dict[str, Any]:
         return {
             "verified_findings": [],
             "rejected_findings": [],
+            "completed_nodes": ["verifier"],
             "status": "COMPLETED",
         }
 
@@ -188,6 +189,7 @@ async def run_verifier_agent(state: AnalysisState) -> Dict[str, Any]:
         return {
             "verified_findings": [],
             "rejected_findings": rejected_findings,
+            "completed_nodes": ["verifier"],
             "status": "COMPLETED",
         }
 
@@ -309,6 +311,7 @@ async def run_verifier_agent(state: AnalysisState) -> Dict[str, Any]:
     return {
         "verified_findings": verified_findings,
         "rejected_findings": rejected_findings,
+        "completed_nodes": ["verifier"],
         "model_executions": model_executions,
         "errors": errors,
         "status": "COMPLETED",

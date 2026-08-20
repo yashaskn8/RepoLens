@@ -45,6 +45,7 @@ async def run_repository_mapper(state: AnalysisState) -> Dict[str, Any]:
 
     return {
         "architecture_overview": overview,
+        "completed_nodes": ["mapper"],
         "model_executions": model_executions,
         "errors": errors,
     }

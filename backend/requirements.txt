@@ -13,4 +13,5 @@ tree-sitter-python>=0.23.0
 tree-sitter-javascript>=0.23.0
 tree-sitter-typescript>=0.23.0
 langgraph>=0.2.0
+langgraph-checkpoint-sqlite>=3.0.0
 networkx>=3.0

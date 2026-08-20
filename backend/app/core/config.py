@@ -72,6 +72,9 @@ class Settings(BaseSettings):
     EMBEDDING_DIMENSIONS_PRIMARY: int = 4096
     EMBEDDING_DIMENSIONS_FALLBACK: int = 1024
 
+    # LangGraph Checkpoint Settings
+    CHECKPOINT_DB_FILE: str = "checkpoints.db"
+
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

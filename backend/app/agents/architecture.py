@@ -2,7 +2,7 @@
 
 from uuid import UUID
 from typing import Any, Dict
-from app.agents.helpers import parse_llm_findings
+from app.agents.helpers import parse_llm_findings, safe_to_uuid
 from app.agents.state import AnalysisState
 from app.llm.router import get_llm_router
 from app.llm.types import LLMMessage, LLMRequest, TaskPolicy
@@ -10,7 +10,7 @@ from app.llm.types import LLMMessage, LLMRequest, TaskPolicy
 
 async def run_architecture_agent(state: AnalysisState) -> Dict[str, Any]:
     """Analyze high-level architecture, module boundaries, and design patterns using targeted ContextBundle."""
-    scan_id = UUID(state["scan_id"])
+    scan_id = safe_to_uuid(state["scan_id"])
     manifest = state.get("manifest_summary", {})
     languages = state.get("languages", {})
     frameworks = state.get("frameworks", [])
@@ -97,6 +97,7 @@ async def run_architecture_agent(state: AnalysisState) -> Dict[str, Any]:
 
     return {
         "candidate_findings": candidate_findings,
+        "completed_nodes": ["architecture"],
         "model_executions": model_executions,
         "errors": errors,
     }

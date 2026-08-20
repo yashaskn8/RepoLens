@@ -9,7 +9,11 @@ from app.schemas.metadata import ModelExecutionMetadata
 
 
 class AnalysisState(TypedDict):
-    """Explicit shared state schema for the LangGraph multi-agent analysis workflow."""
+    """Explicit shared state schema for the LangGraph multi-agent analysis workflow.
+    
+    Strictly keeps large source code out of state; stores identifiers, metadata,
+    and structured finding representations for safe SQLite checkpoint persistence.
+    """
 
     scan_id: str
     repository_url: str
@@ -25,7 +29,6 @@ class AnalysisState(TypedDict):
     routes: List[Dict[str, Any]]
     frontend_calls: List[Dict[str, Any]]
     static_findings: List[Dict[str, Any]]
-    context_engine: Optional[Any]
 
     # Candidate findings aggregated from parallel specialists
     candidate_findings: Annotated[List[Finding], operator.add]
@@ -33,6 +36,9 @@ class AnalysisState(TypedDict):
     # Grounded findings verified by Verifier agent
     verified_findings: List[Finding]
     rejected_findings: List[Dict[str, Any]]
+
+    # Checkpoint execution tracking
+    completed_nodes: Annotated[List[str], operator.add]
 
     # Observability & telemetry
     model_executions: Annotated[List[ModelExecutionMetadata], operator.add]

@@ -2,7 +2,7 @@
 
 from uuid import UUID
 from typing import Any, Dict
-from app.agents.helpers import parse_llm_findings
+from app.agents.helpers import parse_llm_findings, safe_to_uuid
 from app.agents.state import AnalysisState
 from app.llm.router import get_llm_router
 from app.llm.types import LLMMessage, LLMRequest, TaskPolicy
@@ -10,7 +10,7 @@ from app.llm.types import LLMMessage, LLMRequest, TaskPolicy
 
 async def run_security_agent(state: AnalysisState) -> Dict[str, Any]:
     """Analyze security posture, vulnerability findings, and critical code risks using targeted ContextBundle."""
-    scan_id = UUID(state["scan_id"])
+    scan_id = safe_to_uuid(state["scan_id"])
     context_engine = state.get("context_engine")
     static_findings = state.get("static_findings", [])
     languages = state.get("languages", {})
@@ -94,6 +94,7 @@ async def run_security_agent(state: AnalysisState) -> Dict[str, Any]:
 
     return {
         "candidate_findings": candidate_findings,
+        "completed_nodes": ["security"],
         "model_executions": model_executions,
         "errors": errors,
     }
