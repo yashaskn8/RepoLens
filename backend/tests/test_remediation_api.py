@@ -1,11 +1,13 @@
-"""Tests for Phase 3G: Remediation API contracts, research, fix plan, and patch workflow endpoints."""
-
+from contextlib import asynccontextmanager
+import os
+import tempfile
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 import pytest
 
 from app.models.finding import FindingModel
 from app.models.patch import PatchModel
+from app.models.scan import ScanModel
 from app.patching.schemas import (
     PatchProposal,
     PatchVerificationResult,
@@ -13,8 +15,19 @@ from app.patching.schemas import (
     VerificationStatus,
 )
 from app.planning.schemas import FixPlan, OrderedChangeStep
-from app.research.schemas import ResearchEvidence, ResearchResult
-from app.schemas.enums import FindingStatus, PatchStatus, Severity
+from app.research.schemas import ResearchEvidence, ResearchResult, SourceTier
+from app.schemas.enums import FindingStatus, PatchStatus, ScanStatus, Severity
+
+
+@asynccontextmanager
+async def _mock_open_snapshot_ctx(scan_id, db=None):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.makedirs(os.path.join(tmpdir, "app"), exist_ok=True)
+        with open(os.path.join(tmpdir, "app", "db.py"), "w") as f:
+            f.write("def query(): pass\n")
+        with open(os.path.join(tmpdir, "app", "auth_cookie.py"), "w") as f:
+            f.write("def cookie(): pass\n")
+        yield tmpdir
 
 
 def test_get_finding_by_id_and_not_found(client, db_session):
@@ -25,9 +38,14 @@ def test_get_finding_by_id_and_not_found(client, db_session):
     assert res_404.status_code == 404
 
     # 2. Existing finding returns finding details
-    scan_res = client.post("/api/v1/scans", json={"repository_url": "https://github.com/fastapi/fastapi"})
-    assert scan_res.status_code == 202
-    scan_id = scan_res.json()["id"]
+    scan_id = str(uuid4())
+    sm = ScanModel(
+        id=scan_id,
+        repository_url="https://github.com/fastapi/fastapi",
+        commit_hash="a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+        status=ScanStatus.COMPLETED.value,
+    )
+    db_session.add(sm)
 
     finding_id = str(uuid4())
     fm = FindingModel(
@@ -53,8 +71,14 @@ def test_get_finding_by_id_and_not_found(client, db_session):
 
 def test_request_finding_research_endpoint(client, db_session):
     """Verify POST /api/v1/findings/{finding_id}/research returns structured ResearchResult."""
-    scan_res = client.post("/api/v1/scans", json={"repository_url": "https://github.com/fastapi/fastapi"})
-    scan_id = scan_res.json()["id"]
+    scan_id = str(uuid4())
+    sm = ScanModel(
+        id=scan_id,
+        repository_url="https://github.com/fastapi/fastapi",
+        commit_hash="a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+        status=ScanStatus.COMPLETED.value,
+    )
+    db_session.add(sm)
 
     finding_id = str(uuid4())
     fm = FindingModel(
@@ -68,7 +92,6 @@ def test_request_finding_research_endpoint(client, db_session):
     db_session.add(fm)
     db_session.commit()
 
-    from app.research.schemas import SourceTier
     mock_research = ResearchResult(
         target_framework="pydantic",
         recommended_version="v2.x",
@@ -85,7 +108,8 @@ def test_request_finding_research_endpoint(client, db_session):
         ],
     )
 
-    with patch("app.research.service.ResearchService.research_finding", new_callable=AsyncMock) as mock_res_fn:
+    with patch("app.ingestion.snapshot.RepositorySnapshotService.open_snapshot", side_effect=_mock_open_snapshot_ctx), \
+         patch("app.research.service.ResearchService.research_finding", new_callable=AsyncMock) as mock_res_fn:
         mock_res_fn.return_value = mock_research
 
         res = client.post(f"/api/v1/findings/{finding_id}/research")
@@ -98,8 +122,14 @@ def test_request_finding_research_endpoint(client, db_session):
 
 def test_request_fix_plan_endpoint(client, db_session):
     """Verify POST /api/v1/findings/{finding_id}/plan returns validated FixPlan."""
-    scan_res = client.post("/api/v1/scans", json={"repository_url": "https://github.com/fastapi/fastapi"})
-    scan_id = scan_res.json()["id"]
+    scan_id = str(uuid4())
+    sm = ScanModel(
+        id=scan_id,
+        repository_url="https://github.com/fastapi/fastapi",
+        commit_hash="a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+        status=ScanStatus.COMPLETED.value,
+    )
+    db_session.add(sm)
 
     finding_id = str(uuid4())
     fm = FindingModel(
@@ -129,7 +159,8 @@ def test_request_fix_plan_endpoint(client, db_session):
         validation_plan=["pytest tests/test_db.py"],
     )
 
-    with patch("app.planning.service.FixPlanningService.create_fix_plan", new_callable=AsyncMock) as mock_plan_fn:
+    with patch("app.ingestion.snapshot.RepositorySnapshotService.open_snapshot", side_effect=_mock_open_snapshot_ctx), \
+         patch("app.planning.service.FixPlanningService.create_fix_plan", new_callable=AsyncMock) as mock_plan_fn:
         mock_plan_fn.return_value = mock_plan
 
         res = client.post(f"/api/v1/findings/{finding_id}/plan")
@@ -141,8 +172,14 @@ def test_request_fix_plan_endpoint(client, db_session):
 
 def test_request_patch_generation_endpoint(client, db_session):
     """Verify POST /api/v1/findings/{finding_id}/patch executes workflow and persists proposal."""
-    scan_res = client.post("/api/v1/scans", json={"repository_url": "https://github.com/fastapi/fastapi"})
-    scan_id = scan_res.json()["id"]
+    scan_id = str(uuid4())
+    sm = ScanModel(
+        id=scan_id,
+        repository_url="https://github.com/fastapi/fastapi",
+        commit_hash="a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+        status=ScanStatus.COMPLETED.value,
+    )
+    db_session.add(sm)
 
     finding_id = str(uuid4())
     fm = FindingModel(
@@ -196,7 +233,8 @@ def test_request_patch_generation_endpoint(client, db_session):
         final_verdict="APPROVED",
     )
 
-    with patch("app.planning.service.FixPlanningService.create_fix_plan", new_callable=AsyncMock) as mock_plan_fn, \
+    with patch("app.ingestion.snapshot.RepositorySnapshotService.open_snapshot", side_effect=_mock_open_snapshot_ctx), \
+         patch("app.planning.service.FixPlanningService.create_fix_plan", new_callable=AsyncMock) as mock_plan_fn, \
          patch("app.patching.workflow.PatchWorkflowCoordinator.execute_patch_workflow", new_callable=AsyncMock) as mock_wf_fn:
         
         mock_plan_fn.return_value = mock_plan
@@ -213,3 +251,4 @@ def test_request_patch_generation_endpoint(client, db_session):
         persisted = db_session.query(PatchModel).filter(PatchModel.finding_id == finding_id).first()
         assert persisted is not None
         assert persisted.status == PatchStatus.VERIFIED.value
+
