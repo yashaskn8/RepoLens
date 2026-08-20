@@ -89,3 +89,39 @@ class PatchVerificationResult(BaseModel):
     checks_failed: List[str] = Field(default_factory=list, description="Names of any failed checks")
     explanation: str = Field(..., description="Summary explanation of verification findings")
     verified_at: datetime = Field(default_factory=_utc_now, description="Verification timestamp")
+
+
+class CriticVerdict(str, Enum):
+    """Independent patch critic verdict."""
+
+    APPROVE = "APPROVE"
+    REVISE = "REVISE"
+    REJECT = "REJECT"
+
+
+class PatchCriticReport(BaseModel):
+    """Structured report produced by the independent PatchCriticAgent."""
+
+    id: UUID = Field(default_factory=uuid4, description="Unique critic evaluation identifier")
+    patch_id: UUID = Field(..., description="Evaluated patch proposal ID")
+    finding_id: UUID = Field(..., description="Target finding ID")
+    verdict: CriticVerdict = Field(..., description="APPROVE, REVISE, or REJECT")
+    critic_score: float = Field(default=1.0, ge=0.0, le=1.0, description="Quality/confidence score")
+    concerns: List[str] = Field(default_factory=list, description="Specific architectural, regression, or security concerns")
+    required_revisions: Optional[str] = Field(default=None, description="Actionable revision guidance if verdict is REVISE")
+    evidence_notes: str = Field(..., description="Analysis grounded in independent repository retrieval")
+    escalation_reasons: List[str] = Field(default_factory=list, description="Reasons why critic was conditionally invoked")
+    model_metadata: Optional[ModelExecutionMetadata] = Field(default=None, description="Telemetry from independent critic model")
+    created_at: datetime = Field(default_factory=_utc_now, description="Critic evaluation timestamp")
+
+
+class PatchWorkflowResult(BaseModel):
+    """End-to-end outcome of the safe patch generation, verification, and criticism workflow."""
+
+    finding_id: UUID = Field(..., description="Target finding ID")
+    proposal: PatchProposal = Field(..., description="Final candidate patch proposal")
+    verification_result: PatchVerificationResult = Field(..., description="Deterministic sandbox verification outcome")
+    critic_escalated: bool = Field(default=False, description="True if conditional escalation rules invoked the critic")
+    critic_report: Optional[PatchCriticReport] = Field(default=None, description="Critic evaluation report if escalated")
+    revision_count: int = Field(default=0, ge=0, le=1, description="Number of automatic revisions applied (capped at 1)")
+    final_verdict: str = Field(..., description="APPROVED, REJECTED, or NEEDS_HUMAN_REVIEW")

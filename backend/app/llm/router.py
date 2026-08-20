@@ -106,6 +106,13 @@ class LLMRouter:
                     (LLMProvider.GEMINI, settings.MODEL_ARCHITECTURE),
                 ],
             ),
+            TaskPolicy.PATCH_CRITIC: (
+                (LLMProvider.NVIDIA, settings.MODEL_VERIFICATION),
+                [
+                    (LLMProvider.GEMINI, settings.MODEL_ARCHITECTURE),
+                    (LLMProvider.GROQ, settings.MODEL_SECURITY_REASONING),
+                ],
+            ),
         }
 
         return routes.get(
