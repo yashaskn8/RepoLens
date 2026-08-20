@@ -152,3 +152,72 @@ export interface ScannerResult {
   error_message?: string | null;
   execution_time_ms: number;
 }
+
+export type NodeKind = 'FILE' | 'SYMBOL' | 'ROUTE' | 'FRONTEND_REQUEST' | 'DEPENDENCY' | 'TEST';
+
+export type EdgeKind =
+  | 'CONTAINS'
+  | 'IMPORTS'
+  | 'CALLS'
+  | 'EXPOSES_ROUTE'
+  | 'REQUESTS_ROUTE'
+  | 'MATCHES_ROUTE'
+  | 'DEPENDS_ON'
+  | 'TESTS';
+
+export type ContractMatchStatus =
+  | 'MATCHED'
+  | 'UNMATCHED_FRONTEND_REQUEST'
+  | 'METHOD_MISMATCH'
+  | 'PATH_MISMATCH'
+  | 'AMBIGUOUS_MATCH';
+
+export interface GraphNode {
+  id: string;
+  kind: NodeKind;
+  label: string;
+  file_path?: string | null;
+  start_line?: number | null;
+  end_line?: number | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface GraphEdge {
+  source: string;
+  target: string;
+  kind: EdgeKind;
+  metadata: Record<string, unknown>;
+}
+
+export interface RouteContractMatch {
+  frontend_request_id: string;
+  frontend_method: string;
+  frontend_url: string;
+  frontend_file: string;
+  frontend_line?: number | null;
+  status: ContractMatchStatus;
+  matched_route_ids: string[];
+  matched_backend_paths: string[];
+  matched_backend_methods: string[];
+  details: string;
+}
+
+export interface ContractMatchReport {
+  total_frontend_requests: number;
+  total_backend_routes: number;
+  matched_count: number;
+  unmatched_count: number;
+  method_mismatch_count: number;
+  ambiguous_count: number;
+  matches: RouteContractMatch[];
+}
+
+export interface RepositoryGraphData {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  total_nodes: number;
+  total_edges: number;
+  node_counts_by_kind: Record<string, number>;
+  edge_counts_by_kind: Record<string, number>;
+  contract_report?: ContractMatchReport | null;
+}
