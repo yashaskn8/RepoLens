@@ -1,4 +1,4 @@
-"""Integration Specialist Agent using Qwen3-Coder-Next."""
+"""Integration Specialist Agent using Qwen3-Coder-Next and targeted ContextBundle."""
 
 from uuid import UUID
 from typing import Any, Dict
@@ -9,10 +9,30 @@ from app.llm.types import LLMMessage, LLMRequest, TaskPolicy
 
 
 async def run_integration_agent(state: AnalysisState) -> Dict[str, Any]:
-    """Analyze API contracts, frontend-backend alignment, and route consistency."""
+    """Analyze API contracts, frontend-backend alignment, and route consistency using targeted ContextBundle."""
     scan_id = UUID(state["scan_id"])
+    context_engine = state.get("context_engine")
     routes = state.get("routes", [])
     frontend_calls = state.get("frontend_calls", [])
+
+    targeted_code = ""
+    contract_matches = ""
+    if context_engine:
+        bundle = await context_engine.build_context_bundle(
+            scan_id=str(scan_id),
+            query="API endpoints client fetch axios route contract",
+            analysis_intent="integration",
+            context_budget=3000,
+            max_chunks=4,
+        )
+        targeted_code = "\n\n".join(
+            f"--- {c.chunk.file_path} ({c.chunk.symbol}:{c.chunk.start_line}-{c.chunk.end_line}) ---\n{c.chunk.content}"
+            for c in bundle.relevant_chunks
+        )
+        contract_matches = "\n".join(
+            f"Frontend {m.frontend_method} {m.frontend_url} -> Status: {m.status.value} ({m.details})"
+            for m in bundle.routes_and_contracts[:10]
+        )
 
     system_prompt = (
         "You are the Integration & Code Specialist AI Agent for RepoLens. "
@@ -34,12 +54,14 @@ async def run_integration_agent(state: AnalysisState) -> Dict[str, Any]:
         "    }\n"
         "  ]\n"
         "}\n"
-        "CRITICAL: Ground every finding in provided routes or HTTP calls. Do NOT invent files."
+        "CRITICAL: Ground every finding in provided routes, contracts, or code evidence. Do NOT invent files."
     )
 
     user_prompt = (
-        f"Backend API Routes ({len(routes)}):\n{routes[:30]}\n\n"
-        f"Frontend Client HTTP Calls ({len(frontend_calls)}):\n{frontend_calls[:30]}\n"
+        f"Backend Routes Sample ({len(routes)}):\n{routes[:15]}\n\n"
+        f"Frontend HTTP Calls Sample ({len(frontend_calls)}):\n{frontend_calls[:15]}\n\n"
+        f"Cross-Layer Contracts:\n{contract_matches or 'None evaluated'}\n\n"
+        f"Targeted Code Chunks:\n{targeted_code or 'No code chunks retrieved'}\n"
     )
 
     model_executions = []

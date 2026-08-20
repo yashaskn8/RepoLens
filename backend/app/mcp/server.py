@@ -5,6 +5,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.analysis.store import EvidenceStore
+from app.context.engine import ContextEngine
+from app.graph.matcher import match_route_contract, normalize_route_path
+from app.graph.repository_graph import RepositoryGraph
+from app.graph.schemas import GraphNode, NodeKind
 from app.ingestion.schemas import SymbolKind
 from app.mcp.types import (
     MCPToolCallRequest,
@@ -20,14 +24,22 @@ class MCPRepositoryServer:
     Guarantees:
     - No arbitrary filesystem access or path traversal outside the repository root.
     - No shell command execution.
-    - No access to environment variables, credentials, or host filesystem.
+    - No direct vector database access or ungrounded graph mutations.
     - Zero write operations.
     - Repository content is treated strictly as data.
     """
 
-    def __init__(self, evidence_store: EvidenceStore, repo_dir: str):
+    def __init__(
+        self,
+        evidence_store: EvidenceStore,
+        repo_dir: str,
+        repository_graph: Optional[RepositoryGraph] = None,
+        context_engine: Optional[ContextEngine] = None,
+    ):
         self.evidence_store = evidence_store
         self.repo_dir = os.path.abspath(repo_dir)
+        self.repository_graph = repository_graph
+        self.context_engine = context_engine
 
     def _resolve_safe_path(self, relative_path: str) -> str:
         """Ensure file path is strictly localized within repo_dir, preventing path traversal."""
@@ -141,6 +153,46 @@ class MCPRepositoryServer:
                         "category": {"type": "string", "description": "Optional category filter (e.g. sast, vulnerability, secret, misconfiguration, dependency)"},
                         "tool": {"type": "string", "description": "Optional scanner tool filter (semgrep, trivy, osv-scanner)"},
                     },
+                    "additionalProperties": False,
+                },
+            ),
+            MCPToolDefinition(
+                name="repo_get_related_symbols",
+                description="Retrieve related symbols and module dependencies connected via structural relationship graph edges.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "symbol_name": {"type": "string", "description": "Symbol name or function to trace"},
+                        "file_path": {"type": "string", "description": "Optional file path containing the symbol"},
+                    },
+                    "required": ["symbol_name"],
+                    "additionalProperties": False,
+                },
+            ),
+            MCPToolDefinition(
+                name="repo_trace_contract",
+                description="Trace cross-layer frontend/backend API contract alignment for a specific route or endpoint.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "route_or_url": {"type": "string", "description": "Route path or client URL pattern (e.g. /api/users/:id or /api/users/{id})"},
+                        "http_method": {"type": "string", "description": "Optional HTTP method (GET, POST, PUT, DELETE)"},
+                    },
+                    "required": ["route_or_url"],
+                    "additionalProperties": False,
+                },
+            ),
+            MCPToolDefinition(
+                name="repo_retrieve_context",
+                description="Retrieve an evidence-grounded, bounded ContextBundle with relevant code chunks, graph edges, and static findings.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Targeted search query describing needed context"},
+                        "analysis_intent": {"type": "string", "description": "Specialist intent (architecture, integration, security, bug, verification)"},
+                        "max_chunks": {"type": "integer", "description": "Maximum number of code chunks to include (default: 5)", "default": 5},
+                    },
+                    "required": ["query"],
                     "additionalProperties": False,
                 },
             ),
@@ -267,6 +319,87 @@ class MCPRepositoryServer:
                     tool_name=tool_name,
                     content={"findings": [f.model_dump() for f in findings], "count": len(findings)},
                 )
+
+            elif tool_name == "repo_get_related_symbols":
+                sym_name = arguments.get("symbol_name", "")
+                f_path = arguments.get("file_path")
+                if not sym_name:
+                    return MCPToolCallResponse(tool_name=tool_name, is_error=True, error_message="Parameter 'symbol_name' is required.")
+
+                related = []
+                if self.repository_graph:
+                    for node in self.repository_graph.get_nodes_by_kind(NodeKind.SYMBOL):
+                        if node.label == sym_name or sym_name in node.label:
+                            if not f_path or (node.file_path and f_path in node.file_path):
+                                # Gather connected neighbors
+                                for edge in self.repository_graph.get_outgoing_edges(node.id):
+                                    tgt = self.repository_graph.get_node(edge.target)
+                                    if tgt:
+                                        related.append({"relationship": edge.kind.value, "target": tgt.model_dump()})
+                                for edge in self.repository_graph.get_incoming_edges(node.id):
+                                    src = self.repository_graph.get_node(edge.source)
+                                    if src:
+                                        related.append({"relationship": f"INCOMING_{edge.kind.value}", "source": src.model_dump()})
+
+                return MCPToolCallResponse(
+                    tool_name=tool_name,
+                    content={"symbol_name": sym_name, "related_symbols": related, "count": len(related)},
+                )
+
+            elif tool_name == "repo_trace_contract":
+                raw_route = arguments.get("route_or_url", "")
+                method = arguments.get("http_method", "GET").upper()
+                if not raw_route:
+                    return MCPToolCallResponse(tool_name=tool_name, is_error=True, error_message="Parameter 'route_or_url' is required.")
+
+                norm_path = normalize_route_path(raw_route)
+                routes = self.evidence_store.get_routes()
+                calls = self.evidence_store.get_http_calls()
+
+                # Filter matching routes and calls
+                matched_routes = [
+                    r.model_dump() for r in routes
+                    if normalize_route_path(r.details.get("path", "")) == norm_path
+                ]
+                matched_calls = [
+                    c.model_dump() for c in calls
+                    if normalize_route_path(c.details.get("url", "")) == norm_path
+                ]
+
+                return MCPToolCallResponse(
+                    tool_name=tool_name,
+                    content={
+                        "input_pattern": raw_route,
+                        "normalized_path": norm_path,
+                        "http_method": method,
+                        "backend_routes": matched_routes,
+                        "frontend_calls": matched_calls,
+                        "is_matched": len(matched_routes) > 0 and len(matched_calls) > 0,
+                    },
+                )
+
+            elif tool_name == "repo_retrieve_context":
+                query = arguments.get("query", "")
+                intent = arguments.get("analysis_intent", "general")
+                max_chunks = min(int(arguments.get("max_chunks", 5)), 20)
+
+                if not query:
+                    return MCPToolCallResponse(tool_name=tool_name, is_error=True, error_message="Parameter 'query' is required.")
+
+                if self.context_engine:
+                    bundle = await self.context_engine.build_context_bundle(
+                        scan_id=str(self.evidence_store.manifest.commit_hash[:12]),
+                        query=query,
+                        analysis_intent=intent,
+                        max_chunks=max_chunks,
+                    )
+                    return MCPToolCallResponse(tool_name=tool_name, content=bundle.model_dump())
+                else:
+                    # Fallback summary
+                    return MCPToolCallResponse(
+                        tool_name=tool_name,
+                        content={"query": query, "message": "Context engine not initialized for this session."},
+                    )
 
             else:
                 return MCPToolCallResponse(

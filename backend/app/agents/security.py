@@ -1,4 +1,4 @@
-"""Security Specialist Agent using Groq GPT-OSS 120B."""
+"""Security Specialist Agent using Groq GPT-OSS 120B and targeted ContextBundle."""
 
 from uuid import UUID
 from typing import Any, Dict
@@ -9,11 +9,31 @@ from app.llm.types import LLMMessage, LLMRequest, TaskPolicy
 
 
 async def run_security_agent(state: AnalysisState) -> Dict[str, Any]:
-    """Analyze security posture, vulnerability findings, and critical code risks."""
+    """Analyze security posture, vulnerability findings, and critical code risks using targeted ContextBundle."""
     scan_id = UUID(state["scan_id"])
+    context_engine = state.get("context_engine")
     static_findings = state.get("static_findings", [])
     languages = state.get("languages", {})
     frameworks = state.get("frameworks", [])
+
+    targeted_code = ""
+    bundled_findings = ""
+    if context_engine:
+        bundle = await context_engine.build_context_bundle(
+            scan_id=str(scan_id),
+            query="security vulnerability injection secrets authentication sanitization",
+            analysis_intent="security",
+            context_budget=3000,
+            max_chunks=4,
+        )
+        targeted_code = "\n\n".join(
+            f"--- {c.chunk.file_path} ({c.chunk.symbol}:{c.chunk.start_line}-{c.chunk.end_line}) ---\n{c.chunk.content}"
+            for c in bundle.relevant_chunks
+        )
+        bundled_findings = "\n".join(
+            f"[{f.severity.value}] {f.tool}: {f.title} ({f.evidence.file_path}:{f.evidence.start_line})"
+            for f in bundle.static_findings[:10]
+        )
 
     system_prompt = (
         "You are the Security Specialist AI Agent for RepoLens. "
@@ -42,7 +62,8 @@ async def run_security_agent(state: AnalysisState) -> Dict[str, Any]:
     user_prompt = (
         f"Languages: {languages}\n"
         f"Frameworks: {frameworks}\n"
-        f"Deterministic Static Findings ({len(static_findings)}):\n{static_findings[:40]}\n"
+        f"Deterministic Static Findings ({len(static_findings)}):\n{bundled_findings or static_findings[:20]}\n\n"
+        f"Targeted Code Chunks:\n{targeted_code or 'No code chunks retrieved'}\n"
     )
 
     model_executions = []

@@ -1,4 +1,4 @@
-"""Bug and Correctness Specialist Agent using NVIDIA Laguna XS 2.1."""
+"""Bug and Correctness Specialist Agent using NVIDIA Laguna XS 2.1 and targeted ContextBundle."""
 
 from uuid import UUID
 from typing import Any, Dict
@@ -9,10 +9,25 @@ from app.llm.types import LLMMessage, LLMRequest, TaskPolicy
 
 
 async def run_bug_agent(state: AnalysisState) -> Dict[str, Any]:
-    """Analyze code correctness, logic bugs, unhandled exceptions, and edge cases."""
+    """Analyze code correctness, logic bugs, unhandled exceptions, and edge cases using targeted ContextBundle."""
     scan_id = UUID(state["scan_id"])
+    context_engine = state.get("context_engine")
     manifest = state.get("manifest_summary", {})
     routes = state.get("routes", [])
+
+    targeted_code = ""
+    if context_engine:
+        bundle = await context_engine.build_context_bundle(
+            scan_id=str(scan_id),
+            query="logic bug null exception async handling race condition",
+            analysis_intent="bug",
+            context_budget=3000,
+            max_chunks=4,
+        )
+        targeted_code = "\n\n".join(
+            f"--- {c.chunk.file_path} ({c.chunk.symbol}:{c.chunk.start_line}-{c.chunk.end_line}) ---\n{c.chunk.content}"
+            for c in bundle.relevant_chunks
+        )
 
     system_prompt = (
         "You are the Bug & Correctness Specialist AI Agent for RepoLens. "
@@ -39,7 +54,8 @@ async def run_bug_agent(state: AnalysisState) -> Dict[str, Any]:
 
     user_prompt = (
         f"Repository Summary: {manifest}\n"
-        f"Key Endpoints ({len(routes)}):\n{routes[:25]}\n"
+        f"Key Endpoints ({len(routes)}):\n{routes[:15]}\n\n"
+        f"Targeted Code Chunks:\n{targeted_code or 'No code chunks retrieved'}\n"
     )
 
     model_executions = []

@@ -25,6 +25,7 @@ class AnalysisState(TypedDict):
     routes: List[Dict[str, Any]]
     frontend_calls: List[Dict[str, Any]]
     static_findings: List[Dict[str, Any]]
+    context_engine: Optional[Any]
 
     # Candidate findings aggregated from parallel specialists
     candidate_findings: Annotated[List[Finding], operator.add]

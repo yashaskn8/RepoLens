@@ -61,7 +61,7 @@ async def run_verifier_agent(state: AnalysisState) -> Dict[str, Any]:
     
     1. File exists in workspace
     2. Symbol / line evidence exists within file bounds
-    3. Evidence actually supports the claim
+    3. Evidence actually supports the claim (with independent ContextEngine retrieval)
     4. Contradictory evidence is absent
     5. Severity is justified
     6. Recommendation addresses root cause
@@ -69,6 +69,7 @@ async def run_verifier_agent(state: AnalysisState) -> Dict[str, Any]:
     """
     candidate_findings: List[Finding] = state.get("candidate_findings", [])
     repo_dir = state.get("repo_dir", "")
+    context_engine = state.get("context_engine")
 
     verified_findings: List[Finding] = []
     rejected_findings: List[Dict[str, Any]] = []
@@ -83,7 +84,7 @@ async def run_verifier_agent(state: AnalysisState) -> Dict[str, Any]:
         }
 
     seen_signatures: Set[Tuple[str, Optional[str], Optional[int]]] = set()
-    candidates_for_llm: List[Tuple[Finding, str, str]] = []  # (finding, real_code_slice, policy)
+    candidates_for_llm: List[Tuple[Finding, str, str, str]] = []  # (finding, real_code_slice, policy, independent_context)
 
     # =========================================================================
     # Phase 1: Deterministic Verification & Deduplication
@@ -157,11 +158,30 @@ async def run_verifier_agent(state: AnalysisState) -> Dict[str, Any]:
             # First 50 lines for broad file-level findings
             code_slice = "".join(file_lines[:50])
 
-        # 4. Determine independent verifier provider policy
+        # 4. Independent Supporting Evidence Retrieval
+        independent_context = ""
+        if context_engine:
+            try:
+                ind_bundle = await context_engine.build_context_bundle(
+                    scan_id=state.get("scan_id", "verifier"),
+                    query=f"{finding.title} {finding.description[:100]}",
+                    analysis_intent="verification",
+                    context_budget=1500,
+                    max_chunks=2,
+                )
+                if ind_bundle.relevant_chunks:
+                    independent_context = "\n".join(
+                        f"Independent retrieved evidence ({c.chunk.file_path}:{c.chunk.start_line}):\n{c.chunk.content[:200]}"
+                        for c in ind_bundle.relevant_chunks
+                    )
+            except Exception:
+                pass
+
+        # 5. Determine independent verifier provider policy
         creator_provider = finding.model_metadata.provider if finding.model_metadata else None
         verifier_policy = _select_verifier_policy(creator_provider)
 
-        candidates_for_llm.append((finding, code_slice, verifier_policy))
+        candidates_for_llm.append((finding, code_slice, verifier_policy, independent_context))
 
     # If all candidate findings failed deterministic checks, return early
     if not candidates_for_llm:
@@ -197,7 +217,7 @@ async def run_verifier_agent(state: AnalysisState) -> Dict[str, Any]:
     )
 
     items_to_verify = []
-    for idx, (f, code_slice, _) in enumerate(candidates_for_llm):
+    for idx, (f, code_slice, _, ind_ctx) in enumerate(candidates_for_llm):
         ev = f.evidences[0] if f.evidences else None
         items_to_verify.append({
             "index": idx,
@@ -209,6 +229,7 @@ async def run_verifier_agent(state: AnalysisState) -> Dict[str, Any]:
             "lines": f"{ev.start_line}-{ev.end_line}" if ev and ev.start_line else "whole_file",
             "claimed_snippet": ev.code_snippet if ev else "",
             "actual_source_code": code_slice,
+            "independent_context": ind_ctx or "None",
             "mitigation_guidance": f.mitigation_guidance or "",
         })
 
@@ -238,7 +259,7 @@ async def run_verifier_agent(state: AnalysisState) -> Dict[str, Any]:
             if "index" in item and "verdict" in item
         }
 
-        for idx, (f, _, _) in enumerate(candidates_for_llm):
+        for idx, (f, _, _, _) in enumerate(candidates_for_llm):
             evaluation = eval_map.get(idx)
 
             if not evaluation:
@@ -249,42 +270,40 @@ async def run_verifier_agent(state: AnalysisState) -> Dict[str, Any]:
                 continue
 
             raw_verdict = str(evaluation.get("verdict", "")).upper()
-            reason = evaluation.get("reason", "Verification complete.")
+            reason = str(evaluation.get("reason", "No verification explanation provided."))
 
-            if raw_verdict == VerificationVerdict.CONFIRMED.value:
+            if raw_verdict == "CONFIRMED":
                 f.verification_verdict = VerificationVerdict.CONFIRMED
                 f.verification_reason = reason
-                # Update adjusted severity if provided
-                raw_sev = str(evaluation.get("justified_severity", "")).upper()
-                if raw_sev in Severity.__members__:
-                    f.severity = Severity[raw_sev]
-                f.status = FindingStatus.OPEN
+                justified_sev = evaluation.get("justified_severity")
+                if justified_sev and justified_sev in Severity._value2member_map_:
+                    f.severity = Severity(justified_sev)
                 verified_findings.append(f)
 
-            elif raw_verdict == VerificationVerdict.POSSIBLE.value:
+            elif raw_verdict == "POSSIBLE":
                 f.verification_verdict = VerificationVerdict.POSSIBLE
                 f.verification_reason = reason
-                raw_sev = str(evaluation.get("justified_severity", "")).upper()
-                if raw_sev in Severity.__members__:
-                    f.severity = Severity[raw_sev]
-                f.status = FindingStatus.OPEN
+                justified_sev = evaluation.get("justified_severity")
+                if justified_sev and justified_sev in Severity._value2member_map_:
+                    f.severity = Severity(justified_sev)
                 verified_findings.append(f)
 
-            else:  # REJECTED
+            else:
+                # REJECTED: isolate rejection reason for debugging, do not expose as verified issue
                 rejected_findings.append({
-                    "finding_id": str(f.id),
-                    "title": f.title,
-                    "file_path": f.evidences[0].file_path if f.evidences else "unknown",
+                    "finding_id": str(finding.id),
+                    "title": finding.title,
+                    "file_path": finding.evidences[0].file_path if finding.evidences else "unknown",
                     "verdict": VerificationVerdict.REJECTED.value,
                     "reason": reason,
                 })
 
     except Exception as exc:
-        errors.append(f"Verifier Agent notice: {str(exc)}")
-        # On LLM failure, retain all grounded candidates with POSSIBLE verdict
-        for f, _, _ in candidates_for_llm:
+        errors.append(f"Verifier Agent LLM reasoning failure: {str(exc)}")
+        # Graceful fallback: If LLM call fails, mark deterministic-passed findings as POSSIBLE
+        for f, _, _, _ in candidates_for_llm:
             f.verification_verdict = VerificationVerdict.POSSIBLE
-            f.verification_reason = "Grounded in repository files; verifier model unavailable."
+            f.verification_reason = "Passed deterministic verification; verifier reasoning fallback."
             verified_findings.append(f)
 
     return {

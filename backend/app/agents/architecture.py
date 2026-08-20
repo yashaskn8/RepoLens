@@ -1,4 +1,4 @@
-"""Architecture Specialist Agent using Gemini 3.7 Flash."""
+"""Architecture Specialist Agent using Gemini 3.7 Flash and targeted ContextBundle."""
 
 from uuid import UUID
 from typing import Any, Dict
@@ -9,13 +9,32 @@ from app.llm.types import LLMMessage, LLMRequest, TaskPolicy
 
 
 async def run_architecture_agent(state: AnalysisState) -> Dict[str, Any]:
-    """Analyze high-level architecture, module boundaries, and design patterns."""
+    """Analyze high-level architecture, module boundaries, and design patterns using targeted ContextBundle."""
     scan_id = UUID(state["scan_id"])
     manifest = state.get("manifest_summary", {})
     languages = state.get("languages", {})
     frameworks = state.get("frameworks", [])
     overview = state.get("architecture_overview", "")
-    routes = state.get("routes", [])
+    context_engine = state.get("context_engine")
+
+    # Retrieve targeted context bundle
+    targeted_code = ""
+    graph_context = ""
+    if context_engine:
+        bundle = await context_engine.build_context_bundle(
+            scan_id=str(scan_id),
+            query=f"architecture layer module structure {overview[:80]}",
+            analysis_intent="architecture",
+            context_budget=3000,
+            max_chunks=4,
+        )
+        targeted_code = "\n\n".join(
+            f"--- {c.chunk.file_path} ({c.chunk.symbol}:{c.chunk.start_line}-{c.chunk.end_line}) ---\n{c.chunk.content}"
+            for c in bundle.relevant_chunks
+        )
+        graph_context = "\n".join(
+            f"{e.source} --[{e.kind.value}]--> {e.target}" for e in bundle.graph_relationships[:10]
+        )
 
     system_prompt = (
         "You are the Architecture Specialist AI Agent for RepoLens. "
@@ -46,7 +65,8 @@ async def run_architecture_agent(state: AnalysisState) -> Dict[str, Any]:
         f"Languages: {languages}\n"
         f"Frameworks: {frameworks}\n"
         f"Total Files: {manifest.get('total_files', 0)}\n"
-        f"Sample Routes Count: {len(routes)}\n"
+        f"Graph Relationships:\n{graph_context or 'None'}\n\n"
+        f"Targeted Code Chunks:\n{targeted_code or 'No code chunks retrieved'}\n"
     )
 
     model_executions = []
