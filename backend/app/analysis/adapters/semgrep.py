@@ -1,0 +1,95 @@
+"""Semgrep deterministic static analysis adapter."""
+
+import json
+import os
+from typing import List
+from app.analysis.base import BaseScannerAdapter
+from app.analysis.schemas import StaticFinding
+from app.core.config import get_settings
+from app.schemas.evidence import Evidence
+
+
+class SemgrepAdapter(BaseScannerAdapter):
+    """Adapter for Semgrep SAST scanner."""
+
+    @property
+    def tool_name(self) -> str:
+        return "semgrep"
+
+    @property
+    def tool_path(self) -> str:
+        return get_settings().SEMGREP_PATH
+
+    @property
+    def is_enabled(self) -> bool:
+        return get_settings().SEMGREP_ENABLED
+
+    def _build_command(self, repo_dir: str) -> List[str]:
+        return [
+            self.tool_path,
+            "--json",
+            "--config",
+            "auto",
+            "--quiet",
+            "--no-git-ignore",
+            "--metrics=off",
+            "--disable-version-check",
+            repo_dir,
+        ]
+
+    def parse_output(self, raw_json_str: str, repo_dir: str) -> List[StaticFinding]:
+        """Parse Semgrep JSON output into canonical StaticFinding objects."""
+        findings: List[StaticFinding] = []
+        if not raw_json_str or not raw_json_str.strip():
+            return findings
+
+        try:
+            data = json.loads(raw_json_str)
+        except Exception:
+            return findings
+
+        results = data.get("results", [])
+        for item in results:
+            try:
+                check_id = item.get("check_id", "unknown-rule")
+                raw_path = item.get("path", "")
+                rel_path = os.path.relpath(raw_path, repo_dir).replace("\\", "/") if os.path.isabs(raw_path) else raw_path.replace("\\", "/")
+
+                start_line = item.get("start", {}).get("line")
+                end_line = item.get("end", {}).get("line")
+                extra = item.get("extra", {})
+
+                message = extra.get("message", "Semgrep rule match")
+                raw_severity = extra.get("severity")
+                lines_snippet = extra.get("lines")
+                metadata = extra.get("metadata", {})
+
+                category = metadata.get("category", "sast")
+                confidence = metadata.get("confidence")
+
+                evidence = Evidence(
+                    file_path=rel_path,
+                    start_line=start_line,
+                    end_line=end_line,
+                    code_snippet=lines_snippet,
+                    context_notes=message,
+                )
+
+                findings.append(
+                    StaticFinding(
+                        tool=self.tool_name,
+                        rule_id=check_id,
+                        title=check_id.split(".")[-1].replace("-", " ").title() if "." in check_id else check_id,
+                        description=message,
+                        severity=self._normalize_severity(raw_severity),
+                        category=category,
+                        evidence=evidence,
+                        mitigation=metadata.get("fix") or metadata.get("remediation"),
+                        confidence=confidence.upper() if confidence else None,
+                        raw_details={"check_id": check_id, "metadata": metadata},
+                    )
+                )
+            except Exception:
+                continue
+
+        return findings
