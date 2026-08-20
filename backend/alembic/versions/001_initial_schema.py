@@ -46,6 +46,8 @@ def upgrade() -> None:
         sa.Column("rule_id", sa.String(length=128), nullable=True),
         sa.Column("category", sa.String(length=128), nullable=True),
         sa.Column("mitigation_guidance", sa.Text(), nullable=True),
+        sa.Column("verification_verdict", sa.String(length=32), nullable=True),
+        sa.Column("verification_reason", sa.Text(), nullable=True),
         sa.Column("model_metadata", sa.JSON(), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),

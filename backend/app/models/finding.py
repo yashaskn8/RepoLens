@@ -26,6 +26,8 @@ class FindingModel(Base):
     rule_id = Column(String(128), nullable=True, index=True)
     category = Column(String(128), nullable=True, index=True)
     mitigation_guidance = Column(Text, nullable=True)
+    verification_verdict = Column(String(32), nullable=True)
+    verification_reason = Column(Text, nullable=True)
     model_metadata = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), default=_utc_now, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False)

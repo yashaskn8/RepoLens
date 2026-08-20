@@ -51,6 +51,21 @@ class Settings(BaseSettings):
     LLM_DEFAULT_TIMEOUT: float = 30.0
     LLM_MAX_RETRIES: int = 2
 
+    # Repository Ingestion Limits
+    CLONE_TIMEOUT_SECONDS: int = 120
+    MAX_REPO_FILES: int = 5000
+    MAX_FILE_SIZE_BYTES: int = 1_048_576  # 1 MB
+    ALLOWED_EXTENSIONS: str = ".py,.js,.ts,.tsx,.jsx,.json,.yaml,.yml,.toml,.md,.txt,.cfg,.ini,.html,.css,.sql,.sh,.dockerfile,.env.example"
+
+    # Deterministic Scanner Settings
+    SEMGREP_PATH: str = "semgrep"
+    TRIVY_PATH: str = "trivy"
+    OSV_SCANNER_PATH: str = "osv-scanner"
+    SCANNER_TIMEOUT_SECONDS: int = 60
+    SEMGREP_ENABLED: bool = True
+    TRIVY_ENABLED: bool = True
+    OSV_SCANNER_ENABLED: bool = True
+
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
     def assemble_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:
