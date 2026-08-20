@@ -71,6 +71,10 @@ class GeminiAdapter(BaseLLMAdapter):
         if system_instruction:
             payload["systemInstruction"] = system_instruction
 
+        # Optional Google Search Grounding for Research and Fact Retrieval
+        if request.extra_params.get("enable_search_grounding") or request.extra_params.get("tools"):
+            payload["tools"] = request.extra_params.get("tools", [{"googleSearch": {}}])
+
         url = f"{self.base_url}/models/{model}:generateContent"
         headers = {
             "Content-Type": "application/json",
@@ -102,10 +106,15 @@ class GeminiAdapter(BaseLLMAdapter):
             parts = candidate.get("content", {}).get("parts", [])
             content_text = "".join(part.get("text", "") for part in parts)
             finish_reason = candidate.get("finishReason")
+            grounding_metadata = candidate.get("groundingMetadata")
 
             usage = data.get("usageMetadata", {})
             prompt_tokens = usage.get("promptTokenCount")
             completion_tokens = usage.get("candidatesTokenCount")
+
+            extra_meta = {}
+            if grounding_metadata:
+                extra_meta["grounding_metadata"] = grounding_metadata
 
             metadata = self._build_metadata(
                 model_name=model,
@@ -113,6 +122,7 @@ class GeminiAdapter(BaseLLMAdapter):
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 temperature=request.temperature,
+                extra=extra_meta if extra_meta else None,
             )
 
             return LLMResponse(

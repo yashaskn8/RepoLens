@@ -24,6 +24,7 @@ class TaskPolicy(str, Enum):
     SECURITY_REASONING = "security_reasoning"
     LIGHTWEIGHT_CLASSIFICATION = "lightweight_classification"
     VERIFICATION = "verification"
+    RESEARCH = "research"
 
 
 class LLMMessage(BaseModel):
