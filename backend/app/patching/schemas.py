@@ -52,6 +52,17 @@ class PatchProposal(BaseModel):
     created_at: datetime = Field(default_factory=_utc_now, description="Timestamp of patch creation")
 
 
+class CheckStatus(str, Enum):
+    """Execution status for an individual verification check."""
+
+    PASSED = "PASSED"
+    FAILED = "FAILED"
+    NEEDS_REVIEW = "NEEDS_REVIEW"
+    UNAVAILABLE = "UNAVAILABLE"
+    TIMEOUT = "TIMEOUT"
+    NOT_EVALUATED = "NOT_EVALUATED"
+
+
 class VerificationStatus(str, Enum):
     """Overall status of deterministic patch verification."""
 
@@ -65,7 +76,9 @@ class VerificationCheckItem(BaseModel):
 
     check_name: str = Field(..., description="Canonical name of the verification check")
     passed: bool = Field(..., description="True if the check passed, False otherwise")
+    status: CheckStatus = Field(default=CheckStatus.PASSED, description="Execution status: PASSED, FAILED, NEEDS_REVIEW, UNAVAILABLE, TIMEOUT, NOT_EVALUATED")
     details: Optional[str] = Field(default=None, description="Diagnostic notes or failure explanation")
+
 
 
 class PatchVerificationResult(BaseModel):
