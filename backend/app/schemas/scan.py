@@ -18,8 +18,11 @@ class ScanBase(BaseModel):
     """Base fields for a scan request."""
 
     repository_url: str = Field(..., description="URL or identifier of the repository analyzed")
-    branch: Optional[str] = Field(default="main", description="Branch targeted for analysis")
-    commit_hash: Optional[str] = Field(default=None, description="Commit SHA analyzed")
+    branch: Optional[str] = Field(default=None, description="Resolved branch or ref targeted for analysis")
+    requested_branch: Optional[str] = Field(default=None, description="Explicitly requested branch if supplied")
+    resolved_branch_or_ref: Optional[str] = Field(default=None, description="Actual resolved branch or ref from repository")
+    commit_hash: Optional[str] = Field(default=None, description="Authoritative 40-character commit SHA")
+    commit_sha: Optional[str] = Field(default=None, description="Authoritative 40-character commit SHA alias")
 
 
 class ScanCreate(ScanBase):

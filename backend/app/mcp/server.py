@@ -363,7 +363,7 @@ class MCPRepositoryServer:
                 ]
                 matched_calls = [
                     c.model_dump() for c in calls
-                    if normalize_route_path(c.details.get("url", "")) == norm_path
+                    if normalize_route_path(c.details.get("url") or c.details.get("target", "")) == norm_path
                 ]
 
                 return MCPToolCallResponse(

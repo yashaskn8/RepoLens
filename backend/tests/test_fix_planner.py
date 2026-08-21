@@ -80,39 +80,71 @@ def test_fix_planner_rejects_invented_files():
     assert any("invented file" in r for r in report.rejection_reasons)
 
 
-def test_fix_planner_rejects_unconfirmed_rejected_finding():
-    """Verify planner refuses to plan remediation for a finding marked REJECTED by verifier."""
-    finding = Finding(
-        id=uuid4(),
-        scan_id=uuid4(),
-        title="Hallucinated Issue",
-        description="Fake issue that verifier caught",
-        severity=Severity.LOW,
-        verification_verdict=VerificationVerdict.REJECTED,
-        evidences=[Evidence(file_path="app/main.py", start_line=1, end_line=5)],
+def test_fix_planner_strict_eligibility_validation():
+    """Verify validator permits CONFIRMED findings and rejects POSSIBLE, REJECTED, and missing verdicts."""
+    def _create_finding(verdict):
+        return Finding(
+            id=uuid4(),
+            scan_id=uuid4(),
+            title="Test Finding",
+            description="Test Description",
+            severity=Severity.HIGH,
+            verification_verdict=verdict,
+            evidences=[Evidence(file_path="app/main.py", start_line=1, end_line=5)],
+        )
+
+    manifest = RepositoryManifest(
+        repository_url="https://github.com/fastapi/fastapi",
+        commit_hash="1234567890abcdef",
+        files=[FileEntry(path="app/main.py", size_bytes=100)],
     )
 
-    plan = FixPlan(
-        finding_id=finding.id,
-        root_cause="N/A",
-        objective="Fix",
-        files_expected_to_change=["app/main.py"],
-        ordered_changes=[
-            OrderedChangeStep(
-                step_number=1,
-                target_file="app/main.py",
-                description="Change",
-                rationale="Change",
-            )
-        ],
-        validation_plan=["pytest"],
-    )
+    def _create_plan(finding_id):
+        return FixPlan(
+            finding_id=finding_id,
+            root_cause="Root cause",
+            objective="Fix",
+            files_expected_to_change=["app/main.py"],
+            ordered_changes=[
+                OrderedChangeStep(
+                    step_number=1,
+                    target_file="app/main.py",
+                    description="Fix step",
+                    rationale="Fix rationale",
+                )
+            ],
+            validation_plan=["pytest"],
+        )
 
-    report = validate_fix_plan(plan=plan, finding=finding)
+    # 1. CONFIRMED -> allowed
+    f_confirmed = _create_finding(VerificationVerdict.CONFIRMED)
+    report_confirmed = validate_fix_plan(plan=_create_plan(f_confirmed.id), finding=f_confirmed, manifest=manifest)
+    assert report_confirmed.is_valid
+    assert report_confirmed.status == PlanValidationStatus.VALID
 
-    assert not report.is_valid
-    assert report.status == PlanValidationStatus.REJECTED
-    assert any("REJECTED by independent verification" in r for r in report.rejection_reasons)
+    # 2. POSSIBLE -> rejected
+    f_possible = _create_finding(VerificationVerdict.POSSIBLE)
+    report_possible = validate_fix_plan(plan=_create_plan(f_possible.id), finding=f_possible, manifest=manifest)
+    assert not report_possible.is_valid
+    assert report_possible.status == PlanValidationStatus.REJECTED
+    assert any("not eligible for remediation planning" in r for r in report_possible.rejection_reasons)
+    assert any("POSSIBLE" in r for r in report_possible.rejection_reasons)
+
+    # 3. REJECTED -> rejected
+    f_rejected = _create_finding(VerificationVerdict.REJECTED)
+    report_rejected = validate_fix_plan(plan=_create_plan(f_rejected.id), finding=f_rejected, manifest=manifest)
+    assert not report_rejected.is_valid
+    assert report_rejected.status == PlanValidationStatus.REJECTED
+    assert any("not eligible for remediation planning" in r for r in report_rejected.rejection_reasons)
+    assert any("REJECTED" in r for r in report_rejected.rejection_reasons)
+
+    # 4. missing verdict -> rejected
+    f_missing = _create_finding(None)
+    report_missing = validate_fix_plan(plan=_create_plan(f_missing.id), finding=f_missing, manifest=manifest)
+    assert not report_missing.is_valid
+    assert report_missing.status == PlanValidationStatus.REJECTED
+    assert any("not eligible for remediation planning" in r for r in report_missing.rejection_reasons)
+    assert any("NONE" in r for r in report_missing.rejection_reasons)
 
 
 def test_fix_planner_rejects_alias_workarounds():

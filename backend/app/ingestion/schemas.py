@@ -35,6 +35,19 @@ class ParsedSymbol(BaseModel):
     details: Dict[str, Any] = Field(default_factory=dict, description="Metadata such as HTTP methods, signatures, or parent class")
 
 
+class ParsedCall(BaseModel):
+    """A detected call expression with call-site location and callee identifier."""
+
+    callee: str = Field(..., description="Raw callee expression string (e.g. 'helper', 'auth.login')")
+    callee_name: str = Field(..., description="Base function or method name (e.g. 'helper', 'login')")
+    callee_base: Optional[str] = Field(default=None, description="Module or receiver base if member access (e.g. 'auth', 'self', 'utils')")
+    line_number: int = Field(..., ge=1, description="Call-site line number (1-indexed)")
+    column_number: Optional[int] = Field(default=None, ge=0, description="Call-site column number")
+    caller_name: Optional[str] = Field(default=None, description="Enclosing function or method name")
+    caller_kind: Optional[str] = Field(default=None, description="Enclosing symbol kind (FUNCTION, METHOD, CLASS)")
+    caller_start_line: Optional[int] = Field(default=None, description="Enclosing function or method start line")
+
+
 class FileEntry(BaseModel):
     """Metadata and extracted symbols for an individual file in a repository."""
 
@@ -43,6 +56,7 @@ class FileEntry(BaseModel):
     size_bytes: int = Field(default=0, ge=0, description="File size in bytes")
     lines_count: int = Field(default=0, ge=0, description="Total line count")
     symbols: List[ParsedSymbol] = Field(default_factory=list, description="Extracted functions, classes, imports, and routes")
+    calls: List[ParsedCall] = Field(default_factory=list, description="Extracted function and method call sites")
     is_binary: bool = Field(default=False, description="Flag indicating if file is binary")
     skipped_reason: Optional[str] = Field(default=None, description="Reason file was not parsed (e.g. exceeds_max_size, binary)")
 
@@ -60,7 +74,10 @@ class RepositoryManifest(BaseModel):
 
     repository_url: str = Field(..., description="Source public GitHub repository URL")
     commit_hash: str = Field(..., description="Exact 40-character commit SHA ingested")
-    branch: Optional[str] = Field(default=None, description="Branch analyzed")
+    commit_sha: Optional[str] = Field(default=None, description="Authoritative 40-character commit SHA alias")
+    branch: Optional[str] = Field(default=None, description="Resolved branch or ref analyzed")
+    requested_branch: Optional[str] = Field(default=None, description="Branch originally requested if supplied")
+    resolved_branch_or_ref: Optional[str] = Field(default=None, description="Actual resolved branch or ref from Git")
     total_files: int = Field(default=0, ge=0, description="Total files discovered")
     total_size_bytes: int = Field(default=0, ge=0, description="Total size in bytes")
     languages: Dict[str, int] = Field(default_factory=dict, description="File counts mapped by programming language")

@@ -18,7 +18,7 @@ from app.models.finding import EvidenceModel, FindingModel
 from app.models.scan import ScanModel
 from app.patching.schemas import PatchProposal, PatchWorkflowResult, VerificationStatus
 from app.planning.schemas import FixPlan, OrderedChangeStep
-from app.schemas.enums import FindingStatus, PatchStatus, ScanStatus, Severity
+from app.schemas.enums import FindingStatus, PatchStatus, ScanStatus, Severity, VerificationVerdict
 
 
 @pytest.fixture
@@ -89,6 +89,7 @@ def test_remediation_against_exact_fixture_files_not_repolens_source(client, db_
         severity=Severity.HIGH.value,
         status=FindingStatus.OPEN.value,
         category="security",
+        verification_verdict=VerificationVerdict.CONFIRMED.value,
     )
     ev_model = EvidenceModel(
         id=str(uuid4()),

@@ -9,6 +9,7 @@ from app.ingestion.schemas import RepositoryManifest
 from app.planning.agent import FixPlannerAgent
 from app.planning.schemas import FixPlan
 from app.research.schemas import ResearchResult
+from app.schemas.enums import VerificationVerdict
 from app.schemas.finding import Finding
 
 
@@ -27,6 +28,13 @@ class FixPlanningService:
         manifest: Optional[RepositoryManifest] = None,
     ) -> FixPlan:
         """Retrieve targeted context and generate a validated FixPlan for a finding."""
+        if finding.verification_verdict != VerificationVerdict.CONFIRMED:
+            verdict_str = finding.verification_verdict.value if finding.verification_verdict else "NONE"
+            raise ValueError(
+                f"Remediation fix planning rejected: finding '{finding.id}' is not eligible. "
+                f"Only findings with verification_verdict == 'CONFIRMED' are eligible (current verdict: '{verdict_str}')."
+            )
+
         evidence = finding.evidences[0] if finding.evidences else None
         file_path = evidence.file_path if evidence else "main"
 

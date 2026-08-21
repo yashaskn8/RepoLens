@@ -39,6 +39,7 @@ class PatchResponse(BaseModel):
     finding_id: UUID = Field(..., description="Target finding ID")
     plan_id: Optional[UUID] = Field(default=None, description="Approved FixPlan ID if linked")
     scan_id: UUID = Field(..., description="Associated scan ID")
+    thread_id: Optional[str] = Field(default=None, description="Durable LangGraph remediation thread ID")
     status: PatchStatus = Field(..., description="DRAFT, VERIFIED, NEEDS_REVIEW, REJECTED, APPROVED")
     unified_diff: str = Field(..., description="Standard unified diff")
     files_modified: List[str] = Field(..., description="Repository files modified by this patch")

@@ -7,6 +7,7 @@ from uuid import UUID
 from app.ingestion.schemas import RepositoryManifest
 from app.research.agent import ResearchAgent
 from app.research.schemas import ResearchQuery, ResearchResult
+from app.schemas.enums import VerificationVerdict
 from app.schemas.finding import Finding
 
 
@@ -37,6 +38,13 @@ class ResearchService:
         code_snippet: Optional[str] = None,
     ) -> ResearchResult:
         """Execute targeted technical research for a verified repository finding."""
+        if finding.verification_verdict != VerificationVerdict.CONFIRMED:
+            verdict_str = finding.verification_verdict.value if finding.verification_verdict else "NONE"
+            raise ValueError(
+                f"Remediation research rejected: finding '{finding.id}' is not eligible. "
+                f"Only findings with verification_verdict == 'CONFIRMED' can enter remediation research (current verdict: '{verdict_str}')."
+            )
+
         evidence = finding.evidences[0] if finding.evidences else None
         snippet = code_snippet or (evidence.code_snippet if evidence else None)
         file_path = evidence.file_path if evidence else None

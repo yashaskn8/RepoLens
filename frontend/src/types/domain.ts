@@ -129,7 +129,8 @@ export type ToolStatus =
   | 'DISABLED'
   | 'TIMEOUT'
   | 'FAILED'
-  | 'COMPLETED';
+  | 'COMPLETED'
+  | 'INVALID_OUTPUT';
 
 export interface StaticFinding {
   id: string;
@@ -151,6 +152,7 @@ export interface ScannerResult {
   findings: StaticFinding[];
   error_message?: string | null;
   execution_time_ms: number;
+  diagnostic_stderr?: string | null;
 }
 
 export type NodeKind = 'FILE' | 'SYMBOL' | 'ROUTE' | 'FRONTEND_REQUEST' | 'DEPENDENCY' | 'TEST';
@@ -301,6 +303,7 @@ export interface PatchResponse {
   finding_id: string;
   plan_id?: string | null;
   scan_id: string;
+  thread_id?: string | null;
   status: PatchStatus;
   unified_diff: string;
   files_modified: string[];

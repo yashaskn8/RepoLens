@@ -167,3 +167,66 @@ def clone_repository(
                 shutil.rmtree(dest_dir, ignore_errors=True)
             raise CloneFailedError(f"Unexpected clone error: {str(exc)}")
         raise
+
+
+def get_git_resolved_branch_or_ref(repo_dir: str) -> Optional[str]:
+    """Deterministically inspect a local git repository to discover its current resolved branch or ref.
+
+    Returns:
+        The branch name (e.g. 'main', 'master', 'feature/x'), or ref string if detached HEAD, or None.
+    """
+    if not os.path.exists(repo_dir) or not os.path.exists(os.path.join(repo_dir, ".git")):
+        return None
+
+    # 1. Try symbolic-ref for active branch
+    try:
+        res = subprocess.run(
+            ["git", "symbolic-ref", "--short", "HEAD"],
+            cwd=repo_dir,
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            return res.stdout.strip()
+    except Exception:
+        pass
+
+    # 2. Fallback to rev-parse --abbrev-ref HEAD
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=repo_dir,
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if res.returncode == 0:
+            out = res.stdout.strip()
+            if out and out != "HEAD":
+                return out
+    except Exception:
+        pass
+
+    # 3. If in detached HEAD state, return ref with commit SHA prefix
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_dir,
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            full_sha = res.stdout.strip()
+            return f"HEAD@{full_sha[:8]}"
+    except Exception:
+        pass
+
+    return None

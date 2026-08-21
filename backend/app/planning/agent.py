@@ -135,20 +135,24 @@ class FixPlannerAgent:
         manifest: Optional[RepositoryManifest] = None,
     ) -> FixPlan:
         """Generate and validate a structured FixPlan for a verified finding."""
-        # Guard: Check if finding was rejected by verifier
-        if finding.verification_verdict == VerificationVerdict.REJECTED:
+        # Guard: Check if finding is not CONFIRMED
+        if finding.verification_verdict != VerificationVerdict.CONFIRMED:
+            verdict_str = finding.verification_verdict.value if finding.verification_verdict else "NONE"
             validation_rep = PlanValidationReport(
                 status=PlanValidationStatus.REJECTED,
                 is_valid=False,
-                rejection_reasons=[f"Cannot plan remediation for REJECTED finding '{finding.id}'."],
+                rejection_reasons=[
+                    f"Cannot plan remediation for non-CONFIRMED finding '{finding.id}' (current verdict: '{verdict_str}'). "
+                    "Only findings with verification_verdict == CONFIRMED may produce a FixPlan."
+                ],
             )
             return FixPlan(
                 finding_id=finding.id,
-                root_cause="Finding rejected by independent verification.",
-                objective="N/A (Rejected finding)",
+                root_cause=f"Finding not eligible for remediation planning (verdict: {verdict_str}).",
+                objective=f"N/A ({verdict_str} finding)",
                 files_expected_to_change=[finding.evidences[0].file_path] if finding.evidences else ["unknown"],
                 ordered_changes=[],
-                validation_plan=["Verification rejection"],
+                validation_plan=["Eligibility check failure"],
                 validation_report=validation_rep,
             )
 

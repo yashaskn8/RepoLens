@@ -8,6 +8,7 @@ from app.ingestion.schemas import RepositoryManifest
 from app.patching.agent import PatchGeneratorAgent
 from app.patching.schemas import PatchProposal
 from app.planning.schemas import FixPlan
+from app.schemas.enums import VerificationVerdict
 from app.schemas.finding import Finding
 
 
@@ -52,6 +53,13 @@ class PatchService:
         manifest: Optional[RepositoryManifest] = None,
     ) -> PatchProposal:
         """Generate a validated PatchProposal for an approved FixPlan."""
+        if finding.verification_verdict != VerificationVerdict.CONFIRMED:
+            verdict_str = finding.verification_verdict.value if finding.verification_verdict else "NONE"
+            raise ValueError(
+                f"Patch generation rejected: finding '{finding.id}' is not eligible for remediation. "
+                f"Only findings with verification_verdict == 'CONFIRMED' can produce a patch (current verdict: '{verdict_str}')."
+            )
+
         # 1. Read source files targeted by FixPlan safely
         source_files = self._read_target_files(repo_dir, fix_plan.files_expected_to_change)
 

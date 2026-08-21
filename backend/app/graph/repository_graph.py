@@ -61,6 +61,13 @@ class RepositoryGraph:
         )
         return node
 
+    def update_node_metadata(self, node_id: str, metadata: Dict[str, Any]) -> bool:
+        """Update metadata on an existing node."""
+        if not self._graph.has_node(node_id):
+            return False
+        self._graph.nodes[node_id].setdefault("metadata", {}).update(metadata)
+        return True
+
     def add_edge(
         self,
         source_id: str,
@@ -135,6 +142,10 @@ class RepositoryGraph:
                     )
                 )
         return edges
+
+    def get_edges_by_kind(self, kind: EdgeKind) -> List[GraphEdge]:
+        """Retrieve all edges matching a specific EdgeKind."""
+        return self.get_edges(kind=kind)
 
     def get_incoming_edges(self, node_id: str) -> List[GraphEdge]:
         """Retrieve all incoming edges to a specific node."""

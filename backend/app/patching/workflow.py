@@ -17,6 +17,7 @@ from app.patching.schemas import (
 from app.patching.service import PatchService
 from app.patching.verification import PatchVerificationService
 from app.planning.schemas import FixPlan
+from app.schemas.enums import VerificationVerdict
 from app.schemas.finding import Finding
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,13 @@ class PatchWorkflowCoordinator:
         manifest: RepositoryManifest,
     ) -> PatchWorkflowResult:
         """Execute the end-to-end patch generation, sandbox verification, and conditional critic evaluation."""
+        if finding.verification_verdict != VerificationVerdict.CONFIRMED:
+            verdict_str = finding.verification_verdict.value if finding.verification_verdict else "NONE"
+            raise ValueError(
+                f"Patch generation rejected: finding '{finding.id}' is not eligible for remediation. "
+                f"Only findings with verification_verdict == 'CONFIRMED' can produce a patch (current verdict: '{verdict_str}')."
+            )
+
         # 1. Generate initial candidate patch
         proposal = await self.patch_service.generate_patch_proposal(
             finding=finding,

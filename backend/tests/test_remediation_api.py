@@ -16,7 +16,7 @@ from app.patching.schemas import (
 )
 from app.planning.schemas import FixPlan, OrderedChangeStep
 from app.research.schemas import ResearchEvidence, ResearchResult, SourceTier
-from app.schemas.enums import FindingStatus, PatchStatus, ScanStatus, Severity
+from app.schemas.enums import FindingStatus, PatchStatus, ScanStatus, Severity, VerificationVerdict
 
 
 @asynccontextmanager
@@ -57,20 +57,23 @@ def test_get_finding_by_id_and_not_found(client, db_session):
         status=FindingStatus.OPEN.value,
         rule_id="sec-path-01",
         category="security",
+        verification_verdict=VerificationVerdict.POSSIBLE.value,
     )
     db_session.add(fm)
     db_session.commit()
 
+    # POSSIBLE findings are still readable/inspectable via GET
     res = client.get(f"/api/v1/findings/{finding_id}")
     assert res.status_code == 200
     data = res.json()
     assert data["id"] == finding_id
     assert data["title"] == "Path Traversal In Static Files"
     assert data["severity"] == "HIGH"
+    assert data["verification_verdict"] == "POSSIBLE"
 
 
 def test_request_finding_research_endpoint(client, db_session):
-    """Verify POST /api/v1/findings/{finding_id}/research returns structured ResearchResult."""
+    """Verify POST /api/v1/findings/{finding_id}/research returns structured ResearchResult for CONFIRMED findings."""
     scan_id = str(uuid4())
     sm = ScanModel(
         id=scan_id,
@@ -88,6 +91,7 @@ def test_request_finding_research_endpoint(client, db_session):
         description="Deprecated .dict() method used",
         severity=Severity.MEDIUM.value,
         status=FindingStatus.OPEN.value,
+        verification_verdict=VerificationVerdict.CONFIRMED.value,
     )
     db_session.add(fm)
     db_session.commit()
@@ -121,7 +125,7 @@ def test_request_finding_research_endpoint(client, db_session):
 
 
 def test_request_fix_plan_endpoint(client, db_session):
-    """Verify POST /api/v1/findings/{finding_id}/plan returns validated FixPlan."""
+    """Verify POST /api/v1/findings/{finding_id}/plan returns validated FixPlan for CONFIRMED findings."""
     scan_id = str(uuid4())
     sm = ScanModel(
         id=scan_id,
@@ -139,6 +143,7 @@ def test_request_fix_plan_endpoint(client, db_session):
         description="String formatting in sql",
         severity=Severity.HIGH.value,
         status=FindingStatus.OPEN.value,
+        verification_verdict=VerificationVerdict.CONFIRMED.value,
     )
     db_session.add(fm)
     db_session.commit()
@@ -171,7 +176,7 @@ def test_request_fix_plan_endpoint(client, db_session):
 
 
 def test_request_patch_generation_endpoint(client, db_session):
-    """Verify POST /api/v1/findings/{finding_id}/patch executes workflow and persists proposal."""
+    """Verify POST /api/v1/findings/{finding_id}/patch executes workflow and persists proposal for CONFIRMED findings."""
     scan_id = str(uuid4())
     sm = ScanModel(
         id=scan_id,
@@ -189,6 +194,7 @@ def test_request_patch_generation_endpoint(client, db_session):
         description="Missing Secure and HttpOnly flags",
         severity=Severity.HIGH.value,
         status=FindingStatus.OPEN.value,
+        verification_verdict=VerificationVerdict.CONFIRMED.value,
     )
     db_session.add(fm)
     db_session.commit()
@@ -252,3 +258,159 @@ def test_request_patch_generation_endpoint(client, db_session):
         assert persisted is not None
         assert persisted.status == PatchStatus.VERIFIED.value
 
+
+# =========================================================================
+# Phase 3.5I: Strict Remediation Eligibility Tests
+# =========================================================================
+
+def test_remediation_eligibility_enforced_across_all_endpoints(client, db_session):
+    """Verify strict eligibility:
+    - CONFIRMED -> allowed (200)
+    - POSSIBLE -> rejected (422)
+    - REJECTED -> rejected (422)
+    - missing verdict -> rejected (422)
+    Tested across research, planning, and patch generation endpoints.
+    """
+    scan_id = str(uuid4())
+    sm = ScanModel(
+        id=scan_id,
+        repository_url="https://github.com/fastapi/fastapi",
+        commit_hash="a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+        status=ScanStatus.COMPLETED.value,
+    )
+    db_session.add(sm)
+
+    # 1. Create findings for each verdict state
+    confirmed_id = str(uuid4())
+    fm_confirmed = FindingModel(
+        id=confirmed_id,
+        scan_id=scan_id,
+        title="Confirmed Vulnerability",
+        description="Real confirmed issue",
+        severity=Severity.HIGH.value,
+        status=FindingStatus.OPEN.value,
+        verification_verdict=VerificationVerdict.CONFIRMED.value,
+    )
+
+    possible_id = str(uuid4())
+    fm_possible = FindingModel(
+        id=possible_id,
+        scan_id=scan_id,
+        title="Possible Flaw",
+        description="Possible but unconfirmed issue",
+        severity=Severity.MEDIUM.value,
+        status=FindingStatus.OPEN.value,
+        verification_verdict=VerificationVerdict.POSSIBLE.value,
+    )
+
+    rejected_id = str(uuid4())
+    fm_rejected = FindingModel(
+        id=rejected_id,
+        scan_id=scan_id,
+        title="False Positive",
+        description="Rejected issue",
+        severity=Severity.LOW.value,
+        status=FindingStatus.OPEN.value,
+        verification_verdict=VerificationVerdict.REJECTED.value,
+    )
+
+    missing_id = str(uuid4())
+    fm_missing = FindingModel(
+        id=missing_id,
+        scan_id=scan_id,
+        title="Unverified Issue",
+        description="No verification verdict",
+        severity=Severity.HIGH.value,
+        status=FindingStatus.OPEN.value,
+        verification_verdict=None,
+    )
+
+    db_session.add_all([fm_confirmed, fm_possible, fm_rejected, fm_missing])
+    db_session.commit()
+
+    endpoints = ["research", "plan", "patch"]
+
+    # 2. Test POSSIBLE -> rejected (422)
+    for ep in endpoints:
+        res = client.post(f"/api/v1/findings/{possible_id}/{ep}")
+        assert res.status_code == 422, f"Endpoint {ep} should reject POSSIBLE finding with 422"
+        assert "not eligible for remediation" in res.json()["detail"]
+        assert "POSSIBLE" in res.json()["detail"]
+
+    # 3. Test REJECTED -> rejected (422)
+    for ep in endpoints:
+        res = client.post(f"/api/v1/findings/{rejected_id}/{ep}")
+        assert res.status_code == 422, f"Endpoint {ep} should reject REJECTED finding with 422"
+        assert "not eligible for remediation" in res.json()["detail"]
+        assert "REJECTED" in res.json()["detail"]
+
+    # 4. Test missing verdict -> rejected (422)
+    for ep in endpoints:
+        res = client.post(f"/api/v1/findings/{missing_id}/{ep}")
+        assert res.status_code == 422, f"Endpoint {ep} should reject missing verdict finding with 422"
+        assert "not eligible for remediation" in res.json()["detail"]
+        assert "NONE" in res.json()["detail"]
+
+    # 5. Test CONFIRMED -> allowed (200) when dependencies succeed
+    mock_plan = FixPlan(
+        finding_id=uuid4(),
+        root_cause="Confirmed issue root cause",
+        objective="Fix confirmed issue",
+        files_expected_to_change=["app/db.py"],
+        ordered_changes=[
+            OrderedChangeStep(step_number=1, target_file="app/db.py", description="Fix", rationale="Security")
+        ],
+        validation_plan=["pytest"],
+    )
+    mock_proposal = PatchProposal(
+        finding_id=uuid4(),
+        plan_id=mock_plan.id,
+        unified_diff="--- a/app/db.py\n+++ b/app/db.py\n@@ -1 +1 @@\n-old\n+new\n",
+        files_modified=["app/db.py"],
+        explanation="Fix",
+        expected_behavior_change="Fix",
+    )
+    mock_verif = PatchVerificationResult(
+        patch_id=mock_proposal.id,
+        finding_id=mock_proposal.finding_id,
+        status=VerificationStatus.PASSED,
+        syntax_valid=True,
+        security_clean=True,
+        contract_aligned=True,
+        target_finding_resolved=True,
+        explanation="Clean",
+    )
+    mock_workflow_res = PatchWorkflowResult(
+        finding_id=mock_proposal.finding_id,
+        proposal=mock_proposal,
+        verification_result=mock_verif,
+        critic_escalated=False,
+        revision_count=0,
+        final_verdict="APPROVED",
+    )
+    mock_research = ResearchResult(
+        target_framework="FastAPI",
+        recommended_version="0.110.0",
+        migration_summary="Fix issue",
+        repository_impact="Impact",
+        evidences=[],
+    )
+
+    with patch("app.ingestion.snapshot.RepositorySnapshotService.open_snapshot", side_effect=_mock_open_snapshot_ctx), \
+         patch("app.research.service.ResearchService.research_finding", new_callable=AsyncMock) as mock_res_fn, \
+         patch("app.planning.service.FixPlanningService.create_fix_plan", new_callable=AsyncMock) as mock_plan_fn, \
+         patch("app.patching.workflow.PatchWorkflowCoordinator.execute_patch_workflow", new_callable=AsyncMock) as mock_wf_fn:
+
+        mock_res_fn.return_value = mock_research
+        mock_plan_fn.return_value = mock_plan
+        mock_wf_fn.return_value = mock_workflow_res
+
+        # CONFIRMED -> allowed
+        res_res = client.post(f"/api/v1/findings/{confirmed_id}/research")
+        assert res_res.status_code == 200
+
+        res_plan = client.post(f"/api/v1/findings/{confirmed_id}/plan")
+        assert res_plan.status_code == 200
+
+        res_patch = client.post(f"/api/v1/findings/{confirmed_id}/patch")
+        assert res_patch.status_code == 200

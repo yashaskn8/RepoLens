@@ -2,15 +2,21 @@
 
 import json
 import os
-from typing import List
-from app.analysis.base import BaseScannerAdapter
+from typing import FrozenSet, List
+from app.analysis.base import BaseScannerAdapter, ScannerOutputError
 from app.analysis.schemas import StaticFinding
 from app.core.config import get_settings
 from app.schemas.evidence import Evidence
 
 
 class OSVScannerAdapter(BaseScannerAdapter):
-    """Adapter for Google OSV-Scanner open source vulnerability scanner."""
+    """Adapter for Google OSV-Scanner open source vulnerability scanner.
+
+    Exit code semantics:
+      0 — no vulnerabilities found
+      1 — vulnerabilities found
+      ≥2 — fatal error (e.g. invalid args, network failure, internal crash)
+    """
 
     @property
     def tool_name(self) -> str:
@@ -24,6 +30,10 @@ class OSVScannerAdapter(BaseScannerAdapter):
     def is_enabled(self) -> bool:
         return get_settings().OSV_SCANNER_ENABLED
 
+    @property
+    def _accepted_exit_codes(self) -> FrozenSet[int]:
+        return frozenset({0, 1})
+
     def _build_command(self, repo_dir: str) -> List[str]:
         return [
             self.tool_path,
@@ -33,15 +43,21 @@ class OSVScannerAdapter(BaseScannerAdapter):
         ]
 
     def parse_output(self, raw_json_str: str, repo_dir: str) -> List[StaticFinding]:
-        """Parse OSV-Scanner JSON output into canonical StaticFinding objects."""
+        """Parse OSV-Scanner JSON output into canonical StaticFinding objects.
+
+        Raises ScannerOutputError if JSON is malformed or has unexpected structure.
+        """
         findings: List[StaticFinding] = []
         if not raw_json_str or not raw_json_str.strip():
             return findings
 
         try:
             data = json.loads(raw_json_str)
-        except Exception:
-            return findings
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise ScannerOutputError(self.tool_name, f"Invalid JSON: {exc}") from exc
+
+        if not isinstance(data, dict):
+            raise ScannerOutputError(self.tool_name, f"Expected JSON object, got {type(data).__name__}")
 
         results = data.get("results", [])
         for entry in results:

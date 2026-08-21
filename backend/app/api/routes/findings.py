@@ -17,11 +17,13 @@ from app.ingestion.snapshot import SnapshotError, get_snapshot_service
 from app.models.finding import FindingModel
 from app.models.patch import PatchModel
 from app.models.scan import ScanModel
+from app.agents.checkpointer import get_sqlite_checkpointer
 from app.patching.critic import PatchCriticAgent
 from app.patching.schemas import PatchProposal, PatchWorkflowResult
 from app.patching.service import PatchService
 from app.patching.verification import PatchVerificationService
 from app.patching.workflow import PatchWorkflowCoordinator
+from app.patching.workflow_graph import build_remediation_graph
 from app.planning.schemas import FixPlan
 from app.planning.service import FixPlanningService
 from app.research.schemas import ResearchResult
@@ -106,6 +108,18 @@ def _get_verified_finding_and_scan(finding_id: UUID, db: Session) -> tuple[Findi
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Remediation rejected: Scan has invalid or unrecorded commit hash ('{scan.commit_hash}').",
+        )
+
+    # Strict remediation eligibility check: only CONFIRMED findings may enter remediation
+    if fm.verification_verdict != VerificationVerdict.CONFIRMED.value:
+        verdict_display = fm.verification_verdict or "NONE"
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Finding '{finding_id}' is not eligible for remediation: only findings with "
+                f"verification_verdict == 'CONFIRMED' may enter research, fix planning, or patch generation "
+                f"(current verdict: '{verdict_display}')."
+            ),
         )
 
     return _finding_model_to_schema(fm), scan
@@ -235,17 +249,41 @@ async def request_patch_generation(
                 manifest=runtime.manifest,
             )
 
-            # 3. Persist Patch Proposal into database
+            proposal = workflow_result.proposal
             patch_status = PatchStatus.VERIFIED if workflow_result.final_verdict == "APPROVED" else (
                 PatchStatus.REJECTED if workflow_result.final_verdict == "REJECTED" else PatchStatus.NEEDS_REVIEW
             )
 
-            proposal = workflow_result.proposal
+            # 3. Initialize durable LangGraph remediation thread paused at human approval interrupt
+            remediation_thread_id = f"remediation-{proposal.id}"
+            initial_remediation_state = {
+                "scan_id": str(scan.id),
+                "finding_id": str(finding_id),
+                "patch_id": str(proposal.id),
+                "thread_id": remediation_thread_id,
+                "proposal_dict": proposal.model_dump(mode="json"),
+                "verification_dict": workflow_result.verification_result.model_dump(mode="json") if workflow_result.verification_result else None,
+                "critic_dict": workflow_result.critic_report.model_dump(mode="json") if workflow_result.critic_report else None,
+                "patch_status": patch_status.value,
+                "revision_count": 0,
+            }
+            try:
+                async with get_sqlite_checkpointer() as checkpointer:
+                    remediation_app = build_remediation_graph(checkpointer=checkpointer)
+                    await remediation_app.ainvoke(
+                        initial_remediation_state,
+                        config={"configurable": {"thread_id": remediation_thread_id}},
+                    )
+            except Exception as exc:
+                logger.warning("Notice initializing remediation thread %s: %s", remediation_thread_id, str(exc))
+
+            # 4. Persist Patch Proposal into database
             patch_model = PatchModel(
                 id=str(proposal.id),
                 finding_id=str(finding_id),
                 plan_id=str(proposal.plan_id) if proposal.plan_id else None,
                 scan_id=str(scan.id),
+                thread_id=remediation_thread_id,
                 status=patch_status.value,
                 unified_diff=proposal.unified_diff,
                 files_modified=proposal.files_modified,

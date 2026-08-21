@@ -1,4 +1,4 @@
-"""Tests for Phase 3F: Human-in-the-Loop Approval Checkpoints and Durable API Operations."""
+"""Tests for Phase 3F & 3.5H: Human-in-the-Loop Approval Checkpoints and Durable API Operations."""
 
 import os
 import tempfile
@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.agents.checkpointer import get_sqlite_checkpointer
 from app.core.database import Base, get_db
 from app.main import app
 from app.models.finding import FindingModel
@@ -100,7 +101,7 @@ def test_patch_api_lifecycle_inspect_approve_reject_revise(client, db_session):
     assert reject_res.json()["status"] == "REJECTED"
     assert reject_res.json()["rejected_reason"] == "Breaks backward compatibility with legacy clients."
 
-    # 7. Cannot approve a REJECTED patch
+    # 7. Cannot approve a REJECTED patch directly
     reapprove_res = client.post(
         f"/api/v1/patches/{patch_id}/approve",
         json={"approved_by": "user"},
@@ -110,7 +111,93 @@ def test_patch_api_lifecycle_inspect_approve_reject_revise(client, db_session):
 
 
 # =========================================================================
-# 2. Durable LangGraph Human Approval Interrupt / Resume Tests
+# 2. State Transition Rules Enforcement Tests
+# =========================================================================
+
+def test_legal_state_transitions_enforced(client, db_session):
+    """Verify state machine constraints:
+    - REJECTED -> APPROVED directly must fail.
+    - APPROVED -> REVISE must fail.
+    - REJECTED -> REVISE must fail.
+    - APPROVED -> APPROVED duplicate must fail.
+    - REJECTED -> REJECTED duplicate must fail.
+    """
+    scan_id = str(uuid4())
+    finding_id = str(uuid4())
+
+    scan = ScanModel(
+        id=scan_id,
+        repository_url="https://github.com/fastapi/fastapi.git",
+        status=ScanStatus.COMPLETED.value,
+        commit_hash="1234567890abcdef",
+    )
+    db_session.add(scan)
+
+    finding = FindingModel(
+        id=finding_id,
+        scan_id=scan_id,
+        title="Test Finding",
+        description="Test",
+        severity=Severity.HIGH.value,
+        status=FindingStatus.OPEN.value,
+    )
+    db_session.add(finding)
+
+    # 1. Test APPROVED -> REVISE and APPROVED -> APPROVED failure
+    patch_approved_id = str(uuid4())
+    patch_approved = PatchModel(
+        id=patch_approved_id,
+        finding_id=finding_id,
+        scan_id=scan_id,
+        status=PatchStatus.APPROVED.value,
+        unified_diff="--- a/x\n+++ b/x\n",
+        files_modified=["x.py"],
+        explanation="Fix",
+        expected_behavior_change="Fix",
+        approved_by="reviewer@corp.com",
+    )
+    db_session.add(patch_approved)
+    db_session.commit()
+
+    revise_appr = client.post(f"/api/v1/patches/{patch_approved_id}/revise", json={"user_feedback": "revise it"})
+    assert revise_appr.status_code == 400
+    assert "already APPROVED" in revise_appr.json()["detail"]
+
+    appr_dup = client.post(f"/api/v1/patches/{patch_approved_id}/approve", json={"approved_by": "other"})
+    assert appr_dup.status_code == 400
+    assert "already APPROVED" in appr_dup.json()["detail"]
+
+    # 2. Test REJECTED -> APPROVED, REJECTED -> REVISE, and REJECTED -> REJECTED failure
+    patch_rejected_id = str(uuid4())
+    patch_rejected = PatchModel(
+        id=patch_rejected_id,
+        finding_id=finding_id,
+        scan_id=scan_id,
+        status=PatchStatus.REJECTED.value,
+        unified_diff="--- a/x\n+++ b/x\n",
+        files_modified=["x.py"],
+        explanation="Fix",
+        expected_behavior_change="Fix",
+        rejected_reason="Bad approach",
+    )
+    db_session.add(patch_rejected)
+    db_session.commit()
+
+    appr_rej = client.post(f"/api/v1/patches/{patch_rejected_id}/approve", json={"approved_by": "reviewer"})
+    assert appr_rej.status_code == 400
+    assert "REJECTED" in appr_rej.json()["detail"]
+
+    revise_rej = client.post(f"/api/v1/patches/{patch_rejected_id}/revise", json={"user_feedback": "try again"})
+    assert revise_rej.status_code == 400
+    assert "REJECTED" in revise_rej.json()["detail"]
+
+    rej_dup = client.post(f"/api/v1/patches/{patch_rejected_id}/reject", json={"reason": "still bad"})
+    assert rej_dup.status_code == 400
+    assert "already REJECTED" in rej_dup.json()["detail"]
+
+
+# =========================================================================
+# 3. LangGraph Thread Synchronization & Restart Tests
 # =========================================================================
 
 @pytest.mark.asyncio
@@ -155,3 +242,87 @@ async def test_remediation_graph_interrupt_and_human_resume():
             # Check final state: graph finished execution
             finished_state = await workflow_app.aget_state(config)
             assert not finished_state.next
+
+
+@pytest.mark.asyncio
+async def test_end_to_end_db_and_langgraph_state_identical_after_resume():
+    """End-to-end test proving DB state and LangGraph thread checkpoint state remain identical across pause/resume cycles."""
+    scan_id = str(uuid4())
+    finding_id = str(uuid4())
+    patch_id = str(uuid4())
+    thread_id = f"remediation-{patch_id}"
+
+    config = {"configurable": {"thread_id": thread_id}}
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_file = os.path.join(tmpdir, "test_checkpoints.sqlite")
+
+        # 1. Initialize workflow paused at interrupt
+        async with get_sqlite_checkpointer(db_path=db_file) as checkpointer:
+            workflow_app = build_remediation_graph(checkpointer=checkpointer)
+
+            initial_state: RemediationState = {
+                "scan_id": scan_id,
+                "finding_id": finding_id,
+                "patch_id": patch_id,
+                "thread_id": thread_id,
+                "proposal_dict": {"unified_diff": "--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-old\n+new\n"},
+                "patch_status": PatchStatus.VERIFIED.value,
+                "revision_count": 0,
+            }
+            await workflow_app.ainvoke(initial_state, config=config)
+
+            # Verify it is paused
+            paused_checkpoint = await workflow_app.aget_state(config)
+            assert paused_checkpoint.next == ("human_approval_checkpoint",)
+            assert paused_checkpoint.values["patch_status"] == PatchStatus.VERIFIED.value
+
+        # 2. Simulate server restart: open new connection to same persistent checkpointer DB
+        async with get_sqlite_checkpointer(db_path=db_file) as checkpointer_2:
+            workflow_app_2 = build_remediation_graph(checkpointer=checkpointer_2)
+
+            # Retrieve state after restart
+            rehydrated_checkpoint = await workflow_app_2.aget_state(config)
+            assert rehydrated_checkpoint is not None
+            assert rehydrated_checkpoint.next == ("human_approval_checkpoint",)
+            assert rehydrated_checkpoint.values["patch_status"] == PatchStatus.VERIFIED.value
+
+            # Perform Human Revision action
+            await workflow_app_2.aupdate_state(
+                config,
+                {
+                    "patch_status": PatchStatus.NEEDS_REVIEW.value,
+                    "user_feedback": "Please add docstring",
+                    "revision_count": 1,
+                },
+                as_node="human_approval_checkpoint",
+            )
+            resumed_rev = await workflow_app_2.ainvoke(None, config=config)
+            assert resumed_rev["patch_status"] == PatchStatus.NEEDS_REVIEW.value
+            assert resumed_rev["user_feedback"] == "Please add docstring"
+            assert resumed_rev["revision_count"] == 1
+
+        # 3. Simulate another server restart and then Approve
+        async with get_sqlite_checkpointer(db_path=db_file) as checkpointer_3:
+            workflow_app_3 = build_remediation_graph(checkpointer=checkpointer_3)
+
+            # Update to APPROVED and resume to completion
+            await workflow_app_3.aupdate_state(
+                config,
+                {
+                    "patch_status": PatchStatus.APPROVED.value,
+                    "approved_by": "security-lead@company.com",
+                    "approved_at": "2026-08-20T22:00:00Z",
+                },
+                as_node="human_approval_checkpoint",
+            )
+            final_result = await workflow_app_3.ainvoke(None, config=config)
+
+            assert final_result["patch_status"] == PatchStatus.APPROVED.value
+            assert final_result["approved_by"] == "security-lead@company.com"
+
+            # Check final checkpoint
+            final_checkpoint = await workflow_app_3.aget_state(config)
+            assert not final_checkpoint.next
+            assert final_checkpoint.values["patch_status"] == PatchStatus.APPROVED.value
+            assert final_checkpoint.values["approved_by"] == "security-lead@company.com"

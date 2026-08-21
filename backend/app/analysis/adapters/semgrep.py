@@ -2,15 +2,22 @@
 
 import json
 import os
-from typing import List
-from app.analysis.base import BaseScannerAdapter
+from typing import FrozenSet, List
+from app.analysis.base import BaseScannerAdapter, ScannerOutputError
 from app.analysis.schemas import StaticFinding
 from app.core.config import get_settings
 from app.schemas.evidence import Evidence
 
 
 class SemgrepAdapter(BaseScannerAdapter):
-    """Adapter for Semgrep SAST scanner."""
+    """Adapter for Semgrep SAST scanner.
+
+    Exit code semantics:
+      0 — scan completed (no findings, or findings present without --error)
+      1 — findings present (when --error flag is used; we don't use --error,
+          but accept 1 defensively since some configs enable it)
+      ≥2 — fatal error (invalid config, internal crash, etc.)
+    """
 
     @property
     def tool_name(self) -> str:
@@ -23,6 +30,10 @@ class SemgrepAdapter(BaseScannerAdapter):
     @property
     def is_enabled(self) -> bool:
         return get_settings().SEMGREP_ENABLED
+
+    @property
+    def _accepted_exit_codes(self) -> FrozenSet[int]:
+        return frozenset({0, 1})
 
     def _build_command(self, repo_dir: str) -> List[str]:
         return [
@@ -38,15 +49,21 @@ class SemgrepAdapter(BaseScannerAdapter):
         ]
 
     def parse_output(self, raw_json_str: str, repo_dir: str) -> List[StaticFinding]:
-        """Parse Semgrep JSON output into canonical StaticFinding objects."""
+        """Parse Semgrep JSON output into canonical StaticFinding objects.
+
+        Raises ScannerOutputError if JSON is malformed or missing expected structure.
+        """
         findings: List[StaticFinding] = []
         if not raw_json_str or not raw_json_str.strip():
             return findings
 
         try:
             data = json.loads(raw_json_str)
-        except Exception:
-            return findings
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise ScannerOutputError(self.tool_name, f"Invalid JSON: {exc}") from exc
+
+        if not isinstance(data, dict):
+            raise ScannerOutputError(self.tool_name, f"Expected JSON object, got {type(data).__name__}")
 
         results = data.get("results", [])
         for item in results:

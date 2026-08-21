@@ -19,6 +19,7 @@ from app.retrieval.vector_index import (
     InMemoryVectorIndex,
     PgVectorIndex,
     cosine_similarity,
+    create_vector_index,
 )
 
 
@@ -78,14 +79,24 @@ def test_in_memory_vector_index_operations():
     assert index.count() == 0
 
 
-def test_pgvector_index_local_fallback():
-    """Verify PgVectorIndex operates seamlessly in local fallback mode."""
-    pg_index = PgVectorIndex(db_url="sqlite:///./repolens.db", dimensions=4)
-    pg_index.upsert("c1", [0.5, 0.5, 0.5, 0.5])
-    assert pg_index.count() == 1
-    res = pg_index.query([0.5, 0.5, 0.5, 0.5], top_k=1)
+def test_vector_index_factory_and_pgvector_validation():
+    """Verify create_vector_index defaults to InMemoryVectorIndex and PgVectorIndex enforces PostgreSQL URL."""
+    # 1. Default local factory gives InMemoryVectorIndex
+    idx = create_vector_index(db_url="sqlite:///./repolens.db", dimensions=4, enable_pgvector=False)
+    assert isinstance(idx, InMemoryVectorIndex)
+    idx.upsert("c1", [0.5, 0.5, 0.5, 0.5])
+    assert idx.count() == 1
+    res = idx.query([0.5, 0.5, 0.5, 0.5], top_k=1)
     assert len(res) == 1
     assert res[0][0] == "c1"
+
+    # 2. PgVectorIndex rejects non-Postgres URLs truthfully
+    with pytest.raises(ValueError, match="requires a PostgreSQL database URL"):
+        PgVectorIndex(db_url="sqlite:///./repolens.db", dimensions=4)
+
+    # 3. create_vector_index with enable_pgvector=True on SQLite raises clear error
+    with pytest.raises(ValueError, match="Cannot initialize PgVectorIndex"):
+        create_vector_index(db_url="sqlite:///./repolens.db", dimensions=4, enable_pgvector=True)
 
 
 # =========================================================================

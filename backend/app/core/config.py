@@ -75,6 +75,9 @@ class Settings(BaseSettings):
     # LangGraph Checkpoint Settings
     CHECKPOINT_DB_FILE: str = "checkpoints.db"
 
+    # PostgreSQL pgvector Settings
+    ENABLE_PGVECTOR: bool = False
+
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

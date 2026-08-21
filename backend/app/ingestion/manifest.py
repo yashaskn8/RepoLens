@@ -5,7 +5,7 @@ import time
 from typing import Dict, List, Set
 from app.core.config import get_settings
 from app.ingestion.detector import detect_frameworks, detect_language
-from app.ingestion.parser import parse_file
+from app.ingestion.parser import parse_file, parse_file_with_calls
 from app.ingestion.schemas import FileEntry, RepositoryManifest
 
 # Directories to always skip during repository inspection
@@ -54,6 +54,8 @@ def build_manifest(
     repository_url: str,
     commit_hash: str,
     branch: str | None = None,
+    requested_branch: str | None = None,
+    resolved_branch_or_ref: str | None = None,
 ) -> RepositoryManifest:
     """Scan and parse an ingested repository workspace into a typed RepositoryManifest."""
     start_time = time.perf_counter()
@@ -78,38 +80,35 @@ def build_manifest(
 
             abs_path = os.path.join(root, filename)
             rel_path = os.path.relpath(abs_path, repo_dir).replace("\\", "/")
-
-            try:
-                file_stat = os.stat(abs_path)
-                file_size = file_stat.st_size
-            except Exception:
-                continue
-
             total_files += 1
-            total_size_bytes += file_size
-
-            lang = detect_language(rel_path)
-            if lang:
-                language_counts[lang] = language_counts.get(lang, 0) + 1
-
-            # Skip reading files that exceed the single file limit
-            if file_size > max_file_size:
-                file_entries.append(
-                    FileEntry(
-                        path=rel_path,
-                        language=lang,
-                        size_bytes=file_size,
-                        lines_count=0,
-                        skipped_reason="exceeds_max_size",
-                    )
-                )
-                continue
 
             try:
+                file_size = os.path.getsize(abs_path)
+                total_size_bytes += file_size
+
+                lang = detect_language(filename)
+                if lang:
+                    language_counts[lang] = language_counts.get(lang, 0) + 1
+
+                # Skip oversized files
+                if file_size > max_file_size:
+                    file_entries.append(
+                        FileEntry(
+                            path=rel_path,
+                            language=lang,
+                            size_bytes=file_size,
+                            lines_count=0,
+                            skipped_reason="exceeds_max_size",
+                        )
+                    )
+                    continue
+
+                # Read text and count lines
                 with open(abs_path, "rb") as f:
                     content_bytes = f.read()
 
-                if _is_binary_file(rel_path, content_bytes):
+                # Basic binary check
+                if b"\x00" in content_bytes:
                     file_entries.append(
                         FileEntry(
                             path=rel_path,
@@ -124,10 +123,11 @@ def build_manifest(
 
                 lines_count = content_bytes.count(b"\n") + (1 if content_bytes and not content_bytes.endswith(b"\n") else 0)
 
-                # Parse AST symbols if language is supported by tree-sitter
+                # Parse AST symbols and calls if language is supported by tree-sitter
                 symbols = []
+                calls = []
                 if lang in ("python", "javascript", "typescript", "tsx"):
-                    symbols = parse_file(rel_path, lang, content_bytes)
+                    symbols, calls = parse_file_with_calls(rel_path, lang, content_bytes)
 
                 file_entries.append(
                     FileEntry(
@@ -136,6 +136,7 @@ def build_manifest(
                         size_bytes=file_size,
                         lines_count=lines_count,
                         symbols=symbols,
+                        calls=calls,
                         is_binary=False,
                     )
                 )
@@ -144,8 +145,8 @@ def build_manifest(
                 file_entries.append(
                     FileEntry(
                         path=rel_path,
-                        language=lang,
-                        size_bytes=file_size,
+                        language=None,
+                        size_bytes=0,
                         lines_count=0,
                         skipped_reason=f"read_error: {str(exc)}",
                     )
@@ -154,12 +155,22 @@ def build_manifest(
     # 2. Detect frameworks from repository files
     frameworks = detect_frameworks(repo_dir)
 
+    # 3. Determine truthful Git branch and ref metadata if available
+    from app.ingestion.clone import get_git_resolved_branch_or_ref
+    git_resolved = get_git_resolved_branch_or_ref(repo_dir)
+
+    resolved_branch = resolved_branch_or_ref or git_resolved or branch
+    req_branch = requested_branch if requested_branch is not None else (branch if branch else None)
+
     duration_ms = (time.perf_counter() - start_time) * 1000.0
 
     return RepositoryManifest(
         repository_url=repository_url,
         commit_hash=commit_hash,
-        branch=branch,
+        commit_sha=commit_hash,
+        branch=resolved_branch or req_branch,
+        requested_branch=req_branch,
+        resolved_branch_or_ref=resolved_branch,
         total_files=total_files,
         total_size_bytes=total_size_bytes,
         languages=language_counts,

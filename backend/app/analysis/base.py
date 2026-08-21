@@ -6,11 +6,30 @@ import os
 import shutil
 import subprocess
 import time
-from typing import List, Optional, Tuple
+from typing import FrozenSet, List, Optional, Tuple
 
-from app.analysis.schemas import ScannerResult, StaticFinding, ToolStatus
+from app.analysis.schemas import ScannerResult, StaticFinding, ToolStatus, _MAX_DIAGNOSTIC_STDERR_CHARS
 from app.core.config import get_settings
 from app.schemas.enums import Severity
+
+
+class ScannerOutputError(Exception):
+    """Raised when scanner stdout cannot be parsed into expected machine-readable format."""
+
+    def __init__(self, tool: str, reason: str):
+        self.tool = tool
+        self.reason = reason
+        super().__init__(f"{tool}: {reason}")
+
+
+def _bound_stderr(stderr: Optional[str]) -> Optional[str]:
+    """Truncate stderr to bounded length, stripping trailing whitespace."""
+    if not stderr or not stderr.strip():
+        return None
+    bounded = stderr.strip()[:_MAX_DIAGNOSTIC_STDERR_CHARS]
+    if len(stderr.strip()) > _MAX_DIAGNOSTIC_STDERR_CHARS:
+        bounded += "\n... [truncated]"
+    return bounded
 
 
 class BaseScannerAdapter(ABC):
@@ -33,6 +52,16 @@ class BaseScannerAdapter(ABC):
     def is_enabled(self) -> bool:
         """Check if scanner is enabled in settings."""
         pass
+
+    @property
+    def _accepted_exit_codes(self) -> FrozenSet[int]:
+        """Exit codes that indicate the scanner process completed normally.
+
+        Default is {0}. Concrete adapters (e.g. Semgrep, OSV) override to specify
+        their custom exit codes (such as 1 for findings present).
+        Any exit code NOT in this set is treated as a tool failure.
+        """
+        return frozenset({0})
 
     def is_available(self) -> bool:
         """Check if the scanner executable is available on the host PATH."""
@@ -62,7 +91,10 @@ class BaseScannerAdapter(ABC):
         cwd: str,
         timeout_seconds: Optional[int] = None,
     ) -> Tuple[int, str, str]:
-        """Execute a fixed command with shell=False in a separate thread, enforcing timeout."""
+        """Execute a fixed command with shell=False in a separate thread, enforcing timeout.
+
+        Raises subprocess.TimeoutExpired on timeout (NOT asyncio.TimeoutError).
+        """
         settings = get_settings()
         timeout = timeout_seconds or settings.SCANNER_TIMEOUT_SECONDS
 
@@ -82,11 +114,22 @@ class BaseScannerAdapter(ABC):
 
     @abstractmethod
     def parse_output(self, raw_json_str: str, repo_dir: str) -> List[StaticFinding]:
-        """Parse tool JSON output into canonical StaticFinding items."""
+        """Parse tool JSON output into canonical StaticFinding items.
+
+        MUST raise ScannerOutputError if the output cannot be parsed into
+        the expected machine-readable format (e.g. invalid JSON, wrong schema).
+        Returning an empty list is valid only when the output is well-formed
+        but contains no findings.
+        """
         pass
 
     async def scan(self, repo_dir: str) -> ScannerResult:
-        """Execute scanner on repository directory and return structured ScannerResult."""
+        """Execute scanner on repository directory and return structured ScannerResult.
+
+        A result is COMPLETED only when:
+        - the process completed under a known-valid exit code; AND
+        - expected machine-readable output was successfully parsed.
+        """
         if not self.is_enabled:
             return ScannerResult(
                 tool=self.tool_name,
@@ -106,19 +149,38 @@ class BaseScannerAdapter(ABC):
             cmd = self._build_command(repo_dir)
             returncode, stdout, stderr = await self._execute_command(cmd, cwd=repo_dir)
             execution_time_ms = (time.perf_counter() - start_time) * 1000.0
+            bounded_stderr = _bound_stderr(stderr)
 
-            # Some tools (e.g. semgrep / trivy) return non-zero returncodes when findings are detected
-            # We attempt parsing stdout if output is present
-            findings = self.parse_output(stdout, repo_dir) if stdout.strip() else []
+            # --- Exit code validation ---
+            if returncode not in self._accepted_exit_codes:
+                return ScannerResult(
+                    tool=self.tool_name,
+                    status=ToolStatus.FAILED,
+                    error_message=(
+                        f"{self.tool_name} exited with unexpected code {returncode}. "
+                        f"Accepted codes: {sorted(self._accepted_exit_codes)}."
+                    ),
+                    execution_time_ms=execution_time_ms,
+                    diagnostic_stderr=bounded_stderr,
+                )
+
+            # --- Parse output ---
+            if not stdout.strip():
+                # Empty stdout with accepted exit code → no findings
+                findings: List[StaticFinding] = []
+            else:
+                # parse_output raises ScannerOutputError on invalid format
+                findings = self.parse_output(stdout, repo_dir)
 
             return ScannerResult(
                 tool=self.tool_name,
                 status=ToolStatus.COMPLETED,
                 findings=findings,
                 execution_time_ms=execution_time_ms,
+                diagnostic_stderr=bounded_stderr,
             )
 
-        except asyncio.TimeoutError:
+        except subprocess.TimeoutExpired:
             execution_time_ms = (time.perf_counter() - start_time) * 1000.0
             return ScannerResult(
                 tool=self.tool_name,
@@ -126,6 +188,16 @@ class BaseScannerAdapter(ABC):
                 error_message=f"{self.tool_name} execution timed out.",
                 execution_time_ms=execution_time_ms,
             )
+
+        except ScannerOutputError as exc:
+            execution_time_ms = (time.perf_counter() - start_time) * 1000.0
+            return ScannerResult(
+                tool=self.tool_name,
+                status=ToolStatus.INVALID_OUTPUT,
+                error_message=f"Failed to parse {self.tool_name} output: {exc.reason}",
+                execution_time_ms=execution_time_ms,
+            )
+
         except Exception as exc:
             execution_time_ms = (time.perf_counter() - start_time) * 1000.0
             return ScannerResult(

@@ -88,6 +88,7 @@ async def run_analysis_workflow(
                 embedding_provider=None,
                 retrieval_service=None,
                 context_engine=context_engine,
+                repo_dir=repo_dir,
             )
             register_scan_runtime(scan_id, runtime)
         else:
@@ -102,20 +103,29 @@ async def run_analysis_workflow(
     try:
         # Check for existing checkpoint state for this scan_id thread
         if checkpointer is not None and resume_if_exists:
+            current_state = None
             try:
                 current_state = await app.aget_state(config)
-                if current_state and current_state.values:
-                    # If all nodes already finished, return the completed state directly
-                    if not current_state.next:
-                        logger.info("Scan %s already completed in checkpointer. Returning cached result.", scan_id)
-                        return current_state.values
+            except Exception as exc:
+                logger.warning("Failed to retrieve existing checkpoint state for %s: %s", scan_id, str(exc))
 
-                    # Interrupted scan: resume execution from last completed super-step
-                    logger.info("Resuming scan %s from checkpoint (next nodes: %s)...", scan_id, current_state.next)
+            if current_state and current_state.values:
+                # If all nodes already finished, return the completed state directly
+                if not current_state.next:
+                    logger.info("Scan %s already completed in checkpointer. Returning cached result.", scan_id)
+                    return current_state.values
+
+                # Interrupted scan: resume execution from last completed super-step
+                logger.info("Resuming scan %s from checkpoint (next nodes: %s)...", scan_id, current_state.next)
+                try:
                     resumed_result = await app.ainvoke(None, config=config)
                     return resumed_result
-            except Exception as exc:
-                logger.warning("Failed to check or resume existing checkpoint for %s: %s. Starting fresh.", scan_id, str(exc))
+                except Exception as exc:
+                    logger.error("Terminal workflow failure during resume of scan %s: %s", scan_id, str(exc))
+                    failed_state = dict(current_state.values)
+                    failed_state["status"] = "FAILED"
+                    failed_state.setdefault("errors", []).append(f"Terminal execution failure on resume: {str(exc)}")
+                    return failed_state
 
         # Fresh scan initialization (strictly JSON/msgpack serializable for SQLite checkpoints)
         summary = evidence_store.get_summary()

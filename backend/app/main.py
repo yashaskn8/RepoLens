@@ -14,8 +14,6 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifecycle events handler."""
-    # Ensure database schema is created on startup if not already existing
-    Base.metadata.create_all(bind=engine)
     yield
 
 

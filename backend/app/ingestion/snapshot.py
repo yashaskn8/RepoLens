@@ -120,12 +120,9 @@ class RepositorySnapshotService:
             timeout = getattr(self.settings, "CLONE_TIMEOUT_SECONDS", 120)
 
             # 3. Initialize empty git repository with security options
-            code, out, err = self._run_git_cmd(["init", "--initial-branch=main"], cwd=workspace_path, timeout=15)
+            code, out, err = self._run_git_cmd(["init"], cwd=workspace_path, timeout=15)
             if code != 0:
-                # Fallback for older git without --initial-branch
-                code, out, err = self._run_git_cmd(["init"], cwd=workspace_path, timeout=15)
-                if code != 0:
-                    raise SnapshotRehydrationError(f"git init failed in workspace: {err}")
+                raise SnapshotRehydrationError(f"git init failed in workspace: {err}")
 
             # 4. Add remote origin
             code, out, err = self._run_git_cmd(["remote", "add", "origin", normalized_url], cwd=workspace_path, timeout=15)

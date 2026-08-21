@@ -546,9 +546,10 @@ async def test_adversarial_patch_introducing_route_mismatch_fails_check_7():
         diff = (
             "--- a/app/main.py\n"
             "+++ b/app/main.py\n"
-            "@@ -4,2 +4,2 @@\n"
+            "@@ -5,2 +5,2 @@\n"
             "-@app.get('/api/v1/health')\n"
             "+@app.post('/api/v1/health')\n"
+            " def health(): return {'status': 'ok'}\n"
         )
 
         proposal = PatchProposal(

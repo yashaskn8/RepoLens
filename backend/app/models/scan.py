@@ -19,7 +19,7 @@ class ScanModel(Base):
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
     repository_url = Column(String(512), nullable=False, index=True)
-    branch = Column(String(128), nullable=True, default="main")
+    branch = Column(String(128), nullable=True, default=None)
     commit_hash = Column(String(64), nullable=True)
     status = Column(String(32), nullable=False, default=ScanStatus.PENDING.value, index=True)
     model_metadata = Column(JSON, nullable=True)

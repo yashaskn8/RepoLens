@@ -14,6 +14,7 @@ from app.retrieval.vector_index import (
     PgVectorIndex,
     VectorIndex,
     cosine_similarity,
+    create_vector_index,
 )
 
 __all__ = [
@@ -24,6 +25,7 @@ __all__ = [
     "VectorIndex",
     "InMemoryVectorIndex",
     "PgVectorIndex",
+    "create_vector_index",
     "cosine_similarity",
     "reciprocal_rank_fusion",
     "QwenReranker",

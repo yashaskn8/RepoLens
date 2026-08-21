@@ -22,6 +22,7 @@ class PatchModel(Base):
     finding_id = Column(String(36), ForeignKey("findings.id", ondelete="CASCADE"), nullable=False, index=True)
     plan_id = Column(String(36), nullable=True)
     scan_id = Column(String(36), ForeignKey("scans.id", ondelete="CASCADE"), nullable=False, index=True)
+    thread_id = Column(String(128), nullable=True, index=True)
     status = Column(String(32), nullable=False, default=PatchStatus.DRAFT.value, index=True)
     unified_diff = Column(Text, nullable=False)
     files_modified = Column(JSON, nullable=False)

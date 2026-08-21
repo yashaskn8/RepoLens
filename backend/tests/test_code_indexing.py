@@ -318,7 +318,7 @@ class TestEmbeddingProviders:
     def test_embedding_provider_is_abstract(self):
         """EmbeddingProvider cannot be instantiated directly."""
         with pytest.raises(TypeError):
-            EmbeddingProvider()
+            EmbeddingProvider()  # type: ignore[abstract]
 
     def test_input_type_passage_vs_query(self):
         """EmbeddingRequest validates input_type string."""

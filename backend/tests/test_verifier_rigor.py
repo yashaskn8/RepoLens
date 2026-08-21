@@ -253,3 +253,115 @@ async def test_verifier_adjusts_severity_and_confirms(workspace_with_code):
     assert vf.verification_verdict == VerificationVerdict.CONFIRMED
     assert vf.severity == Severity.LOW  # Adjusted from CRITICAL
     assert "Downgraded to LOW" in vf.verification_reason
+
+
+@pytest.mark.asyncio
+async def test_verifier_no_variable_leakage_across_candidates_multiverdict(workspace_with_code):
+    """Phase 3.5J Regression Test: Prove that across multiple candidate findings evaluated in the same batch
+    (CONFIRMED, POSSIBLE, REJECTED), all resulting finding_ids, titles, file_paths, verdicts, and reasons
+    map strictly to the exact input candidate without stale variable leakage.
+    """
+    scan_id = str(uuid4())
+
+    c_confirmed = Finding(
+        id=uuid4(),
+        scan_id=scan_id,
+        title="Confirmed Hardcoded JWT Secret",
+        description="SECRET_KEY defined inline",
+        severity=Severity.HIGH,
+        evidences=[Evidence(file_path="auth.py", start_line=2, end_line=2, code_snippet="SECRET_KEY = 'supersecret'")],
+        model_metadata=ModelExecutionMetadata(provider="gemini", model_name="gemini-3.7-flash"),
+    )
+
+    c_possible = Finding(
+        id=uuid4(),
+        scan_id=scan_id,
+        title="Possible Insecure Token Verification",
+        description="Token decode lacks audience check",
+        severity=Severity.MEDIUM,
+        evidences=[Evidence(file_path="auth.py", start_line=4, end_line=5, code_snippet="jwt.decode(...)")],
+        model_metadata=ModelExecutionMetadata(provider="gemini", model_name="gemini-3.7-flash"),
+    )
+
+    c_rejected = Finding(
+        id=uuid4(),
+        scan_id=scan_id,
+        title="Rejected False Positive SQLi",
+        description="Claimed SQL injection on empty debug endpoint",
+        severity=Severity.CRITICAL,
+        evidences=[Evidence(file_path="auth.py", start_line=7, end_line=8, code_snippet="def insecure_debug_endpoint(): pass")],
+        model_metadata=ModelExecutionMetadata(provider="gemini", model_name="gemini-3.7-flash"),
+    )
+
+    state = {
+        "scan_id": scan_id,
+        "repo_dir": workspace_with_code,
+        "candidate_findings": [c_confirmed, c_possible, c_rejected],
+    }
+
+    mock_router = AsyncMock()
+    mock_response = LLMResponse(
+        content=json.dumps({
+            "evaluations": [
+                {
+                    "index": 0,
+                    "verdict": "CONFIRMED",
+                    "justified_severity": "HIGH",
+                    "reason": "Hardcoded secret verified on line 2."
+                },
+                {
+                    "index": 1,
+                    "verdict": "POSSIBLE",
+                    "justified_severity": "MEDIUM",
+                    "reason": "Token decode could be insecure depending on algorithm whitelist."
+                },
+                {
+                    "index": 2,
+                    "verdict": "REJECTED",
+                    "justified_severity": "LOW",
+                    "reason": "No SQL query in function; false positive."
+                }
+            ]
+        }),
+        model="nemotron",
+        provider=LLMProvider.NVIDIA,
+        metadata=ModelExecutionMetadata(
+            provider=LLMProvider.NVIDIA,
+            model_name="nemotron",
+            prompt_tokens=50,
+            completion_tokens=50,
+            total_tokens=100,
+            latency_ms=25.0,
+        ),
+    )
+    mock_router.generate.return_value = mock_response
+
+    with patch("app.agents.verifier.get_llm_router", return_value=mock_router):
+        result = await run_verifier_agent(state)
+
+    # 1. Verify finding counts
+    assert len(result["verified_findings"]) == 2
+    assert len(result["rejected_findings"]) == 1
+
+    # 2. Verify CONFIRMED candidate mapping
+    vf_conf = next(f for f in result["verified_findings"] if f.verification_verdict == VerificationVerdict.CONFIRMED)
+    assert vf_conf.id == c_confirmed.id
+    assert vf_conf.title == "Confirmed Hardcoded JWT Secret"
+    assert vf_conf.verification_reason == "Hardcoded secret verified on line 2."
+    assert vf_conf.evidences[0].file_path == "auth.py"
+
+    # 3. Verify POSSIBLE candidate mapping
+    vf_poss = next(f for f in result["verified_findings"] if f.verification_verdict == VerificationVerdict.POSSIBLE)
+    assert vf_poss.id == c_possible.id
+    assert vf_poss.title == "Possible Insecure Token Verification"
+    assert vf_poss.verification_reason == "Token decode could be insecure depending on algorithm whitelist."
+    assert vf_poss.evidences[0].file_path == "auth.py"
+
+    # 4. Verify REJECTED candidate mapping (specifically ensuring NO variable leakage from other candidates)
+    rf = result["rejected_findings"][0]
+    assert rf["finding_id"] == str(c_rejected.id)
+    assert rf["title"] == "Rejected False Positive SQLi"
+    assert rf["file_path"] == "auth.py"
+    assert rf["verdict"] == "REJECTED"
+    assert rf["reason"] == "No SQL query in function; false positive."
+

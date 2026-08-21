@@ -22,6 +22,8 @@ class RemediationState(TypedDict, total=False):
 
     scan_id: str
     finding_id: str
+    patch_id: Optional[str]
+    thread_id: Optional[str]
     plan_dict: Optional[Dict[str, Any]]
     proposal_dict: Optional[Dict[str, Any]]
     verification_dict: Optional[Dict[str, Any]]
@@ -29,17 +31,23 @@ class RemediationState(TypedDict, total=False):
     patch_status: str
     user_feedback: Optional[str]
     approved_by: Optional[str]
+    approved_at: Optional[str]
+    rejected_reason: Optional[str]
     revision_count: int
     error: Optional[str]
 
 
 async def run_human_approval_checkpoint(state: RemediationState) -> Dict[str, Any]:
-    """Node executed once human approval or rejection is submitted."""
+    """Node executed once human approval, rejection, or revision is submitted."""
     current_status = state.get("patch_status", PatchStatus.VERIFIED.value)
-    logger.info("Human approval checkpoint reached with status: %s", current_status)
+    logger.info("Human approval checkpoint executed with status: %s", current_status)
     return {
         "patch_status": current_status,
         "approved_by": state.get("approved_by"),
+        "approved_at": state.get("approved_at"),
+        "rejected_reason": state.get("rejected_reason"),
+        "user_feedback": state.get("user_feedback"),
+        "revision_count": state.get("revision_count", 0),
     }
 
 

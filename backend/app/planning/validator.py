@@ -40,11 +40,14 @@ def validate_fix_plan(
     validated_symbols: List[str] = []
 
     # =========================================================================
-    # Rule 1: Only CONFIRMED / Non-Rejected Findings Allowed
+    # Rule 1: Strict Remediation Eligibility: Only CONFIRMED Findings Allowed
     # =========================================================================
-    if finding.verification_verdict == VerificationVerdict.REJECTED:
+    if finding.verification_verdict != VerificationVerdict.CONFIRMED:
+        verdict_str = finding.verification_verdict.value if finding.verification_verdict else "NONE"
         rejection_reasons.append(
-            f"Fix planning rejected: finding '{finding.id}' was REJECTED by independent verification."
+            f"Fix planning rejected: finding '{finding.id}' is not eligible for remediation planning. "
+            f"Only findings with verification_verdict == CONFIRMED may produce a FixPlan "
+            f"(current verdict: '{verdict_str}')."
         )
 
     # =========================================================================

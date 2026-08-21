@@ -107,7 +107,16 @@ class PatchVerificationService:
                 continue
 
             # Determine language
-            lang = "python" if rel_path.endswith(".py") else ("typescript" if rel_path.endswith((".ts", ".tsx")) else ("javascript" if rel_path.endswith((".js", ".jsx")) else None))
+            if rel_path.endswith(".py"):
+                lang = "python"
+            elif rel_path.endswith(".tsx"):
+                lang = "tsx"
+            elif rel_path.endswith(".ts"):
+                lang = "typescript"
+            elif rel_path.endswith((".js", ".jsx")):
+                lang = "javascript"
+            else:
+                lang = None
             if not lang:
                 continue
 
@@ -264,8 +273,9 @@ class PatchVerificationService:
 
             is_route_finding = (
                 (finding.category or "").lower() in ("route_mismatch", "contract", "api_contract")
-                or "route" in finding.title.lower()
-                or "contract" in finding.title.lower()
+                or "route mismatch" in finding.title.lower()
+                or "api contract" in finding.title.lower()
+                or "route contract" in finding.title.lower()
             )
 
             if new_mismatches:

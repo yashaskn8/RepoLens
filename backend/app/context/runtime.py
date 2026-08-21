@@ -81,6 +81,7 @@ class ScanIntelligenceRuntime:
         embedding_provider: Optional[EmbeddingProvider],
         retrieval_service: RetrievalService,
         context_engine: ContextEngine,
+        repo_dir: Optional[str] = None,
     ):
         self.evidence_store = evidence_store
         self.manifest = evidence_store.manifest
@@ -90,6 +91,7 @@ class ScanIntelligenceRuntime:
         self.embedding_provider = embedding_provider
         self.retrieval_service = retrieval_service
         self.context_engine = context_engine
+        self.repo_dir = repo_dir
 
     @classmethod
     async def build(
@@ -173,6 +175,7 @@ class ScanIntelligenceRuntime:
             embedding_provider=provider,
             retrieval_service=retrieval_service,
             context_engine=context_engine,
+            repo_dir=repo_dir,
         )
 
 

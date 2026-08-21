@@ -18,6 +18,7 @@ class ToolStatus(str, Enum):
     TIMEOUT = "TIMEOUT"
     FAILED = "FAILED"
     COMPLETED = "COMPLETED"
+    INVALID_OUTPUT = "INVALID_OUTPUT"
 
 
 class StaticFinding(BaseModel):
@@ -40,6 +41,9 @@ class StaticFinding(BaseModel):
     }
 
 
+_MAX_DIAGNOSTIC_STDERR_CHARS = 2000
+
+
 class ScannerResult(BaseModel):
     """Aggregated output from a single scanner adapter execution."""
 
@@ -48,3 +52,7 @@ class ScannerResult(BaseModel):
     findings: List[StaticFinding] = Field(default_factory=list, description="Extracted and normalized static findings")
     error_message: Optional[str] = Field(default=None, description="Error explanation if execution failed")
     execution_time_ms: float = Field(default=0.0, ge=0.0, description="Scanner execution time in milliseconds")
+    diagnostic_stderr: Optional[str] = Field(
+        default=None,
+        description="Bounded scanner stderr for diagnostics (not exposed to untrusted consumers).",
+    )

@@ -2,6 +2,7 @@
 
 from app.ingestion.schemas import (
     FileEntry,
+    ParsedCall,
     ParsedSymbol,
     RepositoryManifest,
     SymbolKind,
@@ -12,10 +13,11 @@ from app.ingestion.clone import (
     IngestionError,
     InvalidRepositoryURLError,
     clone_repository,
+    get_git_resolved_branch_or_ref,
     validate_github_url,
 )
 from app.ingestion.manifest import build_manifest
-from app.ingestion.parser import parse_file
+from app.ingestion.parser import parse_file, parse_file_with_calls
 from app.ingestion.snapshot import (
     RepositorySnapshotService,
     ScanNotFoundError,
@@ -32,6 +34,7 @@ __all__ = [
     "FileEntry",
     "IngestionError",
     "InvalidRepositoryURLError",
+    "ParsedCall",
     "ParsedSymbol",
     "RepositoryManifest",
     "RepositorySnapshotService",
@@ -43,8 +46,10 @@ __all__ = [
     "SymbolKind",
     "build_manifest",
     "clone_repository",
+    "get_git_resolved_branch_or_ref",
     "get_snapshot_service",
     "parse_file",
+    "parse_file_with_calls",
     "validate_github_url",
 ]
 

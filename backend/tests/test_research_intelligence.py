@@ -26,7 +26,7 @@ from app.research.schemas import (
     SourceTier,
 )
 from app.research.service import ResearchService
-from app.schemas.enums import FindingStatus, Severity
+from app.schemas.enums import FindingStatus, Severity, VerificationVerdict
 from app.schemas.evidence import Evidence
 from app.schemas.finding import Finding
 
@@ -222,6 +222,7 @@ async def test_research_service_finding_and_batch_orchestration():
         description="Legacy lifecycle hook usage in component.",
         severity=Severity.MEDIUM,
         status=FindingStatus.OPEN,
+        verification_verdict=VerificationVerdict.CONFIRMED,
         evidences=[Evidence(file_path="frontend/src/App.tsx", start_line=10, end_line=15, code_snippet="useEffect(...)")],
     )
 

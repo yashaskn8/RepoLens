@@ -2,15 +2,21 @@
 
 import json
 import os
-from typing import List
-from app.analysis.base import BaseScannerAdapter
+from typing import FrozenSet, List
+from app.analysis.base import BaseScannerAdapter, ScannerOutputError
 from app.analysis.schemas import StaticFinding
 from app.core.config import get_settings
 from app.schemas.evidence import Evidence
 
 
 class TrivyAdapter(BaseScannerAdapter):
-    """Adapter for Trivy filesystem scanner (vulnerabilities, misconfigurations, secrets)."""
+    """Adapter for Trivy filesystem scanner (vulnerabilities, misconfigurations, secrets).
+
+    Exit code semantics:
+      0 — scan completed successfully (findings may or may not be present)
+      We do NOT use --exit-code, so Trivy returns 0 in both cases.
+      Any non-zero exit code indicates a real tool error.
+    """
 
     @property
     def tool_name(self) -> str:
@@ -24,6 +30,10 @@ class TrivyAdapter(BaseScannerAdapter):
     def is_enabled(self) -> bool:
         return get_settings().TRIVY_ENABLED
 
+    @property
+    def _accepted_exit_codes(self) -> FrozenSet[int]:
+        return frozenset({0})
+
     def _build_command(self, repo_dir: str) -> List[str]:
         return [
             self.tool_path,
@@ -35,18 +45,26 @@ class TrivyAdapter(BaseScannerAdapter):
         ]
 
     def parse_output(self, raw_json_str: str, repo_dir: str) -> List[StaticFinding]:
-        """Parse Trivy JSON output into canonical StaticFinding objects."""
+        """Parse Trivy JSON output into canonical StaticFinding objects.
+
+        Raises ScannerOutputError if JSON is malformed or has unexpected structure.
+        """
         findings: List[StaticFinding] = []
         if not raw_json_str or not raw_json_str.strip():
             return findings
 
         try:
             data = json.loads(raw_json_str)
-        except Exception:
-            return findings
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise ScannerOutputError(self.tool_name, f"Invalid JSON: {exc}") from exc
 
         # Trivy output may be a dict with "Results" or a list of result objects
-        results = data.get("Results", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+        if isinstance(data, dict):
+            results = data.get("Results", [])
+        elif isinstance(data, list):
+            results = data
+        else:
+            raise ScannerOutputError(self.tool_name, f"Expected JSON object or array, got {type(data).__name__}")
 
         for target_res in results:
             raw_target = target_res.get("Target", "repository")
