@@ -81,9 +81,9 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
       setDiff(res.proposal.unified_diff);
       setFilesModified(res.proposal.files_modified);
       setPatchStatus(
-        res.final_verdict === 'APPROVED'
+        res.machine_verdict === 'PASSED' || res.final_verdict === 'PASSED'
           ? 'VERIFIED'
-          : res.final_verdict === 'REJECTED'
+          : res.machine_verdict === 'REJECTED' || res.final_verdict === 'REJECTED'
           ? 'REJECTED'
           : 'NEEDS_REVIEW'
       );

@@ -329,7 +329,7 @@ export interface PatchResponse {
   revision_number?: number;
   thread_id?: string | null;
   status: PatchStatus;
-  machine_verdict?: string | null;
+  machine_verdict?: MachineVerdict | null;
   unified_diff: string;
   files_modified: string[];
   explanation: string;
@@ -410,7 +410,7 @@ export interface PatchWorkflowResult {
   critic_report?: PatchCriticReport | null;
   revision_count: number;
   machine_verdict: MachineVerdict;
-  final_verdict?: string;
+  final_verdict: MachineVerdict;
 }
 
 export interface PatchReviewRequest {

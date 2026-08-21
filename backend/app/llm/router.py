@@ -1,6 +1,7 @@
 """Canonical LLMRouter orchestrating task policy dispatch, provider adapters, and fallback execution."""
 
 import logging
+import random
 from typing import Dict, List, Optional, Tuple
 from app.core.config import get_settings
 from app.llm.adapters import GeminiAdapter, GroqAdapter, HuggingFaceAdapter, NvidiaAdapter
@@ -9,6 +10,27 @@ from app.llm.exceptions import LLMAllFallbacksFailedError, LLMError, LLMRateLimi
 from app.llm.types import LLMProvider, LLMRequest, LLMResponse, TaskPolicy
 
 logger = logging.getLogger(__name__)
+
+
+def _calculate_retry_delay(
+    attempt: int,
+    exc: Optional[LLMError] = None,
+    max_delay: float = 2.0,
+) -> float:
+    """Calculate bounded exponential backoff delay with random jitter.
+
+    If exc is LLMRateLimitError with retry_after_seconds, uses that as base delay.
+    Otherwise uses exponential backoff: min(0.2 * (2 ** attempt), max_delay).
+    Applies bounded jitter up to min(base_delay * 0.25, 0.25) while strictly capping total delay at max_delay.
+    """
+    if isinstance(exc, LLMRateLimitError) and exc.retry_after_seconds is not None and exc.retry_after_seconds > 0:
+        base_delay = min(exc.retry_after_seconds, max_delay)
+    else:
+        base_delay = min(0.2 * (2 ** attempt), max_delay)
+
+    max_jitter = min(base_delay * 0.25, 0.25)
+    jitter = random.uniform(0.0, max_jitter) if max_jitter > 0 else 0.0
+    return min(base_delay + jitter, max_delay)
 
 
 class LLMRouter:
@@ -143,9 +165,7 @@ class LLMRouter:
                 except LLMError as exc:
                     if not exc.retryable or attempt >= max_retries:
                         raise
-                    delay = min(0.2 * (2 ** attempt), 2.0)
-                    if isinstance(exc, LLMRateLimitError) and exc.retry_after_seconds:
-                        delay = min(exc.retry_after_seconds, 2.0)
+                    delay = _calculate_retry_delay(attempt, exc)
                     logger.warning(
                         f"Transient LLM failure on explicit provider {request.provider.value} ({exc.message}). "
                         f"Retrying in {delay:.2f}s (attempt {attempt + 1}/{max_retries})..."
@@ -189,10 +209,7 @@ class LLMRouter:
                         attempted_errors.append(exc)
                         break
 
-                    delay = min(0.2 * (2 ** attempt), 2.0)
-                    if isinstance(exc, LLMRateLimitError) and exc.retry_after_seconds:
-                        delay = min(exc.retry_after_seconds, 2.0)
-
+                    delay = _calculate_retry_delay(attempt, exc)
                     logger.warning(
                         f"Transient LLM error on {provider.value} ({model}): {exc.message}. "
                         f"Retrying in {delay:.2f}s (attempt {attempt + 1}/{max_retries})..."

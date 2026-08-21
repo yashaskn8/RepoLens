@@ -13,7 +13,7 @@ RepoLens is an AI-powered repository intelligence and autonomous remediation pla
 2. **Deterministic 12-Check Verification**: Patches undergo unified diff validation, path traversal prevention, binary file guards, Tree-sitter AST syntax re-parsing, route contract verification, scanner re-evaluation, secret leak scanning, and critical finding regression checks.
 3. **Exact Commit Rehydration**: The original repository is never mutated in-place. Remediation, planning, and verification operate strictly in ephemeral sandbox clones rehydrated to the exact persisted commit SHA.
 4. **Human-in-the-Loop Authority**: Machine verification never marks patches as `APPROVED`. Patches pause at human approval boundaries (`VERIFIED` or `NEEDS_REVIEW`) and require explicit human review via `/approve`, `/reject`, or `/revise`.
-5. **Machine Verdict vs Human Verdict Separation**: Strict separation between deterministic machine verification results (`PASSED`, `NEEDS_REVIEW`, `REJECTED`) and human review decisions (`AWAITING_REVIEW`, `APPROVED`, `REJECTED`).
+5. **Machine Verdict vs Human Review Separation**: Machine verification results are persisted independently as `PASSED`, `NEEDS_REVIEW`, or `REJECTED`, while patch lifecycle status uses `DRAFT`, `VERIFIED`, `NEEDS_REVIEW`, `REJECTED`, and `APPROVED`. Only explicit human approval may set `APPROVED`.
 6. **Single Revision Lineage**: Human revisions generate an immutable child patch linked via `parent_patch_id` and `revision_number = 1`, enforced by database constraints and atomic API validation.
 7. **Zero External Worker Requirement**: RepoLens supports pure local development on Windows, macOS, and Linux without requiring Docker, Redis, Celery, or Kafka.
 
@@ -40,7 +40,7 @@ RepoLens/
 │   │   ├── schemas/         # Canonical Pydantic schemas & enums
 │   │   └── services/        # Durable scan recovery & in-process task dispatcher
 │   ├── alembic/             # Database migrations (001, 002, 003, 004)
-│   └── tests/               # 298+ comprehensive Pytest verification tests
+│   └── tests/               # 302+ comprehensive Pytest verification tests
 └── frontend/                 # Next.js + React 19 + TypeScript frontend
     └── src/
         ├── app/             # App Router pages (scans dashboard, finding remediation)
@@ -92,7 +92,8 @@ RepoLens/
    uvicorn app.main:app --reload --port 8000
    ```
    The backend will be available at `http://localhost:8000`.  
-   - Interactive API Docs: `http://localhost:8000/docs`  
+   - Interactive Swagger API Docs: `http://localhost:8000/api/v1/docs`  
+   - Interactive ReDoc API Docs: `http://localhost:8000/api/v1/redoc`  
    - Health Check: `http://localhost:8000/health`
 
 6. Run backend test suite:
