@@ -134,7 +134,12 @@ class LLMRouter:
             adapter = self.get_adapter(request.provider)
             for attempt in range(max_retries + 1):
                 try:
-                    return await adapter.generate(request)
+                    response = await adapter.generate(request)
+                    if attempt > 0:
+                        if response.metadata.extra_metadata is None:
+                            response.metadata.extra_metadata = {}
+                        response.metadata.extra_metadata["retry_count"] = attempt
+                    return response
                 except LLMError as exc:
                     if not exc.retryable or attempt >= max_retries:
                         raise
@@ -161,6 +166,19 @@ class LLMRouter:
             for attempt in range(max_retries + 1):
                 try:
                     response = await adapter.generate(attempt_request)
+                    if attempt > 0 or attempted_errors:
+                        if response.metadata.extra_metadata is None:
+                            response.metadata.extra_metadata = {}
+                        response.metadata.extra_metadata["retry_count"] = attempt
+                        if attempted_errors:
+                            response.metadata.extra_metadata["fallbacks_attempted"] = [
+                                {
+                                    "provider": err.provider.value if err.provider else "unknown",
+                                    "model": err.model,
+                                    "error": err.message,
+                                }
+                                for err in attempted_errors
+                            ]
                     return response
                 except LLMError as exc:
                     if not exc.retryable or attempt >= max_retries:

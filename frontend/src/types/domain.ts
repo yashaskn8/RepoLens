@@ -60,7 +60,10 @@ export interface Scan {
   id: string;
   repository_url: string;
   branch?: string | null;
+  requested_branch?: string | null;
+  resolved_branch_or_ref?: string | null;
   commit_hash?: string | null;
+  commit_sha?: string | null;
   status: ScanStatus;
   findings_count: number;
   findings: Finding[];
@@ -114,16 +117,21 @@ export interface FrameworkDetected {
 }
 
 export interface AnalysisScope {
-  total_source_bytes: number;
-  max_source_bytes: number;
-  is_truncated: boolean;
-  truncated_file_count: number;
+  truncated: boolean;
+  reason?: string | null;
+  files_processed: number;
+  source_bytes_processed: number;
+  total_observed_files: number;
+  total_observed_bytes: number;
 }
 
 export interface RepositoryManifest {
   repository_url: string;
   commit_hash: string;
+  commit_sha?: string | null;
   branch?: string | null;
+  requested_branch?: string | null;
+  resolved_branch_or_ref?: string | null;
   total_files: number;
   total_size_bytes: number;
   languages: Record<string, number>;
@@ -272,9 +280,12 @@ export interface RetrievalQuery {
 
 export type PatchStatus = 'DRAFT' | 'VERIFIED' | 'NEEDS_REVIEW' | 'REJECTED' | 'APPROVED';
 
+export type CheckStatus = 'PASSED' | 'FAILED' | 'NEEDS_REVIEW' | 'UNAVAILABLE' | 'TIMEOUT' | 'NOT_EVALUATED';
+
 export interface VerificationCheckItem {
   check_name: string;
   passed: boolean;
+  status?: CheckStatus;
   details?: string | null;
 }
 
@@ -389,6 +400,8 @@ export interface PatchProposal {
   created_at: string;
 }
 
+export type MachineVerdict = 'PASSED' | 'NEEDS_REVIEW' | 'REJECTED';
+
 export interface PatchWorkflowResult {
   finding_id: string;
   proposal: PatchProposal;
@@ -396,7 +409,8 @@ export interface PatchWorkflowResult {
   critic_escalated: boolean;
   critic_report?: PatchCriticReport | null;
   revision_count: number;
-  final_verdict: 'APPROVED' | 'REJECTED' | 'NEEDS_HUMAN_REVIEW';
+  machine_verdict: MachineVerdict;
+  final_verdict?: string;
 }
 
 export interface PatchReviewRequest {

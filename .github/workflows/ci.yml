@@ -1,4 +1,4 @@
-﻿name: CI
+name: CI
 
 on:
   push:
@@ -10,6 +10,9 @@ jobs:
   backend-test:
     name: Backend Tests (Python 3.12)
     runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: "sqlite:///./ci_test.db"
+      TESTING: "true"
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -19,13 +22,23 @@ jobs:
         with:
           python-version: "3.12"
           cache: "pip"
-          cache-dependency-path: "backend/requirements.txt"
+          cache-dependency-path: "backend/pyproject.toml"
 
-      - name: Install Dependencies
+      - name: Install Backend Dependencies
         run: |
           cd backend
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -e ".[dev]"
+
+      - name: Verify Module Imports
+        run: |
+          cd backend
+          python -c "import app.main; import app.patching.workflow; import app.services.scan_recovery; print('Module imports OK')"
+
+      - name: Run Fresh Alembic Migrations
+        run: |
+          cd backend
+          alembic upgrade head
 
       - name: Run Pytest Suite
         run: |
@@ -33,7 +46,7 @@ jobs:
           python -m pytest tests -v
 
   frontend-check:
-    name: Frontend Typecheck & Lint
+    name: Frontend Typecheck, Lint & Build
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -46,7 +59,7 @@ jobs:
           cache: "npm"
           cache-dependency-path: "frontend/package.json"
 
-      - name: Install Dependencies
+      - name: Install Frontend Dependencies
         run: |
           cd frontend
           npm ci
@@ -60,3 +73,9 @@ jobs:
         run: |
           cd frontend
           npm run lint
+
+      - name: Production Build
+        run: |
+          cd frontend
+          npm run build
+

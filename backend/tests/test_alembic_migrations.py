@@ -51,7 +51,7 @@ def test_alembic_upgrade_head_on_empty_db_creates_complete_schema():
             patch_cols = {col["name"]: col for col in inspector.get_columns("patches")}
             expected_patch_cols = {
                 "id", "finding_id", "plan_id", "scan_id", "parent_patch_id", "revision_number", "thread_id", "status",
-                "unified_diff", "files_modified", "explanation", "expected_behavior_change",
+                "machine_verdict", "unified_diff", "files_modified", "explanation", "expected_behavior_change",
                 "generated_tests_or_test_plan", "verification_report", "critic_report",
                 "user_feedback", "approved_by", "approved_at", "rejected_reason",
                 "model_metadata", "created_at", "updated_at",

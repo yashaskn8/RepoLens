@@ -285,6 +285,7 @@ async def request_patch_generation(
                 scan_id=str(scan.id),
                 thread_id=remediation_thread_id,
                 status=patch_status.value,
+                machine_verdict=workflow_result.machine_verdict,
                 unified_diff=proposal.unified_diff,
                 files_modified=proposal.files_modified,
                 explanation=proposal.explanation,

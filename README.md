@@ -13,8 +13,9 @@ RepoLens is an AI-powered repository intelligence and autonomous remediation pla
 2. **Deterministic 12-Check Verification**: Patches undergo unified diff validation, path traversal prevention, binary file guards, Tree-sitter AST syntax re-parsing, route contract verification, scanner re-evaluation, secret leak scanning, and critical finding regression checks.
 3. **Exact Commit Rehydration**: The original repository is never mutated in-place. Remediation, planning, and verification operate strictly in ephemeral sandbox clones rehydrated to the exact persisted commit SHA.
 4. **Human-in-the-Loop Authority**: Machine verification never marks patches as `APPROVED`. Patches pause at human approval boundaries (`VERIFIED` or `NEEDS_REVIEW`) and require explicit human review via `/approve`, `/reject`, or `/revise`.
-5. **Single Revision Lineage**: Human revisions generate an immutable child patch linked via `parent_patch_id` and `revision_number = 1`, enforcing a hard cap of at most one human revision per patch lineage.
-6. **Zero External Worker Requirement**: RepoLens supports pure local development on Windows, macOS, and Linux without requiring Docker, Redis, Celery, or Kafka.
+5. **Machine Verdict vs Human Verdict Separation**: Strict separation between deterministic machine verification results (`PASSED`, `NEEDS_REVIEW`, `REJECTED`) and human review decisions (`AWAITING_REVIEW`, `APPROVED`, `REJECTED`).
+6. **Single Revision Lineage**: Human revisions generate an immutable child patch linked via `parent_patch_id` and `revision_number = 1`, enforced by database constraints and atomic API validation.
+7. **Zero External Worker Requirement**: RepoLens supports pure local development on Windows, macOS, and Linux without requiring Docker, Redis, Celery, or Kafka.
 
 ---
 
@@ -31,15 +32,15 @@ RepoLens/
 │   │   ├── core/            # Settings, database connection, database engine
 │   │   ├── graph/           # RepositoryGraph, node/edge builders, route matcher
 │   │   ├── ingestion/       # Tree-sitter parsers, manifest, snapshot rehydration
-│   │   ├── llm/             # Resilient gateway with fallback & exponential backoff
+│   │   ├── llm/             # Resilient gateway with fallback, backoff & telemetry
 │   │   ├── models/          # SQLAlchemy ORM models (Scan, Finding, Evidence, Patch)
 │   │   ├── patching/        # Unified diff applier, validator, 12-check verifier, critic
 │   │   ├── planning/        # Fix planner with strict scope boundary enforcement
 │   │   ├── research/        # Evidence-grounded technical research & source tiering
 │   │   ├── schemas/         # Canonical Pydantic schemas & enums
 │   │   └── services/        # Durable scan recovery & in-process task dispatcher
-│   ├── alembic/             # Database migrations (001, 002, 003)
-│   └── tests/               # 280+ comprehensive Pytest verification tests
+│   ├── alembic/             # Database migrations (001, 002, 003, 004)
+│   └── tests/               # 298+ comprehensive Pytest verification tests
 └── frontend/                 # Next.js + React 19 + TypeScript frontend
     └── src/
         ├── app/             # App Router pages (scans dashboard, finding remediation)
@@ -77,8 +78,9 @@ RepoLens/
 
 3. Install dependencies:
    ```bash
-   pip install -r requirements.txt
+   pip install -e ".[dev]"
    ```
+   *(Or `pip install -r requirements.txt`)*
 
 4. Run database migrations:
    ```bash
@@ -100,7 +102,7 @@ RepoLens/
 
 ---
 
-### Frontend Setup
+## Frontend Setup
 
 1. Navigate to the frontend directory:
    ```bash
@@ -132,4 +134,4 @@ By default, RepoLens uses SQLite for local zero-dependency development (`sqlite:
 ```bash
 DATABASE_URL="postgresql://user:password@localhost:5432/repolens"
 ```
-Alembic migrations (001, 002, 003) and SQLAlchemy models are designed to be fully compatible with both SQLite and PostgreSQL.
+Alembic migrations (001, 002, 003, 004) and SQLAlchemy models are designed to be fully compatible with both SQLite and PostgreSQL.

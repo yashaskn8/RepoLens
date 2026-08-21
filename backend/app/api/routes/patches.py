@@ -6,6 +6,7 @@ from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.agents.checkpointer import get_sqlite_checkpointer
@@ -343,6 +344,7 @@ async def request_patch_revision(
             revision_number=(patch_model.revision_number or 0) + 1,
             thread_id=child_thread_id,
             status=child_status.value,
+            machine_verdict=workflow_result.machine_verdict,
             unified_diff=proposal.unified_diff,
             files_modified=proposal.files_modified,
             explanation=proposal.explanation,
@@ -354,6 +356,13 @@ async def request_patch_revision(
             model_metadata=proposal.model_metadata.model_dump() if proposal.model_metadata else None,
         )
         db.add(child_patch_model)
-        db.commit()
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A revision child has already been created for this patch proposal (concurrent conflict).",
+            )
         db.refresh(child_patch_model)
         return child_patch_model

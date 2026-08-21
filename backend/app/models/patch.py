@@ -26,6 +26,7 @@ class PatchModel(Base):
     revision_number = Column(Integer, default=0, nullable=False)
     thread_id = Column(String(128), nullable=True, index=True)
     status = Column(String(32), nullable=False, default=PatchStatus.DRAFT.value, index=True)
+    machine_verdict = Column(String(32), nullable=True)
     unified_diff = Column(Text, nullable=False)
     files_modified = Column(JSON, nullable=False)
     explanation = Column(Text, nullable=False)

@@ -124,3 +124,101 @@ def test_revise_rejected_when_child_already_exists(client, db_session):
     resp = client.post(f"/api/v1/patches/{parent_patch.id}/revise", json={"user_feedback": "Duplicate child request"})
     assert resp.status_code == 400
     assert "already been created" in resp.json()["detail"]
+
+
+def test_revise_race_condition_returns_409(client, db_session):
+    """Simulate a race condition where two concurrent revision requests both pass
+    the pre-check. The losing request must get HTTP 409, not 500.
+
+    Strategy: Insert a conflicting child directly into the DB, then mock the
+    pre-check query (existing_child lookup) to return None — simulating the
+    window where Request B's pre-check runs before Request A's commit.
+    The actual db.commit() will then hit the UNIQUE constraint on parent_patch_id.
+    """
+    from contextlib import asynccontextmanager
+
+    scan, finding, parent_patch = _setup_scan_finding_patch(db_session, status=PatchStatus.VERIFIED.value, revision_number=0)
+
+    # Capture IDs as strings before any potential rollback invalidates ORM state
+    parent_patch_id = parent_patch.id
+    finding_id = finding.id
+    scan_id = scan.id
+
+    # Pre-insert a conflicting child (simulating Request A already committed)
+    conflicting_child = PatchModel(
+        id=str(uuid4()),
+        finding_id=finding_id,
+        scan_id=scan_id,
+        parent_patch_id=parent_patch_id,
+        revision_number=1,
+        status=PatchStatus.VERIFIED.value,
+        unified_diff="--- a/query.py\n+++ b/query.py\n@@ -5,1 +5,1 @@\n-old\n+fixed\n",
+        files_modified=["app/query.py"],
+        explanation="First child",
+        expected_behavior_change="Fixed",
+    )
+    db_session.add(conflicting_child)
+    db_session.commit()
+
+    @asynccontextmanager
+    async def _mock_open_snapshot(*args, **kwargs):
+        with tempfile.TemporaryDirectory() as td:
+            yield td
+
+    mock_wf_result = MagicMock()
+    mock_wf_result.machine_verdict = "PASSED"
+    mock_wf_result.proposal = PatchProposal(
+        finding_id=finding_id,
+        unified_diff="--- a/query.py\n+++ b/query.py\n@@ -5,1 +5,1 @@\n-old\n+new\n",
+        files_modified=["app/query.py"],
+        explanation="Race fix",
+        expected_behavior_change="Fixed",
+    )
+    mock_wf_result.verification_result = None
+    mock_wf_result.critic_report = None
+
+    # Store reference to real query method
+    _real_query = db_session.query
+
+    def _patched_query(model):
+        """Return a query wrapper that makes the existing_child lookup return None,
+        simulating the race window where Request B hasn't seen Request A's child yet."""
+        real_q = _real_query(model)
+        if model is PatchModel:
+            original_filter = real_q.filter
+
+            def _patched_filter(*args):
+                result = original_filter(*args)
+                # Check if this is the parent_patch_id filter (existing_child check)
+                filter_str = str(args[0]) if args else ""
+                if "parent_patch_id" in filter_str:
+                    # Return a query that yields None (simulating race window)
+                    mock_result = MagicMock()
+                    mock_result.first.return_value = None
+                    return mock_result
+                return result
+            real_q.filter = _patched_filter
+        return real_q
+
+    with patch("app.ingestion.snapshot.RepositorySnapshotService.open_snapshot", _mock_open_snapshot), \
+         patch("app.analysis.service.RepositoryIntelligenceService.analyze_repository", AsyncMock()), \
+         patch("app.context.runtime.ScanIntelligenceRuntime.build", AsyncMock()), \
+         patch("app.planning.service.FixPlanningService.create_fix_plan", AsyncMock()), \
+         patch("app.patching.workflow.PatchWorkflowCoordinator.execute_patch_workflow", AsyncMock(return_value=mock_wf_result)):
+        # Monkey-patch query on the session to bypass the pre-check
+        original_query = db_session.query
+        db_session.query = _patched_query
+        try:
+            resp = client.post(
+                f"/api/v1/patches/{parent_patch_id}/revise",
+                json={"user_feedback": "Please improve error handling"},
+            )
+        finally:
+            db_session.query = original_query
+
+    # The endpoint must return 409 Conflict, not 500
+    assert resp.status_code == 409
+    assert "already been created" in resp.json()["detail"]
+
+
+
