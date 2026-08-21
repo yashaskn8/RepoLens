@@ -69,6 +69,32 @@ class FrameworkDetected(BaseModel):
     evidence: str = Field(..., description="Deterministic file and dependency evidence")
 
 
+class AnalysisScope(BaseModel):
+    """Resource boundary and truncation scope metadata."""
+
+    truncated: bool = Field(default=False, description="True if processing stopped due to file count or byte limits")
+    reason: Optional[str] = Field(default=None, description="Reason for truncation if applicable")
+    files_processed: int = Field(default=0, ge=0, description="Total files actually parsed and indexed")
+    source_bytes_processed: int = Field(default=0, ge=0, description="Total source bytes actually parsed and indexed")
+    total_observed_files: int = Field(default=0, ge=0, description="Total files discovered in repository")
+    total_observed_bytes: int = Field(default=0, ge=0, description="Total raw size in bytes across repository")
+
+    @property
+    def is_truncated(self) -> bool:
+        """Alias for truncated."""
+        return self.truncated
+
+    @property
+    def truncated_file_count(self) -> int:
+        """Count of unparsed files due to resource limit truncation."""
+        return max(0, self.total_observed_files - self.files_processed)
+
+    @property
+    def total_source_bytes(self) -> int:
+        """Total source bytes processed."""
+        return self.source_bytes_processed
+
+
 class RepositoryManifest(BaseModel):
     """Complete structural manifest of an ingested repository."""
 
@@ -85,3 +111,4 @@ class RepositoryManifest(BaseModel):
     files: List[FileEntry] = Field(default_factory=list, description="List of processed files")
     cloned_at: datetime = Field(default_factory=_utc_now, description="Timestamp when ingestion started")
     scan_duration_ms: Optional[float] = Field(default=None, ge=0.0, description="Ingestion and parsing wall time in milliseconds")
+    analysis_scope: Optional[AnalysisScope] = Field(default=None, description="Observed vs processed scope and truncation state")

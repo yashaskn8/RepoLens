@@ -6,10 +6,11 @@ import logging
 import os
 import shutil
 from typing import List, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.agents.checkpointer import get_sqlite_checkpointer
 from app.agents.graph import run_analysis_workflow
@@ -30,6 +31,7 @@ from app.schemas.evidence import Evidence
 from app.schemas.finding import Finding
 from app.schemas.metadata import ModelExecutionMetadata
 from app.schemas.scan import Scan, ScanCreate
+from app.services.scan_recovery import ScanDispatcher
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/scans", tags=["Scans"])
@@ -62,7 +64,7 @@ async def execute_background_scan(
         requested_branch = branch
         resolved_branch = None
 
-        if scan_model.commit_hash and scan_model.commit_hash != "unknown" and len(scan_model.commit_hash.strip()) >= 7:
+        if scan_model.commit_hash and scan_model.commit_hash != "unknown" and len(scan_model.commit_hash.strip()) == 40:
             workspace_dir = await asyncio.to_thread(
                 snapshot_service.materialize_snapshot_from_metadata,
                 repository_url=repo_url,
@@ -80,13 +82,14 @@ async def execute_background_scan(
             resolved_branch = get_git_resolved_branch_or_ref(workspace_dir)
             scan_model.commit_hash = commit_sha
             scan_model.branch = resolved_branch or requested_branch
-            meta = scan_model.model_metadata or {}
+            meta = dict(scan_model.model_metadata or {})
             meta.update({
                 "requested_branch": requested_branch,
                 "resolved_branch_or_ref": resolved_branch,
                 "commit_sha": commit_sha,
             })
             scan_model.model_metadata = meta
+            flag_modified(scan_model, "model_metadata")
             db.commit()
 
         # 3. Run deterministic intelligence service (manifest + scanners)
@@ -123,9 +126,10 @@ async def execute_background_scan(
             scan_model.status = ScanStatus.FAILED.value
             scan_model.completed_at = _utc_now()
             errors = final_state.get("errors", [])
-            scan_model.model_metadata = {
-                "error": "; ".join(errors) if errors else "Terminal workflow failure"
-            }
+            existing_meta = dict(scan_model.model_metadata or {})
+            existing_meta["error"] = "; ".join(errors) if errors else "Terminal workflow failure"
+            scan_model.model_metadata = existing_meta
+            flag_modified(scan_model, "model_metadata")
             db.commit()
             return
 
@@ -161,12 +165,15 @@ async def execute_background_scan(
                 mitigation_guidance=f.mitigation_guidance,
                 verification_verdict=verdict_val,
                 verification_reason=f.verification_reason,
+                source_tool=getattr(f, "source_tool", None),
+                detector_id=getattr(f, "detector_id", None),
+                detector_kind=getattr(f, "detector_kind", None),
                 model_metadata=f.model_metadata.model_dump() if f.model_metadata and hasattr(f.model_metadata, "model_dump") else (f.model_metadata if isinstance(f.model_metadata, dict) else None),
             )
 
             for ev in f.evidences:
                 if isinstance(ev, dict):
-                    ev_id = str(ev.get("id", uuid4()))
+                    ev_id = str(ev.get("id") or uuid4())
                     ev_fp = ev.get("file_path", "")
                     ev_sl = ev.get("start_line")
                     ev_el = ev.get("end_line")
@@ -193,16 +200,20 @@ async def execute_background_scan(
 
             db.add(finding_model)
 
-        # 8. Mark scan COMPLETED
+        # 8. Mark scan COMPLETED and preserve merged metadata
         scan_model.status = ScanStatus.COMPLETED.value
         scan_model.completed_at = _utc_now()
-        scan_model.model_metadata = {
+        existing_meta = dict(scan_model.model_metadata or {})
+        existing_meta.update({
             "architecture_overview": final_state.get("architecture_overview"),
             "languages": final_state.get("languages", {}),
             "frameworks": final_state.get("frameworks", []),
             "total_files": evidence_store.manifest.total_files,
             "total_size_bytes": evidence_store.manifest.total_size_bytes,
-        }
+            "analysis_scope": evidence_store.manifest.analysis_scope.model_dump() if getattr(evidence_store.manifest, "analysis_scope", None) else None,
+        })
+        scan_model.model_metadata = existing_meta
+        flag_modified(scan_model, "model_metadata")
         db.commit()
 
     except Exception as exc:
@@ -212,7 +223,10 @@ async def execute_background_scan(
             if scan_model:
                 scan_model.status = ScanStatus.FAILED.value
                 scan_model.completed_at = _utc_now()
-                scan_model.model_metadata = {"error": str(exc)}
+                meta = dict(scan_model.model_metadata or {})
+                meta["error"] = str(exc)
+                scan_model.model_metadata = meta
+                flag_modified(scan_model, "model_metadata")
                 db.commit()
         except Exception:
             pass
@@ -248,23 +262,22 @@ async def create_scan(payload: ScanCreate, db: Session = Depends(get_db)) -> Sca
     db.commit()
     db.refresh(scan_model)
 
-    # 3. Launch background async execution
-    asyncio.create_task(
-        execute_background_scan(
-            scan_id=scan_model.id,
-            repo_url=normalized_url,
-            branch=req_branch,
-        )
+    # 3. Launch background async execution via canonical dispatcher
+    ScanDispatcher.dispatch_scan(
+        scan_id=scan_model.id,
+        repo_url=normalized_url,
+        branch=req_branch,
     )
 
+    # Truthful initial response: resolved branch and commit SHA remain null until resolved
     return Scan(
         id=UUID(scan_model.id),
         repository_url=scan_model.repository_url,
         branch=scan_model.branch,
         requested_branch=req_branch,
-        resolved_branch_or_ref=scan_model.branch,
-        commit_hash=scan_model.commit_hash,
-        commit_sha=scan_model.commit_hash,
+        resolved_branch_or_ref=None,
+        commit_hash=None,
+        commit_sha=None,
         status=ScanStatus(scan_model.status),
         findings_count=0,
         findings=[],

@@ -15,7 +15,7 @@ from app.ingestion.clone import (
 def test_clone_repository_invokes_git_safely():
     """Verify that clone_repository passes safe flags and shell=False to subprocess."""
     mock_clone_res = MagicMock(return_code=0, stdout="", stderr="", returncode=0)
-    mock_rev_res = MagicMock(return_code=0, stdout="c0ffee1234567890\n", stderr="", returncode=0)
+    mock_rev_res = MagicMock(return_code=0, stdout="c0ffee1234567890abcdef1234567890abcdef12\n", stderr="", returncode=0)
 
     def mock_subprocess_run(cmd, *args, **kwargs):
         assert kwargs.get("shell") is False
@@ -37,7 +37,7 @@ def test_clone_repository_invokes_git_safely():
         )
 
     assert workspace == "/tmp/test_dir"
-    assert commit_sha == "c0ffee1234567890"
+    assert commit_sha == "c0ffee1234567890abcdef1234567890abcdef12"
 
 
 def test_clone_repository_rejects_malicious_branch():

@@ -202,35 +202,47 @@ def apply_unified_diff_to_directory(unified_diff: str, target_dir: str) -> Dict[
     """Strictly apply a unified diff string to files within a temporary workspace directory.
     
     Guarantees:
-    - Never modifies files outside target_dir.
+    - Never modifies or deletes files outside target_dir using canonical resolve_safe_path.
     - Strictly checks original line numbers, context lines, and deletion lines.
+    - Strictly validates deleted-file hunks against existing file content before deletion.
+    - Rejects attempts to overwrite existing files with new-file creation diffs.
     - Rejects stale context, wrong deletions, overlapping hunks, and binary modifications.
     - Raises PatchApplyError on any mismatch.
     
     Returns:
         Dict mapping modified relative file paths to their new patched content.
     """
-    abs_root = os.path.abspath(target_dir)
+    from app.core.path_confinement import PathTraversalError, resolve_safe_path
+
     file_patches = parse_unified_diff(unified_diff)
     patched_files: Dict[str, str] = {}
 
     for fp in file_patches:
         target_rel = (fp.new_file if not fp.is_deleted_file else fp.orig_file).replace("\\", "/").lstrip("/")
 
-        # Path traversal guard
-        if os.path.isabs(target_rel) or target_rel.startswith(("/", "\\", "..")):
-            raise PatchApplyError(f"Path traversal detected: '{target_rel}' escapes repository boundary.", file_path=target_rel)
+        try:
+            full_path_obj = resolve_safe_path(target_dir, target_rel)
+            full_path = str(full_path_obj)
+        except PathTraversalError as err:
+            raise PatchApplyError(f"Path traversal detected: {str(err)}", file_path=target_rel)
 
-        full_path = os.path.abspath(os.path.join(abs_root, target_rel))
-        if not full_path.startswith(abs_root + os.sep) and full_path != abs_root:
-            raise PatchApplyError(f"Path traversal detected: '{target_rel}' resolves outside repository root.", file_path=target_rel)
-
-        # Read original content
+        # 1. New-file creation semantics
         if fp.is_new_file:
+            if os.path.exists(full_path):
+                raise PatchApplyError(
+                    f"New-file creation rejected: target file already exists at '{target_rel}'. Cannot overwrite existing file.",
+                    file_path=target_rel,
+                )
             original_lines: List[str] = []
+
+        # 2. Existing file modification or deletion semantics
         else:
             if not os.path.exists(full_path):
-                raise PatchApplyError(f"Target file does not exist on disk: '{target_rel}'", file_path=target_rel)
+                action = "deletion" if fp.is_deleted_file else "modification"
+                raise PatchApplyError(
+                    f"Target file for {action} does not exist on disk: '{target_rel}'",
+                    file_path=target_rel,
+                )
 
             try:
                 with open(full_path, "r", encoding="utf-8") as f:
@@ -238,7 +250,46 @@ def apply_unified_diff_to_directory(unified_diff: str, target_dir: str) -> Dict[
             except UnicodeDecodeError:
                 raise PatchApplyError(f"Target file is binary or non-UTF-8: '{target_rel}'", file_path=target_rel)
 
+        # 3. Strict deleted-file semantics: validate all deletion hunks before deleting
         if fp.is_deleted_file:
+            if fp.hunks:
+                # Validate all hunks against original_lines
+                sorted_del_hunks = sorted(fp.hunks, key=lambda h: h.orig_start)
+                del_orig_idx = 0
+                for hunk in sorted_del_hunks:
+                    h_start_0 = max(0, hunk.orig_start - 1) if hunk.orig_start > 0 else 0
+                    if h_start_0 < del_orig_idx:
+                        raise PatchApplyError(
+                            f"Overlapping deletion hunks in '{target_rel}' at hunk {hunk.hunk_index}",
+                            file_path=target_rel,
+                            hunk_index=hunk.hunk_index,
+                        )
+                    del_orig_idx = h_start_0
+                    for prefix, content in hunk.lines:
+                        if prefix in (" ", "-"):
+                            if del_orig_idx >= len(original_lines):
+                                raise PatchApplyError(
+                                    f"Deletion hunk mismatch in '{target_rel}' at hunk {hunk.hunk_index} line {del_orig_idx + 1}: expected line {repr(content)}, found <EOF>",
+                                    file_path=target_rel,
+                                    hunk_index=hunk.hunk_index,
+                                    line_number=del_orig_idx + 1,
+                                )
+                            if original_lines[del_orig_idx] != content:
+                                raise PatchApplyError(
+                                    f"Deletion hunk mismatch in '{target_rel}' at hunk {hunk.hunk_index} line {del_orig_idx + 1}: expected {repr(content)}, found {repr(original_lines[del_orig_idx])}",
+                                    file_path=target_rel,
+                                    hunk_index=hunk.hunk_index,
+                                    line_number=del_orig_idx + 1,
+                                )
+                            del_orig_idx += 1
+                        elif prefix == "+":
+                            raise PatchApplyError(
+                                f"Deleted-file diff for '{target_rel}' cannot contain addition lines (+)",
+                                file_path=target_rel,
+                                hunk_index=hunk.hunk_index,
+                            )
+
+            # File content strictly verified; now safe to delete temporary sandbox copy
             if os.path.exists(full_path):
                 os.remove(full_path)
             patched_files[target_rel] = ""

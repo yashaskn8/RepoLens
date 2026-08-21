@@ -110,8 +110,8 @@ class RepositorySnapshotService:
         normalized_url = validate_github_url(repository_url)
 
         cleaned_sha = (commit_hash or "").strip()
-        if not cleaned_sha or len(cleaned_sha) < 7 or not re.match(r"^[0-9a-fA-F]+$", cleaned_sha):
-            raise SnapshotMetadataError(f"Invalid or missing commit SHA for snapshot: '{commit_hash}'")
+        if not re.match(r"^[0-9a-fA-F]{40}$", cleaned_sha):
+            raise SnapshotMetadataError(f"Invalid or non-40-character commit SHA for snapshot: '{commit_hash}'")
 
         # 2. Create isolated temporary workspace directory
         workspace_path = tempfile.mkdtemp(prefix="repolens_snapshot_")
@@ -172,10 +172,10 @@ class RepositorySnapshotService:
             if rev_code != 0:
                 raise SnapshotVerificationError(f"Could not verify repository HEAD SHA: {rev_err}")
 
-            # Compare full or prefix match
-            if not (current_head.lower().startswith(cleaned_sha.lower()) or cleaned_sha.lower().startswith(current_head.lower())):
+            # Exact 40-character case-insensitive comparison
+            if current_head.lower() != cleaned_sha.lower():
                 raise SnapshotVerificationError(
-                    f"Snapshot HEAD verification mismatch: expected {cleaned_sha}, got {current_head}"
+                    f"Snapshot HEAD verification mismatch: expected exact SHA {cleaned_sha}, got {current_head}"
                 )
 
             logger.info(

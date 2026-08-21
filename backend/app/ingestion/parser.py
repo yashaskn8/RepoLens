@@ -497,11 +497,26 @@ def _extract_js_ts_symbols_and_calls(
                     fn_name = _node_text(fn_node, source_bytes)
                     if fn_name == "fetch":
                         url_arg = "unknown"
+                        http_method = "GET"  # fetch() defaults to GET
                         if args_node and args_node.children:
                             for arg in args_node.children:
                                 if arg.type in ("string", "template_string", "string_fragment", "identifier"):
                                     url_arg = _node_text(arg, source_bytes).strip("\"'`")
                                     break
+                            # Extract HTTP method from options object: fetch(url, { method: 'POST' })
+                            for arg in args_node.children:
+                                if arg.type == "object":
+                                    for prop in arg.children:
+                                        if prop.type in ("pair", "property"):
+                                            key_node = prop.child_by_field_name("key")
+                                            val_node = prop.child_by_field_name("value")
+                                            if key_node and val_node:
+                                                key_text = _node_text(key_node, source_bytes).strip("\"'")
+                                                if key_text == "method":
+                                                    val_text = _node_text(val_node, source_bytes).strip("\"'`")
+                                                    if val_text.upper() in ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"):
+                                                        http_method = val_text.upper()
+                                    break  # Only inspect first object argument
                         symbols.append(
                             ParsedSymbol(
                                 name=f"fetch({url_arg})",
@@ -510,7 +525,7 @@ def _extract_js_ts_symbols_and_calls(
                                 end_line=node.end_point[0] + 1,
                                 start_column=node.start_point[1],
                                 end_column=node.end_point[1],
-                                details={"target": url_arg, "url": url_arg},
+                                details={"target": url_arg, "url": url_arg, "http_method": http_method},
                             )
                         )
                     elif fn_name == "axios":

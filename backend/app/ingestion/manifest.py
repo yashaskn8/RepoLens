@@ -61,13 +61,19 @@ def build_manifest(
     start_time = time.perf_counter()
     settings = get_settings()
 
-    total_files = 0
-    total_size_bytes = 0
+    total_observed_files = 0
+    total_observed_bytes = 0
+    processed_source_bytes = 0
+    processed_files_count = 0
+    is_truncated = False
+    truncation_reason: str | None = None
+
     file_entries: List[FileEntry] = []
     language_counts: Dict[str, int] = {}
 
     max_files = settings.MAX_REPO_FILES
     max_file_size = settings.MAX_FILE_SIZE_BYTES
+    max_total_source_bytes = getattr(settings, "MAX_TOTAL_SOURCE_BYTES", 52_428_800)
 
     # 1. Walk directory tree safely
     for root, dirs, files in os.walk(repo_dir, topdown=True):
@@ -75,22 +81,39 @@ def build_manifest(
         dirs[:] = [d for d in dirs if d not in DEFAULT_IGNORE_DIRS and not d.startswith(".")]
 
         for filename in files:
-            if total_files >= max_files:
-                break
-
             abs_path = os.path.join(root, filename)
             rel_path = os.path.relpath(abs_path, repo_dir).replace("\\", "/")
-            total_files += 1
+            total_observed_files += 1
 
             try:
                 file_size = os.path.getsize(abs_path)
-                total_size_bytes += file_size
+                total_observed_bytes += file_size
+
+                if total_observed_files > max_files:
+                    is_truncated = True
+                    truncation_reason = f"exceeded_max_repo_files ({max_files})"
+                    break
 
                 lang = detect_language(filename)
                 if lang:
                     language_counts[lang] = language_counts.get(lang, 0) + 1
 
-                # Skip oversized files
+                # Check if adding this file's size exceeds total source byte budget
+                if processed_source_bytes + file_size > max_total_source_bytes:
+                    is_truncated = True
+                    truncation_reason = f"exceeded_max_total_source_bytes ({max_total_source_bytes} bytes)"
+                    file_entries.append(
+                        FileEntry(
+                            path=rel_path,
+                            language=lang,
+                            size_bytes=file_size,
+                            lines_count=0,
+                            skipped_reason="total_source_byte_budget_exceeded",
+                        )
+                    )
+                    continue
+
+                # Skip individual oversized files
                 if file_size > max_file_size:
                     file_entries.append(
                         FileEntry(
@@ -140,6 +163,8 @@ def build_manifest(
                         is_binary=False,
                     )
                 )
+                processed_source_bytes += file_size
+                processed_files_count += 1
 
             except Exception as exc:
                 file_entries.append(
@@ -151,6 +176,9 @@ def build_manifest(
                         skipped_reason=f"read_error: {str(exc)}",
                     )
                 )
+
+        if is_truncated and total_observed_files > max_files:
+            break
 
     # 2. Detect frameworks from repository files
     frameworks = detect_frameworks(repo_dir)
@@ -164,6 +192,17 @@ def build_manifest(
 
     duration_ms = (time.perf_counter() - start_time) * 1000.0
 
+    from app.ingestion.schemas import AnalysisScope
+
+    scope = AnalysisScope(
+        truncated=is_truncated,
+        reason=truncation_reason,
+        files_processed=processed_files_count,
+        source_bytes_processed=processed_source_bytes,
+        total_observed_files=total_observed_files,
+        total_observed_bytes=total_observed_bytes,
+    )
+
     return RepositoryManifest(
         repository_url=repository_url,
         commit_hash=commit_hash,
@@ -171,10 +210,11 @@ def build_manifest(
         branch=resolved_branch or req_branch,
         requested_branch=req_branch,
         resolved_branch_or_ref=resolved_branch,
-        total_files=total_files,
-        total_size_bytes=total_size_bytes,
+        total_files=total_observed_files,
+        total_size_bytes=total_observed_bytes,
         languages=language_counts,
         frameworks=frameworks,
         files=file_entries,
         scan_duration_ms=duration_ms,
+        analysis_scope=scope,
     )

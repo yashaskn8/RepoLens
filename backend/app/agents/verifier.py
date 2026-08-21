@@ -41,11 +41,12 @@ def _read_real_file_lines(repo_dir: str, rel_path: str) -> Optional[List[str]]:
     if not repo_dir or not rel_path:
         return None
 
-    clean_path = rel_path.replace("\\", "/").lstrip("/")
-    abs_path = os.path.abspath(os.path.join(repo_dir, clean_path))
+    from app.core.path_confinement import PathTraversalError, resolve_safe_path
 
-    # Boundary confinement
-    if not abs_path.startswith(os.path.abspath(repo_dir)):
+    try:
+        abs_path_obj = resolve_safe_path(repo_dir, rel_path)
+        abs_path = str(abs_path_obj)
+    except PathTraversalError:
         return None
 
     if not os.path.exists(abs_path) or not os.path.isfile(abs_path):

@@ -123,6 +123,15 @@ class BaseScannerAdapter(ABC):
         """
         pass
 
+    @property
+    def requires_structured_output(self) -> bool:
+        """Indicate whether this scanner produces structured machine-readable JSON output.
+
+        When True, empty or whitespace-only stdout with an accepted exit code is treated
+        as ToolStatus.INVALID_OUTPUT rather than clean zero findings.
+        """
+        return True
+
     async def scan(self, repo_dir: str) -> ScannerResult:
         """Execute scanner on repository directory and return structured ScannerResult.
 
@@ -166,7 +175,14 @@ class BaseScannerAdapter(ABC):
 
             # --- Parse output ---
             if not stdout.strip():
-                # Empty stdout with accepted exit code → no findings
+                if self.requires_structured_output:
+                    return ScannerResult(
+                        tool=self.tool_name,
+                        status=ToolStatus.INVALID_OUTPUT,
+                        error_message=f"{self.tool_name} returned empty/blank stdout when valid JSON output was required.",
+                        execution_time_ms=execution_time_ms,
+                        diagnostic_stderr=bounded_stderr,
+                    )
                 findings: List[StaticFinding] = []
             else:
                 # parse_output raises ScannerOutputError on invalid format

@@ -55,6 +55,8 @@ class Settings(BaseSettings):
     CLONE_TIMEOUT_SECONDS: int = 120
     MAX_REPO_FILES: int = 5000
     MAX_FILE_SIZE_BYTES: int = 1_048_576  # 1 MB
+    MAX_TOTAL_SOURCE_BYTES: int = 52_428_800  # 50 MB global source budget
+    MAX_SCAN_DURATION_SECONDS: int = 300  # 5 minutes maximum scan lifecycle timeout
     ALLOWED_EXTENSIONS: str = ".py,.js,.ts,.tsx,.jsx,.json,.yaml,.yml,.toml,.md,.txt,.cfg,.ini,.html,.css,.sql,.sh,.dockerfile,.env.example"
 
     # Deterministic Scanner Settings

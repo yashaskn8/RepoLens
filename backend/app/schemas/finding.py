@@ -26,6 +26,9 @@ class FindingBase(BaseModel):
     mitigation_guidance: Optional[str] = Field(default=None, description="Recommended remediation steps or code diff")
     verification_verdict: Optional[VerificationVerdict] = Field(default=None, description="Verification verdict: CONFIRMED, POSSIBLE, REJECTED")
     verification_reason: Optional[str] = Field(default=None, description="Detailed rationale provided by the Verifier")
+    source_tool: Optional[str] = Field(default=None, description="Canonical source tool identifier (e.g. semgrep, trivy, osv, route_contract, repolens-secret)")
+    detector_id: Optional[str] = Field(default=None, description="Exact detector rule/check ID, CVE, or route mismatch identifier")
+    detector_kind: Optional[str] = Field(default=None, description="Detector kind (e.g. static_scanner, contract_matcher, deterministic_secret)")
 
 
 class FindingCreate(FindingBase):

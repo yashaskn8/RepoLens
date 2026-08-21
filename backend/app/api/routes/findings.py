@@ -250,7 +250,7 @@ async def request_patch_generation(
             )
 
             proposal = workflow_result.proposal
-            patch_status = PatchStatus.VERIFIED if workflow_result.final_verdict == "APPROVED" else (
+            patch_status = PatchStatus.VERIFIED if workflow_result.final_verdict in ("PASSED", "APPROVED") else (
                 PatchStatus.REJECTED if workflow_result.final_verdict == "REJECTED" else PatchStatus.NEEDS_REVIEW
             )
 

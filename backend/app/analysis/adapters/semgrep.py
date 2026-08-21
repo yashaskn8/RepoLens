@@ -103,6 +103,9 @@ class SemgrepAdapter(BaseScannerAdapter):
                         evidence=evidence,
                         mitigation=metadata.get("fix") or metadata.get("remediation"),
                         confidence=confidence.upper() if confidence else None,
+                        source_tool="semgrep",
+                        detector_id=check_id,
+                        detector_kind="static_scanner",
                         raw_details={"check_id": check_id, "metadata": metadata},
                     )
                 )

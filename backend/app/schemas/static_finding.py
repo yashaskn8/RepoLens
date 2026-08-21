@@ -34,6 +34,9 @@ class StaticFinding(BaseModel):
     evidence: Evidence = Field(..., description="Localized code location and snippet evidence")
     mitigation: Optional[str] = Field(default=None, description="Remediation advice if provided by the tool")
     confidence: Optional[str] = Field(default=None, description="Confidence level: HIGH, MEDIUM, LOW")
+    source_tool: Optional[str] = Field(default=None, description="Canonical source tool name (e.g. semgrep, trivy, osv, route_contract, repolens-secret)")
+    detector_id: Optional[str] = Field(default=None, description="Exact detector rule/check ID, CVE, or route mismatch identifier")
+    detector_kind: Optional[str] = Field(default=None, description="Detector kind (e.g. static_scanner, contract_matcher, deterministic_secret)")
     raw_details: Dict[str, Any] = Field(default_factory=dict, description="Raw tool-specific payload extract")
 
     model_config = {

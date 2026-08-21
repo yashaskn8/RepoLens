@@ -204,13 +204,26 @@ async def request_patch_revision(
     payload: PatchReviseRequest,
     db: Session = Depends(get_db),
 ):
-    """Request a single targeted revision with explicit human reviewer feedback.
+    """Request a real human-guided revision generating a new child PatchProposal.
 
     Guarantees:
     - Enforces legal state transitions (APPROVED -> REVISE fails; REJECTED -> REVISE fails).
-    - Resumes the corresponding LangGraph thread through the revision path with updated feedback.
-    - Synchronizes revision metadata across database and durable LangGraph checkpoint.
+    - Hard limit of at most ONE human-requested revision per patch lineage (revision_number >= 1 fails).
+    - Database/service concurrency guard: rejects if a child revision already exists for this parent.
+    - Rehydrates exact scan commit SHA and loads original CONFIRMED finding.
+    - Injects human feedback into remediation prompt/plan to generate a fresh diff.
+    - Executes strict sandbox validation, deterministic 12-check verification, and conditional critic.
+    - Persists an immutable new child PatchModel referencing parent_patch_id and revision_number = 1.
+    - Pauses in VERIFIED / NEEDS_REVIEW for explicit human approval or rejection.
+    - Machine verification NEVER produces PatchStatus.APPROVED directly.
     """
+    from app.analysis.service import get_intelligence_service
+    from app.api.routes.findings import _get_verified_finding_and_scan
+    from app.context.runtime import ScanIntelligenceRuntime
+    from app.ingestion.snapshot import get_snapshot_service
+    from app.patching.workflow import PatchWorkflowCoordinator
+    from app.planning.service import FixPlanningService
+
     patch_model = db.query(PatchModel).filter(PatchModel.id == str(patch_id)).first()
     if not patch_model:
         raise HTTPException(
@@ -218,7 +231,7 @@ async def request_patch_revision(
             detail=f"Patch proposal '{patch_id}' not found.",
         )
 
-    # Transition validation
+    # 1. State transition and lineage validation
     if patch_model.status == PatchStatus.APPROVED.value:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -228,48 +241,119 @@ async def request_patch_revision(
     if patch_model.status == PatchStatus.REJECTED.value:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot request revision on a REJECTED patch. Generate a new revision first.",
+            detail="Cannot request revision on a REJECTED patch. Generate a new revision from the finding instead.",
         )
 
-    thread_id = patch_model.thread_id or f"remediation-{patch_model.id}"
-    config = {"configurable": {"thread_id": thread_id}}
-
-    # Resume the LangGraph thread as NEEDS_REVIEW through revision path
-    async with get_sqlite_checkpointer() as checkpointer:
-        workflow_app = build_remediation_graph(checkpointer=checkpointer)
-
-        state = await workflow_app.aget_state(config)
-        if not state or not state.values:
-            initial_state: RemediationState = {
-                "scan_id": str(patch_model.scan_id),
-                "finding_id": str(patch_model.finding_id),
-                "patch_id": str(patch_model.id),
-                "thread_id": thread_id,
-                "proposal_dict": {
-                    "unified_diff": patch_model.unified_diff,
-                    "files_modified": patch_model.files_modified,
-                },
-                "patch_status": patch_model.status,
-                "revision_count": 0,
-            }
-            await workflow_app.ainvoke(initial_state, config=config)
-            state = await workflow_app.aget_state(config)
-
-        current_rev = (state.values.get("revision_count", 0) + 1) if state and state.values else 1
-        await workflow_app.aupdate_state(
-            config,
-            {
-                "patch_status": PatchStatus.NEEDS_REVIEW.value,
-                "user_feedback": payload.user_feedback,
-                "revision_count": current_rev,
-            },
-            as_node="human_approval_checkpoint",
+    if (patch_model.revision_number or 0) >= 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Maximum of 1 human revision allowed per patch lineage. Cannot revise a child revision.",
         )
-        await workflow_app.ainvoke(None, config=config)
 
-    patch_model.status = PatchStatus.NEEDS_REVIEW.value
-    patch_model.user_feedback = payload.user_feedback
-    patch_model.thread_id = thread_id
-    db.commit()
-    db.refresh(patch_model)
-    return patch_model
+    existing_child = db.query(PatchModel).filter(PatchModel.parent_patch_id == str(patch_id)).first()
+    if existing_child:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A revision child has already been created for this patch proposal.",
+        )
+
+    finding_schema, scan = _get_verified_finding_and_scan(UUID(patch_model.finding_id), db)
+    snapshot_service = get_snapshot_service()
+
+    # 2. Materialize exact snapshot, rebuild intelligence runtime, and generate revised patch
+    async with snapshot_service.open_snapshot(scan_id=scan.id, db=db) as workspace_dir:
+        intelligence_service = get_intelligence_service()
+        evidence_store = await intelligence_service.analyze_repository(
+            repo_dir=workspace_dir,
+            repository_url=scan.repository_url,
+            commit_hash=scan.commit_hash,
+            branch=scan.branch,
+        )
+
+        runtime = await ScanIntelligenceRuntime.build(
+            evidence_store=evidence_store,
+            repo_dir=workspace_dir,
+        )
+
+        planning_service = FixPlanningService()
+        fix_plan = await planning_service.create_fix_plan(
+            finding=finding_schema,
+            context_engine=runtime.context_engine,
+            repository_graph=runtime.repository_graph,
+            manifest=runtime.manifest,
+        )
+        # Inject reviewer feedback into fix plan objective
+        fix_plan.objective = f"{fix_plan.objective} (Human reviewer feedback: {payload.user_feedback})"
+
+        coordinator = PatchWorkflowCoordinator()
+        workflow_result = await coordinator.execute_patch_workflow(
+            finding=finding_schema,
+            fix_plan=fix_plan,
+            context_engine=runtime.context_engine,
+            original_repo_dir=workspace_dir,
+            manifest=runtime.manifest,
+        )
+
+        proposal = workflow_result.proposal
+
+        # Map machine verdict directly to status (never APPROVED without explicit human /approve)
+        if workflow_result.machine_verdict == "PASSED" or (
+            workflow_result.verification_result and workflow_result.verification_result.status.value == "PASSED"
+        ):
+            child_status = PatchStatus.VERIFIED
+        elif workflow_result.machine_verdict == "REJECTED" or (
+            workflow_result.verification_result and workflow_result.verification_result.status.value == "FAILED"
+        ):
+            child_status = PatchStatus.REJECTED
+        else:
+            child_status = PatchStatus.NEEDS_REVIEW
+
+        # 3. Create durable LangGraph remediation thread for child patch
+        child_thread_id = f"remediation-{proposal.id}"
+        initial_remediation_state: RemediationState = {
+            "scan_id": str(scan.id),
+            "finding_id": str(finding_schema.id),
+            "patch_id": str(proposal.id),
+            "thread_id": child_thread_id,
+            "proposal_dict": proposal.model_dump(mode="json"),
+            "verification_dict": workflow_result.verification_result.model_dump(mode="json") if workflow_result.verification_result else None,
+            "critic_dict": workflow_result.critic_report.model_dump(mode="json") if workflow_result.critic_report else None,
+            "patch_status": child_status.value,
+            "user_feedback": payload.user_feedback,
+            "revision_count": (patch_model.revision_number or 0) + 1,
+        }
+
+        try:
+            async with get_sqlite_checkpointer() as checkpointer:
+                remediation_app = build_remediation_graph(checkpointer=checkpointer)
+                await remediation_app.ainvoke(
+                    initial_remediation_state,
+                    config={"configurable": {"thread_id": child_thread_id}},
+                )
+        except Exception as exc:
+            logger.warning("Notice initializing child remediation thread %s: %s", child_thread_id, str(exc))
+
+        # 4. Persist child PatchModel with audit lineage
+        child_patch_model = PatchModel(
+            id=str(proposal.id),
+            finding_id=str(finding_schema.id),
+            plan_id=str(proposal.plan_id) if proposal.plan_id else None,
+            scan_id=str(scan.id),
+            parent_patch_id=str(patch_model.id),
+            revision_number=(patch_model.revision_number or 0) + 1,
+            thread_id=child_thread_id,
+            status=child_status.value,
+            unified_diff=proposal.unified_diff,
+            files_modified=proposal.files_modified,
+            explanation=proposal.explanation,
+            expected_behavior_change=proposal.expected_behavior_change,
+            generated_tests_or_test_plan=proposal.generated_tests_or_test_plan,
+            verification_report=workflow_result.verification_result.model_dump(mode="json") if workflow_result.verification_result else None,
+            critic_report=workflow_result.critic_report.model_dump(mode="json") if workflow_result.critic_report else None,
+            user_feedback=payload.user_feedback,
+            model_metadata=proposal.model_metadata.model_dump() if proposal.model_metadata else None,
+        )
+        db.add(child_patch_model)
+        db.commit()
+        db.refresh(child_patch_model)
+        return child_patch_model

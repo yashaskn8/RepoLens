@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Tuple
 from app.core.config import get_settings
 from app.llm.adapters import GeminiAdapter, GroqAdapter, HuggingFaceAdapter, NvidiaAdapter
 from app.llm.base import BaseLLMAdapter
-from app.llm.exceptions import LLMAllFallbacksFailedError, LLMError
+from app.llm.exceptions import LLMAllFallbacksFailedError, LLMError, LLMRateLimitError
 from app.llm.types import LLMProvider, LLMRequest, LLMResponse, TaskPolicy
 
 logger = logging.getLogger(__name__)
@@ -124,11 +124,28 @@ class LLMRouter:
         )
 
     async def generate(self, request: LLMRequest) -> LLMResponse:
-        """Route request according to policy/provider overrides with automatic fallback execution."""
+        """Route request according to policy/provider overrides with bounded transient retries and automatic fallback."""
+        import asyncio
+        settings = get_settings()
+        max_retries = max(0, settings.LLM_MAX_RETRIES)
+
         # 1. Direct explicit provider override
         if request.provider is not None:
             adapter = self.get_adapter(request.provider)
-            return await adapter.generate(request)
+            for attempt in range(max_retries + 1):
+                try:
+                    return await adapter.generate(request)
+                except LLMError as exc:
+                    if not exc.retryable or attempt >= max_retries:
+                        raise
+                    delay = min(0.2 * (2 ** attempt), 2.0)
+                    if isinstance(exc, LLMRateLimitError) and exc.retry_after_seconds:
+                        delay = min(exc.retry_after_seconds, 2.0)
+                    logger.warning(
+                        f"Transient LLM failure on explicit provider {request.provider.value} ({exc.message}). "
+                        f"Retrying in {delay:.2f}s (attempt {attempt + 1}/{max_retries})..."
+                    )
+                    await asyncio.sleep(delay)
 
         # 2. Determine policy route
         policy = request.task_policy or TaskPolicy.ARCHITECTURE
@@ -138,23 +155,38 @@ class LLMRouter:
         attempted_errors: List[LLMError] = []
 
         for provider, model in execution_chain:
-            try:
-                adapter = self.get_adapter(provider)
-                # Clone request with specific provider and model for this attempt
-                attempt_request = request.model_copy(update={"provider": provider, "model": model})
-                response = await adapter.generate(attempt_request)
-                return response
-            except LLMError as exc:
-                logger.warning(
-                    f"LLM execution failed for policy '{policy.value}' on {provider.value} ({model}): {exc.message}. "
-                    f"Attempting fallback..."
-                )
-                attempted_errors.append(exc)
-            except Exception as exc:
-                logger.error(f"Unexpected error executing {provider.value} ({model}): {str(exc)}")
-                attempted_errors.append(
-                    LLMError(f"Unexpected execution failure: {str(exc)}", provider=provider, model=model)
-                )
+            adapter = self.get_adapter(provider)
+            attempt_request = request.model_copy(update={"provider": provider, "model": model})
+
+            for attempt in range(max_retries + 1):
+                try:
+                    response = await adapter.generate(attempt_request)
+                    return response
+                except LLMError as exc:
+                    if not exc.retryable or attempt >= max_retries:
+                        logger.warning(
+                            f"LLM execution exhausted/permanent failure for policy '{policy.value}' on {provider.value} ({model}): {exc.message}. "
+                            f"Attempting fallback..."
+                        )
+                        attempted_errors.append(exc)
+                        break
+
+                    delay = min(0.2 * (2 ** attempt), 2.0)
+                    if isinstance(exc, LLMRateLimitError) and exc.retry_after_seconds:
+                        delay = min(exc.retry_after_seconds, 2.0)
+
+                    logger.warning(
+                        f"Transient LLM error on {provider.value} ({model}): {exc.message}. "
+                        f"Retrying in {delay:.2f}s (attempt {attempt + 1}/{max_retries})..."
+                    )
+                    await asyncio.sleep(delay)
+
+                except Exception as exc:
+                    logger.error(f"Unexpected error executing {provider.value} ({model}): {str(exc)}")
+                    attempted_errors.append(
+                        LLMError(f"Unexpected execution failure: {str(exc)}", provider=provider, model=model, retryable=False)
+                    )
+                    break
 
         # If all routes in the execution chain failed
         error_summary = "; ".join([f"[{err.provider.value if err.provider else 'unknown'}]: {err.message}" for err in attempted_errors])

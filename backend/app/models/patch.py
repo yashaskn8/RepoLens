@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 import uuid
-from sqlalchemy import Column, DateTime, ForeignKey, JSON, String, Text
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.orm import relationship
 
 from app.models.base import Base
@@ -22,6 +22,8 @@ class PatchModel(Base):
     finding_id = Column(String(36), ForeignKey("findings.id", ondelete="CASCADE"), nullable=False, index=True)
     plan_id = Column(String(36), nullable=True)
     scan_id = Column(String(36), ForeignKey("scans.id", ondelete="CASCADE"), nullable=False, index=True)
+    parent_patch_id = Column(String(36), ForeignKey("patches.id", ondelete="RESTRICT"), unique=True, nullable=True, index=True)
+    revision_number = Column(Integer, default=0, nullable=False)
     thread_id = Column(String(128), nullable=True, index=True)
     status = Column(String(32), nullable=False, default=PatchStatus.DRAFT.value, index=True)
     unified_diff = Column(Text, nullable=False)
@@ -42,3 +44,4 @@ class PatchModel(Base):
     # Relationships
     finding = relationship("FindingModel")
     scan = relationship("ScanModel")
+    parent_patch = relationship("PatchModel", remote_side=[id], backref="child_revision")

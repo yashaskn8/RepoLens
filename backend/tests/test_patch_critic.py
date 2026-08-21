@@ -371,5 +371,5 @@ async def test_patch_workflow_single_revision_cap():
     assert isinstance(result, PatchWorkflowResult)
     assert result.critic_escalated
     assert result.revision_count == 1  # Exactly 1 revision loop
-    assert result.final_verdict == "APPROVED"
+    assert result.final_verdict == "PASSED"
     assert mock_critic_agent.evaluate_patch.call_count == 2

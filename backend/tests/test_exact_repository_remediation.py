@@ -218,7 +218,7 @@ def test_remediation_against_exact_fixture_files_not_repolens_source(client, db_
         assert patch_data["verification_result"]["security_clean"] is True
         assert patch_data["verification_result"]["contract_aligned"] is True
         assert patch_data["verification_result"]["status"] in ("PASSED", "NEEDS_REVIEW")
-        assert patch_data["final_verdict"] in ("APPROVED", "NEEDS_HUMAN_REVIEW")
+        assert patch_data["final_verdict"] in ("PASSED", "NEEDS_REVIEW")
 
 
 

@@ -13,8 +13,27 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifecycle events handler."""
+    """Application lifecycle events handler: startup recovery and graceful shutdown."""
+    # 1. Startup: discover and dispatch unfinished scans without blocking startup
+    from app.core.database import SessionLocal
+    from app.services.scan_recovery import ScanDispatcher, ScanRecoveryService
+
+    db = SessionLocal()
+    try:
+        recovered = ScanRecoveryService.recover_unfinished_scans(db)
+        if recovered:
+            import logging
+            logging.getLogger(__name__).info(f"Startup recovery: dispatched {len(recovered)} unfinished scans ({recovered})")
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).error(f"Failed to run startup scan recovery: {str(exc)}", exc_info=True)
+    finally:
+        db.close()
+
     yield
+
+    # 2. Shutdown: gracefully cancel active task wrappers without corrupting checkpoints
+    ScanDispatcher.cancel_all_active_scans()
 
 
 app = FastAPI(

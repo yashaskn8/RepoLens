@@ -50,7 +50,7 @@ def test_alembic_upgrade_head_on_empty_db_creates_complete_schema():
             # 3. Verify 'patches' table columns
             patch_cols = {col["name"]: col for col in inspector.get_columns("patches")}
             expected_patch_cols = {
-                "id", "finding_id", "plan_id", "scan_id", "thread_id", "status",
+                "id", "finding_id", "plan_id", "scan_id", "parent_patch_id", "revision_number", "thread_id", "status",
                 "unified_diff", "files_modified", "explanation", "expected_behavior_change",
                 "generated_tests_or_test_plan", "verification_report", "critic_report",
                 "user_feedback", "approved_by", "approved_at", "rejected_reason",
@@ -58,21 +58,32 @@ def test_alembic_upgrade_head_on_empty_db_creates_complete_schema():
             }
             assert expected_patch_cols.issubset(set(patch_cols.keys())), f"Missing patch columns: {expected_patch_cols - set(patch_cols.keys())}"
 
-            # 4. Verify 'patches' foreign keys
+            # 4. Verify 'findings' table columns
+            finding_cols = {col["name"]: col for col in inspector.get_columns("findings")}
+            expected_finding_cols = {
+                "id", "scan_id", "title", "description", "severity", "status",
+                "rule_id", "category", "mitigation_guidance", "verification_verdict",
+                "verification_reason", "source_tool", "detector_id", "detector_kind",
+                "model_metadata", "created_at", "updated_at",
+            }
+            assert expected_finding_cols.issubset(set(finding_cols.keys())), f"Missing finding columns: {expected_finding_cols - set(finding_cols.keys())}"
+
+            # 5. Verify 'patches' foreign keys
             fks = inspector.get_foreign_keys("patches")
             fk_targets = {fk["referred_table"] for fk in fks}
             assert "findings" in fk_targets
             assert "scans" in fk_targets
 
-            # 5. Verify 'patches' indexes
+            # 6. Verify 'patches' indexes
             indexes = {idx["name"] for idx in inspector.get_indexes("patches")}
             assert any("ix_patches_id" in idx for idx in indexes)
             assert any("ix_patches_finding_id" in idx for idx in indexes)
             assert any("ix_patches_scan_id" in idx for idx in indexes)
             assert any("ix_patches_thread_id" in idx for idx in indexes)
             assert any("ix_patches_status" in idx for idx in indexes)
+            assert any("ix_patches_parent_patch_id" in idx for idx in indexes)
 
-            # 6. Verify ORM read/write compatibility against migrated database
+            # 7. Verify ORM read/write compatibility against migrated database
             SessionLocal = sessionmaker(bind=engine)
             db = SessionLocal()
 
@@ -80,7 +91,7 @@ def test_alembic_upgrade_head_on_empty_db_creates_complete_schema():
                 id=str(uuid4()),
                 repository_url="https://github.com/fastapi/fastapi",
                 status=ScanStatus.COMPLETED.value,
-                commit_hash="abcdef123456",
+                commit_hash="abcdef1234567890abcdef1234567890abcdef12",
             )
             db.add(scan)
 
@@ -92,6 +103,9 @@ def test_alembic_upgrade_head_on_empty_db_creates_complete_schema():
                 severity=Severity.HIGH.value,
                 status=FindingStatus.OPEN.value,
                 verification_verdict=VerificationVerdict.CONFIRMED.value,
+                source_tool="semgrep",
+                detector_id="python.cookie.missing-httponly",
+                detector_kind="static_scanner",
             )
             db.add(finding)
 
@@ -116,6 +130,7 @@ def test_alembic_upgrade_head_on_empty_db_creates_complete_schema():
                 explanation="Hardened cookie",
                 expected_behavior_change="Flags added",
                 verification_report={"status": "PASSED"},
+                revision_number=0,
             )
             db.add(patch)
             db.commit()
@@ -124,8 +139,11 @@ def test_alembic_upgrade_head_on_empty_db_creates_complete_schema():
             persisted_patch = db.query(PatchModel).filter(PatchModel.id == patch.id).first()
             assert persisted_patch is not None
             assert persisted_patch.finding.title == "Insecure cookie"
+            assert persisted_patch.finding.source_tool == "semgrep"
+            assert persisted_patch.finding.detector_id == "python.cookie.missing-httponly"
             assert persisted_patch.scan.repository_url == "https://github.com/fastapi/fastapi"
             assert persisted_patch.status == "VERIFIED"
+            assert persisted_patch.revision_number == 0
 
             db.close()
         finally:
@@ -133,7 +151,7 @@ def test_alembic_upgrade_head_on_empty_db_creates_complete_schema():
 
 
 def test_alembic_migration_upgrade_downgrade_reupgrade_cycle():
-    """Verify upgrade -> downgrade one revision -> upgrade again works cleanly without errors."""
+    """Verify upgrade -> downgrade revisions -> upgrade again works cleanly without errors."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test_cycle.db")
         db_url = f"sqlite:///{db_path}"
@@ -142,13 +160,28 @@ def test_alembic_migration_upgrade_downgrade_reupgrade_cycle():
         engine = create_engine(db_url)
 
         try:
-            # 1. Upgrade to head (002_patches_table)
+            # 1. Upgrade to head (003_phase36_durability_and_provenance)
             command.upgrade(alembic_cfg, "head")
             inspector = inspect(engine)
             assert "patches" in inspector.get_table_names()
             assert "findings" in inspector.get_table_names()
+            patch_cols = {col["name"] for col in inspector.get_columns("patches")}
+            assert "parent_patch_id" in patch_cols
+            assert "revision_number" in patch_cols
+            finding_cols = {col["name"] for col in inspector.get_columns("findings")}
+            assert "source_tool" in finding_cols
+            assert "detector_id" in finding_cols
 
-            # 2. Downgrade one revision (back to 001_initial_schema)
+            # 2. Downgrade one revision (back to 002_patches_table)
+            command.downgrade(alembic_cfg, "002_patches_table")
+            inspector = inspect(engine)
+            assert "patches" in inspector.get_table_names()
+            patch_cols_002 = {col["name"] for col in inspector.get_columns("patches")}
+            assert "parent_patch_id" not in patch_cols_002
+            finding_cols_002 = {col["name"] for col in inspector.get_columns("findings")}
+            assert "source_tool" not in finding_cols_002
+
+            # 3. Downgrade another revision (back to 001_initial_schema)
             command.downgrade(alembic_cfg, "001_initial_schema")
             inspector = inspect(engine)
             assert "patches" not in inspector.get_table_names()
@@ -156,21 +189,22 @@ def test_alembic_migration_upgrade_downgrade_reupgrade_cycle():
             assert "scans" in inspector.get_table_names()
             assert "evidences" in inspector.get_table_names()
 
-            # 3. Upgrade again to head
+            # 4. Upgrade again to head
             command.upgrade(alembic_cfg, "head")
             inspector = inspect(engine)
             assert "patches" in inspector.get_table_names()
             patch_cols = {col["name"] for col in inspector.get_columns("patches")}
+            assert "parent_patch_id" in patch_cols
             assert "thread_id" in patch_cols
             assert "verification_report" in patch_cols
 
-            # 4. Downgrade all the way to base
+            # 5. Downgrade all the way to base
             command.downgrade(alembic_cfg, "base")
             inspector = inspect(engine)
             user_tables = [t for t in inspector.get_table_names() if t != "alembic_version"]
             assert len(user_tables) == 0, f"Expected zero user tables after downgrade to base, got {user_tables}"
 
-            # 5. Re-upgrade all the way to head
+            # 6. Re-upgrade all the way to head
             command.upgrade(alembic_cfg, "head")
             inspector = inspect(engine)
             assert {"scans", "findings", "evidences", "patches"}.issubset(set(inspector.get_table_names()))

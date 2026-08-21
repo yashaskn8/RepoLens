@@ -25,16 +25,17 @@ class PatchService:
 
     def _read_target_files(self, repo_dir: str, file_paths: List[str]) -> Dict[str, str]:
         """Safely read target file contents from the read-only cloned repository."""
+        from app.core.path_confinement import PathTraversalError, resolve_safe_path
+
         contents: Dict[str, str] = {}
-        abs_repo = os.path.abspath(repo_dir)
-
         for rel_path in file_paths:
-            clean_rel = rel_path.replace("\\", "/").lstrip("/")
-            full_path = os.path.abspath(os.path.join(abs_repo, clean_rel))
-
-            # Confinement check
-            if not full_path.startswith(abs_repo):
+            try:
+                full_path_obj = resolve_safe_path(repo_dir, rel_path)
+                full_path = str(full_path_obj)
+            except PathTraversalError:
                 continue
+
+            clean_rel = rel_path.replace("\\", "/").lstrip("/")
             if os.path.exists(full_path) and os.path.isfile(full_path):
                 try:
                     with open(full_path, "r", encoding="utf-8", errors="ignore") as f:

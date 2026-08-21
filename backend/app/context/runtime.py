@@ -26,21 +26,21 @@ logger = logging.getLogger(__name__)
 
 def _read_file_contents_from_workspace(manifest: RepositoryManifest, repo_dir: str) -> Dict[str, str]:
     """Safely read non-binary source file contents from a repository workspace."""
+    from app.core.path_confinement import PathTraversalError, resolve_safe_path
+
     file_contents: Dict[str, str] = {}
     if not repo_dir or not os.path.exists(repo_dir):
         return file_contents
-
-    abs_root = os.path.abspath(repo_dir)
 
     for file_entry in manifest.files:
         if file_entry.is_binary:
             continue
 
         clean_path = file_entry.path.replace("\\", "/").lstrip("/")
-        full_path = os.path.abspath(os.path.join(abs_root, clean_path))
-
-        # Path traversal boundary confinement
-        if not full_path.startswith(abs_root):
+        try:
+            full_path_obj = resolve_safe_path(repo_dir, clean_path)
+            full_path = str(full_path_obj)
+        except PathTraversalError:
             continue
 
         if os.path.exists(full_path) and os.path.isfile(full_path):
@@ -126,9 +126,18 @@ class ScanIntelligenceRuntime:
             elif getattr(settings, "HUGGINGFACE_API_KEY", None):
                 provider = HuggingFaceEmbeddingAdapter()
 
-        # 5. Initialize VectorIndex and populate embeddings if provider available
+        # 5. Initialize VectorIndex via canonical factory and populate embeddings if provider available
         dim = provider.dimensions if provider else 1536
-        v_index = vector_index or InMemoryVectorIndex(dimensions=dim)
+        model_name = getattr(provider, "default_model", "text-embedding-3-large") if provider else "text-embedding-3-large"
+        namespace = f"scan:{manifest.commit_sha or 'default'}"
+        from app.retrieval.vector_index import create_vector_index
+        v_index = vector_index or create_vector_index(
+            db_url=getattr(settings, "DATABASE_URL", None),
+            dimensions=dim,
+            namespace=namespace,
+            model_name=model_name,
+            enable_pgvector=getattr(settings, "ENABLE_PGVECTOR", False),
+        )
 
         if provider and chunks:
             try:

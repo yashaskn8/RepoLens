@@ -111,7 +111,8 @@ async def test_router_fallback_on_primary_failure():
     assert response.provider == LLMProvider.GEMINI
     assert response.model == "gemini-3.7-flash"
     assert response.content == "Fallback code analysis"
-    mock_hf.generate.assert_called_once()
+    # HF fails transiently with RateLimitError -> retried 2 times (total 3 attempts)
+    assert mock_hf.generate.call_count == 3
     mock_gemini.generate.assert_called_once()
 
 
@@ -149,3 +150,9 @@ async def test_router_all_fallbacks_failed():
 
     assert len(exc_info.value.attempted_errors) == 3
     assert "All LLM candidate models for policy 'security_reasoning' failed" in str(exc_info.value)
+    # Groq (auth error) called once without retrying permanent error
+    assert mock_groq.generate.call_count == 1
+    # Nvidia (rate limit error) retried 2 times (3 calls total)
+    assert mock_nvidia.generate.call_count == 3
+    # Gemini (auth error) called once
+    assert mock_gemini.generate.call_count == 1

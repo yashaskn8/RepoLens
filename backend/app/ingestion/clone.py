@@ -151,9 +151,15 @@ def clone_repository(
         )
 
         if rev_result.returncode != 0:
-            commit_sha = "unknown"
-        else:
-            commit_sha = rev_result.stdout.strip()
+            if target_dir is None and os.path.exists(dest_dir):
+                shutil.rmtree(dest_dir, ignore_errors=True)
+            raise CloneFailedError(f"git rev-parse HEAD failed with exit code {rev_result.returncode}: {rev_result.stderr.strip()}")
+
+        commit_sha = rev_result.stdout.strip()
+        if not re.match(r"^[0-9a-fA-F]{40}$", commit_sha):
+            if target_dir is None and os.path.exists(dest_dir):
+                shutil.rmtree(dest_dir, ignore_errors=True)
+            raise CloneFailedError(f"git rev-parse HEAD returned invalid non-40-character commit SHA: '{commit_sha}'")
 
         return dest_dir, commit_sha
 

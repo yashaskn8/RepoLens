@@ -2,7 +2,7 @@
 
 import os
 import tempfile
-from uuid import uuid4
+from uuid import UUID, uuid4
 from fastapi.testclient import TestClient
 import pytest
 from sqlalchemy import create_engine
@@ -33,7 +33,14 @@ def test_patch_api_lifecycle_inspect_approve_reject_revise(client, db_session):
     assert scan_res.status_code == 202
     scan_id = scan_res.json()["id"]
 
+    # Mark scan COMPLETED with commit hash for provenance
+    scan_model = db_session.query(ScanModel).filter(ScanModel.id == scan_id).first()
+    scan_model.status = ScanStatus.COMPLETED.value
+    scan_model.commit_hash = "abcdef1234567890abcdef1234567890abcdef12"
+
     # Insert a mock patch proposal in DB
+    from app.models.finding import EvidenceModel
+    from app.schemas.enums import VerificationVerdict
     finding_id = str(uuid4())
     finding_model = FindingModel(
         id=finding_id,
@@ -42,8 +49,22 @@ def test_patch_api_lifecycle_inspect_approve_reject_revise(client, db_session):
         description="Formatted query string",
         severity=Severity.HIGH.value,
         status=FindingStatus.OPEN.value,
+        verification_verdict=VerificationVerdict.CONFIRMED.value,
+        source_tool="semgrep",
+        detector_id="python.sql.injection",
+        detector_kind="static_scanner",
     )
     db_session.add(finding_model)
+
+    evidence_model = EvidenceModel(
+        id=str(uuid4()),
+        finding_id=finding_id,
+        file_path="app/db.py",
+        start_line=1,
+        end_line=1,
+        code_snippet="f'SELECT'",
+    )
+    db_session.add(evidence_model)
 
     patch_id = str(uuid4())
     patch_model = PatchModel(
@@ -56,6 +77,7 @@ def test_patch_api_lifecycle_inspect_approve_reject_revise(client, db_session):
         explanation="Parameterized query placeholder",
         expected_behavior_change="Safe binding",
         verification_report={"status": "PASSED"},
+        revision_number=0,
     )
     db_session.add(patch_model)
     db_session.commit()
@@ -74,10 +96,35 @@ def test_patch_api_lifecycle_inspect_approve_reject_revise(client, db_session):
     assert len(scan_patches_res.json()) >= 1
 
     # 4. Request Revision via POST /api/v1/patches/{patch_id}/revise
-    revise_res = client.post(
-        f"/api/v1/patches/{patch_id}/revise",
-        json={"user_feedback": "Please add explicit type annotations"},
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _mock_open_snapshot(*args, **kwargs):
+        with tempfile.TemporaryDirectory() as td:
+            yield td
+
+    mock_wf_result = MagicMock()
+    mock_wf_result.machine_verdict = "NEEDS_REVIEW"
+    mock_wf_result.proposal = PatchProposal(
+        finding_id=UUID(finding_id),
+        unified_diff="--- a/app/db.py\n+++ b/app/db.py\n@@ -1,1 +1,1 @@\n-old\n+new_with_types\n",
+        files_modified=["app/db.py"],
+        explanation="Added explicit type annotations",
+        expected_behavior_change="Types aligned",
     )
+    mock_wf_result.verification_result = None
+    mock_wf_result.critic_report = None
+
+    with patch("app.ingestion.snapshot.RepositorySnapshotService.open_snapshot", _mock_open_snapshot), \
+         patch("app.analysis.service.RepositoryIntelligenceService.analyze_repository", AsyncMock()), \
+         patch("app.context.runtime.ScanIntelligenceRuntime.build", AsyncMock()), \
+         patch("app.planning.service.FixPlanningService.create_fix_plan", AsyncMock()), \
+         patch("app.patching.workflow.PatchWorkflowCoordinator.execute_patch_workflow", AsyncMock(return_value=mock_wf_result)):
+        revise_res = client.post(
+            f"/api/v1/patches/{patch_id}/revise",
+            json={"user_feedback": "Please add explicit type annotations"},
+        )
     assert revise_res.status_code == 200
     assert revise_res.json()["status"] == "NEEDS_REVIEW"
     assert revise_res.json()["user_feedback"] == "Please add explicit type annotations"

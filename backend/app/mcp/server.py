@@ -43,30 +43,13 @@ class MCPRepositoryServer:
 
     def _resolve_safe_path(self, relative_path: str) -> str:
         """Ensure file path is strictly localized within repo_dir, preventing path traversal."""
-        if not relative_path or not isinstance(relative_path, str):
-            raise ValueError("File path must be a non-empty string.")
+        from app.core.path_confinement import PathTraversalError, resolve_safe_path
 
-        # Disallow control characters, null bytes
-        if "\x00" in relative_path:
-            raise ValueError("Invalid characters in file path.")
-
-        # Disallow absolute paths (POSIX leading slash, Windows drive letter or backslash)
-        if (
-            os.path.isabs(relative_path)
-            or relative_path.startswith(("/", "\\"))
-            or (len(relative_path) >= 2 and relative_path[1] == ":")
-        ):
-            raise PermissionError(f"Access denied: absolute path '{relative_path}' is prohibited.")
-
-        # Normalize and resolve relative to repository workspace
-        clean_path = relative_path.replace("\\", "/")
-        full_path = os.path.abspath(os.path.join(self.repo_dir, clean_path))
-
-        # Strict containment check
-        if not full_path.startswith(self.repo_dir + os.sep) and full_path != self.repo_dir:
-            raise PermissionError(f"Access denied: path '{relative_path}' escapes repository boundary.")
-
-        return full_path
+        try:
+            full_path_obj = resolve_safe_path(self.repo_dir, relative_path)
+            return str(full_path_obj)
+        except (PathTraversalError, ValueError) as err:
+            raise PermissionError(f"Access denied: {str(err)}")
 
     def list_tools(self) -> List[MCPToolDefinition]:
         """Return the definitions of all available MCP tools."""

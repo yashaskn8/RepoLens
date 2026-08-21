@@ -137,4 +137,5 @@ class PatchWorkflowResult(BaseModel):
     critic_escalated: bool = Field(default=False, description="True if conditional escalation rules invoked the critic")
     critic_report: Optional[PatchCriticReport] = Field(default=None, description="Critic evaluation report if escalated")
     revision_count: int = Field(default=0, ge=0, le=1, description="Number of automatic revisions applied (capped at 1)")
-    final_verdict: str = Field(..., description="APPROVED, REJECTED, or NEEDS_HUMAN_REVIEW")
+    machine_verdict: str = Field(default="NEEDS_REVIEW", description="Machine verification verdict: PASSED, NEEDS_REVIEW, or REJECTED")
+    final_verdict: str = Field(default="NEEDS_REVIEW", description="Backward-compatible alias for machine_verdict")

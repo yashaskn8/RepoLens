@@ -98,6 +98,9 @@ class OSVScannerAdapter(BaseScannerAdapter):
                             category="dependency",
                             evidence=evidence,
                             mitigation=f"Upgrade dependency {pkg_name} to a non-vulnerable release.",
+                            source_tool="osv",
+                            detector_id=vuln_id,
+                            detector_kind="static_scanner",
                             raw_details={"ecosystem": ecosystem, "aliases": aliases},
                         )
                     )

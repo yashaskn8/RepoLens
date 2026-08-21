@@ -84,6 +84,7 @@ class PatchWorkflowCoordinator:
                 verification_result=verification_result,
                 critic_escalated=False,
                 revision_count=0,
+                machine_verdict="REJECTED",
                 final_verdict="REJECTED",
             )
 
@@ -96,14 +97,16 @@ class PatchWorkflowCoordinator:
         )
 
         if not should_escalate:
-            # Low-risk patch passed verification cleanly -> Auto-approved without burning extra LLM calls
+            # Low-risk patch passed verification cleanly -> Machine verified as PASSED
+            machine_verdict = "PASSED" if verification_result.status == VerificationStatus.PASSED else "NEEDS_REVIEW"
             return PatchWorkflowResult(
                 finding_id=finding.id,
                 proposal=proposal,
                 verification_result=verification_result,
                 critic_escalated=False,
                 revision_count=0,
-                final_verdict="APPROVED",
+                machine_verdict=machine_verdict,
+                final_verdict=machine_verdict,
             )
 
         # 4. Independent Critic Evaluation (with independently retrieved ContextBundle)
@@ -124,6 +127,7 @@ class PatchWorkflowCoordinator:
         )
 
         if critic_report.verdict == CriticVerdict.APPROVE:
+            machine_verdict = "PASSED" if verification_result.status == VerificationStatus.PASSED else "NEEDS_REVIEW"
             return PatchWorkflowResult(
                 finding_id=finding.id,
                 proposal=proposal,
@@ -131,7 +135,8 @@ class PatchWorkflowCoordinator:
                 critic_escalated=True,
                 critic_report=critic_report,
                 revision_count=0,
-                final_verdict="APPROVED",
+                machine_verdict=machine_verdict,
+                final_verdict=machine_verdict,
             )
         elif critic_report.verdict == CriticVerdict.REJECT:
             return PatchWorkflowResult(
@@ -141,6 +146,7 @@ class PatchWorkflowCoordinator:
                 critic_escalated=True,
                 critic_report=critic_report,
                 revision_count=0,
+                machine_verdict="REJECTED",
                 final_verdict="REJECTED",
             )
 
@@ -177,10 +183,10 @@ class PatchWorkflowCoordinator:
             escalation_reasons=escalation_reasons,
         )
 
-        final_verdict = "APPROVED" if (
+        machine_verdict = "PASSED" if (
             revised_critic_report.verdict == CriticVerdict.APPROVE
-            and revised_verification.status != VerificationStatus.FAILED
-        ) else "NEEDS_HUMAN_REVIEW"
+            and revised_verification.status == VerificationStatus.PASSED
+        ) else ("REJECTED" if revised_critic_report.verdict == CriticVerdict.REJECT or revised_verification.status == VerificationStatus.FAILED else "NEEDS_REVIEW")
 
         return PatchWorkflowResult(
             finding_id=finding.id,
@@ -189,5 +195,6 @@ class PatchWorkflowCoordinator:
             critic_escalated=True,
             critic_report=revised_critic_report,
             revision_count=1,  # Hard cap
-            final_verdict=final_verdict,
+            machine_verdict=machine_verdict,
+            final_verdict=machine_verdict,
         )

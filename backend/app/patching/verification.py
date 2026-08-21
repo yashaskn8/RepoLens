@@ -240,7 +240,7 @@ class PatchVerificationService:
             patched_evidence_store = EvidenceStore(manifest=patched_manifest)
 
             # =========================================================================
-            # 7. Route contracts consistency check (Pre vs Post comparison)
+            # 7. Route contracts consistency check (Target-Specific + Regression)
             # =========================================================================
             pre_evidence_store = EvidenceStore(manifest=manifest)
             pre_graph = build_repository_graph(manifest, pre_evidence_store)
@@ -249,7 +249,7 @@ class PatchVerificationService:
             patched_graph = build_repository_graph(patched_manifest, patched_evidence_store)
             post_contract_report = patched_graph.evaluate_route_contracts()
 
-            # Compare pre and post defective sets
+            # Canonical route mismatch identity tuple: (file, method, url, status)
             pre_defective = [
                 m for m in pre_contract_report.matches
                 if m.status != ContractMatchStatus.MATCHED
@@ -259,20 +259,24 @@ class PatchVerificationService:
                 if m.status != ContractMatchStatus.MATCHED
             ]
 
-            pre_defective_keys = {
-                (m.frontend_file, m.frontend_url, m.frontend_method, m.status)
-                for m in pre_defective
-            }
-            post_defective_keys = {
-                (m.frontend_file, m.frontend_url, m.frontend_method, m.status)
-                for m in post_defective
-            }
+            def _mismatch_ident(m) -> Tuple[str, str, str, str]:
+                return (
+                    m.frontend_file.replace("\\", "/").lstrip("/"),
+                    m.frontend_method.upper() if m.frontend_method else "GET",
+                    m.frontend_url.strip(),
+                    m.status.value,
+                )
 
-            new_mismatches = post_defective_keys - pre_defective_keys
-            resolved_mismatches = pre_defective_keys - post_defective_keys
+            pre_defective_map = {_mismatch_ident(m): m for m in pre_defective}
+            post_defective_map = {_mismatch_ident(m): m for m in post_defective}
+
+            new_mismatches = set(post_defective_map.keys()) - set(pre_defective_map.keys())
+            resolved_mismatches = set(pre_defective_map.keys()) - set(post_defective_map.keys())
 
             is_route_finding = (
-                (finding.category or "").lower() in ("route_mismatch", "contract", "api_contract")
+                getattr(finding, "source_tool", None) == "route_contract"
+                or getattr(finding, "detector_kind", None) == "contract_matcher"
+                or (finding.category or "").lower() in ("route_mismatch", "contract", "api_contract")
                 or "route mismatch" in finding.title.lower()
                 or "api contract" in finding.title.lower()
                 or "route contract" in finding.title.lower()
@@ -281,15 +285,32 @@ class PatchVerificationService:
             if new_mismatches:
                 c7_status = CheckStatus.FAILED
                 first_new = sorted(list(new_mismatches))[0]
-                c7_details = f"Patch introduced new route contract mismatch: {first_new[0]} calls {first_new[2]} {first_new[1]} ({first_new[3].value})"
+                c7_details = f"Patch introduced new route contract mismatch: {first_new[0]} {first_new[1]} {first_new[2]} ({first_new[3]})"
             elif is_route_finding:
-                # Check if target mismatch changed from defective to resolved
-                if not resolved_mismatches and post_defective:
+                # Target-specific verification: identify the specific target mismatch
+                target_ev = finding.evidences[0] if finding.evidences else None
+                target_fp = target_ev.file_path.replace("\\", "/").lstrip("/") if target_ev else ""
+                
+                # Check if detector_id or evidence identifies the target defect
+                target_matches_in_pre = [
+                    ident for ident, m in pre_defective_map.items()
+                    if (not target_fp or ident[0] == target_fp)
+                ]
+
+                if not target_matches_in_pre:
                     c7_status = CheckStatus.FAILED
-                    c7_details = "Target route contract mismatch remains unresolved in patched code"
+                    c7_details = f"Original route contract defect not found in pre-patch report for '{target_fp}'"
                 else:
-                    c7_status = CheckStatus.PASSED
-                    c7_details = f"Target route contract mismatch successfully resolved ({len(resolved_mismatches)} defect(s) fixed)"
+                    # Check if the specific target was resolved
+                    target_resolved = [ident for ident in target_matches_in_pre if ident in resolved_mismatches]
+                    target_still_defective = [ident for ident in target_matches_in_pre if ident in post_defective_map]
+
+                    if target_resolved and not target_still_defective:
+                        c7_status = CheckStatus.PASSED
+                        c7_details = f"Target route defect resolved: {target_resolved[0][0]} {target_resolved[0][1]} {target_resolved[0][2]} -> MATCHED"
+                    else:
+                        c7_status = CheckStatus.FAILED
+                        c7_details = f"Target route defect remains defective: {target_matches_in_pre[0][0]} {target_matches_in_pre[0][1]} {target_matches_in_pre[0][2]}"
             else:
                 c7_status = CheckStatus.PASSED
                 c7_details = f"Route contracts intact ({post_contract_report.matched_count} matched, 0 new mismatches)"
@@ -305,24 +326,38 @@ class PatchVerificationService:
             record_check("check_8_graph_rebuild", c8_status, f"RepositoryGraph rebuilt with {graph_nodes} nodes and {graph_edges} edges" if graph_nodes > 0 else "RepositoryGraph empty on patched workspace")
 
             # =========================================================================
-            # 10. Static scanner safety re-run (executed first to feed check 9 and 12)
+            # 10. Static scanner safety re-run (Strict Completeness Semantics)
             # =========================================================================
             scanner_tasks = [adapter.scan(temp_dir) for adapter in self.scanner_adapters]
             post_scanner_results: List[ScannerResult] = await asyncio.gather(*scanner_tasks, return_exceptions=False)
 
-            failed_scanners = [r.tool for r in post_scanner_results if r.status in (ToolStatus.FAILED, ToolStatus.TIMEOUT)]
-            available_scanners = [r for r in post_scanner_results if r.status == ToolStatus.COMPLETED]
-            unavailable_scanners = [r for r in post_scanner_results if r.status in (ToolStatus.UNAVAILABLE, ToolStatus.DISABLED)]
+            enabled_adapters = [a for a in self.scanner_adapters if a.is_enabled]
+            result_map = {r.tool: r for r in post_scanner_results}
 
-            if failed_scanners:
+            failed_tools = [r.tool for r in post_scanner_results if r.status in (ToolStatus.FAILED, ToolStatus.TIMEOUT)]
+            invalid_tools = [r.tool for r in post_scanner_results if r.status == ToolStatus.INVALID_OUTPUT]
+            unavailable_tools = [r.tool for r in post_scanner_results if r.status == ToolStatus.UNAVAILABLE]
+            completed_tools = [r.tool for r in post_scanner_results if r.status == ToolStatus.COMPLETED]
+
+            if failed_tools:
                 c10_status = CheckStatus.FAILED
-                c10_details = f"Deterministic scanner(s) failed or timed out during execution: {', '.join(failed_scanners)}"
-            elif not available_scanners:
+                c10_details = f"Scanner failure or timeout: {', '.join(failed_tools)}"
+            elif invalid_tools:
+                c10_status = CheckStatus.NEEDS_REVIEW
+                c10_details = f"Scanner output could not be parsed: {', '.join(invalid_tools)}"
+            elif unavailable_tools and not completed_tools:
                 c10_status = CheckStatus.UNAVAILABLE
-                c10_details = f"Deterministic scanners unavailable locally ({', '.join(f'{r.tool}: {r.status.value}' for r in unavailable_scanners)})"
-            else:
+                c10_details = f"Deterministic scanners unavailable locally ({', '.join(unavailable_tools)})"
+            elif unavailable_tools:
+                # Partial scanner availability cannot produce PASSED
+                c10_status = CheckStatus.NEEDS_REVIEW
+                c10_details = f"Incomplete scanner coverage: {', '.join(unavailable_tools)} unavailable (evaluated: {', '.join(completed_tools) if completed_tools else 'none'})"
+            elif completed_tools and len(completed_tools) == len(enabled_adapters):
                 c10_status = CheckStatus.PASSED
-                c10_details = f"Executed deterministic scanners: {', '.join(r.tool for r in available_scanners)}"
+                c10_details = f"All {len(completed_tools)} enabled scanners completed successfully: {', '.join(completed_tools)}"
+            else:
+                c10_status = CheckStatus.NEEDS_REVIEW
+                c10_details = "No enabled deterministic scanners were fully evaluated."
 
             record_check("check_10_scanners_clean", c10_status, c10_details)
 
@@ -334,7 +369,7 @@ class PatchVerificationService:
             record_check("check_11_no_secrets_introduced", c11_status, "; ".join(secret_errs) if secret_errs else "Zero secrets or API keys introduced")
 
             # =========================================================================
-            # 9. Target finding evidence re-evaluation
+            # 9. Target finding evidence re-evaluation (Canonical Provenance)
             # =========================================================================
             finding_resolved_status = CheckStatus.NEEDS_REVIEW
             finding_resolved_details = "No automated deterministic detector exists for this finding category; requires human review"
@@ -342,56 +377,66 @@ class PatchVerificationService:
             target_ev = finding.evidences[0] if finding.evidences else None
             target_file = target_ev.file_path.replace("\\", "/").lstrip("/") if target_ev else ""
 
-            # Case A: Finding comes from a static scanner rule or tool
-            matching_scanner_result = next(
-                (r for r in available_scanners if finding.rule_id and (r.tool.lower() in finding.rule_id.lower() or finding.rule_id.lower().startswith(r.tool.lower()))),
+            # Check canonical provenance fields first
+            source_tool = (getattr(finding, "source_tool", None) or "").lower()
+            detector_id = getattr(finding, "detector_id", None) or finding.rule_id
+            detector_kind = getattr(finding, "detector_kind", None) or ""
+
+            # Match tool name from canonical source_tool or adapter tool_name
+            matching_adapter = next(
+                (a for a in self.scanner_adapters if source_tool and (a.tool_name.lower() == source_tool or a.tool_name.lower().replace("-", "") == source_tool.replace("-", ""))),
                 None,
             )
 
-            if matching_scanner_result:
-                # Check if scanner still detected the finding
-                still_flagged = any(
-                    f.rule_id == finding.rule_id and f.evidence.file_path.replace("\\", "/").lstrip("/") == target_file
-                    for f in matching_scanner_result.findings
+            # Backward-compatible fallback for rule_id prefix if source_tool not set
+            if not matching_adapter and detector_id:
+                matching_adapter = next(
+                    (a for a in self.scanner_adapters if a.tool_name.lower() in detector_id.lower()),
+                    None,
                 )
-                if still_flagged:
-                    finding_resolved_status = CheckStatus.FAILED
-                    finding_resolved_details = f"Deterministic scanner '{matching_scanner_result.tool}' still flags rule '{finding.rule_id}' in {target_file}"
+
+            if matching_adapter:
+                res = result_map.get(matching_adapter.tool_name)
+                if res and res.status == ToolStatus.COMPLETED:
+                    still_flagged = any(
+                        (f.rule_id == detector_id or f.detector_id == detector_id)
+                        and f.evidence.file_path.replace("\\", "/").lstrip("/") == target_file
+                        for f in res.findings
+                    )
+                    if still_flagged:
+                        finding_resolved_status = CheckStatus.FAILED
+                        finding_resolved_details = f"Deterministic scanner '{res.tool}' still flags detector '{detector_id}' in {target_file}"
+                    else:
+                        finding_resolved_status = CheckStatus.PASSED
+                        finding_resolved_details = f"Deterministic scanner '{res.tool}' verified detector '{detector_id}' is resolved"
+                elif res and res.status == ToolStatus.UNAVAILABLE:
+                    finding_resolved_status = CheckStatus.NEEDS_REVIEW
+                    finding_resolved_details = f"Source scanner '{matching_adapter.tool_name}' unavailable locally to verify resolution"
                 else:
-                    finding_resolved_status = CheckStatus.PASSED
-                    finding_resolved_details = f"Deterministic scanner '{matching_scanner_result.tool}' verified rule '{finding.rule_id}' is resolved"
-            elif is_route_finding:
-                # Case B: Route / contract finding proved by contract matcher
-                if c7_status == CheckStatus.PASSED:
-                    finding_resolved_status = CheckStatus.PASSED
-                    finding_resolved_details = "Deterministic contract matcher verified route contract resolution"
-                else:
                     finding_resolved_status = CheckStatus.FAILED
-                    finding_resolved_details = "Deterministic contract matcher detected route mismatch persists"
-            elif "secret" in (finding.category or "").lower() or "secret" in finding.title.lower():
-                # Case C: Secret finding proved by secret scanner
-                if c11_status == CheckStatus.PASSED:
-                    finding_resolved_status = CheckStatus.PASSED
-                    finding_resolved_details = "Secret detector verified secret was removed"
-                else:
-                    finding_resolved_status = CheckStatus.FAILED
-                    finding_resolved_details = "Secret detector found secret pattern still present"
+                    finding_resolved_details = f"Source scanner '{matching_adapter.tool_name}' failed during verification"
+
+            elif source_tool == "route_contract" or detector_kind == "contract_matcher" or is_route_finding:
+                finding_resolved_status = c7_status
+                finding_resolved_details = c7_details
+
+            elif source_tool == "repolens-secret" or detector_kind == "deterministic_secret" or "secret" in (finding.category or "").lower() or "secret" in finding.title.lower():
+                finding_resolved_status = c11_status
+                finding_resolved_details = "Secret detector verified secret was removed" if c11_status == CheckStatus.PASSED else "Secret still present"
 
             elif target_ev and target_ev.code_snippet and target_file in patched_contents:
-                # Case D: Check if code snippet was actually altered/remediated rather than unchanged
                 snippet_core = target_ev.code_snippet.strip()
                 if len(snippet_core) > 10 and snippet_core in patched_contents[target_file]:
                     finding_resolved_status = CheckStatus.FAILED
                     finding_resolved_details = "Original defect snippet still present verbatim in patched file"
                 else:
-                    # Snippet changed, but without a dedicated deterministic detector, mark NEEDS_REVIEW
                     finding_resolved_status = CheckStatus.NEEDS_REVIEW
                     finding_resolved_details = "Defect snippet removed, but requires human verification (no automated rule detector)"
 
             record_check("check_9_finding_remediation", finding_resolved_status, finding_resolved_details)
 
             # =========================================================================
-            # 12. No new deterministic HIGH/CRITICAL findings
+            # 12. No new deterministic HIGH/CRITICAL findings (Both-Sides Completed Only)
             # =========================================================================
             new_critical_found = False
             new_critical_details = "Zero new HIGH/CRITICAL deterministic issues introduced by patch"
@@ -402,29 +447,32 @@ class PatchVerificationService:
             elif not syntax_clean:
                 new_critical_found = True
                 new_critical_details = "Patch introduced syntax corruption in source code (CRITICAL)"
-            elif available_scanners:
-                # Compare pre-patch and post-patch scanner findings
-                pre_scanner_tasks = [adapter.scan(original_repo_dir) for adapter in self.scanner_adapters if adapter.tool_name in [r.tool for r in available_scanners]]
-                pre_scanner_results: List[ScannerResult] = await asyncio.gather(*pre_scanner_tasks, return_exceptions=False)
+            else:
+                # Compare pre and post ONLY for scanners that completed on BOTH sides
+                post_completed_adapters = [a for a in self.scanner_adapters if result_map.get(a.tool_name) and result_map[a.tool_name].status == ToolStatus.COMPLETED]
+                if post_completed_adapters:
+                    pre_scanner_tasks = [a.scan(original_repo_dir) for a in post_completed_adapters]
+                    pre_scanner_results: List[ScannerResult] = await asyncio.gather(*pre_scanner_tasks, return_exceptions=False)
+                    
+                    pre_both_completed = {r.tool: r for r in pre_scanner_results if r.status == ToolStatus.COMPLETED}
 
+                    pre_finding_keys = {
+                        (f.tool, f.rule_id, f.evidence.file_path.replace("\\", "/").lstrip("/"), f.severity)
+                        for tool_name, r in pre_both_completed.items()
+                        for f in r.findings
+                    }
 
-                pre_finding_keys = {
-                    (f.tool, f.rule_id, f.evidence.file_path.replace("\\", "/").lstrip("/"), f.severity)
-                    for r in pre_scanner_results
-                    for f in r.findings
-                }
+                    new_high_crit_findings = [
+                        f for tool_name in pre_both_completed.keys()
+                        for f in result_map[tool_name].findings
+                        if f.severity in (Severity.HIGH, Severity.CRITICAL)
+                        and (f.tool, f.rule_id, f.evidence.file_path.replace("\\", "/").lstrip("/"), f.severity) not in pre_finding_keys
+                    ]
 
-                new_high_crit_findings = [
-                    f for r in post_scanner_results
-                    for f in r.findings
-                    if f.severity in (Severity.HIGH, Severity.CRITICAL)
-                    and (f.tool, f.rule_id, f.evidence.file_path.replace("\\", "/").lstrip("/"), f.severity) not in pre_finding_keys
-                ]
-
-                if new_high_crit_findings:
-                    new_critical_found = True
-                    first_new = new_high_crit_findings[0]
-                    new_critical_details = f"New {first_new.severity.value} finding introduced by patch: {first_new.title} ({first_new.rule_id or 'unknown'}) in {first_new.evidence.file_path}"
+                    if new_high_crit_findings:
+                        new_critical_found = True
+                        first_new = new_high_crit_findings[0]
+                        new_critical_details = f"New {first_new.severity.value} finding introduced by patch: {first_new.title} ({first_new.rule_id or 'unknown'}) in {first_new.evidence.file_path}"
 
             c12_status = CheckStatus.FAILED if new_critical_found else CheckStatus.PASSED
             record_check("check_12_no_new_critical_findings", c12_status, new_critical_details)

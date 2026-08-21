@@ -42,6 +42,9 @@ export interface Finding {
   mitigation_guidance?: string | null;
   verification_verdict?: VerificationVerdict | null;
   verification_reason?: string | null;
+  source_tool?: string | null;
+  detector_id?: string | null;
+  detector_kind?: string | null;
   evidences: Evidence[];
   model_metadata?: ModelExecutionMetadata | null;
   created_at: string;
@@ -110,6 +113,13 @@ export interface FrameworkDetected {
   evidence: string;
 }
 
+export interface AnalysisScope {
+  total_source_bytes: number;
+  max_source_bytes: number;
+  is_truncated: boolean;
+  truncated_file_count: number;
+}
+
 export interface RepositoryManifest {
   repository_url: string;
   commit_hash: string;
@@ -121,6 +131,7 @@ export interface RepositoryManifest {
   files: FileEntry[];
   cloned_at: string;
   scan_duration_ms?: number | null;
+  analysis_scope?: AnalysisScope | null;
 }
 
 export type ToolStatus =
@@ -303,8 +314,11 @@ export interface PatchResponse {
   finding_id: string;
   plan_id?: string | null;
   scan_id: string;
+  parent_patch_id?: string | null;
+  revision_number?: number;
   thread_id?: string | null;
   status: PatchStatus;
+  machine_verdict?: string | null;
   unified_diff: string;
   files_modified: string[];
   explanation: string;

@@ -103,6 +103,9 @@ class TrivyAdapter(BaseScannerAdapter):
                         category="vulnerability",
                         evidence=evidence,
                         mitigation=mitigation,
+                        source_tool="trivy",
+                        detector_id=vuln_id,
+                        detector_kind="static_scanner",
                         raw_details={"pkg_name": pkg_name, "installed": installed_ver, "fixed": fixed_ver},
                     )
                 )
@@ -135,6 +138,9 @@ class TrivyAdapter(BaseScannerAdapter):
                         category="secret",
                         evidence=evidence,
                         mitigation="Revoke the credential immediately and migrate to secure environment variables or secret management.",
+                        source_tool="trivy",
+                        detector_id=rule_id,
+                        detector_kind="deterministic_secret",
                         raw_details={"rule_id": rule_id},
                     )
                 )
