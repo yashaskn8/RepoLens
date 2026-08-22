@@ -94,8 +94,8 @@ class TestOperationalEventIsolation:
         mock_session.rollback.assert_called_once()
         mock_session.close.assert_called_once()
 
-    def test_successful_operational_event_persists_via_caller_session(self, db_session: Session):
-        """Successful operational event via legacy emit (no session_factory) persists in caller's session."""
+    def test_successful_operational_event_persists_via_independent_derived_session(self, db_session: Session):
+        """Successful operational event via emit(critical=False) derives independent session and persists."""
         scan_id = str(uuid4())
         scan = ScanModel(
             id=scan_id,
@@ -105,7 +105,7 @@ class TestOperationalEventIsolation:
         db_session.add(scan)
         db_session.commit()
 
-        # Use legacy emit with critical=False (no session_factory) — adds to caller session
+        # Emit with critical=False: derives session factory from db_session.get_bind()
         result = WorkflowEventService.emit(
             db=db_session,
             event=WorkflowEventCreate(
@@ -119,9 +119,8 @@ class TestOperationalEventIsolation:
 
         assert result is not None
         assert result.event_type == "TOOL_COMPLETED"
-        db_session.commit()
 
-        # Verify it persisted
+        # Verify it persisted in the DB independently
         persisted = (
             db_session.query(WorkflowEventModel)
             .filter(
@@ -132,6 +131,25 @@ class TestOperationalEventIsolation:
         )
         assert persisted is not None
         assert persisted.tool_name == "semgrep"
+
+    def test_operational_emit_flush_failure_is_suppressed(self, db_session: Session):
+        """When an independent operational session fails at flush, error is caught and logged."""
+        mock_session = MagicMock()
+        mock_session.commit.side_effect = RuntimeError("Flush/Commit DB error")
+
+        result = WorkflowEventService.emit_operational(
+            event=WorkflowEventCreate(
+                event_type=WorkflowEventType.STAGE_STARTED,
+                scan_id=UUID(str(uuid4())),
+                stage="intelligence_analysis",
+                message="Started",
+            ),
+            session_factory=lambda: mock_session,
+        )
+
+        assert result is None
+        mock_session.rollback.assert_called_once()
+        mock_session.close.assert_called_once()
 
     def test_operational_emit_with_mock_factory_uses_independent_session(self):
         """emit_operational uses the provided session_factory for independent persistence."""

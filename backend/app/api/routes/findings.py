@@ -298,6 +298,8 @@ async def request_patch_generation(
                 model_metadata=proposal.model_metadata.model_dump(mode="json") if proposal.model_metadata else None,
             )
             db.add(patch_model)
+            db.commit()
+            db.refresh(patch_model)
 
             # 5. Emit PATCH_GENERATED and machine verification verdict events
             WorkflowEventService.emit(
@@ -338,7 +340,6 @@ async def request_patch_generation(
                     metadata_payload={"machine_verdict": workflow_result.machine_verdict},
                 ),
             )
-            db.commit()
 
             return workflow_result
     except SnapshotError as exc:

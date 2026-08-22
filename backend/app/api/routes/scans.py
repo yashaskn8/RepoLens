@@ -33,6 +33,7 @@ from app.schemas.metadata import ModelExecutionMetadata
 from app.schemas.scan import Scan, ScanCreate
 from app.schemas.static_finding import ToolStatus
 from app.schemas.workflow_event import WorkflowEventCreate, WorkflowEventType
+from app.security.redaction import redact_secrets
 from app.services.scan_recovery import ScanDispatcher
 from app.services.workflow_event_service import WorkflowEventService
 
@@ -60,6 +61,7 @@ async def execute_background_scan(
         if not scan_model:
             return
         scan_model.status = ScanStatus.RUNNING.value
+        db.commit()
         WorkflowEventService.emit(
             db=db,
             event=WorkflowEventCreate(
@@ -69,7 +71,6 @@ async def execute_background_scan(
                 metadata_payload={"repository_url": repo_url, "branch": branch},
             ),
         )
-        db.commit()
 
         # 2. Materialize exact snapshot if commit_hash already exists (e.g. on resume), or clone safely
         snapshot_service = get_snapshot_service()
@@ -115,7 +116,6 @@ async def execute_background_scan(
                 message="Deterministic repository parsing and static scanner execution started",
             ),
         )
-        db.commit()
 
         service = get_intelligence_service()
         evidence_store = await service.analyze_repository(
@@ -127,8 +127,9 @@ async def execute_background_scan(
             resolved_branch_or_ref=resolved_branch,
         )
 
-        # Emit truthful deterministic tool outcome events
+        # Build scanner summary and update scan metadata
         scanner_summary = []
+        tool_events_to_emit = []
         for tool_name, result in (evidence_store.scanner_results or {}).items():
             findings_count = len(result.findings) if result.findings else 0
             if result.status == ToolStatus.COMPLETED:
@@ -147,16 +148,19 @@ async def execute_background_scan(
                 evt_type = WorkflowEventType.TOOL_FAILED
                 msg = f"Deterministic scanner {tool_name} failed execution"
 
+            safe_reason = None
+            if result.error_message:
+                safe_reason = redact_secrets(str(result.error_message))[:512]
+
             safe_payload = {
                 "status": result.status.value,
                 "findings_count": findings_count,
             }
-            if result.error_message:
-                safe_payload["reason"] = str(result.error_message)[:200]
+            if safe_reason:
+                safe_payload["reason"] = safe_reason
 
-            WorkflowEventService.emit(
-                db=db,
-                event=WorkflowEventCreate(
+            tool_events_to_emit.append(
+                WorkflowEventCreate(
                     event_type=evt_type,
                     scan_id=UUID(scan_id),
                     stage="intelligence_analysis",
@@ -164,27 +168,15 @@ async def execute_background_scan(
                     commit_sha=commit_sha,
                     message=msg,
                     metadata_payload=safe_payload,
-                ),
+                )
             )
 
             scanner_summary.append({
                 "tool": tool_name,
                 "status": result.status.value,
                 "findings_count": findings_count,
-                "failure_reason": str(result.error_message)[:200] if result.error_message else None,
+                "failure_reason": safe_reason,
             })
-
-        WorkflowEventService.emit(
-            db=db,
-            event=WorkflowEventCreate(
-                event_type=WorkflowEventType.STAGE_COMPLETED,
-                scan_id=UUID(scan_id),
-                stage="intelligence_analysis",
-                commit_sha=commit_sha,
-                message="Deterministic static scanners completed",
-                metadata_payload={"total_files": evidence_store.manifest.total_files},
-            ),
-        )
 
         # Update scan metadata with analysis scope and scanner coverage
         meta = dict(scan_model.model_metadata or {})
@@ -198,6 +190,22 @@ async def execute_background_scan(
         scan_model.model_metadata = meta
         flag_modified(scan_model, "model_metadata")
         db.commit()
+
+        # Emit tool events and stage completion independently
+        for tool_event in tool_events_to_emit:
+            WorkflowEventService.emit(db=db, event=tool_event)
+
+        WorkflowEventService.emit(
+            db=db,
+            event=WorkflowEventCreate(
+                event_type=WorkflowEventType.STAGE_COMPLETED,
+                scan_id=UUID(scan_id),
+                stage="intelligence_analysis",
+                commit_sha=commit_sha,
+                message="Deterministic static scanners completed",
+                metadata_payload={"total_files": evidence_store.manifest.total_files},
+            ),
+        )
 
         # 4. Assemble canonical ScanIntelligenceRuntime from EvidenceStore
         runtime = await ScanIntelligenceRuntime.build(
@@ -250,6 +258,7 @@ async def execute_background_scan(
             existing_meta["error"] = "; ".join(errors) if errors else "Terminal workflow failure"
             scan_model.model_metadata = existing_meta
             flag_modified(scan_model, "model_metadata")
+            db.commit()
             WorkflowEventService.emit(
                 db=db,
                 event=WorkflowEventCreate(
@@ -260,7 +269,6 @@ async def execute_background_scan(
                     metadata_payload={"errors": errors},
                 ),
             )
-            db.commit()
             return
 
         # 7. Persist verified findings into database (idempotent, no duplicates on resume)
@@ -329,17 +337,6 @@ async def execute_background_scan(
                 finding_model.evidences.append(ev_model)
 
             db.add(finding_model)
-            WorkflowEventService.emit(
-                db=db,
-                event=WorkflowEventCreate(
-                    event_type=WorkflowEventType.FINDING_CONFIRMED,
-                    scan_id=UUID(scan_id),
-                    finding_id=UUID(str(f.id)),
-                    commit_sha=commit_sha,
-                    message=f"Confirmed finding: {f.title} ({sev_val})",
-                    metadata_payload={"severity": sev_val, "category": f.category, "source_tool": getattr(f, "source_tool", None)},
-                ),
-            )
 
         # 8. Mark scan COMPLETED and preserve merged metadata
         scan_model.status = ScanStatus.COMPLETED.value
@@ -355,6 +352,24 @@ async def execute_background_scan(
         })
         scan_model.model_metadata = existing_meta
         flag_modified(scan_model, "model_metadata")
+        db.commit()
+
+        # Emit finding confirmed events and scan completed event independently
+        for f in raw_verified_findings:
+            if str(f.id) not in existing_finding_ids:
+                sev_val = f.severity.value if hasattr(f.severity, "value") else str(f.severity)
+                WorkflowEventService.emit(
+                    db=db,
+                    event=WorkflowEventCreate(
+                        event_type=WorkflowEventType.FINDING_CONFIRMED,
+                        scan_id=UUID(scan_id),
+                        finding_id=UUID(str(f.id)),
+                        commit_sha=commit_sha,
+                        message=f"Confirmed finding: {f.title} ({sev_val})",
+                        metadata_payload={"severity": sev_val, "category": f.category, "source_tool": getattr(f, "source_tool", None)},
+                    ),
+                )
+
         WorkflowEventService.emit(
             db=db,
             event=WorkflowEventCreate(
@@ -365,7 +380,6 @@ async def execute_background_scan(
                 metadata_payload={"findings_count": len(raw_verified_findings)},
             ),
         )
-        db.commit()
 
     except Exception as exc:
         logger.error(f"Scan {scan_id} failed: {str(exc)}", exc_info=True)
@@ -378,6 +392,7 @@ async def execute_background_scan(
                 meta["error"] = str(exc)
                 scan_model.model_metadata = meta
                 flag_modified(scan_model, "model_metadata")
+                db.commit()
                 WorkflowEventService.emit(
                     db=db,
                     event=WorkflowEventCreate(
@@ -387,7 +402,6 @@ async def execute_background_scan(
                         metadata_payload={"error": str(exc)},
                     ),
                 )
-                db.commit()
         except Exception:
             pass
     finally:

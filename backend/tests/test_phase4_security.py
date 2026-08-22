@@ -363,3 +363,43 @@ def test_sanitized_metadata_remains_json_serializable():
     assert "sk-[REDACTED]" in loaded["custom"]
     assert loaded["numbers"] == [1, 2.5, True, None]
     assert loaded["subdict"] == {"k": "v"}
+
+
+def test_fallback_tool_event_scanner_coverage_sanitization(db_session: Session):
+    """14. Reconstructed scanner coverage from fallback TOOL events scrubs credentials and host paths."""
+    from app.services.report_service import ScanReportService
+
+    scan_id = uuid4()
+    scan = ScanModel(
+        id=str(scan_id),
+        repository_url="https://github.com/org/fallback-scanner-sec",
+        status=ScanStatus.COMPLETED.value,
+        model_metadata={},  # No scanner_coverage in model_metadata
+    )
+    db_session.add(scan)
+    db_session.commit()
+
+    raw_reason = "Trivy failed on C:\\Users\\Administrator\\secret_project with auth token Bearer mysecretbearer12345"
+
+    WorkflowEventService.emit(
+        db=db_session,
+        event=WorkflowEventCreate(
+            event_type=WorkflowEventType.TOOL_FAILED,
+            scan_id=scan_id,
+            tool_name="trivy",
+            message=raw_reason,
+            metadata_payload={"reason": raw_reason},
+        ),
+    )
+    db_session.commit()
+
+    report = ScanReportService.build_scan_report(db=db_session, scan_id=str(scan_id))
+    assert report is not None
+    assert len(report.scanner_coverage) == 1
+    sc = report.scanner_coverage[0]
+    assert sc.tool == "trivy"
+    assert sc.status == "FAILED"
+    assert "C:\\Users\\Administrator" not in sc.failure_reason
+    assert "mysecretbearer12345" not in sc.failure_reason
+    assert "[REDACTED]" in sc.failure_reason
+

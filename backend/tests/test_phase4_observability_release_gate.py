@@ -19,7 +19,9 @@ MOCKED:
 
 from datetime import datetime, timezone
 import hashlib
+import json
 import os
+import shutil
 import subprocess
 import tempfile
 from unittest.mock import AsyncMock, patch as mock_patch
@@ -60,7 +62,6 @@ def phase4_git_fixture_repo():
                 "app = FastAPI(title='FixtureApp')\n\n"
                 "@app.get('/api/v1/files/read')\n"
                 "def read_file(file_path: str):\n"
-                "    # Path traversal vulnerability\n"
                 "    full_path = os.path.join('/var/data', file_path)\n"
                 "    with open(full_path, 'r') as f:\n"
                 "        return {'content': f.read()}\n"
@@ -303,9 +304,23 @@ async def test_phase4_observability_lifecycle_and_restart_release_gate(
 ):
     """Genuine Phase 4 Lifecycle and Persistence Restart Release Gate.
 
-    Executes canonical scan pipeline on a real local Git repository fixture,
-    records durable workflow events, verifies replay isolation, rebuilds reports/telemetry,
-    performs human review state transition, and verifies state survival across simulated restart.
+    REAL:
+    - local Git repository creation and commit resolution
+    - Tree-sitter source code parsing
+    - repository graph construction
+    - database persistence across Scans, Findings, Evidences, Patches, and WorkflowEvents
+    - remediation workflow orchestration (Fix Planning -> Patch Generation -> Sandbox Verification -> Critic)
+    - patch persistence and machine verdict derivation
+    - human review state transition and critical audit trail
+    - true database session restart with fresh Session object
+    - event persistence, ordering, and after_id replay
+    - report and telemetry rebuild from persisted DB models
+
+    MOCKED:
+    - GitHub network clone transport (redirected to local Git repository fixture)
+    - external LLM network providers (using deterministic structured mock responses)
+    - unavailable external scanner binaries
+    (Grounded finding is test-seeded from real fixture code evidence because host scanner binaries may not be installed).
     """
     fixture_dir, fixture_commit_sha = phase4_git_fixture_repo
     scan_id = str(uuid4())
@@ -323,12 +338,15 @@ async def test_phase4_observability_lifecycle_and_restart_release_gate(
 
     from tests.conftest import TestingSessionLocal
 
-    async def mock_llm_generate(self, request):
+    async def mock_llm_generate(*args, **kwargs):
+        request = args[0] if len(args) == 1 else args[1]
         meta = ModelExecutionMetadata(
+            model_name="mock-model",
+            provider="mock",
             prompt_tokens=150,
             completion_tokens=50,
             total_tokens=200,
-            execution_time_ms=50,
+            execution_time_ms=50.0,
         )
         return LLMResponse(
             content=json.dumps({
@@ -342,9 +360,14 @@ async def test_phase4_observability_lifecycle_and_restart_release_gate(
             metadata=meta,
         )
 
+    def mock_clone(repo_url, branch=None, target_dir=None, timeout_seconds=None):
+        scan_dir = target_dir or tempfile.mkdtemp(prefix="repolens_p4_scan_")
+        shutil.copytree(fixture_dir, scan_dir, dirs_exist_ok=True)
+        return scan_dir, fixture_commit_sha
+
     # 2. Execute canonical background scan with clone directed to real local Git repository
     with mock_patch("app.api.routes.scans.SessionLocal", side_effect=TestingSessionLocal), \
-         mock_patch("app.api.routes.scans.clone_repository", return_value=(fixture_dir, fixture_commit_sha)), \
+         mock_patch("app.api.routes.scans.clone_repository", side_effect=mock_clone), \
          mock_patch("app.api.routes.scans.get_git_resolved_branch_or_ref", return_value="main"), \
          mock_patch("app.llm.router.LLMRouter.generate", side_effect=mock_llm_generate):
         await execute_background_scan(
@@ -368,7 +391,7 @@ async def test_phase4_observability_lifecycle_and_restart_release_gate(
     event_types = [e.event_type for e in events]
     assert "SCAN_STARTED" in event_types
 
-    # 5. Add a grounded finding and candidate patch linked to fixture source code
+    # 5. Seed a grounded finding derived from real parsed fixture evidence
     finding_id = str(uuid4())
     finding = FindingModel(
         id=finding_id,
@@ -393,112 +416,236 @@ async def test_phase4_observability_lifecycle_and_restart_release_gate(
     )
     db_session.add(finding)
     db_session.add(evidence)
-
-    patch_id = str(uuid4())
-    patch = PatchModel(
-        id=patch_id,
-        finding_id=finding_id,
-        scan_id=scan_id,
-        status=PatchStatus.NEEDS_REVIEW.value,
-        machine_verdict="PASSED",
-        unified_diff=(
-            "--- a/backend/app/server.py\n"
-            "+++ b/backend/app/server.py\n"
-            "@@ -8,2 +8,4 @@\n"
-            "-    full_path = os.path.join('/var/data', file_path)\n"
-            "+    resolved = os.path.realpath(os.path.join('/var/data', file_path))\n"
-            "+    if not resolved.startswith('/var/data'):\n"
-            "+        raise HTTPException(400, 'Invalid path')\n"
-        ),
-        files_modified=["backend/app/server.py"],
-        explanation="Confines file path to /var/data directory",
-        expected_behavior_change="Rejects directory escape sequences",
-        revision_number=0,
-    )
-    db_session.add(patch)
     db_session.commit()
 
-    # 6. Verify Scan Telemetry generation from persisted DB models
-    resp_telem = client.get(f"/api/v1/scans/{scan_id}/telemetry")
-    assert resp_telem.status_code == 200
-    telem = resp_telem.json()
-    assert telem["scan_id"] == scan_id
-    assert telem["commit_sha"] == fixture_commit_sha
-    assert telem["status"] == "COMPLETED"
-    assert telem["confirmed_findings"] == 1
-    assert telem["patches_generated"] == 1
-    assert telem["patches_needing_review"] == 1
-    assert telem["event_count"] >= 4
+    # 6. Execute the CANONICAL Remediation Workflow (Fix Planning -> Patch Generation -> Sandbox Verification -> Critic)
+    tracked_snapshot_dirs = []
 
-    # 7. Verify Evidence Report generation from persisted DB models
-    resp_report_json = client.get(f"/api/v1/scans/{scan_id}/report/json")
-    assert resp_report_json.status_code == 200
-    rep = resp_report_json.json()
-    assert rep["scan_id"] == scan_id
-    assert rep["commit_sha"] == fixture_commit_sha
-    assert rep["summary"]["total_findings"] == 1
-    assert rep["findings"][0]["evidences"][0]["file_path"] == "backend/app/server.py"
+    def mock_materialize(*args, **kwargs):
+        dest = tempfile.mkdtemp(prefix="repolens_p4_snapshot_")
+        tracked_snapshot_dirs.append(dest)
+        shutil.copytree(fixture_dir, dest, dirs_exist_ok=True)
+        return dest
 
-    resp_report_md = client.get(f"/api/v1/scans/{scan_id}/report/markdown")
-    assert resp_report_md.status_code == 200
-    assert fixture_commit_sha in resp_report_md.text
-    assert "backend/app/server.py" in resp_report_md.text
-
-    # 8. Verify SSE / Event Replay querying with after_id
-    mid_event_id = events[1].id
-    replayed = WorkflowEventService.list_after_id(db=db_session, scan_id=scan_id, after_id=mid_event_id)
-    assert len(replayed) == len(events) - 2
-    for r in replayed:
-        assert r.id > mid_event_id
-
-    # 9. Perform Human Approval state transition
-    resp_approve = client.post(
-        f"/api/v1/patches/{patch_id}/approve",
-        json={"approved_by": "security-reviewer", "notes": "Approved after manual inspection"},
+    diff = (
+        "--- a/backend/app/server.py\n"
+        "+++ b/backend/app/server.py\n"
+        "@@ -8,3 +8,5 @@\n"
+        "-    full_path = os.path.join('/var/data', file_path)\n"
+        "-    with open(full_path, 'r') as f:\n"
+        "-        return {'content': f.read()}\n"
+        "+    resolved = os.path.realpath(os.path.join('/var/data', file_path))\n"
+        "+    if not resolved.startswith('/var/data'):\n"
+        "+        raise HTTPException(400, 'Invalid path')\n"
+        "+    with open(resolved, 'r') as f:\n"
+        "+        return {'content': f.read()}\n"
     )
-    assert resp_approve.status_code == 200
-    assert resp_approve.json()["status"] == "APPROVED"
 
-    # Verify HUMAN_APPROVED event was persisted
-    patch_events = WorkflowEventService.list_for_patch(db=db_session, patch_id=patch_id)
-    pe_types = [e.event_type for e in patch_events]
-    assert "HUMAN_APPROVED" in pe_types
-    assert "PATCH_APPROVED" in pe_types
+    async def mock_remediation_llm(*args, **kwargs):
+        request = args[0] if len(args) == 1 else args[1]
+        user_content = next((m.content for m in request.messages if m.role == "user"), "")
+        system_content = request.messages[0].content if request.messages else ""
+        meta = ModelExecutionMetadata(
+            model_name="claude-3-5-sonnet",
+            provider="mock",
+            prompt_tokens=150,
+            completion_tokens=50,
+            total_tokens=200,
+            execution_time_ms=50.0,
+        )
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # 10. Explicit Persistence Restart & Durability Simulation
-    # ──────────────────────────────────────────────────────────────────────────
-    # Record current state
-    known_event_count = len(WorkflowEventService.list_for_scan(db=db_session, scan_id=scan_id))
-    last_event_id = events[-1].id
+        if "Fix Planner" in system_content or "FixPlan" in user_content:
+            return LLMResponse(
+                content=json.dumps({
+                    "root_cause": "Unvalidated path parameter allows path traversal in read_file",
+                    "objective": "Confine path parameter to /var/data directory before opening",
+                    "files_expected_to_change": ["backend/app/server.py"],
+                    "ordered_changes": [
+                        {
+                            "step_number": 1,
+                            "target_file": "backend/app/server.py",
+                            "description": "Add path confinement check with os.path.realpath and raise HTTPException(400) if not in /var/data",
+                            "rationale": "Prevents path traversal and arbitrary file reads",
+                        }
+                    ],
+                    "validation_plan": ["pytest tests/"],
+                }),
+                model="claude-3-5-sonnet",
+                provider=LLMProvider.GEMINI,
+                metadata=meta,
+            )
+        elif "Patch Generator" in system_content or "unified diff" in user_content.lower():
+            return LLMResponse(
+                content=json.dumps({
+                    "unified_diff": diff,
+                    "explanation": "Confines file path to /var/data directory",
+                    "expected_behavior_change": "Rejects directory escape sequences with 400 status",
+                    "generated_tests_or_test_plan": ["pytest tests/test_server.py"],
+                    "files_modified": ["backend/app/server.py"],
+                }),
+                model="claude-3-5-sonnet",
+                provider=LLMProvider.GEMINI,
+                metadata=meta,
+            )
+        elif "Critic" in system_content or "critique" in user_content.lower():
+            return LLMResponse(
+                content=json.dumps({
+                    "verdict": "APPROVED",
+                    "reason": "Patch cleanly prevents path traversal without breaking route contract",
+                    "confidence_score": 0.95,
+                    "risk_assessment": "Low risk",
+                    "suggested_improvements": [],
+                }),
+                model="claude-3-5-sonnet",
+                provider=LLMProvider.GEMINI,
+                metadata=meta,
+            )
 
-    # Simulate process restart by expiring all cache and using clean queries
-    db_session.expire_all()
+        return LLMResponse(
+            content=json.dumps({
+                "overview": "Fixture FastAPI service",
+                "findings": [],
+                "evaluations": [],
+                "ordered_changes": [],
+            }),
+            model="mock-model",
+            provider=LLMProvider.GEMINI,
+            metadata=meta,
+        )
 
-    # Verify scan, findings, and events survived restart intact
-    restarted_scan = db_session.query(ScanModel).filter(ScanModel.id == scan_id).first()
-    assert restarted_scan is not None
-    assert restarted_scan.commit_hash == fixture_commit_sha
-    assert restarted_scan.status == ScanStatus.COMPLETED.value
+    try:
+        with mock_patch("app.ingestion.snapshot.RepositorySnapshotService.materialize_snapshot_from_metadata", side_effect=mock_materialize), \
+             mock_patch("app.llm.router.LLMRouter.generate", side_effect=mock_remediation_llm):
+            resp_patch = client.post(f"/api/v1/findings/{finding_id}/patch")
+            assert resp_patch.status_code == 200
+            patch_data = resp_patch.json()
+            patch_id = patch_data["proposal"]["id"]
 
-    # Replay after a known persisted event ID returns strictly unseen events
-    post_restart_replayed = WorkflowEventService.list_after_id(
-        db=db_session,
-        scan_id=scan_id,
-        after_id=last_event_id,
-    )
-    # Any events emitted after the last scan event (e.g. human approval events) are returned
-    for evt in post_restart_replayed:
-        assert evt.id > last_event_id
+        # Verify patch was created by canonical workflow and persisted with machine verdict
+        db_session.expire_all()
+        persisted_patch = db_session.query(PatchModel).filter(PatchModel.id == patch_id).first()
+        assert persisted_patch is not None
+        assert persisted_patch.finding_id == finding_id
+        assert persisted_patch.scan_id == scan_id
+        assert persisted_patch.files_modified == ["backend/app/server.py"]
+        assert persisted_patch.machine_verdict in ("PASSED", "NEEDS_REVIEW")
+        assert persisted_patch.status in (PatchStatus.VERIFIED.value, PatchStatus.NEEDS_REVIEW.value)
+        # Machine workflow must never mark patch as APPROVED
+        assert persisted_patch.status != PatchStatus.APPROVED.value
 
-    # Rebuild report and telemetry post-restart
-    restarted_report = ScanReportService.build_scan_report(db=db_session, scan_id=scan_id)
-    assert restarted_report is not None
-    assert restarted_report.commit_sha == fixture_commit_sha
-    assert len(restarted_report.findings) == 1
+        # 7. Verify Scan Telemetry generation from persisted DB models
+        resp_telem = client.get(f"/api/v1/scans/{scan_id}/telemetry")
+        assert resp_telem.status_code == 200
+        telem = resp_telem.json()
+        assert telem["scan_id"] == scan_id
+        assert telem["commit_sha"] == fixture_commit_sha
+        assert telem["status"] == "COMPLETED"
+        assert telem["confirmed_findings"] == 1
+        assert telem["patches_generated"] >= 1
+        assert telem["event_count"] >= 4
 
-    restarted_telemetry = ScanReportService.build_scan_telemetry(db=db_session, scan_id=scan_id)
-    assert restarted_telemetry is not None
-    assert restarted_telemetry.commit_sha == fixture_commit_sha
-    assert restarted_telemetry.confirmed_findings == 1
-    assert restarted_telemetry.patches_approved == 1
+        # 8. Verify Evidence Report generation from persisted DB models
+        resp_report_json = client.get(f"/api/v1/scans/{scan_id}/report/json")
+        assert resp_report_json.status_code == 200
+        rep = resp_report_json.json()
+        assert rep["scan_id"] == scan_id
+        assert rep["commit_sha"] == fixture_commit_sha
+        assert rep["summary"]["total_findings"] == 1
+        assert rep["findings"][0]["evidences"][0]["file_path"] == "backend/app/server.py"
+
+        resp_report_md = client.get(f"/api/v1/scans/{scan_id}/report/markdown")
+        assert resp_report_md.status_code == 200
+        assert fixture_commit_sha in resp_report_md.text
+        assert "backend/app/server.py" in resp_report_md.text
+
+        # 9. Verify SSE / Event Replay querying with after_id
+        events_before_approval = WorkflowEventService.list_for_scan(db=db_session, scan_id=scan_id, limit=50)
+        mid_event_id = events_before_approval[1].id
+        replayed = WorkflowEventService.list_after_id(db=db_session, scan_id=scan_id, after_id=mid_event_id)
+        assert len(replayed) == len(events_before_approval) - 2
+        for r in replayed:
+            assert r.id > mid_event_id
+
+        # 10. Perform Human Approval state transition
+        resp_approve = client.post(
+            f"/api/v1/patches/{patch_id}/approve",
+            json={"approved_by": "security-reviewer", "notes": "Approved after manual inspection"},
+        )
+        assert resp_approve.status_code == 200
+        assert resp_approve.json()["status"] == "APPROVED"
+
+        # Verify HUMAN_APPROVED event was persisted
+        patch_events = WorkflowEventService.list_for_patch(db=db_session, patch_id=patch_id)
+        pe_types = [e.event_type for e in patch_events]
+        assert "HUMAN_APPROVED" in pe_types
+        assert "PATCH_APPROVED" in pe_types
+
+        # ──────────────────────────────────────────────────────────────────────────
+        # 11. True Database Session Restart & Durability Simulation (FIX 3)
+        # ──────────────────────────────────────────────────────────────────────────
+        # 1. Record current state before closing session
+        all_events_pre_restart = WorkflowEventService.list_for_scan(db=db_session, scan_id=scan_id, limit=100)
+        known_event_count = len(all_events_pre_restart)
+        known_last_event_id = events_before_approval[-1].id
+
+        # 2. Extract engine bind and cleanly close the old session
+        bind = db_session.get_bind()
+        db_session.commit()
+        db_session.close()
+
+        # 3. Create a brand-NEW SQLAlchemy Session from the sessionmaker factory
+        FreshSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=bind)
+        fresh_session = FreshSessionLocal()
+
+        try:
+            # 4. Verify scan, findings, and patches survived restart intact using fresh session
+            restarted_scan = fresh_session.query(ScanModel).filter(ScanModel.id == scan_id).first()
+            assert restarted_scan is not None
+            assert restarted_scan.commit_hash == fixture_commit_sha
+            assert restarted_scan.status == ScanStatus.COMPLETED.value
+
+            restarted_finding = fresh_session.query(FindingModel).filter(FindingModel.scan_id == scan_id).first()
+            assert restarted_finding is not None
+            assert restarted_finding.verification_verdict == "CONFIRMED"
+
+            restarted_patch = fresh_session.query(PatchModel).filter(PatchModel.id == patch_id).first()
+            assert restarted_patch is not None
+            assert restarted_patch.status == PatchStatus.APPROVED.value
+            assert restarted_patch.machine_verdict in ("PASSED", "NEEDS_REVIEW")
+
+            # 5. Verify events survived with monotonically increasing IDs
+            fresh_events = WorkflowEventService.list_for_scan(db=fresh_session, scan_id=scan_id, limit=100)
+            assert len(fresh_events) == known_event_count
+            fresh_event_ids = [e.id for e in fresh_events]
+            assert fresh_event_ids == sorted(fresh_event_ids)
+
+            # 6. Replay after known event ID using fresh session returns strictly unseen events
+            post_restart_replayed = WorkflowEventService.list_after_id(
+                db=fresh_session,
+                scan_id=scan_id,
+                after_id=known_last_event_id,
+            )
+            assert len(post_restart_replayed) >= 2  # HUMAN_APPROVED, PATCH_APPROVED
+            for evt in post_restart_replayed:
+                assert evt.id > known_last_event_id
+
+            # 7. Rebuild report and telemetry post-restart using fresh session
+            restarted_report = ScanReportService.build_scan_report(db=fresh_session, scan_id=scan_id)
+            assert restarted_report is not None
+            assert restarted_report.commit_sha == fixture_commit_sha
+            assert len(restarted_report.findings) == 1
+            assert restarted_report.summary.approved_patches == 1
+
+            restarted_telemetry = ScanReportService.build_scan_telemetry(db=fresh_session, scan_id=scan_id)
+            assert restarted_telemetry is not None
+            assert restarted_telemetry.commit_sha == fixture_commit_sha
+            assert restarted_telemetry.confirmed_findings == 1
+            assert restarted_telemetry.patches_approved == 1
+
+        finally:
+            fresh_session.close()
+
+    finally:
+        for p in tracked_snapshot_dirs:
+            if os.path.exists(p):
+                shutil.rmtree(p, ignore_errors=True)

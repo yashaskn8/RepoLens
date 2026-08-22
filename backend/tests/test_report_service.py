@@ -334,3 +334,67 @@ def test_report_hostile_markdown_and_secret_redaction(db_session: Session):
     # 3. Dynamic code fences used (4 backticks because 3 backticks was inside content)
     assert "````" in md
 
+
+def test_scanner_failure_reasons_redacted_in_json_and_markdown(db_session: Session):
+    """Verify scanner failure reasons scrub secrets and host paths in JSON report and Markdown."""
+    scan_id = uuid4()
+    scan = ScanModel(
+        id=str(scan_id),
+        repository_url="https://github.com/org/scanner-redaction-test",
+        status=ScanStatus.COMPLETED.value,
+        model_metadata={
+            "scanner_coverage": [
+                {
+                    "tool": "trivy",
+                    "status": "FAILED",
+                    "findings_count": 0,
+                    "failure_reason": "Trivy failed at C:\\Users\\admin\\workspace with Authorization: Bearer supersecret123456",
+                },
+                {
+                    "tool": "osv",
+                    "status": "UNAVAILABLE",
+                    "findings_count": 0,
+                    "failure_reason": "OSV failed under /home/alice/private using sk-12345678901234567890",
+                },
+                {
+                    "tool": "semgrep",
+                    "status": "COMPLETED",
+                    "findings_count": 3,
+                    "failure_reason": None,
+                },
+            ]
+        },
+    )
+    db_session.add(scan)
+    db_session.commit()
+
+    report = ScanReportService.build_scan_report(db=db_session, scan_id=str(scan_id))
+    assert report is not None
+    assert len(report.scanner_coverage) == 3
+
+    # Check Trivy coverage in JSON report
+    trivy_cov = next(sc for sc in report.scanner_coverage if sc.tool == "trivy")
+    assert trivy_cov.status == "FAILED"
+    assert trivy_cov.failure_reason is not None
+    assert "C:\\Users\\admin" not in trivy_cov.failure_reason
+    assert "supersecret123456" not in trivy_cov.failure_reason
+    assert "[REDACTED]" in trivy_cov.failure_reason
+
+    # Check OSV coverage in JSON report
+    osv_cov = next(sc for sc in report.scanner_coverage if sc.tool == "osv")
+    assert osv_cov.status == "UNAVAILABLE"
+    assert osv_cov.failure_reason is not None
+    assert "/home/alice" not in osv_cov.failure_reason
+    assert "sk-12345678901234567890" not in osv_cov.failure_reason
+    assert "[REDACTED]" in osv_cov.failure_reason
+
+    # Verify Markdown rendering also scrubs secrets
+    md = ScanReportService.render_markdown(report)
+    assert "supersecret123456" not in md
+    assert "sk-1234567890" not in md
+    assert "C:\\Users\\admin" not in md
+    assert "/home/alice" not in md
+    assert "FAILED" in md
+    assert "UNAVAILABLE" in md
+
+

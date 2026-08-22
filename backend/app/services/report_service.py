@@ -234,13 +234,17 @@ class ScanReportService:
         if isinstance(raw_scanners, list) and raw_scanners:
             for sc in raw_scanners:
                 if isinstance(sc, dict):
+                    raw_reason = sc.get("failure_reason") or sc.get("error_category")
+                    safe_reason = _redact_secrets(str(raw_reason))[:512] if raw_reason is not None else None
+                    raw_tool = sc.get("tool") or sc.get("scanner") or "unknown"
+                    safe_tool = _redact_secrets(str(raw_tool))[:128]
                     scanner_coverage.append(
                         ReportScannerCoverage(
-                            tool=sc.get("tool") or sc.get("scanner") or "unknown",
-                            status=sc.get("status") or "UNKNOWN",
-                            findings_count=sc.get("findings_count", 0),
+                            tool=safe_tool,
+                            status=str(sc.get("status") or "UNKNOWN"),
+                            findings_count=int(sc.get("findings_count", 0)),
                             execution_time_ms=sc.get("execution_time_ms"),
-                            failure_reason=sc.get("failure_reason") or sc.get("error_category"),
+                            failure_reason=safe_reason,
                         )
                     )
         else:
@@ -252,14 +256,15 @@ class ScanReportService:
                     st = "COMPLETED" if te.event_type == "TOOL_COMPLETED" else ("UNAVAILABLE" if te.event_type == "TOOL_UNAVAILABLE" else "FAILED")
                     fc = (te.metadata_payload or {}).get("findings_count", 0)
                     et = (te.metadata_payload or {}).get("execution_time_ms")
-                    reason = (te.metadata_payload or {}).get("reason") or (te.metadata_payload or {}).get("status")
+                    raw_reason = (te.metadata_payload or {}).get("reason") or (te.metadata_payload or {}).get("status")
+                    safe_reason = _redact_secrets(str(raw_reason))[:512] if raw_reason is not None and st != "COMPLETED" else None
                     scanner_coverage.append(
                         ReportScannerCoverage(
-                            tool=te.tool_name,
+                            tool=_redact_secrets(str(te.tool_name))[:128],
                             status=st,
                             findings_count=fc,
                             execution_time_ms=et,
-                            failure_reason=reason if st != "COMPLETED" else None,
+                            failure_reason=safe_reason,
                         )
                     )
 

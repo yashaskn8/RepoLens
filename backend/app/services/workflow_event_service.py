@@ -96,6 +96,8 @@ class WorkflowEventService:
             op_session = session_factory()
             op_session.add(model)
             op_session.commit()
+            op_session.refresh(model)
+            op_session.expunge(model)
             return model
         except Exception as exc:
             logger.warning(f"Operational event emission failed for {event.event_type}: {exc}")
@@ -114,34 +116,44 @@ class WorkflowEventService:
 
     @staticmethod
     def emit(
-        db: Session,
+        db: Optional[Session],
         event: WorkflowEventCreate,
         critical: bool = False,
         session_factory: Optional[Callable[[], Session]] = None,
     ) -> Optional[WorkflowEventModel]:
-        """Backward-compatible emit interface.
+        """Canonical event emission interface.
 
-        If critical is True, delegates to emit_critical (uses caller's session, errors propagate).
-        If critical is False, delegates to emit_operational when a session_factory is available,
-        otherwise falls back to adding to the caller's session with error suppression for
-        backward compatibility with existing call sites that commit immediately after.
+        If critical is True:
+            Delegates to emit_critical (attaches to caller's session so audit events
+            commit or rollback atomically with domain state transitions; errors propagate).
+
+        If critical is False:
+            Delegates to emit_operational (independent short-lived transaction).
+            If session_factory is supplied, it is used.
+            If session_factory is None and db is supplied, derives an independent session_factory
+            from the active engine/bind of that session.
+            If neither is available, falls back to global SessionLocal.
+            NO non-critical event ever attaches to the caller's transaction.
         """
         if critical:
+            if db is None:
+                raise ValueError("A database session is required for critical audit event emission.")
             return WorkflowEventService.emit_critical(db, event)
 
-        if session_factory is not None:
-            return WorkflowEventService.emit_operational(event, session_factory)
+        if session_factory is None and db is not None:
+            bind = None
+            if hasattr(db, "get_bind"):
+                try:
+                    bind = db.get_bind()
+                except Exception:
+                    bind = None
+            if bind is None:
+                bind = getattr(db, "bind", None)
 
-        # Legacy fallback: add to caller's session with error suppression.
-        # This is safe when the caller commits immediately after (as in execute_background_scan),
-        # because the operational event and the state change share the same commit boundary.
-        try:
-            model = _build_event_model(event)
-            db.add(model)
-            return model
-        except Exception as exc:
-            logger.warning(f"Failed to emit workflow event {event.event_type}: {str(exc)}")
-            return None
+            if bind is not None:
+                session_factory = sessionmaker(autocommit=False, autoflush=False, expire_on_commit=False, bind=bind)
+
+        return WorkflowEventService.emit_operational(event, session_factory=session_factory)
 
     @staticmethod
     def list_for_scan(
