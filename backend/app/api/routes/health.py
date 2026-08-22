@@ -23,7 +23,7 @@ from app.schemas.telemetry import (
     TelemetryReport,
 )
 
-router = APIRouter(tags=["Health & Telemetry"])
+router = APIRouter(prefix="/health", tags=["Health & Telemetry"])
 settings = get_settings()
 
 
@@ -32,7 +32,7 @@ def _utc_now() -> datetime:
 
 
 @router.get(
-    "/health",
+    "",
     status_code=status.HTTP_200_OK,
     summary="Health check endpoint",
     description="Validates that the API service is active and the database connection is healthy.",
@@ -44,7 +44,8 @@ def check_health(db: Session = Depends(get_db)) -> Dict[str, Any]:
     try:
         db.execute(text("SELECT 1"))
     except Exception as exc:
-        db_status = f"unhealthy: {str(exc)}"
+        logger.error(f"Database health check failed: {exc}", exc_info=True)
+        db_status = "unhealthy"
 
     return {
         "status": "healthy" if db_status == "connected" else "degraded",
@@ -57,13 +58,14 @@ def check_health(db: Session = Depends(get_db)) -> Dict[str, Any]:
 
 
 def _build_telemetry_report(db: Session) -> TelemetryReport:
-    """Collect and assemble comprehensive operational telemetry without leaking credentials."""
+    """Collect and assemble comprehensive operational telemetry without leaking credentials or host paths."""
     # 1. Database check
     db_status = "connected"
     try:
         db.execute(text("SELECT 1"))
     except Exception as exc:
-        db_status = f"unhealthy: {str(exc)}"
+        logger.error(f"Database telemetry check failed: {exc}", exc_info=True)
+        db_status = "unhealthy"
 
     # 2. Providers configuration telemetry (booleans only, never keys)
     providers = [
@@ -89,7 +91,7 @@ def _build_telemetry_report(db: Session) -> TelemetryReport:
         ),
     ]
 
-    # 3. Storage filesystem health
+    # 3. Storage filesystem capability (booleans only, no host paths)
     temp_dir = tempfile.gettempdir()
     snapshot_writable = os.access(temp_dir, os.W_OK)
     checkpointer_path = getattr(settings, "CHECKPOINTER_DB_PATH", "repolens_checkpoints.db")
@@ -97,10 +99,8 @@ def _build_telemetry_report(db: Session) -> TelemetryReport:
     checkpointer_accessible = os.access(checkpointer_dir, os.W_OK)
 
     storage = StorageTelemetry(
-        snapshot_dir=temp_dir,
-        writable=snapshot_writable,
-        checkpointer_db_path=checkpointer_path,
-        checkpointer_accessible=checkpointer_accessible,
+        snapshot_storage_writable=snapshot_writable,
+        checkpointer_storage_accessible=checkpointer_accessible,
     )
 
     # 4. Metrics aggregation
@@ -137,7 +137,7 @@ def _build_telemetry_report(db: Session) -> TelemetryReport:
 
 
 @router.get(
-    "/health/detailed",
+    "/detailed",
     status_code=status.HTTP_200_OK,
     summary="Detailed system telemetry endpoint",
     description="Returns comprehensive system observability metrics, database status, provider availability, and storage health.",
@@ -149,12 +149,13 @@ def get_detailed_health(db: Session = Depends(get_db)) -> TelemetryReport:
 
 
 @router.get(
-    "/api/v1/health/telemetry",
+    "/telemetry",
     status_code=status.HTTP_200_OK,
-    summary="API v1 Telemetry endpoint",
-    description="Canonical API v1 endpoint for operational telemetry and observability monitoring.",
+    summary="API Telemetry endpoint",
+    description="Operational telemetry and observability monitoring endpoint.",
     response_model=TelemetryReport,
 )
 def get_api_telemetry(db: Session = Depends(get_db)) -> TelemetryReport:
-    """Retrieve canonical API v1 operational telemetry."""
+    """Retrieve operational telemetry."""
     return _build_telemetry_report(db)
+

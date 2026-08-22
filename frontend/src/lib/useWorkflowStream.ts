@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { WorkflowEvent, WorkflowEventType } from '@/types/domain';
+import { WORKFLOW_EVENT_TYPES, WorkflowEvent, WorkflowEventType } from '@/types/domain';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
 
@@ -22,16 +22,29 @@ export function useWorkflowStream(
   const [events, setEvents] = useState<WorkflowEvent[]>([]);
   const [status, setStatus] = useState<StreamStatus>('idle');
   const [error, setError] = useState<string | null>(null);
+
   const lastEventIdRef = useRef<number>(0);
   const eventSourceRef = useRef<EventSource | null>(null);
   const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const terminalReceivedRef = useRef<boolean>(false);
 
   const clearEvents = () => {
     setEvents([]);
     lastEventIdRef.current = 0;
+    terminalReceivedRef.current = false;
   };
 
   useEffect(() => {
+    // Reset state for new scan or disabled stream
+    terminalReceivedRef.current = false;
+    lastEventIdRef.current = 0;
+    setEvents([]);
+
+    if (retryTimeoutRef.current) {
+      clearTimeout(retryTimeoutRef.current);
+      retryTimeoutRef.current = null;
+    }
+
     if (!scanId || !enabled) {
       setStatus('idle');
       if (eventSourceRef.current) {
@@ -45,11 +58,52 @@ export function useWorkflowStream(
     let retryCount = 0;
     const maxRetries = 10;
 
+    function handleEvent(messageEvent: MessageEvent) {
+      if (!isMounted || terminalReceivedRef.current) return;
+
+      try {
+        const parsed = JSON.parse(messageEvent.data) as WorkflowEvent;
+        if (parsed && typeof parsed.id === 'number') {
+          if (parsed.id > lastEventIdRef.current) {
+            lastEventIdRef.current = parsed.id;
+          }
+
+          setEvents((prev) => {
+            if (prev.some((e) => e.id === parsed.id)) {
+              return prev;
+            }
+            return [...prev, parsed].sort((a, b) => a.id - b.id);
+          });
+
+          // Check if terminal event received
+          if (parsed.event_type === 'SCAN_COMPLETED' || parsed.event_type === 'SCAN_FAILED') {
+            terminalReceivedRef.current = true;
+            setStatus('completed');
+
+            // Clear any pending retries
+            if (retryTimeoutRef.current) {
+              clearTimeout(retryTimeoutRef.current);
+              retryTimeoutRef.current = null;
+            }
+
+            // Close the EventSource immediately to avoid unnecessary reconnect loops
+            if (eventSourceRef.current) {
+              eventSourceRef.current.close();
+              eventSourceRef.current = null;
+            }
+          }
+        }
+      } catch {
+        // Ignore non-JSON comments or keepalive messages
+      }
+    }
+
     function connect() {
-      if (!isMounted) return;
+      if (!isMounted || terminalReceivedRef.current) return;
 
       if (eventSourceRef.current) {
         eventSourceRef.current.close();
+        eventSourceRef.current = null;
       }
 
       setStatus(lastEventIdRef.current > 0 ? 'reconnecting' : 'connecting');
@@ -65,38 +119,24 @@ export function useWorkflowStream(
         retryCount = 0;
       };
 
-      es.onmessage = (messageEvent) => {
-        if (!isMounted) return;
-        try {
-          const parsed = JSON.parse(messageEvent.data) as WorkflowEvent;
-          if (parsed && typeof parsed.id === 'number') {
-            if (parsed.id > lastEventIdRef.current) {
-              lastEventIdRef.current = parsed.id;
-            }
-            setEvents((prev) => {
-              // Deduplicate by ID
-              if (prev.some((e) => e.id === parsed.id)) {
-                return prev;
-              }
-              return [...prev, parsed].sort((a, b) => a.id - b.id);
-            });
+      // Register shared event handler for generic messages
+      es.onmessage = handleEvent;
 
-            // If terminal event received, mark completed
-            if (parsed.event_type === 'SCAN_COMPLETED' || parsed.event_type === 'SCAN_FAILED') {
-              setStatus('completed');
-            }
-          }
-        } catch {
-          // Ignore heartbeats or non-JSON comments
-        }
-      };
+      // Register shared event handler for all canonical named SSE events
+      WORKFLOW_EVENT_TYPES.forEach((eventType) => {
+        es.addEventListener(eventType, handleEvent as EventListener);
+      });
 
       es.onerror = () => {
         if (!isMounted) return;
-        es.close();
-        eventSourceRef.current = null;
 
-        if (status === 'completed') {
+        es.close();
+        if (eventSourceRef.current === es) {
+          eventSourceRef.current = null;
+        }
+
+        // If a terminal event was already received, do not reconnect
+        if (terminalReceivedRef.current) {
           return;
         }
 
@@ -118,6 +158,7 @@ export function useWorkflowStream(
       isMounted = false;
       if (retryTimeoutRef.current) {
         clearTimeout(retryTimeoutRef.current);
+        retryTimeoutRef.current = null;
       }
       if (eventSourceRef.current) {
         eventSourceRef.current.close();
@@ -134,3 +175,4 @@ export function useWorkflowStream(
     clearEvents,
   };
 }
+

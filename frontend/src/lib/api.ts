@@ -202,3 +202,17 @@ export async function requestPatchGeneration(findingId: string): Promise<import(
 
   return response.json();
 }
+
+export async function fetchScanTelemetry(scanId: string): Promise<import('@/types/domain').ScanTelemetry> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/scans/${scanId}/telemetry`, {
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json' },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch scan telemetry (${response.status})`);
+  }
+
+  return response.json();
+}
+

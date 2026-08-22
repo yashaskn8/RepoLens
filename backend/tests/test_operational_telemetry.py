@@ -27,7 +27,7 @@ def test_basic_health_endpoint(client: TestClient):
 
 
 def test_detailed_telemetry_endpoint(client: TestClient, db_session: Session):
-    """Verify GET /health/detailed and GET /api/v1/health/telemetry return aggregated system metrics without leaking credentials."""
+    """Verify GET /health/detailed and GET /api/v1/health/telemetry return aggregated system metrics without leaking host paths, database strings, or credentials."""
     # Seed some records in the test database
     scan1 = ScanModel(
         id=str(uuid4()),
@@ -82,14 +82,27 @@ def test_detailed_telemetry_endpoint(client: TestClient, db_session: Session):
     assert "providers" in data
     assert len(data["providers"]) >= 4
 
-    # Verify no raw keys in response
-    resp_text = resp.text.lower()
-    assert "api_key" not in resp_text or "sk-" not in resp_text
+    # Verify no credentials, host filesystem paths, or DB URLs in telemetry response text
+    resp_text = resp.text
+    resp_lower = resp_text.lower()
+    assert "c:\\" not in resp_lower
+    assert "/tmp/" not in resp_lower
+    assert "/home/" not in resp_lower
+    assert "repolens_checkpoints.db" not in resp_text
+    assert "sqlite://" not in resp_lower
+    assert "postgresql://" not in resp_lower
+    assert "sk-" not in resp_text
+    assert "gsk_" not in resp_text
+    assert "aiza" not in resp_lower
 
-    # Verify storage checks
+    # Verify storage capability fields (booleans only, no host paths)
     assert "storage" in data
-    assert "snapshot_dir" in data["storage"]
-    assert "writable" in data["storage"]
+    assert "snapshot_storage_writable" in data["storage"]
+    assert isinstance(data["storage"]["snapshot_storage_writable"], bool)
+    assert "checkpointer_storage_accessible" in data["storage"]
+    assert isinstance(data["storage"]["checkpointer_storage_accessible"], bool)
+    assert "snapshot_dir" not in data["storage"]
+    assert "checkpointer_db_path" not in data["storage"]
 
     # Verify metrics aggregation
     metrics = data["metrics"]
@@ -101,7 +114,10 @@ def test_detailed_telemetry_endpoint(client: TestClient, db_session: Session):
     assert metrics["approved_patches"] >= 1
     assert metrics["total_workflow_events"] >= 1
 
-    # Verify /api/v1/health/telemetry alias
-    resp_v1 = client.get("/api/v1/health/telemetry")
-    assert resp_v1.status_code == 200
-    assert resp_v1.json()["service"] == "RepoLens"
+    # Verify root and API v1 routes
+    assert client.get("/health").status_code == 200
+    assert client.get("/api/v1/health").status_code == 200
+    assert client.get("/api/v1/health/telemetry").status_code == 200
+    assert client.get("/health/telemetry").status_code == 200
+    assert client.get("/api/v1/api/v1/health/telemetry").status_code == 404
+

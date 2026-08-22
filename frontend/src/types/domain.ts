@@ -80,6 +80,35 @@ export interface HealthResponse {
   database: string;
 }
 
+export interface ScanTelemetry {
+  scan_id: string;
+  commit_sha?: string | null;
+  status: string;
+  total_duration_ms?: number | null;
+  event_count: number;
+  stage_count: number;
+  tools_completed: number;
+  tools_failed: number;
+  tools_unavailable: number;
+  llm_calls?: number | null;
+  llm_retries?: number | null;
+  provider_fallbacks?: number | null;
+  prompt_tokens?: number | null;
+  completion_tokens?: number | null;
+  total_tokens?: number | null;
+  confirmed_findings: number;
+  possible_findings: number;
+  rejected_findings: number;
+  patches_generated: number;
+  patches_verified: number;
+  patches_needing_review: number;
+  patches_approved: number;
+  patches_rejected: number;
+  analysis_truncated: boolean;
+  analysis_truncation_reason?: string | null;
+}
+
+
 export type SymbolKind =
   | 'FUNCTION'
   | 'CLASS'
@@ -437,6 +466,7 @@ export type WorkflowEventType =
   | 'TOOL_STARTED'
   | 'TOOL_COMPLETED'
   | 'TOOL_FAILED'
+  | 'TOOL_UNAVAILABLE'
   | 'FINDING_CONFIRMED'
   | 'PATCH_GENERATED'
   | 'PATCH_VERIFIED'
@@ -448,6 +478,31 @@ export type WorkflowEventType =
   | 'HUMAN_REJECTED'
   | 'HUMAN_REVISION_REQUESTED'
   | 'WORKFLOW_ERROR';
+
+export const WORKFLOW_EVENT_TYPES: readonly WorkflowEventType[] = [
+  'SCAN_CREATED',
+  'SCAN_STARTED',
+  'SCAN_COMPLETED',
+  'SCAN_FAILED',
+  'STAGE_STARTED',
+  'STAGE_COMPLETED',
+  'STAGE_FAILED',
+  'TOOL_STARTED',
+  'TOOL_COMPLETED',
+  'TOOL_FAILED',
+  'TOOL_UNAVAILABLE',
+  'FINDING_CONFIRMED',
+  'PATCH_GENERATED',
+  'PATCH_VERIFIED',
+  'PATCH_NEEDS_REVIEW',
+  'PATCH_REJECTED',
+  'PATCH_APPROVED',
+  'PATCH_REVISION_CREATED',
+  'HUMAN_APPROVED',
+  'HUMAN_REJECTED',
+  'HUMAN_REVISION_REQUESTED',
+  'WORKFLOW_ERROR',
+] as const;
 
 export interface WorkflowEvent {
   id: number;

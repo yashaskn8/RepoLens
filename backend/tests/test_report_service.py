@@ -167,3 +167,170 @@ def test_report_unknown_scan_returns_404(client: TestClient):
     random_id = uuid4()
     resp = client.get(f"/api/v1/scans/{random_id}/report")
     assert resp.status_code == 404
+
+
+def test_report_analysis_scope_and_scanner_coverage(db_session: Session):
+    """Verify ScanReport accurately reflects analysis scope, truncation, and scanner coverage statuses."""
+    scan_id = uuid4()
+    scan = ScanModel(
+        id=str(scan_id),
+        repository_url="https://github.com/org/scope-test-repo",
+        branch="main",
+        status=ScanStatus.COMPLETED.value,
+        model_metadata={
+            "analysis_scope": {
+                "truncated": True,
+                "reason": "Max byte limit 50MB exceeded during clone ingestion",
+                "files_processed": 500,
+                "source_bytes_processed": 52428800,
+                "total_observed_files": 1250,
+                "total_observed_bytes": 104857600,
+            },
+            "scanner_coverage": [
+                {
+                    "tool": "semgrep",
+                    "status": "COMPLETED",
+                    "findings_count": 3,
+                    "execution_time_ms": 240,
+                },
+                {
+                    "tool": "trivy",
+                    "status": "UNAVAILABLE",
+                    "findings_count": 0,
+                    "failure_reason": "Trivy binary not installed on runner host",
+                },
+                {
+                    "tool": "osv",
+                    "status": "FAILED",
+                    "findings_count": 0,
+                    "execution_time_ms": 1500,
+                    "failure_reason": "OSV scanner network timeout querying database",
+                },
+            ],
+        },
+    )
+    db_session.add(scan)
+    db_session.commit()
+
+    report = ScanReportService.build_scan_report(db=db_session, scan_id=str(scan_id))
+    assert report is not None
+
+    # Verify JSON structure
+    assert report.analysis_scope is not None
+    assert report.analysis_scope.truncated is True
+    assert "Max byte limit" in report.analysis_scope.reason
+    assert report.analysis_scope.files_processed == 500
+    assert report.analysis_scope.total_observed_files == 1250
+
+    assert len(report.scanner_coverage) == 3
+    tools = {sc.tool: sc for sc in report.scanner_coverage}
+    assert tools["semgrep"].status == "COMPLETED"
+    assert tools["semgrep"].findings_count == 3
+    assert tools["trivy"].status == "UNAVAILABLE"
+    assert tools["trivy"].failure_reason == "Trivy binary not installed on runner host"
+    assert tools["osv"].status == "FAILED"
+
+    # Verify Markdown rendering
+    md = ScanReportService.render_markdown(report)
+    assert "## Analysis Scope & Ingestion Boundary" in md
+    assert "**Analysis Truncated**: **YES** ⚠️" in md
+    assert "Max byte limit 50MB exceeded" in md
+    assert "500 / 1250 observed" in md
+
+    assert "## Deterministic Scanner Coverage" in md
+    assert "semgrep" in md
+    assert "`COMPLETED`" in md
+    assert "trivy" in md
+    assert "`UNAVAILABLE`" in md
+    assert "Trivy binary not installed on runner host" in md
+    assert "osv" in md
+    assert "`FAILED`" in md
+
+
+def test_report_hostile_markdown_and_secret_redaction(db_session: Session):
+    """Verify malicious HTML tags are inert, code fences are breakout-proof, and secrets are redacted."""
+    scan_id = uuid4()
+    scan = ScanModel(
+        id=str(scan_id),
+        repository_url="https://github.com/org/hostile-repo",
+        branch="main",
+        status=ScanStatus.COMPLETED.value,
+        model_metadata={
+            "architecture_overview": "Overview with <script>alert(1)</script> and sk-12345678901234567890 and Bearer secrettoken12345",
+        },
+    )
+    db_session.add(scan)
+
+    # Finding with hostile script tags, backticks, and secret tokens in title and snippet
+    finding_id = uuid4()
+    finding = FindingModel(
+        id=str(finding_id),
+        scan_id=str(scan_id),
+        title="XSS via <img src=x onerror=alert('hack')> and sk-abcdef1234567890",
+        description="User input contains <script>alert('pwned')</script> and Authorization: Bearer supersecrettoken999",
+        severity=Severity.CRITICAL.value,
+        status=FindingStatus.OPEN.value,
+    )
+    db_session.add(finding)
+
+    # Snippet with nested code fences to test breakout prevention
+    evidence = EvidenceModel(
+        id=str(uuid4()),
+        finding_id=str(finding_id),
+        file_path="app/auth/`user_token`.py",
+        start_line=10,
+        end_line=20,
+        code_snippet='const token = "sk-live12345678901234567890";\n```javascript\n// Attempted fence breakout\n```\nconst auth = "Bearer toplevelsecret99999";',
+        context_notes="Host path leak attempt C:\\Users\\Administrator\\AppData and AIzaSyD1234567890123456789012345678901",
+    )
+    db_session.add(evidence)
+
+    # Patch with diff
+    patch = PatchModel(
+        id=str(uuid4()),
+        finding_id=str(finding_id),
+        scan_id=str(scan_id),
+        status=PatchStatus.APPROVED.value,
+        machine_verdict="PASSED",
+        unified_diff='--- a/auth.py\n+++ b/auth.py\n@@ -1,1 +1,1 @@\n-apiKey = "sk-badsecretkey1234567890"\n+apiKey = os.environ["API_KEY"]\n',
+        files_modified=["app/auth/`user_token`.py"],
+        explanation="Removed raw key sk-badsecretkey1234567890",
+        expected_behavior_change="Use env var with <script>test</script>",
+        approved_by="admin-user | with | pipes",
+        revision_number=0,
+    )
+    db_session.add(patch)
+    db_session.commit()
+
+    report = ScanReportService.build_scan_report(db=db_session, scan_id=str(scan_id))
+    assert report is not None
+
+    # Verify JSON redaction
+    assert "sk-12345678901234567890" not in report.architecture_overview
+    assert "sk-abcdef1234567890" not in report.findings[0].title
+    assert "supersecrettoken999" not in report.findings[0].description
+    assert "sk-live12345678901234567890" not in report.findings[0].evidences[0].code_snippet
+    assert "toplevelsecret99999" not in report.findings[0].evidences[0].code_snippet
+    assert "AIzaSyD1234567890123456789012345678901" not in report.findings[0].evidences[0].context_notes
+    assert "sk-badsecretkey1234567890" not in report.findings[0].patches[0].unified_diff
+
+    # Verify Markdown rendering
+    md = ScanReportService.render_markdown(report)
+
+    # 1. No executable scripts
+    assert "<script>alert" not in md
+    assert "&lt;script&gt;alert" in md or "alert" in md
+    assert "<img src=x onerror" not in md
+
+    # 2. No secrets in markdown
+    assert "sk-1234567890" not in md
+    assert "sk-abcdef" not in md
+    assert "supersecrettoken999" not in md
+    assert "sk-live1234567890" not in md
+    assert "toplevelsecret99999" not in md
+    assert "AIzaSyD" not in md
+    assert "sk-badsecretkey" not in md
+
+    # 3. Dynamic code fences used (4 backticks because 3 backticks was inside content)
+    assert "````" in md
+

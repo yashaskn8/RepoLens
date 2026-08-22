@@ -82,6 +82,25 @@ class ReportWorkflowEvent(BaseModel):
     created_at: datetime
 
 
+class ReportAnalysisScope(BaseModel):
+    """Analysis boundary and truncation status."""
+    truncated: bool = False
+    reason: Optional[str] = None
+    files_processed: int = 0
+    source_bytes_processed: int = 0
+    total_observed_files: int = 0
+    total_observed_bytes: int = 0
+
+
+class ReportScannerCoverage(BaseModel):
+    """Execution status and finding counts for deterministic scanners."""
+    tool: str
+    status: str
+    findings_count: int = 0
+    execution_time_ms: Optional[int] = None
+    failure_reason: Optional[str] = None
+
+
 class ScanReport(BaseModel):
     """Complete, evidence-grounded exportable repository report."""
     scan_id: str
@@ -95,6 +114,9 @@ class ScanReport(BaseModel):
     architecture_overview: Optional[str] = None
     languages: Dict[str, int] = Field(default_factory=dict)
     frameworks: List[str] = Field(default_factory=list)
+    analysis_scope: Optional[ReportAnalysisScope] = None
+    scanner_coverage: List[ReportScannerCoverage] = Field(default_factory=list)
     summary: ReportSummary
     findings: List[ReportFinding] = Field(default_factory=list)
     events_audit_trail: List[ReportWorkflowEvent] = Field(default_factory=list)
+

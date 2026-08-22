@@ -38,6 +38,7 @@ function getEventBadgeStyle(type: WorkflowEventType): {
     case 'SCAN_FAILED':
     case 'STAGE_FAILED':
     case 'TOOL_FAILED':
+    case 'TOOL_UNAVAILABLE':
     case 'WORKFLOW_ERROR':
       return { bg: 'bg-rose-950/40', text: 'text-rose-400', border: 'border-rose-800/60', icon: '❌' };
     case 'HUMAN_APPROVED':

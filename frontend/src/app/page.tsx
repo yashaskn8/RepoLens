@@ -5,10 +5,11 @@ import {
   Finding,
   HealthResponse,
   Scan,
+  ScanTelemetry,
   Severity,
   VerificationVerdict,
 } from '@/types/domain';
-import { fetchHealth, fetchScan, fetchScanFindings, startScan } from '@/lib/api';
+import { fetchHealth, fetchScan, fetchScanFindings, fetchScanTelemetry, startScan } from '@/lib/api';
 import { RemediationLifecycle } from '@/components/RemediationLifecycle';
 import { WorkflowTimeline } from '@/components/WorkflowTimeline';
 
@@ -23,6 +24,7 @@ export default function HomePage() {
   const [severityFilter, setSeverityFilter] = useState<string>('ALL');
   const [verdictFilter, setVerdictFilter] = useState<string>('ALL');
   const [expandedFindingId, setExpandedFindingId] = useState<string | null>(null);
+  const [telemetry, setTelemetry] = useState<ScanTelemetry | null>(null);
 
   // 1. Initial health check
   useEffect(() => {
@@ -42,9 +44,12 @@ export default function HomePage() {
         const updated = await fetchScan(activeScan.id);
         setActiveScan(updated);
 
-        if (updated.status === 'COMPLETED') {
-          const scanFindings = await fetchScanFindings(updated.id);
-          setFindings(scanFindings);
+        if (updated.status === 'COMPLETED' || updated.status === 'FAILED') {
+          if (updated.status === 'COMPLETED') {
+            const scanFindings = await fetchScanFindings(updated.id);
+            setFindings(scanFindings);
+          }
+          fetchScanTelemetry(updated.id).then(setTelemetry).catch(() => setTelemetry(null));
         }
       } catch (err: unknown) {
         console.error('Polling error:', err);
@@ -304,6 +309,69 @@ export default function HomePage() {
           </div>
         </div>
       )}
+
+      {/* Compact Scan Telemetry Summary */}
+      {telemetry && (
+        <div className="glass-card" style={{ marginBottom: '2rem' }}>
+          <div className="card-title">
+            <span>Execution Telemetry & Diagnostics</span>
+            <span className="badge-tag" style={{ background: 'rgba(148, 163, 184, 0.15)', color: '#94a3b8' }}>
+              Status: {telemetry.status}
+            </span>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '1rem', marginTop: '0.5rem' }}>
+            <div>
+              <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>DURATION</div>
+              <div style={{ fontSize: '1rem', fontWeight: 600, color: '#f8fafc' }}>
+                {telemetry.total_duration_ms != null ? `${(telemetry.total_duration_ms / 1000).toFixed(1)}s` : 'N/A'}
+              </div>
+            </div>
+            <div>
+              <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>WORKFLOW EVENTS</div>
+              <div style={{ fontSize: '1rem', fontWeight: 600, color: '#38bdf8' }}>{telemetry.event_count}</div>
+            </div>
+            <div>
+              <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>PIPELINE STAGES</div>
+              <div style={{ fontSize: '1rem', fontWeight: 600, color: '#a78bfa' }}>{telemetry.stage_count}</div>
+            </div>
+            <div>
+              <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>TOOLS (OK / FAIL / N/A)</div>
+              <div style={{ fontSize: '1rem', fontWeight: 600 }}>
+                <span style={{ color: '#4ade80' }}>{telemetry.tools_completed}</span>
+                {' / '}
+                <span style={{ color: '#f87171' }}>{telemetry.tools_failed}</span>
+                {' / '}
+                <span style={{ color: '#94a3b8' }}>{telemetry.tools_unavailable}</span>
+              </div>
+            </div>
+            <div>
+              <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>CONFIRMED FINDINGS</div>
+              <div style={{ fontSize: '1rem', fontWeight: 600, color: '#fbbf24' }}>{telemetry.confirmed_findings}</div>
+            </div>
+            <div>
+              <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>REMEDIATION PATCHES</div>
+              <div style={{ fontSize: '1rem', fontWeight: 600, color: '#34d399' }}>{telemetry.patches_generated}</div>
+            </div>
+          </div>
+
+          {(telemetry.llm_retries != null || telemetry.provider_fallbacks != null || telemetry.total_tokens != null) && (
+            <div style={{ marginTop: '0.75rem', paddingTop: '0.75rem', borderTop: '1px solid rgba(255, 255, 255, 0.05)', display: 'flex', gap: '1rem', fontSize: '0.8rem', color: '#94a3b8' }}>
+              {telemetry.llm_calls != null && <span>LLM Calls: <strong style={{ color: '#cbd5e1' }}>{telemetry.llm_calls}</strong></span>}
+              {telemetry.llm_retries != null && <span>Retries: <strong style={{ color: '#cbd5e1' }}>{telemetry.llm_retries}</strong></span>}
+              {telemetry.provider_fallbacks != null && <span>Fallbacks: <strong style={{ color: '#cbd5e1' }}>{telemetry.provider_fallbacks}</strong></span>}
+              {telemetry.total_tokens != null && <span>Total Tokens: <strong style={{ color: '#cbd5e1' }}>{telemetry.total_tokens}</strong></span>}
+            </div>
+          )}
+
+          {telemetry.analysis_truncated && (
+            <div style={{ marginTop: '0.75rem', padding: '0.5rem 0.75rem', borderRadius: '6px', background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.25)', color: '#fca5a5', fontSize: '0.8rem' }}>
+              ⚠️ <strong>Analysis Truncated:</strong> {telemetry.analysis_truncation_reason || 'File/byte limit reached during ingestion'}
+            </div>
+          )}
+        </div>
+      )}
+
 
       {/* Findings Section */}
       {activeScan?.status === 'COMPLETED' && (

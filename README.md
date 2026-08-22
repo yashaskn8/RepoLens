@@ -42,7 +42,7 @@ RepoLens/
 │   │   ├── schemas/         # Canonical Pydantic schemas, enums, reports & telemetry
 │   │   └── services/        # Scan recovery, workflow events & evidence report generator
 │   ├── alembic/             # Database migrations (001, 002, 003, 004, 005)
-│   └── tests/               # 322+ comprehensive Pytest verification tests
+│   └── tests/               # 328+ comprehensive Pytest verification tests
 └── frontend/                 # Next.js + React 19 + TypeScript frontend
     └── src/
         ├── app/             # App Router pages (scans dashboard, finding remediation)

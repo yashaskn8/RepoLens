@@ -31,6 +31,7 @@ from app.schemas.evidence import Evidence
 from app.schemas.finding import Finding
 from app.schemas.metadata import ModelExecutionMetadata
 from app.schemas.scan import Scan, ScanCreate
+from app.schemas.static_finding import ToolStatus
 from app.schemas.workflow_event import WorkflowEventCreate, WorkflowEventType
 from app.services.scan_recovery import ScanDispatcher
 from app.services.workflow_event_service import WorkflowEventService
@@ -126,6 +127,53 @@ async def execute_background_scan(
             resolved_branch_or_ref=resolved_branch,
         )
 
+        # Emit truthful deterministic tool outcome events
+        scanner_summary = []
+        for tool_name, result in (evidence_store.scanner_results or {}).items():
+            findings_count = len(result.findings) if result.findings else 0
+            if result.status == ToolStatus.COMPLETED:
+                evt_type = WorkflowEventType.TOOL_COMPLETED
+                msg = f"Deterministic scanner {tool_name} completed with {findings_count} findings"
+            elif result.status == ToolStatus.UNAVAILABLE:
+                evt_type = WorkflowEventType.TOOL_UNAVAILABLE
+                msg = f"Deterministic scanner {tool_name} is unavailable on host"
+            elif result.status == ToolStatus.TIMEOUT:
+                evt_type = WorkflowEventType.TOOL_FAILED
+                msg = f"Deterministic scanner {tool_name} timed out"
+            elif result.status == ToolStatus.INVALID_OUTPUT:
+                evt_type = WorkflowEventType.TOOL_FAILED
+                msg = f"Deterministic scanner {tool_name} produced invalid output"
+            else:
+                evt_type = WorkflowEventType.TOOL_FAILED
+                msg = f"Deterministic scanner {tool_name} failed execution"
+
+            safe_payload = {
+                "status": result.status.value,
+                "findings_count": findings_count,
+            }
+            if result.error_message:
+                safe_payload["reason"] = str(result.error_message)[:200]
+
+            WorkflowEventService.emit(
+                db=db,
+                event=WorkflowEventCreate(
+                    event_type=evt_type,
+                    scan_id=UUID(scan_id),
+                    stage="intelligence_analysis",
+                    tool_name=tool_name,
+                    commit_sha=commit_sha,
+                    message=msg,
+                    metadata_payload=safe_payload,
+                ),
+            )
+
+            scanner_summary.append({
+                "tool": tool_name,
+                "status": result.status.value,
+                "findings_count": findings_count,
+                "failure_reason": str(result.error_message)[:200] if result.error_message else None,
+            })
+
         WorkflowEventService.emit(
             db=db,
             event=WorkflowEventCreate(
@@ -137,6 +185,18 @@ async def execute_background_scan(
                 metadata_payload={"total_files": evidence_store.manifest.total_files},
             ),
         )
+
+        # Update scan metadata with analysis scope and scanner coverage
+        meta = dict(scan_model.model_metadata or {})
+        meta["scanner_coverage"] = scanner_summary
+        if evidence_store.manifest.analysis_scope:
+            meta["analysis_scope"] = evidence_store.manifest.analysis_scope.model_dump()
+        if evidence_store.manifest.languages:
+            meta["languages"] = evidence_store.manifest.languages
+        if evidence_store.manifest.frameworks:
+            meta["frameworks"] = [f.name for f in evidence_store.manifest.frameworks]
+        scan_model.model_metadata = meta
+        flag_modified(scan_model, "model_metadata")
         db.commit()
 
         # 4. Assemble canonical ScanIntelligenceRuntime from EvidenceStore
@@ -663,4 +723,20 @@ def get_scan_report_json(scan_id: UUID, db: Session = Depends(get_db)):
         )
 
     return report
+
+
+@router.get("/{scan_id}/telemetry", response_model=None)
+def get_scan_telemetry(scan_id: UUID, db: Session = Depends(get_db)):
+    """Retrieve detailed execution telemetry and metric aggregation for a scan."""
+    from app.services.report_service import ScanReportService
+
+    telemetry = ScanReportService.build_scan_telemetry(db=db, scan_id=str(scan_id))
+    if not telemetry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Scan with ID '{scan_id}' not found.",
+        )
+
+    return telemetry
+
 

@@ -23,6 +23,13 @@ from app.schemas.workflow_event import (
     WorkflowEventResponse,
     WorkflowEventType,
 )
+from app.schemas.telemetry import (
+    MetricsTelemetry,
+    ProviderTelemetry,
+    ScanTelemetry,
+    StorageTelemetry,
+    TelemetryReport,
+)
 
 __all__ = [
     "Severity",
@@ -52,4 +59,9 @@ __all__ = [
     "WorkflowEventBase",
     "WorkflowEventCreate",
     "WorkflowEventResponse",
+    "ScanTelemetry",
+    "TelemetryReport",
+    "ProviderTelemetry",
+    "StorageTelemetry",
+    "MetricsTelemetry",
 ]
