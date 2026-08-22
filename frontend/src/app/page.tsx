@@ -10,6 +10,7 @@ import {
 } from '@/types/domain';
 import { fetchHealth, fetchScan, fetchScanFindings, startScan } from '@/lib/api';
 import { RemediationLifecycle } from '@/components/RemediationLifecycle';
+import { WorkflowTimeline } from '@/components/WorkflowTimeline';
 
 export default function HomePage() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
@@ -245,6 +246,13 @@ export default function HomePage() {
         </div>
       )}
 
+      {/* Real-time Workflow Stream & Audit Trail */}
+      {activeScan && (
+        <div style={{ marginBottom: '2rem' }}>
+          <WorkflowTimeline scanId={activeScan.id} />
+        </div>
+      )}
+
       {/* Architecture Summary */}
       {activeScan?.status === 'COMPLETED' && (
         <div className="glass-card" style={{ marginBottom: '2rem' }}>
@@ -270,6 +278,29 @@ export default function HomePage() {
                 Framework: {fw}
               </span>
             ))}
+          </div>
+
+          <div style={{ marginTop: '1.25rem', paddingTop: '1rem', borderTop: '1px solid rgba(255, 255, 255, 0.08)', display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+            <a
+              href={`${process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000'}/api/v1/scans/${activeScan.id}/report?format=markdown`}
+              download={`repolens-report-${activeScan.id}.md`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="filter-btn"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', background: 'rgba(34, 197, 94, 0.15)', borderColor: 'rgba(34, 197, 94, 0.3)', color: '#4ade80' }}
+            >
+              <span>📄</span> Export Markdown Report
+            </a>
+            <a
+              href={`${process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000'}/api/v1/scans/${activeScan.id}/report?format=json`}
+              download={`repolens-report-${activeScan.id}.json`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="filter-btn"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', background: 'rgba(56, 189, 248, 0.15)', borderColor: 'rgba(56, 189, 248, 0.3)', color: '#38bdf8' }}
+            >
+              <span>📊</span> Export JSON Report
+            </a>
           </div>
         </div>
       )}

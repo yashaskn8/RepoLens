@@ -20,6 +20,8 @@ from app.schemas.patch import (
     PatchReviewRequest,
     PatchReviseRequest,
 )
+from app.schemas.workflow_event import WorkflowEventCreate, WorkflowEventType
+from app.services.workflow_event_service import WorkflowEventService
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/patches", tags=["Patches"])
@@ -126,6 +128,37 @@ async def approve_patch(
     if payload.notes:
         patch_model.user_feedback = payload.notes
     patch_model.thread_id = thread_id
+
+    # Emit durable human audit events
+    WorkflowEventService.emit(
+        db=db,
+        event=WorkflowEventCreate(
+            event_type=WorkflowEventType.HUMAN_APPROVED,
+            scan_id=UUID(str(patch_model.scan_id)),
+            finding_id=UUID(str(patch_model.finding_id)),
+            patch_id=UUID(str(patch_model.id)),
+            thread_id=thread_id,
+            stage="human_review",
+            message=f"Patch approved by {payload.approved_by}",
+            metadata_payload={"approved_by": payload.approved_by, "notes": payload.notes},
+        ),
+        critical=True,
+    )
+    WorkflowEventService.emit(
+        db=db,
+        event=WorkflowEventCreate(
+            event_type=WorkflowEventType.PATCH_APPROVED,
+            scan_id=UUID(str(patch_model.scan_id)),
+            finding_id=UUID(str(patch_model.finding_id)),
+            patch_id=UUID(str(patch_model.id)),
+            thread_id=thread_id,
+            stage="human_review",
+            message="Patch transitioned to APPROVED status",
+            metadata_payload={"approved_by": payload.approved_by},
+        ),
+        critical=True,
+    )
+
     db.commit()
     db.refresh(patch_model)
     return patch_model
@@ -194,6 +227,37 @@ async def reject_patch(
     patch_model.status = PatchStatus.REJECTED.value
     patch_model.rejected_reason = payload.reason
     patch_model.thread_id = thread_id
+
+    # Emit durable human audit events
+    WorkflowEventService.emit(
+        db=db,
+        event=WorkflowEventCreate(
+            event_type=WorkflowEventType.HUMAN_REJECTED,
+            scan_id=UUID(str(patch_model.scan_id)),
+            finding_id=UUID(str(patch_model.finding_id)),
+            patch_id=UUID(str(patch_model.id)),
+            thread_id=thread_id,
+            stage="human_review",
+            message=f"Patch rejected: {payload.reason}",
+            metadata_payload={"reason": payload.reason},
+        ),
+        critical=True,
+    )
+    WorkflowEventService.emit(
+        db=db,
+        event=WorkflowEventCreate(
+            event_type=WorkflowEventType.PATCH_REJECTED,
+            scan_id=UUID(str(patch_model.scan_id)),
+            finding_id=UUID(str(patch_model.finding_id)),
+            patch_id=UUID(str(patch_model.id)),
+            thread_id=thread_id,
+            stage="human_review",
+            message="Patch transitioned to REJECTED status",
+            metadata_payload={"reason": payload.reason},
+        ),
+        critical=True,
+    )
+
     db.commit()
     db.refresh(patch_model)
     return patch_model
@@ -353,9 +417,44 @@ async def request_patch_revision(
             verification_report=workflow_result.verification_result.model_dump(mode="json") if workflow_result.verification_result else None,
             critic_report=workflow_result.critic_report.model_dump(mode="json") if workflow_result.critic_report else None,
             user_feedback=payload.user_feedback,
-            model_metadata=proposal.model_metadata.model_dump() if proposal.model_metadata else None,
+            model_metadata=proposal.model_metadata.model_dump(mode="json") if proposal.model_metadata else None,
         )
         db.add(child_patch_model)
+
+        # 5. Emit durable human revision and child creation audit events
+        WorkflowEventService.emit(
+            db=db,
+            event=WorkflowEventCreate(
+                event_type=WorkflowEventType.HUMAN_REVISION_REQUESTED,
+                scan_id=UUID(str(scan.id)),
+                finding_id=UUID(str(finding_schema.id)),
+                patch_id=UUID(str(patch_model.id)),
+                thread_id=child_thread_id,
+                stage="human_review",
+                message="Human revision requested with feedback",
+                metadata_payload={"user_feedback": payload.user_feedback, "parent_patch_id": str(patch_model.id)},
+            ),
+            critical=True,
+        )
+        WorkflowEventService.emit(
+            db=db,
+            event=WorkflowEventCreate(
+                event_type=WorkflowEventType.PATCH_REVISION_CREATED,
+                scan_id=UUID(str(scan.id)),
+                finding_id=UUID(str(finding_schema.id)),
+                patch_id=UUID(str(proposal.id)),
+                thread_id=child_thread_id,
+                stage="patch_generation",
+                message="Child patch revision created and verified in sandbox",
+                metadata_payload={
+                    "parent_patch_id": str(patch_model.id),
+                    "revision_number": (patch_model.revision_number or 0) + 1,
+                    "machine_verdict": workflow_result.machine_verdict,
+                },
+            ),
+            critical=True,
+        )
+
         try:
             db.commit()
         except IntegrityError:

@@ -426,3 +426,43 @@ export interface PatchReviseRequest {
   user_feedback: string;
 }
 
+export type WorkflowEventType =
+  | 'SCAN_CREATED'
+  | 'SCAN_STARTED'
+  | 'SCAN_COMPLETED'
+  | 'SCAN_FAILED'
+  | 'STAGE_STARTED'
+  | 'STAGE_COMPLETED'
+  | 'STAGE_FAILED'
+  | 'TOOL_STARTED'
+  | 'TOOL_COMPLETED'
+  | 'TOOL_FAILED'
+  | 'FINDING_CONFIRMED'
+  | 'PATCH_GENERATED'
+  | 'PATCH_VERIFIED'
+  | 'PATCH_NEEDS_REVIEW'
+  | 'PATCH_REJECTED'
+  | 'PATCH_APPROVED'
+  | 'PATCH_REVISION_CREATED'
+  | 'HUMAN_APPROVED'
+  | 'HUMAN_REJECTED'
+  | 'HUMAN_REVISION_REQUESTED'
+  | 'WORKFLOW_ERROR';
+
+export interface WorkflowEvent {
+  id: number;
+  event_type: WorkflowEventType;
+  scan_id: string;
+  finding_id?: string | null;
+  patch_id?: string | null;
+  thread_id?: string | null;
+  commit_sha?: string | null;
+  stage?: string | null;
+  tool_name?: string | null;
+  provider?: string | null;
+  model_name?: string | null;
+  message?: string | null;
+  metadata_payload?: Record<string, unknown>;
+  created_at: string;
+}
+

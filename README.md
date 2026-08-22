@@ -2,8 +2,8 @@
 
 RepoLens is an AI-powered repository intelligence and autonomous remediation platform that ingests, indexes, verifies, plans, and patches complex multi-language codebases with strict mathematical determinism and human-in-the-loop safety boundaries.
 
-> **Phase 3.6: Final Correctness Closure**  
-> Complete intelligence pipeline featuring Tree-sitter AST symbol indexing, deterministic RepositoryGraph route & dependency contract evaluation, durable LangGraph multi-agent scan execution, exact-commit snapshot rehydration, and a 12-check isolated sandbox patch verification engine.
+> **Phase 4: Real-Time Workflow Streaming, Durable Auditability & Telemetry**  
+> Complete intelligence and remediation platform featuring real-time Server-Sent Events (SSE) workflow streaming with monotonic replay, durable audit trail event persistence, structured GFM Markdown and JSON evidence reporting, operational telemetry monitoring, Tree-sitter AST symbol indexing, deterministic RepositoryGraph route & dependency contract evaluation, durable LangGraph multi-agent scan execution, exact-commit snapshot rehydration, and an isolated sandbox patch verification engine.
 
 ---
 
@@ -15,7 +15,9 @@ RepoLens is an AI-powered repository intelligence and autonomous remediation pla
 4. **Human-in-the-Loop Authority**: Machine verification never marks patches as `APPROVED`. Patches pause at human approval boundaries (`VERIFIED` or `NEEDS_REVIEW`) and require explicit human review via `/approve`, `/reject`, or `/revise`.
 5. **Machine Verdict vs Human Review Separation**: Machine verification results are persisted independently as `PASSED`, `NEEDS_REVIEW`, or `REJECTED`, while patch lifecycle status uses `DRAFT`, `VERIFIED`, `NEEDS_REVIEW`, `REJECTED`, and `APPROVED`. Only explicit human approval may set `APPROVED`.
 6. **Single Revision Lineage**: Human revisions generate an immutable child patch linked via `parent_patch_id` and `revision_number = 1`, enforced by database constraints and atomic API validation.
-7. **Zero External Worker Requirement**: RepoLens supports pure local development on Windows, macOS, and Linux without requiring Docker, Redis, Celery, or Kafka.
+7. **Real-Time SSE Streaming & Replay**: Low-latency Server-Sent Events stream live workflow stages, tool actions, and human decisions with `Last-Event-ID` offset recovery.
+8. **Exportable Evidence Reports**: Complete GFM Markdown and structured JSON report generation with exact source evidence, unified diffs, and chronological audit trails.
+9. **Zero External Worker Requirement**: RepoLens supports pure local development on Windows, macOS, and Linux without requiring Docker, Redis, Celery, or Kafka.
 
 ---
 
@@ -33,19 +35,19 @@ RepoLens/
 │   │   ├── graph/           # RepositoryGraph, node/edge builders, route matcher
 │   │   ├── ingestion/       # Tree-sitter parsers, manifest, snapshot rehydration
 │   │   ├── llm/             # Resilient gateway with fallback, backoff & telemetry
-│   │   ├── models/          # SQLAlchemy ORM models (Scan, Finding, Evidence, Patch)
+│   │   ├── models/          # SQLAlchemy ORM models (Scan, Finding, Evidence, Patch, WorkflowEvent)
 │   │   ├── patching/        # Unified diff applier, validator, 12-check verifier, critic
 │   │   ├── planning/        # Fix planner with strict scope boundary enforcement
 │   │   ├── research/        # Evidence-grounded technical research & source tiering
-│   │   ├── schemas/         # Canonical Pydantic schemas & enums
-│   │   └── services/        # Durable scan recovery & in-process task dispatcher
-│   ├── alembic/             # Database migrations (001, 002, 003, 004)
-│   └── tests/               # 302+ comprehensive Pytest verification tests
+│   │   ├── schemas/         # Canonical Pydantic schemas, enums, reports & telemetry
+│   │   └── services/        # Scan recovery, workflow events & evidence report generator
+│   ├── alembic/             # Database migrations (001, 002, 003, 004, 005)
+│   └── tests/               # 322+ comprehensive Pytest verification tests
 └── frontend/                 # Next.js + React 19 + TypeScript frontend
     └── src/
         ├── app/             # App Router pages (scans dashboard, finding remediation)
-        ├── components/      # UI components (diff viewer, approval modal, graphs)
-        ├── lib/             # API client & HTTP hooks
+        ├── components/      # UI components (diff viewer, workflow timeline, approval modal)
+        ├── lib/             # API client, SSE streaming hooks & HTTP services
         └── types/           # Domain TypeScript definitions mirroring schemas
 ```
 

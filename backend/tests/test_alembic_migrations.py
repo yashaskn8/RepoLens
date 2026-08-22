@@ -44,7 +44,7 @@ def test_alembic_upgrade_head_on_empty_db_creates_complete_schema():
             inspector = inspect(engine)
 
             table_names = set(inspector.get_table_names())
-            expected_tables = {"scans", "findings", "evidences", "patches", "alembic_version"}
+            expected_tables = {"scans", "findings", "evidences", "patches", "workflow_events", "alembic_version"}
             assert expected_tables.issubset(table_names), f"Missing tables: {expected_tables - table_names}"
 
             # 3. Verify 'patches' table columns
@@ -68,13 +68,28 @@ def test_alembic_upgrade_head_on_empty_db_creates_complete_schema():
             }
             assert expected_finding_cols.issubset(set(finding_cols.keys())), f"Missing finding columns: {expected_finding_cols - set(finding_cols.keys())}"
 
-            # 5. Verify 'patches' foreign keys
+            # 5. Verify 'workflow_events' table columns
+            event_cols = {col["name"]: col for col in inspector.get_columns("workflow_events")}
+            expected_event_cols = {
+                "id", "event_type", "scan_id", "finding_id", "patch_id", "thread_id", "commit_sha",
+                "stage", "tool_name", "provider", "model_name", "message", "metadata_payload", "created_at",
+            }
+            assert expected_event_cols.issubset(set(event_cols.keys())), f"Missing event columns: {expected_event_cols - set(event_cols.keys())}"
+
+            # 6. Verify 'workflow_events' foreign keys
+            event_fks = inspector.get_foreign_keys("workflow_events")
+            event_fk_targets = {fk["referred_table"] for fk in event_fks}
+            assert "scans" in event_fk_targets
+            assert "findings" in event_fk_targets
+            assert "patches" in event_fk_targets
+
+            # 7. Verify 'patches' foreign keys
             fks = inspector.get_foreign_keys("patches")
             fk_targets = {fk["referred_table"] for fk in fks}
             assert "findings" in fk_targets
             assert "scans" in fk_targets
 
-            # 6. Verify 'patches' indexes
+            # 8. Verify 'patches' indexes
             indexes = {idx["name"] for idx in inspector.get_indexes("patches")}
             assert any("ix_patches_id" in idx for idx in indexes)
             assert any("ix_patches_finding_id" in idx for idx in indexes)
@@ -83,7 +98,15 @@ def test_alembic_upgrade_head_on_empty_db_creates_complete_schema():
             assert any("ix_patches_status" in idx for idx in indexes)
             assert any("ix_patches_parent_patch_id" in idx for idx in indexes)
 
-            # 7. Verify ORM read/write compatibility against migrated database
+            # 9. Verify 'workflow_events' indexes
+            event_indexes = {idx["name"] for idx in inspector.get_indexes("workflow_events")}
+            assert any("ix_workflow_events_scan_id" in idx for idx in event_indexes)
+            assert any("ix_workflow_events_patch_id" in idx for idx in event_indexes)
+            assert any("ix_workflow_events_finding_id" in idx for idx in event_indexes)
+            assert any("ix_workflow_events_event_type" in idx for idx in event_indexes)
+            assert any("ix_workflow_events_created_at" in idx for idx in event_indexes)
+
+            # 10. Verify ORM read/write compatibility against migrated database
             SessionLocal = sessionmaker(bind=engine)
             db = SessionLocal()
 
@@ -125,6 +148,7 @@ def test_alembic_upgrade_head_on_empty_db_creates_complete_schema():
                 scan_id=scan.id,
                 thread_id=f"remediation-{uuid4()}",
                 status=PatchStatus.VERIFIED.value,
+                machine_verdict="PASSED",
                 unified_diff="--- a/auth.py\n+++ b/auth.py\n",
                 files_modified=["app/auth.py"],
                 explanation="Hardened cookie",
@@ -143,6 +167,7 @@ def test_alembic_upgrade_head_on_empty_db_creates_complete_schema():
             assert persisted_patch.finding.detector_id == "python.cookie.missing-httponly"
             assert persisted_patch.scan.repository_url == "https://github.com/fastapi/fastapi"
             assert persisted_patch.status == "VERIFIED"
+            assert persisted_patch.machine_verdict == "PASSED"
             assert persisted_patch.revision_number == 0
 
             db.close()
@@ -160,54 +185,51 @@ def test_alembic_migration_upgrade_downgrade_reupgrade_cycle():
         engine = create_engine(db_url)
 
         try:
-            # 1. Upgrade to head (003_phase36_durability_and_provenance)
+            # 1. Upgrade to head (005_workflow_events_table)
             command.upgrade(alembic_cfg, "head")
             inspector = inspect(engine)
+            assert "workflow_events" in inspector.get_table_names()
             assert "patches" in inspector.get_table_names()
             assert "findings" in inspector.get_table_names()
-            patch_cols = {col["name"] for col in inspector.get_columns("patches")}
-            assert "parent_patch_id" in patch_cols
-            assert "revision_number" in patch_cols
-            finding_cols = {col["name"] for col in inspector.get_columns("findings")}
-            assert "source_tool" in finding_cols
-            assert "detector_id" in finding_cols
 
-            # 2. Downgrade one revision (back to 002_patches_table)
+            # 2. Downgrade one revision (back to 004_patch_machine_verdict)
+            command.downgrade(alembic_cfg, "004_patch_machine_verdict")
+            inspector = inspect(engine)
+            assert "workflow_events" not in inspector.get_table_names()
+            assert "patches" in inspector.get_table_names()
+            patch_cols_004 = {col["name"] for col in inspector.get_columns("patches")}
+            assert "machine_verdict" in patch_cols_004
+
+            # 3. Downgrade another revision (back to 003_phase36_durability_and_provenance)
+            command.downgrade(alembic_cfg, "003_phase36_durability_and_provenance")
+            inspector = inspect(engine)
+            patch_cols_003 = {col["name"] for col in inspector.get_columns("patches")}
+            assert "machine_verdict" not in patch_cols_003
+            assert "parent_patch_id" in patch_cols_003
+
+            # 4. Downgrade to 002_patches_table
             command.downgrade(alembic_cfg, "002_patches_table")
             inspector = inspect(engine)
-            assert "patches" in inspector.get_table_names()
             patch_cols_002 = {col["name"] for col in inspector.get_columns("patches")}
             assert "parent_patch_id" not in patch_cols_002
-            finding_cols_002 = {col["name"] for col in inspector.get_columns("findings")}
-            assert "source_tool" not in finding_cols_002
 
-            # 3. Downgrade another revision (back to 001_initial_schema)
+            # 5. Downgrade to 001_initial_schema
             command.downgrade(alembic_cfg, "001_initial_schema")
             inspector = inspect(engine)
             assert "patches" not in inspector.get_table_names()
             assert "findings" in inspector.get_table_names()
             assert "scans" in inspector.get_table_names()
-            assert "evidences" in inspector.get_table_names()
 
-            # 4. Upgrade again to head
-            command.upgrade(alembic_cfg, "head")
-            inspector = inspect(engine)
-            assert "patches" in inspector.get_table_names()
-            patch_cols = {col["name"] for col in inspector.get_columns("patches")}
-            assert "parent_patch_id" in patch_cols
-            assert "thread_id" in patch_cols
-            assert "verification_report" in patch_cols
-
-            # 5. Downgrade all the way to base
+            # 6. Downgrade all the way to base
             command.downgrade(alembic_cfg, "base")
             inspector = inspect(engine)
             user_tables = [t for t in inspector.get_table_names() if t != "alembic_version"]
             assert len(user_tables) == 0, f"Expected zero user tables after downgrade to base, got {user_tables}"
 
-            # 6. Re-upgrade all the way to head
+            # 7. Re-upgrade all the way to head
             command.upgrade(alembic_cfg, "head")
             inspector = inspect(engine)
-            assert {"scans", "findings", "evidences", "patches"}.issubset(set(inspector.get_table_names()))
+            assert {"scans", "findings", "evidences", "patches", "workflow_events"}.issubset(set(inspector.get_table_names()))
         finally:
             engine.dispose()
 

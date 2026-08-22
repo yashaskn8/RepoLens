@@ -28,3 +28,4 @@ class ScanModel(Base):
 
     # Relationships
     findings = relationship("FindingModel", back_populates="scan", cascade="all, delete-orphan")
+    events = relationship("WorkflowEventModel", back_populates="scan", cascade="all, delete-orphan")

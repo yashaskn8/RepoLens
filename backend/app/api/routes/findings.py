@@ -32,6 +32,8 @@ from app.schemas.enums import FindingStatus, PatchStatus, ScanStatus, Severity, 
 from app.schemas.evidence import Evidence
 from app.schemas.finding import Finding
 from app.schemas.metadata import ModelExecutionMetadata
+from app.schemas.workflow_event import WorkflowEventCreate, WorkflowEventType
+from app.services.workflow_event_service import WorkflowEventService
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/findings", tags=["Findings & Remediation"])
@@ -296,6 +298,46 @@ async def request_patch_generation(
                 model_metadata=proposal.model_metadata.model_dump(mode="json") if proposal.model_metadata else None,
             )
             db.add(patch_model)
+
+            # 5. Emit PATCH_GENERATED and machine verification verdict events
+            WorkflowEventService.emit(
+                db=db,
+                event=WorkflowEventCreate(
+                    event_type=WorkflowEventType.PATCH_GENERATED,
+                    scan_id=UUID(str(scan.id)),
+                    finding_id=UUID(str(finding_id)),
+                    patch_id=UUID(str(proposal.id)),
+                    thread_id=remediation_thread_id,
+                    commit_sha=scan.commit_hash,
+                    stage="patch_generation",
+                    message="Safe remediation patch candidate generated and verified in sandbox",
+                    metadata_payload={"files_modified": proposal.files_modified},
+                ),
+            )
+
+            verdict_event_type = (
+                WorkflowEventType.PATCH_VERIFIED
+                if workflow_result.machine_verdict == "PASSED"
+                else (
+                    WorkflowEventType.PATCH_REJECTED
+                    if workflow_result.machine_verdict == "REJECTED"
+                    else WorkflowEventType.PATCH_NEEDS_REVIEW
+                )
+            )
+            WorkflowEventService.emit(
+                db=db,
+                event=WorkflowEventCreate(
+                    event_type=verdict_event_type,
+                    scan_id=UUID(str(scan.id)),
+                    finding_id=UUID(str(finding_id)),
+                    patch_id=UUID(str(proposal.id)),
+                    thread_id=remediation_thread_id,
+                    commit_sha=scan.commit_hash,
+                    stage="patch_verification",
+                    message=f"Machine verification verdict: {workflow_result.machine_verdict}",
+                    metadata_payload={"machine_verdict": workflow_result.machine_verdict},
+                ),
+            )
             db.commit()
 
             return workflow_result

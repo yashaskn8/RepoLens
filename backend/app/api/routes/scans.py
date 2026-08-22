@@ -8,7 +8,7 @@ import shutil
 from typing import List, Optional
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -31,7 +31,9 @@ from app.schemas.evidence import Evidence
 from app.schemas.finding import Finding
 from app.schemas.metadata import ModelExecutionMetadata
 from app.schemas.scan import Scan, ScanCreate
+from app.schemas.workflow_event import WorkflowEventCreate, WorkflowEventType
 from app.services.scan_recovery import ScanDispatcher
+from app.services.workflow_event_service import WorkflowEventService
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/scans", tags=["Scans"])
@@ -52,11 +54,20 @@ async def execute_background_scan(
     workspace_dir: Optional[str] = None
 
     try:
-        # 1. Update status to RUNNING
+        # 1. Update status to RUNNING and emit SCAN_STARTED
         scan_model = db.query(ScanModel).filter(ScanModel.id == scan_id).first()
         if not scan_model:
             return
         scan_model.status = ScanStatus.RUNNING.value
+        WorkflowEventService.emit(
+            db=db,
+            event=WorkflowEventCreate(
+                event_type=WorkflowEventType.SCAN_STARTED,
+                scan_id=UUID(scan_id),
+                message="Repository clone and scan execution started",
+                metadata_payload={"repository_url": repo_url, "branch": branch},
+            ),
+        )
         db.commit()
 
         # 2. Materialize exact snapshot if commit_hash already exists (e.g. on resume), or clone safely
@@ -93,6 +104,18 @@ async def execute_background_scan(
             db.commit()
 
         # 3. Run deterministic intelligence service (manifest + scanners)
+        WorkflowEventService.emit(
+            db=db,
+            event=WorkflowEventCreate(
+                event_type=WorkflowEventType.STAGE_STARTED,
+                scan_id=UUID(scan_id),
+                stage="intelligence_analysis",
+                commit_sha=commit_sha,
+                message="Deterministic repository parsing and static scanner execution started",
+            ),
+        )
+        db.commit()
+
         service = get_intelligence_service()
         evidence_store = await service.analyze_repository(
             repo_dir=workspace_dir,
@@ -103,6 +126,19 @@ async def execute_background_scan(
             resolved_branch_or_ref=resolved_branch,
         )
 
+        WorkflowEventService.emit(
+            db=db,
+            event=WorkflowEventCreate(
+                event_type=WorkflowEventType.STAGE_COMPLETED,
+                scan_id=UUID(scan_id),
+                stage="intelligence_analysis",
+                commit_sha=commit_sha,
+                message="Deterministic static scanners completed",
+                metadata_payload={"total_files": evidence_store.manifest.total_files},
+            ),
+        )
+        db.commit()
+
         # 4. Assemble canonical ScanIntelligenceRuntime from EvidenceStore
         runtime = await ScanIntelligenceRuntime.build(
             evidence_store=evidence_store,
@@ -110,6 +146,18 @@ async def execute_background_scan(
         )
 
         # 5. Run durable LangGraph multi-agent analysis workflow using canonical SQLite checkpointer
+        WorkflowEventService.emit(
+            db=db,
+            event=WorkflowEventCreate(
+                event_type=WorkflowEventType.STAGE_STARTED,
+                scan_id=UUID(scan_id),
+                stage="multi_agent_workflow",
+                commit_sha=commit_sha,
+                message="LangGraph multi-agent analysis workflow started",
+            ),
+        )
+        db.commit()
+
         async with get_sqlite_checkpointer(db_path=checkpoint_db_path) as checkpointer:
             final_state = await run_analysis_workflow(
                 evidence_store=evidence_store,
@@ -121,6 +169,18 @@ async def execute_background_scan(
                 repository_graph=runtime.repository_graph,
             )
 
+        WorkflowEventService.emit(
+            db=db,
+            event=WorkflowEventCreate(
+                event_type=WorkflowEventType.STAGE_COMPLETED,
+                scan_id=UUID(scan_id),
+                stage="multi_agent_workflow",
+                commit_sha=commit_sha,
+                message="LangGraph multi-agent analysis workflow completed",
+            ),
+        )
+        db.commit()
+
         # 6. Check for terminal workflow failure
         if final_state.get("status") == "FAILED":
             scan_model.status = ScanStatus.FAILED.value
@@ -130,6 +190,16 @@ async def execute_background_scan(
             existing_meta["error"] = "; ".join(errors) if errors else "Terminal workflow failure"
             scan_model.model_metadata = existing_meta
             flag_modified(scan_model, "model_metadata")
+            WorkflowEventService.emit(
+                db=db,
+                event=WorkflowEventCreate(
+                    event_type=WorkflowEventType.SCAN_FAILED,
+                    scan_id=UUID(scan_id),
+                    commit_sha=commit_sha,
+                    message="Terminal workflow failure",
+                    metadata_payload={"errors": errors},
+                ),
+            )
             db.commit()
             return
 
@@ -199,6 +269,17 @@ async def execute_background_scan(
                 finding_model.evidences.append(ev_model)
 
             db.add(finding_model)
+            WorkflowEventService.emit(
+                db=db,
+                event=WorkflowEventCreate(
+                    event_type=WorkflowEventType.FINDING_CONFIRMED,
+                    scan_id=UUID(scan_id),
+                    finding_id=UUID(str(f.id)),
+                    commit_sha=commit_sha,
+                    message=f"Confirmed finding: {f.title} ({sev_val})",
+                    metadata_payload={"severity": sev_val, "category": f.category, "source_tool": getattr(f, "source_tool", None)},
+                ),
+            )
 
         # 8. Mark scan COMPLETED and preserve merged metadata
         scan_model.status = ScanStatus.COMPLETED.value
@@ -214,6 +295,16 @@ async def execute_background_scan(
         })
         scan_model.model_metadata = existing_meta
         flag_modified(scan_model, "model_metadata")
+        WorkflowEventService.emit(
+            db=db,
+            event=WorkflowEventCreate(
+                event_type=WorkflowEventType.SCAN_COMPLETED,
+                scan_id=UUID(scan_id),
+                commit_sha=commit_sha,
+                message="Scan completed successfully",
+                metadata_payload={"findings_count": len(raw_verified_findings)},
+            ),
+        )
         db.commit()
 
     except Exception as exc:
@@ -227,6 +318,15 @@ async def execute_background_scan(
                 meta["error"] = str(exc)
                 scan_model.model_metadata = meta
                 flag_modified(scan_model, "model_metadata")
+                WorkflowEventService.emit(
+                    db=db,
+                    event=WorkflowEventCreate(
+                        event_type=WorkflowEventType.SCAN_FAILED,
+                        scan_id=UUID(scan_id),
+                        message=f"Scan execution failed: {str(exc)}",
+                        metadata_payload={"error": str(exc)},
+                    ),
+                )
                 db.commit()
         except Exception:
             pass
@@ -261,6 +361,18 @@ async def create_scan(payload: ScanCreate, db: Session = Depends(get_db)) -> Sca
     db.add(scan_model)
     db.commit()
     db.refresh(scan_model)
+
+    # Emit SCAN_CREATED event
+    WorkflowEventService.emit(
+        db=db,
+        event=WorkflowEventCreate(
+            event_type=WorkflowEventType.SCAN_CREATED,
+            scan_id=UUID(scan_model.id),
+            message="Scan registered and queued for execution",
+            metadata_payload={"repository_url": normalized_url, "branch": req_branch},
+        ),
+    )
+    db.commit()
 
     # 3. Launch background async execution via canonical dispatcher
     ScanDispatcher.dispatch_scan(
@@ -380,3 +492,175 @@ def get_scan_findings(scan_id: UUID, db: Session = Depends(get_db)) -> List[Find
         )
 
     return results
+
+
+@router.get("/{scan_id}/events")
+async def stream_scan_events(
+    scan_id: UUID,
+    request: Request,
+    last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
+    after_id: Optional[int] = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    """Server-Sent Events (SSE) stream delivering durable workflow events in near real time.
+
+    Guarantees:
+    - Verifies scan existence before stream begins (404 on unknown scan).
+    - Validates Last-Event-ID (400 on malformed header).
+    - Replays historical events first, then streams new events.
+    - Uses short-lived database access per poll to avoid persistent session locks.
+    - Detects disconnects and cleans up async stream tasks.
+    - Yields standard SSE format: id, event, data, and comments for heartbeats.
+    """
+    import json
+    from fastapi.responses import StreamingResponse
+    from app.schemas.workflow_event import WorkflowEventResponse
+
+    # 1. Verify scan exists
+    scan_model = db.query(ScanModel).filter(ScanModel.id == str(scan_id)).first()
+    if not scan_model:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Scan with ID '{scan_id}' not found.",
+        )
+
+    # 2. Parse starting event offset
+    start_id = 0
+    if last_event_id is not None and last_event_id.strip():
+        try:
+            start_id = int(last_event_id.strip())
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid Last-Event-ID header value: '{last_event_id}'. Expected integer ID.",
+            )
+    elif after_id is not None:
+        start_id = max(0, after_id)
+
+    from sqlalchemy.orm import sessionmaker
+
+    # Helper to obtain a short-lived session against the active database engine
+    session_factory = sessionmaker(autocommit=False, autoflush=False, bind=db.bind) if db and db.bind else SessionLocal
+
+    async def event_generator():
+        current_id = start_id
+        heartbeat_ticks = 0
+
+        while True:
+            if await request.is_disconnected():
+                break
+
+            poll_db = session_factory()
+            try:
+                events = WorkflowEventService.list_after_id(
+                    db=poll_db,
+                    scan_id=str(scan_id),
+                    after_id=current_id,
+                    limit=100,
+                )
+                current_scan = poll_db.query(ScanModel).filter(ScanModel.id == str(scan_id)).first()
+                is_terminal = (
+                    current_scan.status in (ScanStatus.COMPLETED.value, ScanStatus.FAILED.value)
+                    if current_scan
+                    else False
+                )
+            finally:
+                poll_db.close()
+
+            if events:
+                for evt in events:
+                    current_id = evt.id
+                    payload = WorkflowEventResponse.model_validate(evt).model_dump(mode="json")
+                    data_str = json.dumps(payload)
+                    yield f"id: {evt.id}\nevent: {evt.event_type}\ndata: {data_str}\n\n"
+                heartbeat_ticks = 0
+            else:
+                if is_terminal:
+                    # All events for completed/failed scan have been delivered
+                    break
+
+                heartbeat_ticks += 1
+                if heartbeat_ticks >= 15:  # Every ~7.5s on 0.5s poll
+                    yield ": heartbeat\n\n"
+                    heartbeat_ticks = 0
+
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/{scan_id}/report", response_model=None)
+def get_scan_report(
+    scan_id: UUID,
+    format: str = Query(default="json", pattern="^(json|markdown)$"),
+    db: Session = Depends(get_db),
+):
+    """Retrieve complete, evidence-grounded scan report in Markdown or JSON format."""
+    from fastapi.responses import Response
+    from app.services.report_service import ScanReportService
+
+    report = ScanReportService.build_scan_report(db=db, scan_id=str(scan_id))
+    if not report:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Scan with ID '{scan_id}' not found.",
+        )
+
+    if format == "markdown":
+        md_content = ScanReportService.render_markdown(report)
+        return Response(
+            content=md_content,
+            media_type="text/markdown; charset=utf-8",
+            headers={
+                "Content-Disposition": f'inline; filename="repolens-report-{scan_id}.md"',
+            },
+        )
+
+    return report
+
+
+@router.get("/{scan_id}/report/markdown", response_class=Response)
+def get_scan_report_markdown(scan_id: UUID, db: Session = Depends(get_db)):
+    """Retrieve full GFM Markdown export report for a scan."""
+    from fastapi.responses import Response
+    from app.services.report_service import ScanReportService
+
+    report = ScanReportService.build_scan_report(db=db, scan_id=str(scan_id))
+    if not report:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Scan with ID '{scan_id}' not found.",
+        )
+
+    md_content = ScanReportService.render_markdown(report)
+    return Response(
+        content=md_content,
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            "Content-Disposition": f'inline; filename="repolens-report-{scan_id}.md"',
+        },
+    )
+
+
+@router.get("/{scan_id}/report/json", response_model=None)
+def get_scan_report_json(scan_id: UUID, db: Session = Depends(get_db)):
+    """Retrieve full structured JSON export report for a scan."""
+    from app.services.report_service import ScanReportService
+
+    report = ScanReportService.build_scan_report(db=db, scan_id=str(scan_id))
+    if not report:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Scan with ID '{scan_id}' not found.",
+        )
+
+    return report
+

@@ -17,6 +17,13 @@ from app.ingestion.schemas import (
     SymbolKind,
 )
 
+from app.schemas.workflow_event import (
+    WorkflowEventBase,
+    WorkflowEventCreate,
+    WorkflowEventResponse,
+    WorkflowEventType,
+)
+
 __all__ = [
     "Severity",
     "FindingStatus",
@@ -41,4 +48,8 @@ __all__ = [
     "ToolStatus",
     "StaticFinding",
     "ScannerResult",
+    "WorkflowEventType",
+    "WorkflowEventBase",
+    "WorkflowEventCreate",
+    "WorkflowEventResponse",
 ]

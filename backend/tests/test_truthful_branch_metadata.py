@@ -158,9 +158,8 @@ def test_truthful_branch_resolution_detached_exact_sha():
 # 6. Scans API Contract: Truthful Branch Exposure
 # =============================================================================
 
-def test_scans_api_truthful_branch_contract():
+def test_scans_api_truthful_branch_contract(client: TestClient):
     """Verify Scans API endpoint creates and retrieves scan with truthful branch distinctions."""
-    client = TestClient(app)
 
     # 1. Create scan with explicit custom branch
     res1 = client.post(

@@ -4,5 +4,6 @@ from app.models.base import Base
 from app.models.finding import EvidenceModel, FindingModel
 from app.models.patch import PatchModel
 from app.models.scan import ScanModel
+from app.models.workflow_event import WorkflowEventModel
 
-__all__ = ["Base", "ScanModel", "FindingModel", "EvidenceModel", "PatchModel"]
+__all__ = ["Base", "ScanModel", "FindingModel", "EvidenceModel", "PatchModel", "WorkflowEventModel"]

@@ -7,6 +7,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.core.database import Base, get_db
+import app.models  # Register all SQLAlchemy models
 from app.main import app
 
 # In-memory SQLite engine for fast and isolated testing
