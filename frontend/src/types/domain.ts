@@ -104,6 +104,10 @@ export interface ScanTelemetry {
   patches_needing_review: number;
   patches_approved: number;
   patches_rejected: number;
+  deliveries_requested?: number;
+  deliveries_blocked?: number;
+  pull_requests_created?: number;
+  delivery_failures?: number;
   analysis_truncated: boolean;
   analysis_truncation_reason?: string | null;
 }
@@ -455,6 +459,85 @@ export interface PatchReviseRequest {
   user_feedback: string;
 }
 
+export type DeliveryStatus =
+  | 'PENDING'
+  | 'VALIDATING'
+  | 'BLOCKED'
+  | 'READY'
+  | 'CREATING_COMMIT'
+  | 'CREATING_BRANCH'
+  | 'CREATING_PR'
+  | 'PR_CREATED'
+  | 'FAILED';
+
+export interface DeliveryPreviewResponse {
+  eligible: boolean;
+  blocking_reason?: string | null;
+  failure_code?: string | null;
+  repository_url: string;
+  repository_owner: string;
+  repository_name: string;
+  base_branch: string;
+  scanned_base_sha: string;
+  observed_base_sha?: string | null;
+  files_modified: string[];
+  patch_status: PatchStatus;
+  machine_verdict?: string | null;
+  human_approved: boolean;
+  proposed_branch_name: string;
+  proposed_pr_title: string;
+  github_delivery_configured: boolean;
+}
+
+export interface DeliveryRequest {
+  requested_by?: string;
+  notes?: string | null;
+}
+
+export interface DeliveryResponse {
+  id: string;
+  scan_id: string;
+  finding_id: string;
+  patch_id: string;
+  provider: string;
+  repository_url: string;
+  repository_owner: string;
+  repository_name: string;
+  base_branch: string;
+  scanned_base_sha: string;
+  observed_base_sha?: string | null;
+  head_branch?: string | null;
+  head_sha?: string | null;
+  pr_number?: number | null;
+  pr_url?: string | null;
+  status: DeliveryStatus;
+  failure_code?: string | null;
+  failure_message?: string | null;
+  idempotency_key: string;
+  requested_by: string;
+  attempt_count: number;
+  last_attempt_at?: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at?: string | null;
+}
+
+export interface ReportDelivery {
+  delivery_id: string;
+  status: string;
+  provider: string;
+  repository: string;
+  base_branch: string;
+  scanned_base_sha: string;
+  observed_base_sha?: string | null;
+  head_branch?: string | null;
+  head_sha?: string | null;
+  pr_number?: number | null;
+  pr_url?: string | null;
+  failure_code?: string | null;
+  completed_at?: string | null;
+}
+
 export type WorkflowEventType =
   | 'SCAN_CREATED'
   | 'SCAN_STARTED'
@@ -477,6 +560,13 @@ export type WorkflowEventType =
   | 'HUMAN_APPROVED'
   | 'HUMAN_REJECTED'
   | 'HUMAN_REVISION_REQUESTED'
+  | 'DELIVERY_REQUESTED'
+  | 'DELIVERY_VALIDATED'
+  | 'DELIVERY_BLOCKED'
+  | 'DELIVERY_COMMIT_CREATED'
+  | 'DELIVERY_BRANCH_CREATED'
+  | 'DELIVERY_PR_CREATED'
+  | 'DELIVERY_FAILED'
   | 'WORKFLOW_ERROR';
 
 export const WORKFLOW_EVENT_TYPES: readonly WorkflowEventType[] = [
@@ -501,6 +591,13 @@ export const WORKFLOW_EVENT_TYPES: readonly WorkflowEventType[] = [
   'HUMAN_APPROVED',
   'HUMAN_REJECTED',
   'HUMAN_REVISION_REQUESTED',
+  'DELIVERY_REQUESTED',
+  'DELIVERY_VALIDATED',
+  'DELIVERY_BLOCKED',
+  'DELIVERY_COMMIT_CREATED',
+  'DELIVERY_BRANCH_CREATED',
+  'DELIVERY_PR_CREATED',
+  'DELIVERY_FAILED',
   'WORKFLOW_ERROR',
 ] as const;
 
@@ -510,6 +607,7 @@ export interface WorkflowEvent {
   scan_id: string;
   finding_id?: string | null;
   patch_id?: string | null;
+  delivery_id?: string | null;
   thread_id?: string | null;
   commit_sha?: string | null;
   stage?: string | null;

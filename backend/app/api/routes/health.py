@@ -89,6 +89,11 @@ def _build_telemetry_report(db: Session) -> TelemetryReport:
             configured=bool(settings.HUGGINGFACE_API_KEY and settings.HUGGINGFACE_API_KEY.strip()),
             default_model=settings.MODEL_INTEGRATION_CODE,
         ),
+        ProviderTelemetry(
+            provider="github",
+            configured=bool(settings.GITHUB_TOKEN and settings.GITHUB_TOKEN.strip()),
+            default_model="github-git-data-api",
+        ),
     ]
 
     # 3. Storage filesystem capability (booleans only, no host paths)
@@ -106,6 +111,9 @@ def _build_telemetry_report(db: Session) -> TelemetryReport:
     # 4. Metrics aggregation
     metrics = MetricsTelemetry()
     try:
+        from app.models.delivery import DeliveryModel
+        from app.schemas.enums import DeliveryStatus
+
         metrics.total_scans = db.query(func.count(ScanModel.id)).scalar() or 0
         metrics.completed_scans = db.query(func.count(ScanModel.id)).filter(ScanModel.status == ScanStatus.COMPLETED.value).scalar() or 0
         metrics.failed_scans = db.query(func.count(ScanModel.id)).filter(ScanModel.status == ScanStatus.FAILED.value).scalar() or 0
@@ -116,6 +124,9 @@ def _build_telemetry_report(db: Session) -> TelemetryReport:
         metrics.total_patches = db.query(func.count(PatchModel.id)).scalar() or 0
         metrics.approved_patches = db.query(func.count(PatchModel.id)).filter(PatchModel.status == PatchStatus.APPROVED.value).scalar() or 0
         metrics.rejected_patches = db.query(func.count(PatchModel.id)).filter(PatchModel.status == PatchStatus.REJECTED.value).scalar() or 0
+
+        metrics.total_deliveries = db.query(func.count(DeliveryModel.id)).scalar() or 0
+        metrics.pull_requests_created = db.query(func.count(DeliveryModel.id)).filter(DeliveryModel.status == DeliveryStatus.PR_CREATED.value).scalar() or 0
 
         metrics.total_workflow_events = db.query(func.count(WorkflowEventModel.id)).scalar() or 0
     except Exception as exc:

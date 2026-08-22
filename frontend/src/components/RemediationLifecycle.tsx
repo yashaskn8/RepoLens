@@ -1,7 +1,9 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
+  DeliveryPreviewResponse,
+  DeliveryResponse,
   Finding,
   FixPlan,
   PatchResponse,
@@ -10,7 +12,10 @@ import {
 } from '@/types/domain';
 import {
   approvePatch,
+  fetchDeliveryByPatch,
+  fetchDeliveryPreview,
   rejectPatch,
+  requestDelivery,
   requestFindingResearch,
   requestFixPlan,
   requestPatchGeneration,
@@ -41,6 +46,13 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
   const [rejectReason, setRejectReason] = useState<string>('');
   const [showRejectInput, setShowRejectInput] = useState(false);
   const [showReviseInput, setShowReviseInput] = useState(false);
+
+  // Delivery state (Phase 5)
+  const [deliveryPreview, setDeliveryPreview] = useState<DeliveryPreviewResponse | null>(null);
+  const [delivery, setDelivery] = useState<DeliveryResponse | null>(null);
+  const [showDeliveryModal, setShowDeliveryModal] = useState<boolean>(false);
+  const [deliveryNotes, setDeliveryNotes] = useState<string>('');
+  const [deliveryRequestedBy, setDeliveryRequestedBy] = useState<string>('lead-engineer');
 
   // Step 1: Request Research
   const handleRequestResearch = async () => {
@@ -136,6 +148,51 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
       setShowReviseInput(false);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Revision request failed');
+    } finally {
+      setLoadingStep(null);
+    }
+  };
+
+  // Step 7: Load Delivery Preview & Existing Delivery (Phase 5)
+  useEffect(() => {
+    if (!patchId || patchStatus !== 'APPROVED') return;
+
+    let isMounted = true;
+    const loadDeliveryData = async () => {
+      try {
+        const [prev, del] = await Promise.all([
+          fetchDeliveryPreview(patchId).catch(() => null),
+          fetchDeliveryByPatch(patchId).catch(() => null),
+        ]);
+        if (isMounted) {
+          if (prev) setDeliveryPreview(prev);
+          if (del) setDelivery(del);
+        }
+      } catch (err: unknown) {
+        console.error('Failed to load delivery data:', err);
+      }
+    };
+
+    loadDeliveryData();
+    return () => {
+      isMounted = false;
+    };
+  }, [patchId, patchStatus]);
+
+  // Step 8: Execute Safe GitHub Delivery
+  const handleDeliver = async () => {
+    if (!patchId) return;
+    try {
+      setError(null);
+      setLoadingStep('deliver');
+      const res = await requestDelivery(patchId, {
+        requested_by: deliveryRequestedBy.trim() || 'user',
+        notes: deliveryNotes.trim() || undefined,
+      });
+      setDelivery(res);
+      setShowDeliveryModal(false);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Pull request delivery failed');
     } finally {
       setLoadingStep(null);
     }
@@ -394,7 +451,218 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
             )}
           </div>
         )}
+
+        {/* 5. GitHub Pull Request Delivery (Phase 5) */}
+        {patchStatus === 'APPROVED' && (
+          <div className="rounded-lg border border-emerald-900/60 bg-emerald-950/20 p-5 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <span className="text-xs font-bold text-emerald-400 uppercase tracking-wider flex items-center gap-1.5">
+                  <span>🚀</span> 5. Safe GitHub Delivery & Pull Request
+                </span>
+                <p className="text-[11px] text-neutral-400 mt-0.5">
+                  Deliver the human-approved patch to a dedicated remediation branch on GitHub. No direct writes to main.
+                </p>
+              </div>
+
+              {delivery?.status === 'PR_CREATED' ? (
+                <a
+                  href={delivery.pr_url || '#'}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-4 py-1.5 text-xs font-semibold bg-emerald-700 hover:bg-emerald-600 text-white rounded border border-emerald-500 inline-flex items-center gap-1.5 shadow-sm transition"
+                >
+                  <span>View PR #{delivery.pr_number} on GitHub</span>
+                  <span>↗</span>
+                </a>
+              ) : (
+                <button
+                  onClick={() => setShowDeliveryModal(true)}
+                  disabled={
+                    loadingStep === 'deliver' ||
+                    (deliveryPreview !== null && !deliveryPreview.eligible) ||
+                    delivery?.status === 'BLOCKED'
+                  }
+                  className="px-4 py-1.5 text-xs font-semibold bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded border border-emerald-600 shadow-sm transition inline-flex items-center gap-1.5"
+                >
+                  {loadingStep === 'deliver' ? (
+                    'Creating Pull Request...'
+                  ) : (
+                    <>
+                      <span>Open GitHub Pull Request</span>
+                      <span>→</span>
+                    </>
+                  )}
+                </button>
+              )}
+            </div>
+
+            {/* Success Banner if PR is Created */}
+            {delivery?.status === 'PR_CREATED' && (
+              <div className="rounded-lg border border-emerald-700 bg-emerald-950/60 p-3.5 text-xs space-y-2">
+                <div className="flex items-center justify-between text-emerald-300 font-semibold">
+                  <span>✅ Pull Request Created Successfully</span>
+                  <span className="font-mono text-[11px]">PR #{delivery.pr_number}</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 text-[11px] text-neutral-300 pt-1 border-t border-emerald-900/60">
+                  <div>
+                    <span className="text-neutral-400">Head Branch: </span>
+                    <span className="font-mono text-emerald-400">{delivery.head_branch}</span>
+                  </div>
+                  <div>
+                    <span className="text-neutral-400">Base Branch: </span>
+                    <span className="font-mono text-emerald-400">{delivery.base_branch}</span>
+                  </div>
+                  <div>
+                    <span className="text-neutral-400">Commit SHA: </span>
+                    <span className="font-mono text-neutral-300">{delivery.head_sha?.slice(0, 8)}</span>
+                  </div>
+                  <div>
+                    <span className="text-neutral-400">Delivered By: </span>
+                    <span>{delivery.requested_by}</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Base Drift Warning Banner */}
+            {(deliveryPreview?.failure_code === 'BLOCKED_BASE_DRIFT' ||
+              delivery?.failure_code === 'BLOCKED_BASE_DRIFT') && (
+              <div className="rounded-lg border border-amber-800 bg-amber-950/40 p-3.5 text-xs space-y-1.5 text-amber-200">
+                <div className="flex items-center gap-2 font-semibold text-amber-300">
+                  <span>⚠️ Base Branch Drift Detected</span>
+                </div>
+                <p className="text-[11px] text-amber-300/90 leading-relaxed">
+                  The remote repository base branch has updated on GitHub since this scan was performed. To ensure exact-commit patch integrity, automated delivery is blocked.
+                </p>
+                <div className="text-[10px] font-mono text-amber-400/80 pt-1">
+                  Scanned Base SHA: {deliveryPreview?.scanned_base_sha?.slice(0, 8) || 'N/A'} | Current Remote HEAD: {deliveryPreview?.observed_base_sha?.slice(0, 8) || 'N/A'}
+                </div>
+                <p className="text-[11px] font-medium text-amber-200 pt-0.5">
+                  Please initiate a new repository scan before opening a pull request.
+                </p>
+              </div>
+            )}
+
+            {/* Delivery Preview Parameters */}
+            {deliveryPreview && delivery?.status !== 'PR_CREATED' && (
+              <div className="rounded-lg border border-neutral-800 bg-neutral-950 p-3.5 space-y-2 text-xs">
+                <div className="flex items-center justify-between text-neutral-300 font-medium">
+                  <span>Target Repository: {deliveryPreview.repository_owner}/{deliveryPreview.repository_name}</span>
+                  <span className="text-[11px] text-sky-400 font-mono">Base: {deliveryPreview.base_branch}</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 text-[11px] text-neutral-400 pt-1 border-t border-neutral-800">
+                  <div>
+                    <span>Dedicated Branch: </span>
+                    <span className="font-mono text-neutral-200">{deliveryPreview.proposed_branch_name}</span>
+                  </div>
+                  <div>
+                    <span>Modified Files: </span>
+                    <span className="text-neutral-200">{deliveryPreview.files_modified.length} file(s)</span>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
+
+      {/* Delivery Confirmation Modal */}
+      {showDeliveryModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-xs">
+          <div className="w-full max-w-lg rounded-xl border border-neutral-800 bg-neutral-950 p-6 shadow-2xl space-y-5 text-neutral-200">
+            <div className="flex items-center justify-between border-b border-neutral-800 pb-3">
+              <h3 className="text-base font-semibold text-neutral-100 flex items-center gap-2">
+                <span>🛡️</span> Confirm GitHub Pull Request Delivery
+              </h3>
+              <button
+                onClick={() => setShowDeliveryModal(false)}
+                className="text-neutral-400 hover:text-neutral-200 transition"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="text-xs space-y-3 text-neutral-300">
+              <div className="rounded-lg bg-neutral-900 p-3 space-y-1.5 border border-neutral-800">
+                <div className="flex justify-between">
+                  <span className="text-neutral-400">Target Repository:</span>
+                  <span className="font-semibold text-neutral-100">
+                    {deliveryPreview?.repository_owner}/{deliveryPreview?.repository_name}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-neutral-400">Target Base Branch:</span>
+                  <span className="font-mono text-sky-400">{deliveryPreview?.base_branch || 'main'}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-neutral-400">New Dedicated Branch:</span>
+                  <span className="font-mono text-emerald-400">{deliveryPreview?.proposed_branch_name}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-neutral-400">Files to Patch:</span>
+                  <span>{deliveryPreview?.files_modified.length || 0} file(s)</span>
+                </div>
+              </div>
+
+              {/* Safety Guarantees Callout */}
+              <div className="rounded-lg bg-sky-950/30 border border-sky-900/60 p-3 space-y-1 text-[11px] text-sky-300">
+                <div className="font-semibold">Safety Boundary & Execution Rules:</div>
+                <ul className="list-disc list-inside space-y-0.5 text-neutral-300">
+                  <li>RepoLens will <strong>never write directly</strong> to the default/base branch.</li>
+                  <li>RepoLens will <strong>never automatically merge</strong> or close pull requests.</li>
+                  <li>The pull request contains human-approved code verified against commit <code>{deliveryPreview?.scanned_base_sha?.slice(0, 8)}</code>.</li>
+                </ul>
+              </div>
+
+              {/* Sign-off Inputs */}
+              <div className="space-y-2 pt-1">
+                <div>
+                  <label className="block text-[11px] font-medium text-neutral-300 mb-1">
+                    Requested By (User Identifier):
+                  </label>
+                  <input
+                    type="text"
+                    value={deliveryRequestedBy}
+                    onChange={(e) => setDeliveryRequestedBy(e.target.value)}
+                    placeholder="e.g. lead-engineer"
+                    className="w-full bg-neutral-900 border border-neutral-700 rounded px-3 py-1.5 text-xs text-neutral-200 focus:outline-none focus:border-sky-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-medium text-neutral-300 mb-1">
+                    Optional Delivery Notes / Sign-off:
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={deliveryNotes}
+                    onChange={(e) => setDeliveryNotes(e.target.value)}
+                    placeholder="e.g. Reviewed and authorized for production remediation"
+                    className="w-full bg-neutral-900 border border-neutral-700 rounded px-3 py-1.5 text-xs text-neutral-200 focus:outline-none focus:border-sky-500 resize-none"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end space-x-3 pt-2 border-t border-neutral-800">
+              <button
+                onClick={() => setShowDeliveryModal(false)}
+                className="px-3.5 py-1.5 text-xs font-medium text-neutral-400 hover:text-neutral-200 transition"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDeliver}
+                disabled={loadingStep === 'deliver'}
+                className="px-4 py-1.5 text-xs font-semibold bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white rounded border border-emerald-600 shadow-sm transition"
+              >
+                {loadingStep === 'deliver' ? 'Delivering...' : 'Confirm & Create Pull Request'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
+

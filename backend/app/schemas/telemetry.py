@@ -29,6 +29,8 @@ class MetricsTelemetry(BaseModel):
     total_patches: int = 0
     approved_patches: int = 0
     rejected_patches: int = 0
+    total_deliveries: int = 0
+    pull_requests_created: int = 0
     total_workflow_events: int = 0
 
 
@@ -77,6 +79,11 @@ class ScanTelemetry(BaseModel):
     patches_needing_review: int = 0
     patches_approved: int = 0
     patches_rejected: int = 0
+
+    deliveries_requested: int = 0
+    deliveries_blocked: int = 0
+    pull_requests_created: int = 0
+    delivery_failures: int = 0
 
     analysis_truncated: bool = False
     analysis_truncation_reason: Optional[str] = None

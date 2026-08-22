@@ -9,7 +9,7 @@ interface WorkflowTimelineProps {
   autoScroll?: boolean;
 }
 
-type FilterCategory = 'ALL' | 'STAGES' | 'FINDINGS' | 'PATCHES' | 'HUMAN_AUDIT';
+type FilterCategory = 'ALL' | 'STAGES' | 'FINDINGS' | 'PATCHES' | 'HUMAN_AUDIT' | 'DELIVERIES';
 
 function getEventBadgeStyle(type: WorkflowEventType): {
   bg: string;
@@ -39,6 +39,7 @@ function getEventBadgeStyle(type: WorkflowEventType): {
     case 'STAGE_FAILED':
     case 'TOOL_FAILED':
     case 'TOOL_UNAVAILABLE':
+    case 'DELIVERY_FAILED':
     case 'WORKFLOW_ERROR':
       return { bg: 'bg-rose-950/40', text: 'text-rose-400', border: 'border-rose-800/60', icon: '❌' };
     case 'HUMAN_APPROVED':
@@ -49,6 +50,18 @@ function getEventBadgeStyle(type: WorkflowEventType): {
     case 'HUMAN_REVISION_REQUESTED':
     case 'PATCH_REVISION_CREATED':
       return { bg: 'bg-indigo-950/40', text: 'text-indigo-300', border: 'border-indigo-800/60', icon: '🔄' };
+    case 'DELIVERY_REQUESTED':
+      return { bg: 'bg-indigo-950/40', text: 'text-indigo-400', border: 'border-indigo-800/60', icon: '📦' };
+    case 'DELIVERY_VALIDATED':
+      return { bg: 'bg-sky-950/40', text: 'text-sky-400', border: 'border-sky-800/60', icon: '🔍✅' };
+    case 'DELIVERY_BLOCKED':
+      return { bg: 'bg-amber-950/40', text: 'text-amber-400', border: 'border-amber-800/60', icon: '⚠️🚫' };
+    case 'DELIVERY_COMMIT_CREATED':
+      return { bg: 'bg-blue-950/40', text: 'text-blue-400', border: 'border-blue-800/60', icon: '💾' };
+    case 'DELIVERY_BRANCH_CREATED':
+      return { bg: 'bg-teal-950/40', text: 'text-teal-400', border: 'border-teal-800/60', icon: '🌿' };
+    case 'DELIVERY_PR_CREATED':
+      return { bg: 'bg-emerald-950/60', text: 'text-emerald-300 font-bold', border: 'border-emerald-600', icon: '🚀🎉' };
     case 'SCAN_COMPLETED':
       return { bg: 'bg-emerald-950/40', text: 'text-emerald-300', border: 'border-emerald-700/60', icon: '🎉' };
     default:
@@ -78,6 +91,9 @@ function matchesFilter(event: WorkflowEvent, filter: FilterCategory): boolean {
       event.event_type === 'PATCH_REJECTED' ||
       event.event_type === 'PATCH_REVISION_CREATED'
     );
+  }
+  if (filter === 'DELIVERIES') {
+    return event.event_type.startsWith('DELIVERY_');
   }
   return true;
 }
@@ -169,7 +185,7 @@ export function WorkflowTimeline({ scanId }: WorkflowTimelineProps) {
 
       {/* Filter Bar */}
       <div className="flex items-center gap-2 py-3 overflow-x-auto text-xs border-b border-slate-800/60">
-        {(['ALL', 'STAGES', 'FINDINGS', 'PATCHES', 'HUMAN_AUDIT'] as FilterCategory[]).map((cat) => {
+        {(['ALL', 'STAGES', 'FINDINGS', 'PATCHES', 'HUMAN_AUDIT', 'DELIVERIES'] as FilterCategory[]).map((cat) => {
           const isActive = filter === cat;
           return (
             <button
@@ -182,14 +198,16 @@ export function WorkflowTimeline({ scanId }: WorkflowTimelineProps) {
               }`}
             >
               {cat === 'ALL'
-                ? `All (${events.length})`
+                ? 'All Events'
                 : cat === 'STAGES'
                 ? 'Stages & Scanners'
                 : cat === 'FINDINGS'
                 ? 'Findings'
                 : cat === 'PATCHES'
                 ? 'Patches'
-                : 'Human Audits'}
+                : cat === 'HUMAN_AUDIT'
+                ? 'Human Audit'
+                : '🚀 GitHub Deliveries'}
             </button>
           );
         })}

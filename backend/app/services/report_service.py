@@ -10,12 +10,15 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from app.models.delivery import DeliveryModel
 from app.models.finding import FindingModel
 from app.models.patch import PatchModel
 from app.models.scan import ScanModel
 from app.models.workflow_event import WorkflowEventModel
+from app.schemas.enums import DeliveryStatus
 from app.schemas.report import (
     ReportAnalysisScope,
+    ReportDelivery,
     ReportEvidence,
     ReportFinding,
     ReportPatch,
@@ -52,58 +55,18 @@ def _normalize_count(value: Any) -> Optional[int]:
     return None
 
 
-def _escape_markdown_text(text: Optional[str]) -> str:
-    """Escape raw HTML tags and redact secrets so untrusted repository text is rendered as inert text."""
-    if not text:
-        return ""
-    redacted = _redact_secrets(text)
-    # Convert raw HTML characters so browsers do not execute scripts
-    return html.escape(redacted, quote=False)
+from app.security.markdown import (
+    escape_markdown_text,
+    escape_table_cell,
+    safe_fenced_block,
+    safe_inline_code,
+)
 
-
-def _escape_table_cell(text: Optional[str]) -> str:
-    """Format text safely inside a Markdown table cell, escaping pipes and removing line breaks."""
-    if not text:
-        return "-"
-    redacted = _redact_secrets(text)
-    escaped = html.escape(redacted, quote=False)
-    # Pipes break table formatting
-    escaped = escaped.replace("|", "\\|")
-    # Replace newlines with break tags or spaces
-    escaped = escaped.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
-    return escaped.strip() or "-"
-
-
-def _safe_inline_code(text: Optional[str]) -> str:
-    """Wrap content in inline code backticks, safely escaping embedded backticks."""
-    if not text:
-        return "``"
-    redacted = _redact_secrets(str(text))
-    escaped = html.escape(redacted, quote=False)
-    # If text contains backticks, use double backticks with space padding
-    if "`" in escaped:
-        return f"`` {escaped} ``"
-    return f"`{escaped}`"
-
-
-def _safe_fenced_block(content: Optional[str], lang: str = "") -> str:
-    """Render a code or diff block using dynamic fence length to prevent backtick breakout injection."""
-    if not content:
-        return f"```{lang}\n```{lang}"
-    redacted = _redact_secrets(content)
-    # Calculate required fence length: at least 3, or longest consecutive backtick run + 1
-    longest_run = 0
-    current_run = 0
-    for ch in redacted:
-        if ch == "`":
-            current_run += 1
-            if current_run > longest_run:
-                longest_run = current_run
-        else:
-            current_run = 0
-    fence_length = max(3, longest_run + 1)
-    fence = "`" * fence_length
-    return f"{fence}{lang}\n{redacted}\n{fence}"
+# Canonical aliases for internal references
+_escape_markdown_text = escape_markdown_text
+_escape_table_cell = escape_table_cell
+_safe_inline_code = safe_inline_code
+_safe_fenced_block = safe_fenced_block
 
 
 class ScanReportService:
@@ -118,12 +81,33 @@ class ScanReportService:
 
         finding_models = db.query(FindingModel).filter(FindingModel.scan_id == str(scan_id)).all()
         patch_models = db.query(PatchModel).filter(PatchModel.scan_id == str(scan_id)).all()
+        delivery_models = db.query(DeliveryModel).filter(DeliveryModel.scan_id == str(scan_id)).all()
         event_models = (
             db.query(WorkflowEventModel)
             .filter(WorkflowEventModel.scan_id == str(scan_id))
             .order_by(WorkflowEventModel.id.asc())
             .all()
         )
+
+        # Index deliveries by patch_id
+        deliveries_by_patch: Dict[str, List[ReportDelivery]] = {}
+        for dm in delivery_models:
+            rd = ReportDelivery(
+                delivery_id=dm.id,
+                status=dm.status,
+                provider=dm.provider,
+                repository=f"{dm.repository_owner}/{dm.repository_name}",
+                base_branch=dm.base_branch,
+                scanned_base_sha=dm.scanned_base_sha,
+                observed_base_sha=dm.observed_base_sha,
+                head_branch=dm.head_branch,
+                head_sha=dm.head_sha,
+                pr_number=dm.pr_number,
+                pr_url=dm.pr_url,
+                failure_code=dm.failure_code,
+                completed_at=dm.completed_at,
+            )
+            deliveries_by_patch.setdefault(dm.patch_id, []).append(rd)
 
         # Index patches by finding_id with secret-sanitized content
         patches_by_finding: Dict[str, List[ReportPatch]] = {}
@@ -144,6 +128,7 @@ class ScanReportService:
                 approved_at=pm.approved_at,
                 rejected_reason=_redact_secrets(pm.rejected_reason) if pm.rejected_reason else None,
                 user_feedback=_redact_secrets(pm.user_feedback) if pm.user_feedback else None,
+                deliveries=deliveries_by_patch.get(pm.id, []),
                 created_at=pm.created_at,
             )
             patches_by_finding.setdefault(pm.finding_id, []).append(rp)
@@ -193,6 +178,10 @@ class ScanReportService:
             approved_patches=sum(1 for p in patch_models if p.status == "APPROVED"),
             rejected_patches=sum(1 for p in patch_models if p.status == "REJECTED"),
             revised_patches=sum(1 for p in patch_models if (p.revision_number or 0) > 0),
+            total_deliveries=len(delivery_models),
+            pull_requests_created=sum(1 for d in delivery_models if d.status == DeliveryStatus.PR_CREATED.value),
+            deliveries_blocked=sum(1 for d in delivery_models if d.status == DeliveryStatus.BLOCKED.value),
+            delivery_failures=sum(1 for d in delivery_models if d.status == DeliveryStatus.FAILED.value),
         )
 
         # Build events audit trail
@@ -320,6 +309,9 @@ class ScanReportService:
         lines.append(f"| 👤 Approved Patches | {report.summary.approved_patches} |")
         lines.append(f"| ❌ Rejected Patches | {report.summary.rejected_patches} |")
         lines.append(f"| 🔄 Child Revisions | {report.summary.revised_patches} |")
+        lines.append(f"| 🚀 GitHub PRs Created | {report.summary.pull_requests_created} |")
+        if report.summary.deliveries_blocked > 0:
+            lines.append(f"| ⚠️ Blocked Deliveries (Base Drift) | {report.summary.deliveries_blocked} |")
         lines.append("")
 
         # Analysis Scope & Ingestion Coverage
@@ -417,6 +409,11 @@ class ScanReportService:
                             lines.append(f"- **Rejected Reason**: {_escape_markdown_text(p.rejected_reason)}")
                         if p.user_feedback:
                             lines.append(f"- **Human Feedback**: {_escape_markdown_text(p.user_feedback)}")
+                        if p.deliveries:
+                            lines.append(f"- **GitHub Delivery**: {len(p.deliveries)} delivery record(s)")
+                            for d in p.deliveries:
+                                pr_str = f" [PR #{d.pr_number}]({d.pr_url})" if d.pr_number and d.pr_url else ""
+                                lines.append(f"  - Status: {_safe_inline_code(d.status)}{pr_str} (Branch: {_safe_inline_code(d.head_branch or 'N/A')})")
                         lines.append(f"- **Explanation**: {_escape_markdown_text(p.explanation)}")
                         lines.append(f"- **Files Modified**: {', '.join(_safe_inline_code(fm) for fm in p.files_modified)}")
                         lines.append("")
@@ -576,6 +573,13 @@ class ScanReportService:
         patches_approved = sum(1 for p in patch_models if p.status == "APPROVED")
         patches_rejected = sum(1 for p in patch_models if p.status == "REJECTED" or p.machine_verdict == "REJECTED")
 
+        # Delivery metrics derived authoritatively from DeliveryModel
+        delivery_models = db.query(DeliveryModel).filter(DeliveryModel.scan_id == str(scan_id)).all()
+        deliveries_requested = len(delivery_models)
+        deliveries_blocked = sum(1 for d in delivery_models if d.status == DeliveryStatus.BLOCKED.value)
+        pull_requests_created = sum(1 for d in delivery_models if d.status == DeliveryStatus.PR_CREATED.value)
+        delivery_failures = sum(1 for d in delivery_models if d.status == DeliveryStatus.FAILED.value)
+
         # Analysis scope & truncation
         scope_data = scan_meta.get("analysis_scope") or scan_meta.get("scope") or {}
         analysis_truncated = bool(scope_data.get("truncated", False)) if isinstance(scope_data, dict) else False
@@ -605,6 +609,10 @@ class ScanReportService:
             patches_needing_review=patches_needing_review,
             patches_approved=patches_approved,
             patches_rejected=patches_rejected,
+            deliveries_requested=deliveries_requested,
+            deliveries_blocked=deliveries_blocked,
+            pull_requests_created=pull_requests_created,
+            delivery_failures=delivery_failures,
             analysis_truncated=analysis_truncated,
             analysis_truncation_reason=analysis_truncation_reason,
         )

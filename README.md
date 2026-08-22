@@ -2,22 +2,24 @@
 
 RepoLens is an AI-powered repository intelligence and autonomous remediation platform that ingests, indexes, verifies, plans, and patches complex multi-language codebases with strict mathematical determinism and human-in-the-loop safety boundaries.
 
-> **Phase 4: Real-Time Workflow Streaming, Durable Auditability & Telemetry**  
-> Complete intelligence and remediation platform featuring real-time Server-Sent Events (SSE) workflow streaming with monotonic replay, durable audit trail event persistence, structured GFM Markdown and JSON evidence reporting, operational telemetry monitoring, Tree-sitter AST symbol indexing, deterministic RepositoryGraph route & dependency contract evaluation, durable LangGraph multi-agent scan execution, exact-commit snapshot rehydration, and an isolated sandbox patch verification engine.
+> **Phase 5: Safe GitHub Delivery & Pull Request Orchestration**  
+> Complete intelligence, remediation, and safe delivery platform featuring automated Pull Request generation via GitHub's Git Data API, deterministic base-branch drift protection, isolated ephemeral sandbox verification, real-time Server-Sent Events (SSE) workflow streaming with monotonic replay, durable audit trail event persistence, structured GFM Markdown and JSON evidence reporting, operational telemetry monitoring, Tree-sitter AST symbol indexing, deterministic RepositoryGraph route & dependency contract evaluation, durable LangGraph multi-agent scan execution, exact-commit snapshot rehydration, and an isolated sandbox patch verification engine.
 
 ---
 
 ## Key Capabilities & Safety Invariants
 
 1. **Untrusted Repository Confinement**: Submitted repositories are never executed, test suites are never run directly, and external scripts are never invoked.
-2. **Deterministic 12-Check Verification**: Patches undergo unified diff validation, path traversal prevention, binary file guards, Tree-sitter AST syntax re-parsing, route contract verification, scanner re-evaluation, secret leak scanning, and critical finding regression checks.
-3. **Exact Commit Rehydration**: The original repository is never mutated in-place. Remediation, planning, and verification operate strictly in ephemeral sandbox clones rehydrated to the exact persisted commit SHA.
-4. **Human-in-the-Loop Authority**: Machine verification never marks patches as `APPROVED`. Patches pause at human approval boundaries (`VERIFIED` or `NEEDS_REVIEW`) and require explicit human review via `/approve`, `/reject`, or `/revise`.
-5. **Machine Verdict vs Human Review Separation**: Machine verification results are persisted independently as `PASSED`, `NEEDS_REVIEW`, or `REJECTED`, while patch lifecycle status uses `DRAFT`, `VERIFIED`, `NEEDS_REVIEW`, `REJECTED`, and `APPROVED`. Only explicit human approval may set `APPROVED`.
-6. **Single Revision Lineage**: Human revisions generate an immutable child patch linked via `parent_patch_id` and `revision_number = 1`, enforced by database constraints and atomic API validation.
-7. **Real-Time SSE Streaming & Replay**: Low-latency Server-Sent Events stream live workflow stages, tool actions, and human decisions with `Last-Event-ID` offset recovery.
-8. **Exportable Evidence Reports**: Complete GFM Markdown and structured JSON report generation with exact source evidence, unified diffs, and chronological audit trails.
-9. **Zero External Worker Requirement**: RepoLens supports pure local development on Windows, macOS, and Linux without requiring Docker, Redis, Celery, or Kafka.
+2. **Safe GitHub PR Orchestration**: Approved patches can be delivered as pull requests back to the originating repository via GitHub's Git Data API (`blobs` $\to$ `tree` $\to$ `commit` $\to$ `ref`). RepoLens **never** writes directly to `main` or the default branch, never performs auto-merges, and never force-pushes.
+3. **Deterministic Base Drift Protection**: Before creating a commit or branch, the delivery validator verifies the remote branch HEAD SHA matches the exact scanned commit SHA. If drift is detected, delivery is blocked and recorded in the audit trail without modifying remote repository state.
+4. **Deterministic 15-Check Delivery Verification**: Patches undergo strict validation including explicit human approval checks, machine verdict checks, remote base SHA drift detection, branch name sanitization, path traversal confinement, binary file guards, Tree-sitter AST syntax re-parsing, scanner re-evaluation, secret leak scanning, and critical finding regression checks.
+5. **Exact Commit Rehydration**: The original repository is never mutated in-place. Remediation, planning, and verification operate strictly in ephemeral sandbox clones rehydrated to the exact persisted commit SHA.
+6. **Human-in-the-Loop Authority**: Machine verification never marks patches as `APPROVED`. Patches pause at human approval boundaries (`VERIFIED` or `NEEDS_REVIEW`) and require explicit human review via `/approve`, `/reject`, or `/revise`. Only already-approved patches can be delivered to GitHub.
+7. **Machine Verdict vs Human Review Separation**: Machine verification results are persisted independently as `PASSED`, `NEEDS_REVIEW`, or `REJECTED`, while patch lifecycle status uses `DRAFT`, `VERIFIED`, `NEEDS_REVIEW`, `REJECTED`, and `APPROVED`. Only explicit human approval may set `APPROVED`.
+8. **Single Revision Lineage**: Human revisions generate an immutable child patch linked via `parent_patch_id` and `revision_number = 1`, enforced by database constraints and atomic API validation.
+9. **Real-Time SSE Streaming & Replay**: Low-latency Server-Sent Events stream live workflow stages, tool actions, delivery lifecycle events, and human decisions with `Last-Event-ID` offset recovery.
+10. **Exportable Evidence Reports & Delivery Telemetry**: Complete GFM Markdown and structured JSON report generation with exact source evidence, unified diffs, chronological audit trails, and delivery metrics.
+11. **Zero External Worker Requirement**: RepoLens supports pure local development on Windows, macOS, and Linux without requiring Docker, Redis, Celery, or Kafka.
 
 ---
 
@@ -29,24 +31,26 @@ RepoLens/
 │   ├── app/
 │   │   ├── agents/          # Multi-agent LangGraph workflows & checkpointer
 │   │   ├── analysis/        # Intelligence service, scanners, evidence store
-│   │   ├── api/             # FastAPI routers (scans, findings, patches, health)
+│   │   ├── api/             # FastAPI routers (scans, findings, patches, deliveries, health)
 │   │   ├── context/         # Hybrid retrieval, context engine, token budgeting
 │   │   ├── core/            # Settings, database connection, database engine
+│   │   ├── delivery/        # GitHub provider, Git Data API, safety validator, PR body generator
 │   │   ├── graph/           # RepositoryGraph, node/edge builders, route matcher
 │   │   ├── ingestion/       # Tree-sitter parsers, manifest, snapshot rehydration
 │   │   ├── llm/             # Resilient gateway with fallback, backoff & telemetry
-│   │   ├── models/          # SQLAlchemy ORM models (Scan, Finding, Evidence, Patch, WorkflowEvent)
+│   │   ├── models/          # SQLAlchemy ORM models (Scan, Finding, Evidence, Patch, WorkflowEvent, Delivery)
 │   │   ├── patching/        # Unified diff applier, validator, 12-check verifier, critic
 │   │   ├── planning/        # Fix planner with strict scope boundary enforcement
 │   │   ├── research/        # Evidence-grounded technical research & source tiering
-│   │   ├── schemas/         # Canonical Pydantic schemas, enums, reports & telemetry
-│   │   └── services/        # Scan recovery, workflow events & evidence report generator
-│   ├── alembic/             # Database migrations (001, 002, 003, 004, 005)
-│   └── tests/               # 370+ comprehensive Pytest verification tests
+│   │   ├── schemas/         # Canonical Pydantic schemas, enums, delivery, reports & telemetry
+│   │   ├── security/        # Secret redaction, prompt injection and Markdown sanitization
+│   │   └── services/        # Scan recovery, workflow events, report & delivery orchestrators
+│   ├── alembic/             # Database migrations (001, 002, 003, 004, 005, 006)
+│   └── tests/               # 385+ comprehensive Pytest verification & security release tests
 └── frontend/                 # Next.js + React 19 + TypeScript frontend
     └── src/
         ├── app/             # App Router pages (scans dashboard, finding remediation)
-        ├── components/      # UI components (diff viewer, workflow timeline, approval modal)
+        ├── components/      # UI components (diff viewer, workflow timeline, approval modal, delivery card)
         ├── lib/             # API client, SSE streaming hooks & HTTP services
         └── types/           # Domain TypeScript definitions mirroring schemas
 ```
@@ -137,4 +141,4 @@ By default, RepoLens uses SQLite for local zero-dependency development (`sqlite:
 ```bash
 DATABASE_URL="postgresql://user:password@localhost:5432/repolens"
 ```
-Alembic migrations (001, 002, 003, 004, 005) and SQLAlchemy models are designed to be fully compatible with both SQLite and PostgreSQL.
+Alembic migrations (001, 002, 003, 004, 005, 006) and SQLAlchemy models are designed to be fully compatible with both SQLite and PostgreSQL.

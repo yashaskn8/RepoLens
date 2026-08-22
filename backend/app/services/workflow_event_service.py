@@ -23,11 +23,16 @@ def _build_event_model(event: WorkflowEventCreate) -> WorkflowEventModel:
     if len(clean_msg) > 2048:
         clean_msg = clean_msg[:2048] + "... [truncated]"
 
+    delivery_id = str(event.delivery_id) if event.delivery_id else None
+    if not delivery_id and event.metadata_payload and "delivery_id" in event.metadata_payload:
+        delivery_id = str(event.metadata_payload["delivery_id"])
+
     return WorkflowEventModel(
         event_type=event.event_type.value if hasattr(event.event_type, "value") else str(event.event_type),
         scan_id=str(event.scan_id),
         finding_id=str(event.finding_id) if event.finding_id else None,
         patch_id=str(event.patch_id) if event.patch_id else None,
+        delivery_id=delivery_id,
         thread_id=event.thread_id,
         commit_sha=event.commit_sha,
         stage=event.stage,
@@ -199,6 +204,21 @@ class WorkflowEventService:
         return (
             db.query(WorkflowEventModel)
             .filter(WorkflowEventModel.patch_id == str(patch_id))
+            .order_by(WorkflowEventModel.id.asc())
+            .limit(limit)
+            .all()
+        )
+
+    @staticmethod
+    def list_for_delivery(
+        db: Session,
+        delivery_id: str,
+        limit: int = 100,
+    ) -> List[WorkflowEventModel]:
+        """Query workflow events for a specific delivery execution."""
+        return (
+            db.query(WorkflowEventModel)
+            .filter(WorkflowEventModel.delivery_id == str(delivery_id))
             .order_by(WorkflowEventModel.id.asc())
             .limit(limit)
             .all()

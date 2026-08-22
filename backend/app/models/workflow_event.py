@@ -20,6 +20,7 @@ class WorkflowEventModel(Base):
     scan_id = Column(String(36), ForeignKey("scans.id", ondelete="CASCADE"), nullable=False, index=True)
     finding_id = Column(String(36), ForeignKey("findings.id", ondelete="SET NULL"), nullable=True, index=True)
     patch_id = Column(String(36), ForeignKey("patches.id", ondelete="SET NULL"), nullable=True, index=True)
+    delivery_id = Column(String(36), ForeignKey("deliveries.id", ondelete="SET NULL"), nullable=True, index=True)
     thread_id = Column(String(128), nullable=True)
     commit_sha = Column(String(64), nullable=True)
     stage = Column(String(64), nullable=True)
@@ -34,3 +35,4 @@ class WorkflowEventModel(Base):
     scan = relationship("ScanModel", back_populates="events")
     finding = relationship("FindingModel")
     patch = relationship("PatchModel")
+    delivery = relationship("DeliveryModel", back_populates="events")

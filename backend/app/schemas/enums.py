@@ -47,3 +47,17 @@ class PatchStatus(str, Enum):
     NEEDS_REVIEW = "NEEDS_REVIEW"
     REJECTED = "REJECTED"
     APPROVED = "APPROVED"
+
+
+class DeliveryStatus(str, Enum):
+    """Lifecycle and execution status of a patch pull request delivery."""
+
+    PENDING = "PENDING"
+    VALIDATING = "VALIDATING"
+    BLOCKED = "BLOCKED"
+    READY = "READY"
+    CREATING_COMMIT = "CREATING_COMMIT"
+    CREATING_BRANCH = "CREATING_BRANCH"
+    CREATING_PR = "CREATING_PR"
+    PR_CREATED = "PR_CREATED"
+    FAILED = "FAILED"

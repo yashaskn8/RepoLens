@@ -80,6 +80,10 @@ class Settings(BaseSettings):
     # PostgreSQL pgvector Settings
     ENABLE_PGVECTOR: bool = False
 
+    # Safe GitHub Delivery Settings (Phase 5)
+    GITHUB_TOKEN: str = ""
+    GITHUB_DELIVERY_ENABLED: bool = False
+
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

@@ -19,8 +19,25 @@ class ReportEvidence(BaseModel):
     context_notes: Optional[str] = None
 
 
+class ReportDelivery(BaseModel):
+    """External repository pull request delivery record."""
+    delivery_id: str
+    status: str
+    provider: str
+    repository: str
+    base_branch: str
+    scanned_base_sha: str
+    observed_base_sha: Optional[str] = None
+    head_branch: Optional[str] = None
+    head_sha: Optional[str] = None
+    pr_number: Optional[int] = None
+    pr_url: Optional[str] = None
+    failure_code: Optional[str] = None
+    completed_at: Optional[datetime] = None
+
+
 class ReportPatch(BaseModel):
-    """Candidate patch proposal with machine verdict and human review status."""
+    """Candidate patch proposal with machine verdict, human review, and delivery status."""
     id: str
     finding_id: str
     plan_id: Optional[str] = None
@@ -36,6 +53,7 @@ class ReportPatch(BaseModel):
     approved_at: Optional[datetime] = None
     rejected_reason: Optional[str] = None
     user_feedback: Optional[str] = None
+    deliveries: List[ReportDelivery] = Field(default_factory=list)
     created_at: datetime
 
 
@@ -70,6 +88,10 @@ class ReportSummary(BaseModel):
     approved_patches: int = 0
     rejected_patches: int = 0
     revised_patches: int = 0
+    total_deliveries: int = 0
+    pull_requests_created: int = 0
+    deliveries_blocked: int = 0
+    delivery_failures: int = 0
 
 
 class ReportWorkflowEvent(BaseModel):

@@ -216,3 +216,65 @@ export async function fetchScanTelemetry(scanId: string): Promise<import('@/type
   return response.json();
 }
 
+export async function fetchDeliveryPreview(patchId: string): Promise<import('@/types/domain').DeliveryPreviewResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/patches/${patchId}/delivery-preview`, {
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json' },
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to fetch delivery preview (${response.status})`);
+  }
+
+  return response.json();
+}
+
+export async function requestDelivery(
+  patchId: string,
+  payload: import('@/types/domain').DeliveryRequest = { requested_by: 'user' }
+): Promise<import('@/types/domain').DeliveryResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/patches/${patchId}/deliver`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || `Delivery failed (${response.status})`);
+  }
+
+  return response.json();
+}
+
+export async function fetchDelivery(deliveryId: string): Promise<import('@/types/domain').DeliveryResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/deliveries/${deliveryId}`, {
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json' },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch delivery status (${response.status})`);
+  }
+
+  return response.json();
+}
+
+export async function fetchDeliveryByPatch(patchId: string): Promise<import('@/types/domain').DeliveryResponse | null> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/deliveries/patch/${patchId}`, {
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json' },
+  });
+
+  if (response.status === 404 || response.status === 204) {
+    return null;
+  }
+  if (!response.ok) {
+    return null;
+  }
+
+  return response.json();
+}
+
+
