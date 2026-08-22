@@ -116,8 +116,40 @@ def test_detailed_telemetry_endpoint(client: TestClient, db_session: Session):
 
     # Verify root and API v1 routes
     assert client.get("/health").status_code == 200
-    assert client.get("/api/v1/health").status_code == 200
-    assert client.get("/api/v1/health/telemetry").status_code == 200
+    assert client.get("/health/detailed").status_code == 200
     assert client.get("/health/telemetry").status_code == 200
+    assert client.get("/api/v1/health").status_code == 200
+    assert client.get("/api/v1/health/detailed").status_code == 200
+    assert client.get("/api/v1/health/telemetry").status_code == 200
+    assert client.get("/api/v1/api/v1/health").status_code == 404
     assert client.get("/api/v1/api/v1/health/telemetry").status_code == 404
+
+
+def test_public_error_responses_do_not_leak_stack_traces(client: TestClient, db_session: Session):
+    """Verify error responses on public endpoints return clean structured errors without stack traces."""
+    # 1. Invalid scan ID on telemetry
+    resp = client.get(f"/api/v1/scans/{uuid4()}/telemetry")
+    assert resp.status_code == 404
+    assert "Traceback" not in resp.text
+    assert "detail" in resp.json()
+
+    # 2. Invalid scan ID on report
+    resp = client.get(f"/api/v1/scans/{uuid4()}/report")
+    assert resp.status_code == 404
+    assert "Traceback" not in resp.text
+    assert "detail" in resp.json()
+
+    # 3. Invalid Last-Event-ID header on events stream for an existing scan
+    scan_id = uuid4()
+    db_session.add(ScanModel(
+        id=str(scan_id),
+        repository_url="https://github.com/org/err-test",
+        status=ScanStatus.COMPLETED.value,
+    ))
+    db_session.commit()
+
+    resp = client.get(f"/api/v1/scans/{scan_id}/events", headers={"Last-Event-ID": "non-integer-offset"})
+    assert resp.status_code == 400
+    assert "Traceback" not in resp.text
+    assert "Invalid Last-Event-ID" in resp.json()["detail"]
 

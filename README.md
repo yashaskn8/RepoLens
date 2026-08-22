@@ -42,7 +42,7 @@ RepoLens/
 │   │   ├── schemas/         # Canonical Pydantic schemas, enums, reports & telemetry
 │   │   └── services/        # Scan recovery, workflow events & evidence report generator
 │   ├── alembic/             # Database migrations (001, 002, 003, 004, 005)
-│   └── tests/               # 328+ comprehensive Pytest verification tests
+│   └── tests/               # 370+ comprehensive Pytest verification tests
 └── frontend/                 # Next.js + React 19 + TypeScript frontend
     └── src/
         ├── app/             # App Router pages (scans dashboard, finding remediation)
@@ -137,4 +137,4 @@ By default, RepoLens uses SQLite for local zero-dependency development (`sqlite:
 ```bash
 DATABASE_URL="postgresql://user:password@localhost:5432/repolens"
 ```
-Alembic migrations (001, 002, 003, 004) and SQLAlchemy models are designed to be fully compatible with both SQLite and PostgreSQL.
+Alembic migrations (001, 002, 003, 004, 005) and SQLAlchemy models are designed to be fully compatible with both SQLite and PostgreSQL.

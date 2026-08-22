@@ -25,38 +25,31 @@ from app.schemas.report import (
     ScanReport,
 )
 from app.schemas.telemetry import ScanTelemetry
+from app.security.redaction import redact_secrets
 
 logger = logging.getLogger(__name__)
 
-# Canonical Secret and Host-Path Redaction Patterns
-_SECRET_PATTERNS = [
-    (re.compile(r"(?i)\b(bearer\s+)[a-zA-Z0-9_\-\.]{10,}\b"), r"\1[REDACTED]"),
-    (re.compile(r"\b(sk-[a-zA-Z0-9_\-]{16,})\b"), r"sk-[REDACTED]"),
-    (re.compile(r"\b(gsk_[a-zA-Z0-9_\-]{16,})\b"), r"gsk_[REDACTED]"),
-    (re.compile(r"\b(hf_[a-zA-Z0-9_\-]{16,})\b"), r"hf_[REDACTED]"),
-    (re.compile(r"\b(nvapi-[a-zA-Z0-9_\-]{16,})\b"), r"nvapi-[REDACTED]"),
-    (re.compile(r"\b(AIza[0-9A-Za-z\-_]{20,})\b"), r"AIza[REDACTED]"),
-    (re.compile(r"\b(ghp_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9_]{22,})\b"), r"[REDACTED_GITHUB_TOKEN]"),
-    (re.compile(r"\b(eyJ[a-zA-Z0-9_\-]{10,}\.eyJ[a-zA-Z0-9_\-]{10,}\.[a-zA-Z0-9_\-]{10,})\b"), r"[REDACTED_JWT]"),
-    (re.compile(r"(?i)\b(api[_-]?key|secret|password|auth[_-]?token)\s*[:=]\s*['\"][^\s'\"]{6,}['\"]"), r"\1='[REDACTED]'"),
-]
-
-_HOST_PATH_PATTERNS = [
-    (re.compile(r"[a-zA-Z]:\\[Uu]sers\\[^\s\\/:]+"), r"[HOST_USER_DIR]"),
-    (re.compile(r"/home/[^\s/:]+"), r"/home/[HOST_USER]"),
-]
+# Canonical secret redaction alias
+_redact_secrets = redact_secrets
 
 
-def _redact_secrets(text: Optional[str]) -> str:
-    """Mask raw API credentials, JWTs, and sensitive tokens from report text."""
-    if not text:
-        return ""
-    result = text
-    for pattern, replacement in _SECRET_PATTERNS:
-        result = pattern.sub(replacement, result)
-    for pattern, replacement in _HOST_PATH_PATTERNS:
-        result = pattern.sub(replacement, result)
-    return result
+def _normalize_count(value: Any) -> Optional[int]:
+    """Safely normalize a metadata value to an integer count.
+
+    Handles the canonical shapes persisted by LLMRouter:
+    - None -> None (no recorded metric)
+    - int -> that count
+    - list/tuple -> len(value) (e.g. fallbacks_attempted stores a list of error records)
+    - other invalid value -> None (ignore safely, do not crash)
+    """
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, (list, tuple)):
+        return len(value)
+    # Unsupported type — do not crash, do not fabricate
+    return None
 
 
 def _escape_markdown_text(text: Optional[str]) -> str:
@@ -533,13 +526,27 @@ class ScanReportService:
                 total_tokens += src.get("total_tokens") or 0
             if "retry_count" in src or "retries" in src or "llm_retries" in src:
                 has_retry_metrics = True
-                llm_retries += src.get("retry_count") or src.get("retries") or src.get("llm_retries") or 0
+                raw_retry = src.get("retry_count") or src.get("retries") or src.get("llm_retries")
+                normalized = _normalize_count(raw_retry)
+                if normalized is not None:
+                    llm_retries += normalized
             if "fallbacks_attempted" in src or "provider_fallbacks" in src:
                 has_retry_metrics = True
-                provider_fallbacks += src.get("fallbacks_attempted") or src.get("provider_fallbacks") or 0
+                # fallbacks_attempted is canonically a list of error records from LLMRouter
+                raw_fb = src.get("fallbacks_attempted")
+                raw_pf = src.get("provider_fallbacks")
+                fb_count = _normalize_count(raw_fb)
+                pf_count = _normalize_count(raw_pf)
+                if fb_count is not None:
+                    provider_fallbacks += fb_count
+                elif pf_count is not None:
+                    provider_fallbacks += pf_count
             if "llm_calls" in src or "calls" in src:
                 has_llm_metrics = True
-                llm_calls += src.get("llm_calls") or src.get("calls") or 0
+                raw_calls = src.get("llm_calls") or src.get("calls")
+                normalized_calls = _normalize_count(raw_calls)
+                if normalized_calls is not None:
+                    llm_calls += normalized_calls
 
         final_prompt_tokens = prompt_tokens if has_token_metrics else None
         final_completion_tokens = completion_tokens if has_token_metrics else None
@@ -547,12 +554,15 @@ class ScanReportService:
 
         final_llm_retries = llm_retries if has_retry_metrics else None
         final_provider_fallbacks = provider_fallbacks if has_retry_metrics else None
-        final_llm_calls = llm_calls if has_llm_metrics else (1 if (has_token_metrics or has_retry_metrics) else None)
+        # Do NOT fabricate llm_calls=1 merely because token/retry metadata exists.
+        # If an exact call count was not recorded, it remains None.
+        final_llm_calls = llm_calls if has_llm_metrics else None
 
-        # Finding counts
-        confirmed_findings = sum(1 for f in finding_models if f.status in ("CONFIRMED", "OPEN", "VERIFIED"))
-        possible_findings = sum(1 for f in finding_models if f.status == "POSSIBLE")
-        rejected_findings = sum(1 for f in finding_models if f.status == "REJECTED")
+        # Finding verdict counts — uses verification_verdict (CONFIRMED/POSSIBLE/REJECTED),
+        # NOT lifecycle status (OPEN/RESOLVED/FALSE_POSITIVE/SUPPRESSED).
+        confirmed_findings = sum(1 for f in finding_models if f.verification_verdict == "CONFIRMED")
+        possible_findings = sum(1 for f in finding_models if f.verification_verdict == "POSSIBLE")
+        rejected_findings = sum(1 for f in finding_models if f.verification_verdict == "REJECTED")
 
         # Patch counts
         patches_generated = len(patch_models)

@@ -10,7 +10,7 @@ from app.models.finding import FindingModel
 from app.models.patch import PatchModel
 from app.models.scan import ScanModel
 from app.models.workflow_event import WorkflowEventModel
-from app.schemas.enums import PatchStatus, ScanStatus, Severity
+from app.schemas.enums import FindingStatus, PatchStatus, ScanStatus, Severity, VerificationVerdict
 from app.schemas.workflow_event import WorkflowEventCreate, WorkflowEventType
 from app.services.report_service import ScanReportService
 from app.services.workflow_event_service import WorkflowEventService
@@ -47,14 +47,15 @@ def test_scan_telemetry_completed_scan_aggregation(client: TestClient, db_sessio
     )
     db_session.add(scan)
 
-    # Add findings with various statuses
+    # Add findings with VALID FindingStatus + verification_verdict combinations
     f1 = FindingModel(
         id=str(uuid4()),
         scan_id=scan_id,
         title="SQL Injection",
         description="Concat in query",
         severity=Severity.HIGH.value,
-        status="CONFIRMED",
+        status=FindingStatus.OPEN.value,
+        verification_verdict=VerificationVerdict.CONFIRMED.value,
     )
     f2 = FindingModel(
         id=str(uuid4()),
@@ -62,7 +63,8 @@ def test_scan_telemetry_completed_scan_aggregation(client: TestClient, db_sessio
         title="Potential XSS",
         description="Unescaped output",
         severity=Severity.MEDIUM.value,
-        status="POSSIBLE",
+        status=FindingStatus.OPEN.value,
+        verification_verdict=VerificationVerdict.POSSIBLE.value,
     )
     f3 = FindingModel(
         id=str(uuid4()),
@@ -70,7 +72,8 @@ def test_scan_telemetry_completed_scan_aggregation(client: TestClient, db_sessio
         title="False Alarm",
         description="Benign test code",
         severity=Severity.LOW.value,
-        status="REJECTED",
+        status=FindingStatus.FALSE_POSITIVE.value,
+        verification_verdict=VerificationVerdict.REJECTED.value,
     )
     db_session.add_all([f1, f2, f3])
 
@@ -255,3 +258,261 @@ def test_scan_telemetry_llm_metrics_derivation(client: TestClient, db_session: S
     assert data["prompt_tokens"] == 1500
     assert data["completion_tokens"] == 450
     assert data["total_tokens"] == 1950
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# FIX 1 — Explicit verdict vs lifecycle status separation tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_verdict_counts_use_verification_verdict_not_status(client: TestClient, db_session: Session):
+    """Explicitly verify: OPEN + CONFIRMED => confirmed +1, OPEN + POSSIBLE => possible +1,
+    FALSE_POSITIVE + REJECTED => rejected +1."""
+    scan_id = str(uuid4())
+    scan = ScanModel(
+        id=scan_id,
+        repository_url="https://github.com/org/verdict-separation-test",
+        status=ScanStatus.COMPLETED.value,
+    )
+    db_session.add(scan)
+
+    # OPEN + CONFIRMED → confirmed_findings + 1
+    db_session.add(FindingModel(
+        id=str(uuid4()), scan_id=scan_id,
+        title="Confirmed Finding", description="d",
+        severity=Severity.HIGH.value,
+        status=FindingStatus.OPEN.value,
+        verification_verdict=VerificationVerdict.CONFIRMED.value,
+    ))
+    # OPEN + POSSIBLE → possible_findings + 1
+    db_session.add(FindingModel(
+        id=str(uuid4()), scan_id=scan_id,
+        title="Possible Finding", description="d",
+        severity=Severity.MEDIUM.value,
+        status=FindingStatus.OPEN.value,
+        verification_verdict=VerificationVerdict.POSSIBLE.value,
+    ))
+    # FALSE_POSITIVE + REJECTED → rejected_findings + 1
+    db_session.add(FindingModel(
+        id=str(uuid4()), scan_id=scan_id,
+        title="Rejected Finding", description="d",
+        severity=Severity.LOW.value,
+        status=FindingStatus.FALSE_POSITIVE.value,
+        verification_verdict=VerificationVerdict.REJECTED.value,
+    ))
+    db_session.commit()
+
+    resp = client.get(f"/api/v1/scans/{scan_id}/telemetry")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert data["confirmed_findings"] == 1
+    assert data["possible_findings"] == 1
+    assert data["rejected_findings"] == 1
+
+
+def test_open_finding_without_verdict_is_not_confirmed(client: TestClient, db_session: Session):
+    """OPEN finding with verification_verdict=None must NOT be counted as confirmed."""
+    scan_id = str(uuid4())
+    scan = ScanModel(
+        id=scan_id,
+        repository_url="https://github.com/org/no-verdict-test",
+        status=ScanStatus.COMPLETED.value,
+    )
+    db_session.add(scan)
+
+    # OPEN with no verification_verdict — must not appear in any verdict count
+    db_session.add(FindingModel(
+        id=str(uuid4()), scan_id=scan_id,
+        title="Unverified Finding", description="d",
+        severity=Severity.MEDIUM.value,
+        status=FindingStatus.OPEN.value,
+        verification_verdict=None,
+    ))
+    db_session.commit()
+
+    resp = client.get(f"/api/v1/scans/{scan_id}/telemetry")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert data["confirmed_findings"] == 0
+    assert data["possible_findings"] == 0
+    assert data["rejected_findings"] == 0
+
+
+def test_lifecycle_status_alone_never_determines_verdict_count(client: TestClient, db_session: Session):
+    """Lifecycle status values (OPEN, RESOLVED, FALSE_POSITIVE, SUPPRESSED) must never
+    influence verdict counts. Only verification_verdict drives those."""
+    scan_id = str(uuid4())
+    scan = ScanModel(
+        id=scan_id,
+        repository_url="https://github.com/org/lifecycle-isolation-test",
+        status=ScanStatus.COMPLETED.value,
+    )
+    db_session.add(scan)
+
+    # All valid FindingStatus values, all with verification_verdict=None
+    for status_val in FindingStatus:
+        db_session.add(FindingModel(
+            id=str(uuid4()), scan_id=scan_id,
+            title=f"Finding with status {status_val.value}", description="d",
+            severity=Severity.INFO.value,
+            status=status_val.value,
+            verification_verdict=None,
+        ))
+    db_session.commit()
+
+    resp = client.get(f"/api/v1/scans/{scan_id}/telemetry")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    # No verification_verdict set → all verdict counts must be 0
+    assert data["confirmed_findings"] == 0
+    assert data["possible_findings"] == 0
+    assert data["rejected_findings"] == 0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# FIX 2 — LLM fallback metadata shape handling tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_list_shaped_fallbacks_single_entry(client: TestClient, db_session: Session):
+    """Canonical LLMRouter stores fallbacks_attempted as a list of error records.
+    A single entry → provider_fallbacks == 1."""
+    scan_id = str(uuid4())
+    scan = ScanModel(
+        id=scan_id,
+        repository_url="https://github.com/org/list-fallback-test",
+        status=ScanStatus.COMPLETED.value,
+        model_metadata={
+            "fallbacks_attempted": [
+                {
+                    "provider": "gemini",
+                    "model": "gemini-3.7-flash",
+                    "error": "rate limit",
+                }
+            ],
+        },
+    )
+    db_session.add(scan)
+    db_session.commit()
+
+    resp = client.get(f"/api/v1/scans/{scan_id}/telemetry")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["provider_fallbacks"] == 1
+
+
+def test_list_shaped_fallbacks_two_entries(client: TestClient, db_session: Session):
+    """Two fallback error records → provider_fallbacks == 2."""
+    scan_id = str(uuid4())
+    scan = ScanModel(
+        id=scan_id,
+        repository_url="https://github.com/org/two-fallback-test",
+        status=ScanStatus.COMPLETED.value,
+        model_metadata={
+            "fallbacks_attempted": [
+                {"provider": "groq", "model": "llama-4-scout", "error": "timeout"},
+                {"provider": "nvidia", "model": "llama-3.3-70b-instruct", "error": "server error"},
+            ],
+        },
+    )
+    db_session.add(scan)
+    db_session.commit()
+
+    resp = client.get(f"/api/v1/scans/{scan_id}/telemetry")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["provider_fallbacks"] == 2
+
+
+def test_integer_provider_fallbacks(client: TestClient, db_session: Session):
+    """provider_fallbacks stored as an integer is also supported."""
+    scan_id = str(uuid4())
+    scan = ScanModel(
+        id=scan_id,
+        repository_url="https://github.com/org/int-fallback-test",
+        status=ScanStatus.COMPLETED.value,
+        model_metadata={
+            "provider_fallbacks": 3,
+        },
+    )
+    db_session.add(scan)
+    db_session.commit()
+
+    resp = client.get(f"/api/v1/scans/{scan_id}/telemetry")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["provider_fallbacks"] == 3
+
+
+def test_malformed_fallback_metadata_does_not_crash(client: TestClient, db_session: Session):
+    """Malformed metadata (e.g. fallbacks_attempted as a string) must not cause HTTP 500."""
+    scan_id = str(uuid4())
+    scan = ScanModel(
+        id=scan_id,
+        repository_url="https://github.com/org/malformed-fallback-test",
+        status=ScanStatus.COMPLETED.value,
+        model_metadata={
+            "fallbacks_attempted": "this is invalid",
+        },
+    )
+    db_session.add(scan)
+    db_session.commit()
+
+    resp = client.get(f"/api/v1/scans/{scan_id}/telemetry")
+    assert resp.status_code == 200
+    data = resp.json()
+    # Malformed value is safely ignored
+    assert data["provider_fallbacks"] == 0
+
+
+def test_retry_count_integer_aggregation(client: TestClient, db_session: Session):
+    """Integer retry_count is correctly aggregated."""
+    scan_id = str(uuid4())
+    scan = ScanModel(
+        id=scan_id,
+        repository_url="https://github.com/org/retry-count-test",
+        status=ScanStatus.COMPLETED.value,
+        model_metadata={
+            "retry_count": 4,
+        },
+    )
+    db_session.add(scan)
+    db_session.commit()
+
+    resp = client.get(f"/api/v1/scans/{scan_id}/telemetry")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["llm_retries"] == 4
+
+
+def test_token_metadata_without_llm_calls_remains_none(client: TestClient, db_session: Session):
+    """Token metadata without explicit llm_calls recorded → llm_calls must remain None, not fabricated."""
+    scan_id = str(uuid4())
+    scan = ScanModel(
+        id=scan_id,
+        repository_url="https://github.com/org/no-llm-calls-test",
+        status=ScanStatus.COMPLETED.value,
+        model_metadata={
+            "prompt_tokens": 500,
+            "completion_tokens": 200,
+            "total_tokens": 700,
+            "retry_count": 1,
+        },
+    )
+    db_session.add(scan)
+    db_session.commit()
+
+    resp = client.get(f"/api/v1/scans/{scan_id}/telemetry")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    # Token metrics are present
+    assert data["prompt_tokens"] == 500
+    assert data["completion_tokens"] == 200
+    assert data["total_tokens"] == 700
+    assert data["llm_retries"] == 1
+    # llm_calls was NOT recorded → must be None, not fabricated as 1
+    assert data["llm_calls"] is None
