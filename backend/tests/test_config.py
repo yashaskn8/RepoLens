@@ -4,8 +4,9 @@ import os
 from app.core.config import Settings, get_settings
 
 
-def test_settings_defaults():
+def test_settings_defaults(monkeypatch):
     """Verify default configuration values."""
+    monkeypatch.delenv("DATABASE_URL", raising=False)
     settings = Settings()
     assert settings.PROJECT_NAME == "RepoLens"
     assert settings.VERSION == "0.1.0"
