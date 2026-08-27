@@ -224,6 +224,11 @@ def _extract_python_symbols_and_calls(
                                 )
                             )
 
+                params_node = func_def_node.child_by_field_name("parameters")
+                return_type_node = func_def_node.child_by_field_name("return_type")
+                params_text = _node_text(params_node, source_bytes).strip() if params_node else ""
+                return_type_text = _node_text(return_type_node, source_bytes).strip() if return_type_node else ""
+
                 symbols.append(
                     ParsedSymbol(
                         name=func_name,
@@ -232,7 +237,11 @@ def _extract_python_symbols_and_calls(
                         end_line=end_l,
                         start_column=func_def_node.start_point[1],
                         end_column=func_def_node.end_point[1],
-                        details={"async": func_def_node.type == "async_function_definition"},
+                        details={
+                            "async": func_def_node.type == "async_function_definition",
+                            "parameters": params_text,
+                            "return_type": return_type_text,
+                        },
                     )
                 )
 
@@ -249,6 +258,11 @@ def _extract_python_symbols_and_calls(
             end_l = node.end_point[0] + 1
             kind = SymbolKind.METHOD if (caller_ctx and caller_ctx.get("kind") == "CLASS") else SymbolKind.FUNCTION
 
+            params_node = node.child_by_field_name("parameters")
+            return_type_node = node.child_by_field_name("return_type")
+            params_text = _node_text(params_node, source_bytes).strip() if params_node else ""
+            return_type_text = _node_text(return_type_node, source_bytes).strip() if return_type_node else ""
+
             symbols.append(
                 ParsedSymbol(
                     name=name,
@@ -257,7 +271,11 @@ def _extract_python_symbols_and_calls(
                     end_line=end_l,
                     start_column=node.start_point[1],
                     end_column=node.end_point[1],
-                    details={"async": node.type == "async_function_definition"},
+                    details={
+                        "async": node.type == "async_function_definition",
+                        "parameters": params_text,
+                        "return_type": return_type_text,
+                    },
                 )
             )
 
@@ -273,6 +291,30 @@ def _extract_python_symbols_and_calls(
             start_l = node.start_point[0] + 1
             end_l = node.end_point[0] + 1
 
+            # Extract superclasses
+            superclasses_node = node.child_by_field_name("superclasses")
+            superclasses = []
+            if superclasses_node:
+                for arg in superclasses_node.children:
+                    if arg.type in ("identifier", "attribute"):
+                        superclasses.append(_node_text(arg, source_bytes))
+
+            # Extract class body fields / attributes
+            body_node = node.child_by_field_name("body")
+            fields: Dict[str, str] = {}
+            if body_node:
+                for child in body_node.children:
+                    if child.type == "expression_statement":
+                        for sub in child.children:
+                            if sub.type in ("assignment", "annotated_assignment"):
+                                left_node = sub.child_by_field_name("left")
+                                type_node = sub.child_by_field_name("type")
+                                val_node = sub.child_by_field_name("value") or sub.child_by_field_name("right")
+                                if left_node:
+                                    f_name = _node_text(left_node, source_bytes).strip()
+                                    f_type = _node_text(type_node, source_bytes).strip() if type_node else (_node_text(val_node, source_bytes).strip() if val_node else "Any")
+                                    fields[f_name] = f_type
+
             symbols.append(
                 ParsedSymbol(
                     name=name,
@@ -281,6 +323,7 @@ def _extract_python_symbols_and_calls(
                     end_line=end_l,
                     start_column=node.start_point[1],
                     end_column=node.end_point[1],
+                    details={"superclasses": superclasses, "fields": fields},
                 )
             )
 
@@ -381,6 +424,11 @@ def _extract_js_ts_symbols_and_calls(
             start_l = node.start_point[0] + 1
             end_l = node.end_point[0] + 1
 
+            params_node = node.child_by_field_name("parameters")
+            return_type_node = node.child_by_field_name("return_type")
+            params_text = _node_text(params_node, source_bytes).strip() if params_node else ""
+            return_type_text = _node_text(return_type_node, source_bytes).strip() if return_type_node else ""
+
             symbols.append(
                 ParsedSymbol(
                     name=name,
@@ -389,6 +437,10 @@ def _extract_js_ts_symbols_and_calls(
                     end_line=end_l,
                     start_column=node.start_point[1],
                     end_column=node.end_point[1],
+                    details={
+                        "parameters": params_text,
+                        "return_type": return_type_text,
+                    },
                 )
             )
 
@@ -404,6 +456,25 @@ def _extract_js_ts_symbols_and_calls(
             start_l = node.start_point[0] + 1
             end_l = node.end_point[0] + 1
 
+            heritage_node = None
+            for ch in node.children:
+                if ch.type in ("class_heritage", "heritage"):
+                    heritage_node = ch
+                    break
+            heritage_text = _node_text(heritage_node, source_bytes).strip() if heritage_node else ""
+
+            body_node = node.child_by_field_name("body")
+            fields: Dict[str, str] = {}
+            if body_node:
+                for child in body_node.children:
+                    if child.type in ("field_definition", "public_field_definition", "property_definition"):
+                        prop_name_node = child.child_by_field_name("name") or child.child_by_field_name("property")
+                        type_node = child.child_by_field_name("type")
+                        if prop_name_node:
+                            p_name = _node_text(prop_name_node, source_bytes).strip()
+                            p_type = _node_text(type_node, source_bytes).strip() if type_node else "any"
+                            fields[p_name] = p_type
+
             symbols.append(
                 ParsedSymbol(
                     name=name,
@@ -412,6 +483,7 @@ def _extract_js_ts_symbols_and_calls(
                     end_line=end_l,
                     start_column=node.start_point[1],
                     end_column=node.end_point[1],
+                    details={"heritage": heritage_text, "fields": fields},
                 )
             )
 
@@ -427,6 +499,11 @@ def _extract_js_ts_symbols_and_calls(
             start_l = node.start_point[0] + 1
             end_l = node.end_point[0] + 1
 
+            params_node = node.child_by_field_name("parameters")
+            return_type_node = node.child_by_field_name("return_type")
+            params_text = _node_text(params_node, source_bytes).strip() if params_node else ""
+            return_type_text = _node_text(return_type_node, source_bytes).strip() if return_type_node else ""
+
             symbols.append(
                 ParsedSymbol(
                     name=name,
@@ -435,6 +512,10 @@ def _extract_js_ts_symbols_and_calls(
                     end_line=end_l,
                     start_column=node.start_point[1],
                     end_column=node.end_point[1],
+                    details={
+                        "parameters": params_text,
+                        "return_type": return_type_text,
+                    },
                 )
             )
 

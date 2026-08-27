@@ -31,7 +31,17 @@ from app.schemas.change_analysis import (
     ChangeAnalysisSummary,
     ChangeImpact,
     ChangeImpactEvidence,
+    ConfigDelta,
+    DependencyDelta,
+    FileChangeType,
+    FileDiffFact,
+    RouteContractDelta,
+    SchemaModelDelta,
+    StructuralDiffResult,
+    SymbolChangeType,
+    SymbolDiffFact,
 )
+
 
 from app.schemas.static_finding import (
     ScannerResult,
@@ -94,7 +104,17 @@ __all__ = [
     "ChangeImpact",
     "ChangeImpactEvidence",
     "ChangeAnalysisResponse",
+    "FileChangeType",
+    "SymbolChangeType",
+    "FileDiffFact",
+    "SymbolDiffFact",
+    "DependencyDelta",
+    "ConfigDelta",
+    "RouteContractDelta",
+    "SchemaModelDelta",
+    "StructuralDiffResult",
     "SymbolKind",
+
     "ParsedSymbol",
     "FileEntry",
     "FrameworkDetected",

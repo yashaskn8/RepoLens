@@ -1,10 +1,12 @@
 """Canonical Pydantic contracts for Change Intelligence and PR Impact Analysis."""
 
 from datetime import datetime, timezone
+from enum import Enum
 import re
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 from uuid import UUID
+
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -202,3 +204,124 @@ class ChangeAnalysisResponse(ChangeAnalysisSummary):
     )
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# =========================================================================
+# Structural Diff Contracts (Phase 6C)
+# =========================================================================
+
+
+class FileChangeType(str, Enum):
+    """Classification of file modifications in comparison diff."""
+
+    ADDED = "ADDED"
+    DELETED = "DELETED"
+    MODIFIED = "MODIFIED"
+    RENAMED = "RENAMED"
+    UNMODIFIED = "UNMODIFIED"
+
+
+class SymbolChangeType(str, Enum):
+    """Classification of structural symbol modifications."""
+
+    ADDED = "ADDED"
+    DELETED = "DELETED"
+    MODIFIED = "MODIFIED"
+    SIGNATURE_CHANGED = "SIGNATURE_CHANGED"
+    RENAMED = "RENAMED"
+
+
+class FileDiffFact(BaseModel):
+    """Deterministic structural fact regarding a file change between two revisions."""
+
+    file_path: str = Field(..., description="Normalized relative file path in head revision")
+    old_path: Optional[str] = Field(default=None, description="Original relative file path if renamed")
+    change_type: FileChangeType = Field(..., description="Categorized file change type")
+    is_binary: bool = Field(default=False, description="True if file is binary (never parsed as text)")
+    is_parsed: bool = Field(default=True, description="True if file was parsed by AST parser")
+    skipped_reason: Optional[str] = Field(default=None, description="Reason file parsing was skipped (e.g. BINARY, UNSUPPORTED_LANGUAGE)")
+    language: Optional[str] = Field(default=None, description="Detected source language")
+    changed_line_ranges: List[List[int]] = Field(default_factory=list, description="1-indexed [start, end] line ranges in head")
+    base_line_ranges: List[List[int]] = Field(default_factory=list, description="1-indexed [start, end] line ranges in base")
+
+
+class SymbolDiffFact(BaseModel):
+    """Deterministic structural fact regarding a symbol addition, deletion, or modification."""
+
+    file_path: str = Field(..., description="Relative file path containing symbol")
+    symbol_name: str = Field(..., description="Symbol identifier or signature name")
+    symbol_kind: str = Field(..., description="Kind of symbol (FUNCTION, METHOD, CLASS, ROUTE, etc.)")
+    change_type: SymbolChangeType = Field(..., description="Categorized symbol change type")
+    base_location: Optional[Dict[str, Any]] = Field(default=None, description="Location in base revision {start_line, end_line, ...}")
+    head_location: Optional[Dict[str, Any]] = Field(default=None, description="Location in head revision {start_line, end_line, ...}")
+    evidence: Dict[str, Any] = Field(default_factory=dict, description="Deterministic evidence payload (parameters, return type, diffs)")
+
+
+class DependencyDelta(BaseModel):
+    """Deterministic package dependency change detected in manifest files."""
+
+    manifest_file: str = Field(..., description="Manifest path (e.g. package.json, requirements.txt, pyproject.toml)")
+    package_name: str = Field(..., description="Dependency package name")
+    base_version: Optional[str] = Field(default=None, description="Version in base revision")
+    head_version: Optional[str] = Field(default=None, description="Version in head revision")
+    change_type: str = Field(..., description="ADDED, REMOVED, or UPDATED")
+
+
+class ConfigDelta(BaseModel):
+    """Deterministic configuration or environment variable definition change."""
+
+    file_path: str = Field(..., description="Configuration file path (e.g. .env.example, config.yaml, settings.py)")
+    key: str = Field(..., description="Config key or environment variable name")
+    base_value: Optional[str] = Field(default=None, description="Original value or description in base")
+    head_value: Optional[str] = Field(default=None, description="New value or description in head")
+    change_type: str = Field(..., description="ADDED, REMOVED, or MODIFIED")
+
+
+class RouteContractDelta(BaseModel):
+    """Deterministic API route contract or client invocation change."""
+
+    file_path: str = Field(..., description="Source file defining route or client call")
+    route_type: str = Field(..., description="FASTAPI_ROUTE, EXPRESS_ROUTE, FETCH_CALL, or AXIOS_CALL")
+    route_name: str = Field(..., description="Route identifier or call signature")
+    base_http_method: Optional[str] = Field(default=None, description="HTTP method in base revision")
+    head_http_method: Optional[str] = Field(default=None, description="HTTP method in head revision")
+    base_path: Optional[str] = Field(default=None, description="Path or target in base revision")
+    head_path: Optional[str] = Field(default=None, description="Path or target in head revision")
+    change_type: str = Field(..., description="ADDED, REMOVED, PATH_CHANGED, METHOD_CHANGED, or TARGET_CHANGED")
+    details: str = Field(default="", description="Detailed human-actionable summary of contract change")
+
+
+class SchemaModelDelta(BaseModel):
+    """Deterministic model/schema definition field change (Pydantic, SQLAlchemy, etc.)."""
+
+    file_path: str = Field(..., description="Source file defining model")
+    model_name: str = Field(..., description="Model class name")
+    model_kind: str = Field(default="MODEL", description="PYDANTIC_MODEL, SQLALCHEMY_MODEL, or SCHEMA")
+    field_name: str = Field(..., description="Target model attribute or field name")
+    base_type: Optional[str] = Field(default=None, description="Field type in base revision")
+    head_type: Optional[str] = Field(default=None, description="Field type in head revision")
+    change_type: str = Field(..., description="ADDED_FIELD, REMOVED_FIELD, MODIFIED_TYPE, or CONSTRAINT_CHANGED")
+    details: str = Field(default="", description="Field change explanation")
+
+
+class StructuralDiffResult(BaseModel):
+    """Aggregated deterministic structural change facts between base and head revisions."""
+
+    base_commit_sha: str = Field(..., description="Exact 40-character base commit SHA")
+    head_commit_sha: str = Field(..., description="Exact 40-character head commit SHA")
+    repository_url: str = Field(..., description="Repository URL")
+    changed_files: List[FileDiffFact] = Field(default_factory=list, description="All analyzed files with change classifications")
+    added_files: List[str] = Field(default_factory=list, description="List of newly added relative file paths")
+    deleted_files: List[str] = Field(default_factory=list, description="List of deleted relative file paths")
+    renamed_files: List[List[str]] = Field(default_factory=list, description="List of [old_path, new_path] pairs")
+    modified_files: List[str] = Field(default_factory=list, description="List of modified existing file paths")
+    changed_symbols: List[SymbolDiffFact] = Field(default_factory=list, description="All changed symbols")
+    added_symbols: List[SymbolDiffFact] = Field(default_factory=list, description="Added symbols")
+    deleted_symbols: List[SymbolDiffFact] = Field(default_factory=list, description="Deleted symbols")
+    modified_symbols: List[SymbolDiffFact] = Field(default_factory=list, description="Modified symbols")
+    dependency_deltas: List[DependencyDelta] = Field(default_factory=list, description="Package dependency manifest deltas")
+    config_deltas: List[ConfigDelta] = Field(default_factory=list, description="Config and environment variable deltas")
+    route_deltas: List[RouteContractDelta] = Field(default_factory=list, description="API route and client call deltas")
+    schema_deltas: List[SchemaModelDelta] = Field(default_factory=list, description="Data model and schema deltas")
+    summary: Dict[str, int] = Field(default_factory=dict, description="Numerical summary of all detected changes")
+

@@ -721,4 +721,90 @@ export interface ChangeAnalysisResponse extends ChangeAnalysisSummary {
   model_metadata?: ModelExecutionMetadata | null;
 }
 
+export type FileChangeType = 'ADDED' | 'DELETED' | 'MODIFIED' | 'RENAMED' | 'UNMODIFIED';
+
+export type SymbolChangeType = 'ADDED' | 'DELETED' | 'MODIFIED' | 'SIGNATURE_CHANGED' | 'RENAMED';
+
+export interface FileDiffFact {
+  file_path: string;
+  old_path?: string | null;
+  change_type: FileChangeType;
+  is_binary: boolean;
+  is_parsed: boolean;
+  skipped_reason?: string | null;
+  language?: string | null;
+  changed_line_ranges: [number, number][];
+  base_line_ranges: [number, number][];
+}
+
+export interface SymbolDiffFact {
+  file_path: string;
+  symbol_name: string;
+  symbol_kind: string;
+  change_type: SymbolChangeType;
+  base_location?: Record<string, unknown> | null;
+  head_location?: Record<string, unknown> | null;
+  evidence: Record<string, unknown>;
+}
+
+export interface DependencyDelta {
+  manifest_file: string;
+  package_name: string;
+  base_version?: string | null;
+  head_version?: string | null;
+  change_type: string;
+}
+
+export interface ConfigDelta {
+  file_path: string;
+  key: string;
+  base_value?: string | null;
+  head_value?: string | null;
+  change_type: string;
+}
+
+export interface RouteContractDelta {
+  file_path: string;
+  route_type: string;
+  route_name: string;
+  base_http_method?: string | null;
+  head_http_method?: string | null;
+  base_path?: string | null;
+  head_path?: string | null;
+  change_type: string;
+  details: string;
+}
+
+export interface SchemaModelDelta {
+  file_path: string;
+  model_name: string;
+  model_kind: string;
+  field_name: string;
+  base_type?: string | null;
+  head_type?: string | null;
+  change_type: string;
+  details: string;
+}
+
+export interface StructuralDiffResult {
+  base_commit_sha: string;
+  head_commit_sha: string;
+  repository_url: string;
+  changed_files: FileDiffFact[];
+  added_files: string[];
+  deleted_files: string[];
+  renamed_files: [string, string][];
+  modified_files: string[];
+  changed_symbols: SymbolDiffFact[];
+  added_symbols: SymbolDiffFact[];
+  deleted_symbols: SymbolDiffFact[];
+  modified_symbols: SymbolDiffFact[];
+  dependency_deltas: DependencyDelta[];
+  config_deltas: ConfigDelta[];
+  route_deltas: RouteContractDelta[];
+  schema_deltas: SchemaModelDelta[];
+  summary: Record<string, number>;
+}
+
+
 
