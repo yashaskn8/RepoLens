@@ -90,8 +90,15 @@ class ComparisonWorkspacePair:
     base_commit_sha: str
     head_commit_sha: str
     repository_url: str
+    is_fork: bool = False
+    files_count: int = 0
+    total_bytes: int = 0
     base_ref: Optional[str] = None
     head_ref: Optional[str] = None
+
+    def __iter__(self):
+        yield self.base_workspace
+        yield self.head_workspace
 
 
 def validate_workspace_safety(

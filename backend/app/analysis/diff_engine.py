@@ -831,6 +831,10 @@ class ChangeDiffEngine:
             summary=summary,
         )
 
+    # Alias for backward compatibility
+    compute_diff = compute_structural_diff
+
+
 
 # Global singleton instance
 _default_diff_engine: Optional[ChangeDiffEngine] = None

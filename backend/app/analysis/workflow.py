@@ -68,13 +68,14 @@ async def execute_background_change_analysis(
         )
 
         # 2. Acquire dual workspaces using safe context manager
-        async with snapshot_service.comparison_context(
+        async with snapshot_service.open_comparison_metadata_snapshot(
             repository_url=analysis_model.repository_url,
             base_commit_sha=analysis_model.base_commit_sha,
             head_commit_sha=analysis_model.head_commit_sha,
             base_ref=analysis_model.base_ref,
             head_ref=analysis_model.head_ref,
         ) as (base_ws, head_ws):
+
 
             WorkflowEventService.emit(
                 db=db,

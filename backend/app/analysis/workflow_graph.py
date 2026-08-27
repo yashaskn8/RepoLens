@@ -85,13 +85,14 @@ async def run_diff_node(state: ChangeAnalysisState) -> Dict[str, Any]:
 
     diff_engine = get_diff_engine()
     diff_res = await asyncio.to_thread(
-        diff_engine.compute_diff,
+        diff_engine.compute_structural_diff,
         base_workspace=state["base_workspace"],
         head_workspace=state["head_workspace"],
         base_commit_sha=state["base_commit_sha"],
         head_commit_sha=state["head_commit_sha"],
         repository_url=state["repository_url"],
     )
+
 
     completed.append("diff")
     return {
