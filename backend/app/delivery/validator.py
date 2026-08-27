@@ -7,22 +7,28 @@ import re
 from typing import List, Optional, Set, Tuple
 from sqlalchemy.orm import Session
 
+from uuid import UUID, uuid4
 from app.delivery.provider import RepositoryDeliveryProvider
 from app.delivery.schemas import DeliveryProviderError
 from app.ingestion.clone import GITHUB_URL_PATTERN, validate_github_url
+from app.ingestion.manifest import build_manifest
 from app.ingestion.snapshot import get_snapshot_service
 from app.models.finding import FindingModel
 from app.models.patch import PatchModel
 from app.models.scan import ScanModel
 from app.patching.applier import apply_unified_diff_to_directory
+from app.patching.schemas import CheckStatus, PatchProposal, VerificationStatus
 from app.patching.validator import parse_diff_files
 from app.patching.verification import PatchVerificationService
-from app.schemas.enums import PatchStatus
+from app.planning.schemas import FixPlan, FixScope
+from app.schemas.enums import FindingStatus, PatchStatus, Severity, VerificationVerdict
+from app.schemas.finding import Finding
 
 logger = logging.getLogger(__name__)
 
-# Valid branch name pattern (rejects detached HEAD indicators like HEAD@abc, shell injection, ..)
-_VALID_BRANCH_PATTERN = re.compile(r"^(?!HEAD@)[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.-]+)*$")
+_HEX_40_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
+# Valid branch name pattern (rejects detached HEAD indicators like HEAD@abc, HEAD, raw commit SHAs, shell injection, ..)
+_VALID_BRANCH_PATTERN = re.compile(r"^(?!HEAD@)(?!HEAD$)[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.-]+)*$")
 
 
 def extract_github_owner_repo(url: str) -> Tuple[str, str]:
@@ -71,7 +77,7 @@ class DeliveryValidationResult:
 
 
 class DeliveryValidator:
-    """Deterministic validator verifying exact-commit alignment and delivery safety."""
+    """Deterministic validator verifying that an approved patch is safe to deliver via GitHub PR."""
 
     @classmethod
     async def validate(
@@ -81,7 +87,7 @@ class DeliveryValidator:
         provider: RepositoryDeliveryProvider,
         check_remote_head: bool = True,
     ) -> DeliveryValidationResult:
-        """Execute all 15 deterministic checks before any GitHub write."""
+        """Execute all deterministic checks before any GitHub write."""
         # 1. Patch exists
         patch: Optional[PatchModel] = db.query(PatchModel).filter(PatchModel.id == str(patch_id)).first()
         if not patch:
@@ -109,6 +115,14 @@ class DeliveryValidator:
                 failure_code="SCAN_NOT_FOUND",
             )
 
+        # 3b. Scan must be COMPLETED
+        if scan.status != "COMPLETED":
+            return DeliveryValidationResult(
+                eligible=False,
+                blocking_reason=f"Associated scan status is '{scan.status}'. Only COMPLETED scans may be delivered.",
+                failure_code="SCAN_NOT_COMPLETED",
+            )
+
         # 4. Patch status == APPROVED
         if patch.status != PatchStatus.APPROVED.value:
             return DeliveryValidationResult(
@@ -131,11 +145,11 @@ class DeliveryValidator:
                 human_approved=True,
             )
 
-        # 6. Scan has exact commit SHA (40 chars)
-        if not scan.commit_hash or len(scan.commit_hash) != 40:
+        # 6. Scan has exact 40-hex commit SHA
+        if not scan.commit_hash or not _HEX_40_PATTERN.match(scan.commit_hash):
             return DeliveryValidationResult(
                 eligible=False,
-                blocking_reason="Scan does not have a verified 40-character commit SHA.",
+                blocking_reason=f"Scan does not have a verified 40-character hexadecimal commit SHA (got '{scan.commit_hash}').",
                 failure_code="INVALID_COMMIT_SHA",
             )
 
@@ -150,9 +164,25 @@ class DeliveryValidator:
                 failure_code="INVALID_REPOSITORY_URL",
             )
 
-        # 9. Base branch is real resolved branch, not detached HEAD
-        base_branch = scan.branch or "main"
-        if not _VALID_BRANCH_PATTERN.match(base_branch) or base_branch.startswith("HEAD@"):
+        # 9. Base branch is real resolved branch, not guessed and not detached HEAD/SHA
+        if not scan.branch or not scan.branch.strip():
+            return DeliveryValidationResult(
+                eligible=False,
+                blocking_reason="Scan has no recorded base branch. A real GitHub base branch is required for PR delivery.",
+                failure_code="BASE_BRANCH_UNRESOLVED",
+                repository_url=norm_repo_url,
+                repository_owner=owner,
+                repository_name=repo,
+                scanned_base_sha=scan.commit_hash,
+            )
+
+        base_branch = scan.branch.strip()
+        if (
+            not _VALID_BRANCH_PATTERN.match(base_branch)
+            or base_branch.startswith("HEAD@")
+            or base_branch == "HEAD"
+            or _HEX_40_PATTERN.match(base_branch)
+        ):
             return DeliveryValidationResult(
                 eligible=False,
                 blocking_reason=f"Scan was performed on a detached reference or invalid branch name ('{base_branch}'). A real GitHub base branch is required for PR creation.",
@@ -229,41 +259,134 @@ class DeliveryValidator:
                 failure_code="FILE_SET_MISMATCH",
             )
 
-        # 14 & 15. Rehydrate exact snapshot & strict-reapply approved diff
+        # 14 & 15. Rehydrate exact snapshot and rerun canonical deterministic verification
         snapshot_service = get_snapshot_service()
         try:
             with snapshot_service.snapshot_context(str(scan.id), db=db) as workspace:
-                # Apply unified diff
-                try:
-                    apply_unified_diff_to_directory(patch.unified_diff, workspace)
-                except Exception as apply_err:
+                manifest = build_manifest(
+                    repo_dir=workspace,
+                    repository_url=scan.repository_url,
+                    commit_hash=scan.commit_hash,
+                    branch=scan.branch,
+                )
+
+                proposal = PatchProposal(
+                    id=UUID(str(patch.id)),
+                    finding_id=UUID(str(finding.id)),
+                    plan_id=UUID(str(patch.plan_id)) if patch.plan_id else None,
+                    unified_diff=patch.unified_diff,
+                    files_modified=patch.files_modified or [],
+                    explanation=patch.explanation or f"Remediation patch for {finding.title}",
+                    expected_behavior_change=patch.explanation or f"Remediation patch for {finding.title}",
+                )
+
+                finding_schema = Finding(
+                    id=UUID(str(finding.id)),
+                    scan_id=UUID(str(scan.id)),
+                    title=finding.title,
+                    description=finding.description or "",
+                    severity=Severity(finding.severity),
+                    status=FindingStatus(finding.status),
+                    rule_id=finding.rule_id,
+                    category=finding.category,
+                    verification_verdict=VerificationVerdict(finding.verification_verdict) if finding.verification_verdict else None,
+                    verification_reason=finding.verification_reason,
+                    created_at=finding.created_at,
+                    updated_at=finding.updated_at,
+                )
+
+                from app.planning.schemas import OrderedChangeStep
+
+                ordered_steps = [
+                    OrderedChangeStep(
+                        step_number=idx + 1,
+                        target_file=f_path,
+                        description=f"Remediate vulnerability in {f_path}",
+                        rationale=f"Fix identified finding: {finding.title}",
+                    )
+                    for idx, f_path in enumerate(patch.files_modified or ["unknown"])
+                ]
+
+                fix_plan = FixPlan(
+                    id=UUID(str(patch.plan_id)) if patch.plan_id else uuid4(),
+                    finding_id=UUID(str(finding.id)),
+                    root_cause=finding.description or f"Root cause for {finding.title}",
+                    objective=f"Remediate {finding.title}",
+                    files_expected_to_change=patch.files_modified or ["unknown"],
+                    symbols_expected_to_change=[],
+                    ordered_changes=ordered_steps,
+                    validation_plan=["Verify syntax, boundaries, and security properties"],
+                    estimated_scope=FixScope.FILE if len(patch.files_modified or []) <= 1 else FixScope.CROSS_FILE,
+                )
+
+                verification_service = PatchVerificationService()
+                verif_res = await verification_service.verify_patch(
+                    proposal=proposal,
+                    finding=finding_schema,
+                    fix_plan=fix_plan,
+                    original_repo_dir=workspace,
+                    manifest=manifest,
+                )
+
+                if not verif_res.security_clean:
                     return DeliveryValidationResult(
                         eligible=False,
-                        blocking_reason=f"Re-application of patch to exact scanned snapshot failed: {apply_err}",
-                        failure_code="PATCH_REAPPLY_FAILED",
+                        blocking_reason=f"Canonical deterministic verification detected secret leakage: {verif_res.explanation}",
+                        failure_code="PATCH_CONTAINS_SECRETS",
+                        repository_url=norm_repo_url,
+                        repository_owner=owner,
+                        repository_name=repo,
+                        base_branch=base_branch,
+                        scanned_base_sha=scan.commit_hash,
+                        observed_base_sha=observed_sha or scan.commit_hash,
                     )
 
-                # Re-verify deterministic syntax and security checks
-                # Check for secrets or severe syntax corruption in modified files
-                for f_rel in persisted_files:
-                    full_path = os.path.join(workspace, f_rel)
-                    if os.path.exists(full_path):
-                        try:
-                            with open(full_path, "r", encoding="utf-8", errors="replace") as f_obj:
-                                content = f_obj.read()
-                            # Check basic secret leakage
-                            from app.security.redaction import redact_secrets
-                            # If redact_secrets mutates text with [REDACTED], a raw secret was present
-                            if redact_secrets(content) != content:
-                                return DeliveryValidationResult(
-                                    eligible=False,
-                                    blocking_reason=f"Patched file '{f_rel}' contains sensitive credentials or secret keys.",
-                                    failure_code="PATCH_CONTAINS_SECRETS",
-                                )
-                        except Exception as read_exc:
-                            logger.warning(f"Could not read patched file {f_rel}: {read_exc}")
+                if not verif_res.syntax_valid:
+                    return DeliveryValidationResult(
+                        eligible=False,
+                        blocking_reason=f"Canonical deterministic verification detected syntax error: {verif_res.explanation}",
+                        failure_code="PATCH_SYNTAX_ERROR",
+                        repository_url=norm_repo_url,
+                        repository_owner=owner,
+                        repository_name=repo,
+                        base_branch=base_branch,
+                        scanned_base_sha=scan.commit_hash,
+                        observed_base_sha=observed_sha or scan.commit_hash,
+                    )
+
+                if verif_res.status == VerificationStatus.FAILED:
+                    return DeliveryValidationResult(
+                        eligible=False,
+                        blocking_reason=f"Canonical deterministic verification failed: {verif_res.explanation or 'Failed verification checks'}",
+                        failure_code="VERIFICATION_FAILED",
+                        repository_url=norm_repo_url,
+                        repository_owner=owner,
+                        repository_name=repo,
+                        base_branch=base_branch,
+                        scanned_base_sha=scan.commit_hash,
+                        observed_base_sha=observed_sha or scan.commit_hash,
+                    )
+
+                critical_failures = [
+                    f"{c.check_name}: {c.details}"
+                    for c in verif_res.checks
+                    if c.status == CheckStatus.FAILED
+                ]
+                if critical_failures:
+                    return DeliveryValidationResult(
+                        eligible=False,
+                        blocking_reason=f"Deterministic verification check failed: {'; '.join(critical_failures)}",
+                        failure_code="VERIFICATION_CHECK_FAILED",
+                        repository_url=norm_repo_url,
+                        repository_owner=owner,
+                        repository_name=repo,
+                        base_branch=base_branch,
+                        scanned_base_sha=scan.commit_hash,
+                        observed_base_sha=observed_sha or scan.commit_hash,
+                    )
 
         except Exception as snap_exc:
+            logger.error(f"Snapshot rehydration or verification failed: {snap_exc}", exc_info=True)
             return DeliveryValidationResult(
                 eligible=False,
                 blocking_reason=f"Snapshot rehydration or verification failed: {snap_exc}",

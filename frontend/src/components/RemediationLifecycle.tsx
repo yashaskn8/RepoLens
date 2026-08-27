@@ -480,7 +480,7 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
                   onClick={() => setShowDeliveryModal(true)}
                   disabled={
                     loadingStep === 'deliver' ||
-                    (deliveryPreview !== null && !deliveryPreview.eligible) ||
+                    (deliveryPreview !== null && (!deliveryPreview.eligible || !deliveryPreview.github_delivery_configured)) ||
                     delivery?.status === 'BLOCKED'
                   }
                   className="px-4 py-1.5 text-xs font-semibold bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded border border-emerald-600 shadow-sm transition inline-flex items-center gap-1.5"
@@ -496,6 +496,18 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
                 </button>
               )}
             </div>
+
+            {/* Unconfigured GitHub Delivery Warning */}
+            {deliveryPreview && !deliveryPreview.github_delivery_configured && (
+              <div className="rounded-lg border border-amber-800 bg-amber-950/40 p-3.5 text-xs space-y-1 text-amber-200">
+                <div className="flex items-center gap-2 font-semibold text-amber-300">
+                  <span>⚠️ GitHub Delivery Not Configured</span>
+                </div>
+                <p className="text-[11px] text-amber-300/90">
+                  GitHub delivery is not configured for this RepoLens instance.
+                </p>
+              </div>
+            )}
 
             {/* Success Banner if PR is Created */}
             {delivery?.status === 'PR_CREATED' && (

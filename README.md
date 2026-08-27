@@ -46,7 +46,7 @@ RepoLens/
 │   │   ├── security/        # Secret redaction, prompt injection and Markdown sanitization
 │   │   └── services/        # Scan recovery, workflow events, report & delivery orchestrators
 │   ├── alembic/             # Database migrations (001, 002, 003, 004, 005, 006)
-│   └── tests/               # 385+ comprehensive Pytest verification & security release tests
+│   └── tests/               # 405+ comprehensive Pytest verification & security release tests
 └── frontend/                 # Next.js + React 19 + TypeScript frontend
     └── src/
         ├── app/             # App Router pages (scans dashboard, finding remediation)
@@ -54,6 +54,21 @@ RepoLens/
         ├── lib/             # API client, SSE streaming hooks & HTTP services
         └── types/           # Domain TypeScript definitions mirroring schemas
 ```
+
+---
+
+## Configuration & Environment Variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATABASE_URL` | `sqlite:///./repolens.db` | Main relational database (SQLite or PostgreSQL) |
+| `CHECKPOINTER_DB_PATH` | `sqlite:///./repolens_checkpoints.db` | Durable LangGraph workflow execution checkpointer |
+| `GITHUB_DELIVERY_ENABLED` | `False` | Feature toggle enabling safe GitHub Pull Request delivery |
+| `GITHUB_TOKEN` | `""` | GitHub Personal Access Token (PAT) with repository content & PR write scope |
+| `OPENAI_API_KEY` | `""` | Primary LLM Provider (GPT-4o) |
+| `ANTHROPIC_API_KEY` | `""` | Secondary LLM Provider (Claude 3.5 Sonnet) |
+| `GEMINI_API_KEY` | `""` | Alternative LLM Provider (Gemini 1.5 Pro) |
+
 
 ---
 

@@ -14,7 +14,7 @@ from app.core.config import Settings, get_settings
 from app.delivery.github_provider import GitHubDeliveryProvider
 from app.delivery.pr_body import generate_pr_body, generate_pr_title
 from app.delivery.provider import RepositoryDeliveryProvider
-from app.delivery.schemas import DeliveryProviderError, GitTreeEntry
+from app.delivery.schemas import DeliveryProviderError, GitHubAPIError, GitTreeEntry
 from app.delivery.validator import (
     DeliveryValidationResult,
     DeliveryValidator,
@@ -115,6 +115,13 @@ class DeliveryService:
         """Execute safe, idempotent GitHub pull request delivery for an approved patch."""
         if payload is None:
             payload = DeliveryRequest()
+
+        if not self.provider.is_configured:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="GitHub delivery is not configured or is administratively disabled for this RepoLens instance.",
+            )
+
         # 1. Inspect patch and domain constraints
         patch: Optional[PatchModel] = db.query(PatchModel).filter(PatchModel.id == str(patch_id)).first()
         if not patch:
@@ -143,8 +150,20 @@ class DeliveryService:
                 detail="Associated finding or scan records not found.",
             )
 
+        if scan.status != "COMPLETED":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot deliver patch: Associated scan status is '{scan.status}'. Only COMPLETED scans may be delivered.",
+            )
+
+        if not scan.branch or not scan.branch.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot deliver patch: Scan has no recorded base branch.",
+            )
+
         owner, repo = extract_github_owner_repo(scan.repository_url)
-        base_branch = scan.branch or "main"
+        base_branch = scan.branch.strip()
         scanned_sha = scan.commit_hash or ""
 
         # 2. Compute deterministic idempotency key
@@ -216,11 +235,11 @@ class DeliveryService:
                 scan_id=UUID(str(scan.id)),
                 finding_id=UUID(str(finding.id)),
                 patch_id=UUID(str(patch.id)),
+                delivery_id=UUID(str(delivery.id)),
                 stage="delivery",
                 provider="github",
                 message=f"GitHub pull request delivery requested by {delivery.requested_by}",
                 metadata_payload={
-                    "delivery_id": str(delivery.id),
                     "repository": f"{owner}/{repo}",
                     "base_branch": base_branch,
                     "scanned_base_sha": scanned_sha,
@@ -233,6 +252,7 @@ class DeliveryService:
         # 5. Transition to VALIDATING and run DeliveryValidator
         delivery.status = DeliveryStatus.VALIDATING.value
         db.commit()
+        db.refresh(delivery)
 
         val_result = await DeliveryValidator.validate(
             db=db,
@@ -248,6 +268,8 @@ class DeliveryService:
             delivery.failure_code = val_result.failure_code or "VALIDATION_FAILED"
             delivery.failure_message = redact_secrets(val_result.blocking_reason)[:512]
             delivery.completed_at = _utc_now()
+            db.commit()
+            db.refresh(delivery)
 
             WorkflowEventService.emit(
                 db=db,
@@ -256,11 +278,11 @@ class DeliveryService:
                     scan_id=UUID(str(scan.id)),
                     finding_id=UUID(str(finding.id)),
                     patch_id=UUID(str(patch.id)),
+                    delivery_id=UUID(str(delivery.id)),
                     stage="delivery",
                     provider="github",
                     message=f"Delivery validation blocked: {delivery.failure_message}",
                     metadata_payload={
-                        "delivery_id": str(delivery.id),
                         "failure_code": delivery.failure_code,
                         "scanned_base_sha": scanned_sha,
                         "observed_base_sha": val_result.observed_base_sha,
@@ -268,12 +290,13 @@ class DeliveryService:
                 ),
                 critical=False,
             )
-            db.commit()
-            db.refresh(delivery)
             return delivery
 
         # 6. Transition to READY
         delivery.status = DeliveryStatus.READY.value
+        db.commit()
+        db.refresh(delivery)
+
         WorkflowEventService.emit(
             db=db,
             event=WorkflowEventCreate(
@@ -281,11 +304,11 @@ class DeliveryService:
                 scan_id=UUID(str(scan.id)),
                 finding_id=UUID(str(finding.id)),
                 patch_id=UUID(str(patch.id)),
+                delivery_id=UUID(str(delivery.id)),
                 stage="delivery",
                 provider="github",
                 message="Delivery pre-flight validation passed cleanly.",
                 metadata_payload={
-                    "delivery_id": str(delivery.id),
                     "base_branch": base_branch,
                     "scanned_base_sha": scanned_sha,
                     "head_branch": delivery.head_branch,
@@ -293,7 +316,6 @@ class DeliveryService:
             ),
             critical=False,
         )
-        db.commit()
 
         # 7. Execute Git Data API steps
         try:
@@ -333,47 +355,107 @@ class DeliveryService:
                 tree_entries=tree_entries,
             )
 
-            commit_msg = f"fix(repolens): remediate {finding.title[:80]}"
-            head_sha = await self.provider.create_commit(
+            # Resolve whether dedicated head branch already exists on GitHub
+            existing_branch_sha = await self.provider.try_get_branch_head(
                 owner=owner,
                 repo=repo,
-                message=commit_msg,
-                tree_sha=tree_sha,
-                parent_shas=[scanned_sha],
+                branch=delivery.head_branch,
             )
-            delivery.head_sha = head_sha
 
-            WorkflowEventService.emit(
-                db=db,
-                event=WorkflowEventCreate(
-                    event_type=WorkflowEventType.DELIVERY_COMMIT_CREATED,
-                    scan_id=UUID(str(scan.id)),
-                    finding_id=UUID(str(finding.id)),
-                    patch_id=UUID(str(patch.id)),
-                    stage="delivery",
-                    provider="github",
-                    message=f"Created remediation commit {head_sha[:8]} on GitHub",
-                    metadata_payload={"delivery_id": str(delivery.id), "commit_sha": head_sha},
-                ),
-                critical=False,
-            )
-            db.commit()
-
-            # 7b. CREATING_BRANCH
-            delivery.status = DeliveryStatus.CREATING_BRANCH.value
-            db.commit()
-
-            try:
-                await self.provider.create_branch(
+            if existing_branch_sha is None:
+                # CASE A: Head branch does NOT exist -> create commit and branch
+                commit_msg = f"fix(repolens): remediate {finding.title[:80]}"
+                head_sha = await self.provider.create_commit(
                     owner=owner,
                     repo=repo,
-                    branch_name=delivery.head_branch,
-                    sha=head_sha,
+                    message=commit_msg,
+                    tree_sha=tree_sha,
+                    parent_shas=[scanned_sha],
                 )
-            except GitHubAPIError as branch_err:
-                # If branch already exists (e.g. from prior interrupted attempt), reconcile safely
-                if "already exists" not in branch_err.message.lower() and branch_err.status_code != 422:
-                    raise
+                delivery.head_sha = head_sha
+                db.commit()
+                db.refresh(delivery)
+
+                WorkflowEventService.emit(
+                    db=db,
+                    event=WorkflowEventCreate(
+                        event_type=WorkflowEventType.DELIVERY_COMMIT_CREATED,
+                        scan_id=UUID(str(scan.id)),
+                        finding_id=UUID(str(finding.id)),
+                        patch_id=UUID(str(patch.id)),
+                        delivery_id=UUID(str(delivery.id)),
+                        commit_sha=head_sha,
+                        stage="delivery",
+                        provider="github",
+                        message=f"Created remediation commit {head_sha[:8]} on GitHub",
+                        metadata_payload={"commit_sha": head_sha},
+                    ),
+                    critical=False,
+                )
+
+                # Transition to CREATING_BRANCH
+                delivery.status = DeliveryStatus.CREATING_BRANCH.value
+                db.commit()
+                db.refresh(delivery)
+
+                try:
+                    await self.provider.create_branch(
+                        owner=owner,
+                        repo=repo,
+                        branch_name=delivery.head_branch,
+                        sha=head_sha,
+                    )
+                except GitHubAPIError as branch_err:
+                    # CASE D: create_branch returned 422
+                    if branch_err.status_code == 422 or "already exists" in branch_err.message.lower():
+                        resolved_sha = await self.provider.get_branch_head(owner=owner, repo=repo, branch=delivery.head_branch)
+                        if resolved_sha != head_sha:
+                            raise DeliveryProviderError(
+                                f"Branch '{delivery.head_branch}' already exists at unexpected commit {resolved_sha} (expected {head_sha})",
+                                status_code=409,
+                                safe_code="HEAD_BRANCH_COLLISION",
+                            )
+                    else:
+                        raise
+
+                # Verify branch HEAD matches delivery.head_sha
+                observed_branch_sha = await self.provider.get_branch_head(owner=owner, repo=repo, branch=delivery.head_branch)
+                if observed_branch_sha != head_sha:
+                    raise DeliveryProviderError(
+                        f"Branch HEAD verification mismatch: expected {head_sha}, observed {observed_branch_sha}",
+                        status_code=409,
+                        safe_code="HEAD_BRANCH_SHA_MISMATCH",
+                    )
+
+            else:
+                # Dedicated branch ALREADY EXISTS
+                if delivery.head_sha:
+                    # CASE B: Head branch exists and head_sha is persisted locally
+                    if existing_branch_sha != delivery.head_sha:
+                        raise DeliveryProviderError(
+                            f"Dedicated branch '{delivery.head_branch}' exists with SHA {existing_branch_sha} which does not match expected delivery SHA {delivery.head_sha}",
+                            status_code=409,
+                            safe_code="HEAD_BRANCH_COLLISION",
+                        )
+                    head_sha = delivery.head_sha
+                else:
+                    # CASE C: Head branch exists but local head_sha is missing
+                    branch_commit = await self.provider.get_commit(owner=owner, repo=repo, sha=existing_branch_sha)
+                    matches_parent = (scanned_sha in branch_commit.parents or branch_commit.parents == [scanned_sha])
+                    matches_tree = (branch_commit.tree_sha == tree_sha)
+
+                    if matches_parent and matches_tree:
+                        head_sha = existing_branch_sha
+                        delivery.head_sha = head_sha
+                        db.commit()
+                        db.refresh(delivery)
+                        logger.info(f"Reconciled and adopted existing verified branch commit {head_sha} for branch {delivery.head_branch}")
+                    else:
+                        raise DeliveryProviderError(
+                            f"Existing branch '{delivery.head_branch}' commit {existing_branch_sha} does not match expected parent {scanned_sha} and tree {tree_sha}",
+                            status_code=409,
+                            safe_code="HEAD_BRANCH_COLLISION",
+                        )
 
             WorkflowEventService.emit(
                 db=db,
@@ -382,18 +464,20 @@ class DeliveryService:
                     scan_id=UUID(str(scan.id)),
                     finding_id=UUID(str(finding.id)),
                     patch_id=UUID(str(patch.id)),
+                    delivery_id=UUID(str(delivery.id)),
+                    commit_sha=head_sha,
                     stage="delivery",
                     provider="github",
                     message=f"Created dedicated remediation branch '{delivery.head_branch}'",
-                    metadata_payload={"delivery_id": str(delivery.id), "branch": delivery.head_branch, "commit_sha": head_sha},
+                    metadata_payload={"branch": delivery.head_branch, "commit_sha": head_sha},
                 ),
                 critical=False,
             )
-            db.commit()
 
             # 7c. CREATING_PR
             delivery.status = DeliveryStatus.CREATING_PR.value
             db.commit()
+            db.refresh(delivery)
 
             # Reconcile existing PR before attempting creation
             existing_pr = await self.provider.find_existing_pull_request(
@@ -415,14 +499,32 @@ class DeliveryService:
                     requested_by=payload.requested_by or "user",
                     notes=payload.notes,
                 )
-                pr_info = await self.provider.create_pull_request(
-                    owner=owner,
-                    repo=repo,
-                    title=pr_title,
-                    body=pr_body,
-                    head=delivery.head_branch,
-                    base=base_branch,
-                )
+                try:
+                    pr_info = await self.provider.create_pull_request(
+                        owner=owner,
+                        repo=repo,
+                        title=pr_title,
+                        body=pr_body,
+                        head=delivery.head_branch,
+                        base=base_branch,
+                    )
+                except Exception as pr_create_err:
+                    # Write uncertainty: check if PR was actually created remotely despite error/timeout
+                    try:
+                        reconciled_pr = await self.provider.find_existing_pull_request(
+                            owner=owner,
+                            repo=repo,
+                            head=delivery.head_branch,
+                            base=base_branch,
+                        )
+                    except Exception:
+                        reconciled_pr = None
+
+                    if reconciled_pr:
+                        logger.info(f"Reconciled PR #{reconciled_pr.number} after uncertain PR creation error: {pr_create_err}")
+                        pr_info = reconciled_pr
+                    else:
+                        raise pr_create_err
 
             # 7d. PR_CREATED - final atomic state and audit event
             delivery.pr_number = pr_info.number
@@ -439,11 +541,11 @@ class DeliveryService:
                     scan_id=UUID(str(scan.id)),
                     finding_id=UUID(str(finding.id)),
                     patch_id=UUID(str(patch.id)),
+                    delivery_id=UUID(str(delivery.id)),
                     stage="delivery",
                     provider="github",
                     message=f"GitHub Pull Request #{pr_info.number} successfully created",
                     metadata_payload={
-                        "delivery_id": str(delivery.id),
                         "pr_number": pr_info.number,
                         "pr_url": delivery.pr_url,
                         "head_branch": delivery.head_branch,
@@ -463,6 +565,8 @@ class DeliveryService:
             delivery.failure_code = getattr(exc, "safe_code", "DELIVERY_FAILED")
             delivery.failure_message = redact_secrets(str(exc))[:512]
             delivery.completed_at = _utc_now()
+            db.commit()
+            db.refresh(delivery)
 
             WorkflowEventService.emit(
                 db=db,
@@ -471,16 +575,14 @@ class DeliveryService:
                     scan_id=UUID(str(scan.id)),
                     finding_id=UUID(str(finding.id)),
                     patch_id=UUID(str(patch.id)),
+                    delivery_id=UUID(str(delivery.id)),
                     stage="delivery",
                     provider="github",
                     message=f"Delivery execution failed: {delivery.failure_message}",
                     metadata_payload={
-                        "delivery_id": str(delivery.id),
                         "failure_code": delivery.failure_code,
                     },
                 ),
                 critical=False,
             )
-            db.commit()
-            db.refresh(delivery)
             return delivery

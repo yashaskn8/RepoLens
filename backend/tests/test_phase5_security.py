@@ -16,6 +16,7 @@ from app.delivery.github_provider import GitHubDeliveryProvider
 from app.delivery.pr_body import generate_pr_body, generate_pr_title
 from app.delivery.provider import RepositoryDeliveryProvider
 from app.delivery.schemas import (
+    DeliveryProviderError,
     GitCommitInfo,
     GitPullRequestInfo,
     GitTreeEntry,
@@ -31,6 +32,7 @@ from app.models.delivery import DeliveryModel
 from app.models.finding import EvidenceModel, FindingModel
 from app.models.patch import PatchModel
 from app.models.scan import ScanModel
+from app.models.workflow_event import WorkflowEventModel
 from app.schemas.enums import DeliveryStatus, FindingStatus, PatchStatus, ScanStatus, Severity
 from app.schemas.delivery import DeliveryRequest
 
@@ -45,18 +47,28 @@ class MockDeliveryProvider(RepositoryDeliveryProvider):
     ):
         self.base_head_sha = base_head_sha
         self.base_tree_sha = base_tree_sha
+        self.branches: dict[str, str] = {"main": base_head_sha}
+        self.commits: dict[str, GitCommitInfo] = {
+            base_head_sha: GitCommitInfo(sha=base_head_sha, tree_sha=base_tree_sha, parents=[])
+        }
         self.blobs_created: list[dict] = []
         self.trees_created: list[dict] = []
         self.commits_created: list[dict] = []
         self.branches_created: list[dict] = []
         self.prs_created: list[dict] = []
+        self.prs: dict[str, GitPullRequestInfo] = {}
         self.existing_pr: Optional[GitPullRequestInfo] = None
 
     async def get_branch_head(self, owner: str, repo: str, branch: str) -> str:
-        return self.base_head_sha
+        clean = branch.replace("refs/heads/", "")
+        if clean in self.branches:
+            return self.branches[clean]
+        raise GitHubAPIError(f"Branch '{clean}' not found on remote", status_code=404)
 
     async def get_commit(self, owner: str, repo: str, sha: str) -> GitCommitInfo:
-        return GitCommitInfo(sha=sha, tree_sha=self.base_tree_sha)
+        if sha in self.commits:
+            return self.commits[sha]
+        return GitCommitInfo(sha=sha, tree_sha=self.base_tree_sha, parents=[self.base_head_sha])
 
     async def create_blob(self, owner: str, repo: str, content: str, encoding: str = "utf-8") -> str:
         blob_sha = f"blob_{len(self.blobs_created) + 1}_{len(content)}"
@@ -70,15 +82,28 @@ class MockDeliveryProvider(RepositoryDeliveryProvider):
 
     async def create_commit(self, owner: str, repo: str, message: str, tree_sha: str, parent_shas: list[str]) -> str:
         commit_sha = f"333333333333333333333333333333333333333{len(self.commits_created) + 1}"
+        commit_info = GitCommitInfo(sha=commit_sha, tree_sha=tree_sha, message=message, parents=parent_shas)
+        self.commits[commit_sha] = commit_info
         self.commits_created.append({"owner": owner, "repo": repo, "message": message, "tree_sha": tree_sha, "parents": parent_shas, "sha": commit_sha})
         return commit_sha
 
     async def create_branch(self, owner: str, repo: str, branch_name: str, sha: str) -> str:
-        self.branches_created.append({"owner": owner, "repo": repo, "branch": branch_name, "sha": sha})
-        return f"refs/heads/{branch_name}"
+        clean = branch_name.replace("refs/heads/", "")
+        self.branches[clean] = sha
+        self.branches_created.append({"owner": owner, "repo": repo, "branch": clean, "sha": sha})
+        return f"refs/heads/{clean}"
 
     async def find_existing_pull_request(self, owner: str, repo: str, head: str, base: str) -> Optional[GitPullRequestInfo]:
-        return self.existing_pr
+        if self.existing_pr:
+            return self.existing_pr
+        key = f"{head}:{base}"
+        if key in self.prs:
+            return self.prs[key]
+        for item in self.prs_created:
+            p = item["pr"]
+            if p.head_branch == head and p.base_branch == base:
+                return p
+        return None
 
     async def create_pull_request(self, owner: str, repo: str, title: str, body: str, head: str, base: str) -> GitPullRequestInfo:
         pr_num = len(self.prs_created) + 1
@@ -444,3 +469,544 @@ async def test_concurrent_delivery_race_condition_handled(db_session: Session, b
         assert d2.id == d1.id
         assert d2.pr_number == d1.pr_number
         assert len(mock_provider.prs_created) == 1
+
+
+# 16. Fix 1: create_branch GitHubAPIError is correctly imported and caught without NameError
+@pytest.mark.asyncio
+async def test_create_branch_github_api_error_caught_without_name_error(db_session: Session, base_entities):
+    scan, finding, patch = base_entities
+    mock_provider = MockDeliveryProvider()
+
+    # Simulate race condition: remote created branch with sha, then returned 422
+    async def _failing_create_branch(owner, repo, branch_name, sha):
+        clean = branch_name.replace("refs/heads/", "")
+        mock_provider.branches[clean] = sha
+        raise GitHubAPIError("Reference already exists", status_code=422)
+
+    mock_provider.create_branch = _failing_create_branch
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _fake_snapshot(scan_id, db=None):
+        with tempfile.TemporaryDirectory() as fresh_ws:
+            os.makedirs(os.path.join(fresh_ws, "app"), exist_ok=True)
+            with open(os.path.join(fresh_ws, "app", "storage.py"), "w", encoding="utf-8") as f:
+                f.write("def read_file(p):\n    return open(p)\n")
+            yield fresh_ws
+
+    with mock_patch("app.delivery.service.get_snapshot_service") as mock_snap, \
+         mock_patch("app.delivery.validator.get_snapshot_service") as mock_val_snap:
+        mock_inst = MagicMock()
+        mock_inst.snapshot_context.side_effect = _fake_snapshot
+        mock_snap.return_value = mock_inst
+        mock_val_snap.return_value = mock_inst
+
+        service = DeliveryService(provider=mock_provider)
+        delivery = await service.deliver_patch(db=db_session, patch_id=patch.id, payload=DeliveryRequest())
+        assert delivery is not None
+        assert delivery.status == DeliveryStatus.PR_CREATED.value
+
+
+# 17. Fix 2: Case B - Existing branch with different SHA fails closed with HEAD_BRANCH_COLLISION
+@pytest.mark.asyncio
+async def test_reconciliation_existing_branch_different_sha_fails_closed(db_session: Session, base_entities):
+    scan, finding, patch = base_entities
+    mock_provider = MockDeliveryProvider()
+
+    # Pre-populate branch with collision SHA
+    branch_name = sanitize_branch_name(finding.id, patch.id)
+    mock_provider.branches[branch_name] = "9999999999999999999999999999999999999999"
+
+    # Pre-create delivery with different local head_sha
+    from app.delivery.service import compute_idempotency_key
+    owner, repo = "example-org", "secure-app"
+    idempotency_key = compute_idempotency_key(owner, repo, patch.id, "main", scan.commit_hash)
+
+    delivery = DeliveryModel(
+        id=str(uuid4()),
+        scan_id=scan.id,
+        finding_id=finding.id,
+        patch_id=patch.id,
+        idempotency_key=idempotency_key,
+        repository_url=scan.repository_url,
+        repository_owner=owner,
+        repository_name=repo,
+        head_branch=branch_name,
+        base_branch="main",
+        scanned_base_sha=scan.commit_hash,
+        head_sha="3333333333333333333333333333333333333331",  # Local expected
+        status=DeliveryStatus.READY.value,
+    )
+    db_session.add(delivery)
+    db_session.commit()
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _fake_snapshot(scan_id, db=None):
+        with tempfile.TemporaryDirectory() as fresh_ws:
+            os.makedirs(os.path.join(fresh_ws, "app"), exist_ok=True)
+            with open(os.path.join(fresh_ws, "app", "storage.py"), "w", encoding="utf-8") as f:
+                f.write("def read_file(p):\n    return open(p)\n")
+            yield fresh_ws
+
+    with mock_patch("app.delivery.service.get_snapshot_service") as mock_snap, \
+         mock_patch("app.delivery.validator.get_snapshot_service") as mock_val_snap:
+        mock_inst = MagicMock()
+        mock_inst.snapshot_context.side_effect = _fake_snapshot
+        mock_snap.return_value = mock_inst
+        mock_val_snap.return_value = mock_inst
+
+        service = DeliveryService(provider=mock_provider)
+        res = await service.deliver_patch(db=db_session, patch_id=patch.id, payload=DeliveryRequest())
+
+        assert res.status == DeliveryStatus.FAILED.value
+        assert res.failure_code == "HEAD_BRANCH_COLLISION"
+        assert len(mock_provider.prs_created) == 0
+
+
+# 18. Fix 2: Case C - Branch exists, local head_sha missing, remote tree and parent match -> adopt safely
+@pytest.mark.asyncio
+async def test_reconciliation_missing_local_head_sha_verified_commit_adopted(db_session: Session, base_entities):
+    scan, finding, patch = base_entities
+    mock_provider = MockDeliveryProvider()
+
+    branch_name = sanitize_branch_name(finding.id, patch.id)
+    remote_sha = "4444444444444444444444444444444444444444"
+    mock_provider.branches[branch_name] = remote_sha
+    mock_provider.commits[remote_sha] = GitCommitInfo(
+        sha=remote_sha,
+        tree_sha="tree_1",  # Matches the tree created for this patch
+        parents=[scan.commit_hash],
+    )
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _fake_snapshot(scan_id, db=None):
+        with tempfile.TemporaryDirectory() as fresh_ws:
+            os.makedirs(os.path.join(fresh_ws, "app"), exist_ok=True)
+            with open(os.path.join(fresh_ws, "app", "storage.py"), "w", encoding="utf-8") as f:
+                f.write("def read_file(p):\n    return open(p)\n")
+            yield fresh_ws
+
+    with mock_patch("app.delivery.service.get_snapshot_service") as mock_snap, \
+         mock_patch("app.delivery.validator.get_snapshot_service") as mock_val_snap:
+        mock_inst = MagicMock()
+        mock_inst.snapshot_context.side_effect = _fake_snapshot
+        mock_snap.return_value = mock_inst
+        mock_val_snap.return_value = mock_inst
+
+        service = DeliveryService(provider=mock_provider)
+        res = await service.deliver_patch(db=db_session, patch_id=patch.id, payload=DeliveryRequest())
+
+        assert res.status == DeliveryStatus.PR_CREATED.value
+        assert res.head_sha == remote_sha
+
+
+# 19. Fix 2: Case C - Branch exists, local head_sha missing, remote tree does NOT match -> fail closed
+@pytest.mark.asyncio
+async def test_reconciliation_missing_local_head_sha_mismatched_tree_fails_closed(db_session: Session, base_entities):
+    scan, finding, patch = base_entities
+    mock_provider = MockDeliveryProvider()
+
+    branch_name = sanitize_branch_name(finding.id, patch.id)
+    remote_sha = "4444444444444444444444444444444444444444"
+    mock_provider.branches[branch_name] = remote_sha
+    mock_provider.commits[remote_sha] = GitCommitInfo(
+        sha=remote_sha,
+        tree_sha="tree_alien_mismatch",
+        parents=[scan.commit_hash],
+    )
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _fake_snapshot(scan_id, db=None):
+        with tempfile.TemporaryDirectory() as fresh_ws:
+            os.makedirs(os.path.join(fresh_ws, "app"), exist_ok=True)
+            with open(os.path.join(fresh_ws, "app", "storage.py"), "w", encoding="utf-8") as f:
+                f.write("def read_file(p):\n    return open(p)\n")
+            yield fresh_ws
+
+    with mock_patch("app.delivery.service.get_snapshot_service") as mock_snap, \
+         mock_patch("app.delivery.validator.get_snapshot_service") as mock_val_snap:
+        mock_inst = MagicMock()
+        mock_inst.snapshot_context.side_effect = _fake_snapshot
+        mock_snap.return_value = mock_inst
+        mock_val_snap.return_value = mock_inst
+
+        service = DeliveryService(provider=mock_provider)
+        res = await service.deliver_patch(db=db_session, patch_id=patch.id, payload=DeliveryRequest())
+
+        assert res.status == DeliveryStatus.FAILED.value
+        assert res.failure_code == "HEAD_BRANCH_COLLISION"
+        assert len(mock_provider.prs_created) == 0
+
+
+# 20. Fix 2: Provider has no update_branch_ref method and never mutates default branch
+def test_no_update_branch_ref_in_provider():
+    from app.delivery.provider import RepositoryDeliveryProvider
+    from app.delivery.github_provider import GitHubDeliveryProvider
+
+    assert not hasattr(RepositoryDeliveryProvider, "update_branch_ref")
+    assert not hasattr(GitHubDeliveryProvider, "update_branch_ref")
+    assert not hasattr(RepositoryDeliveryProvider, "merge_pull_request")
+    assert not hasattr(GitHubDeliveryProvider, "merge_pull_request")
+    assert not hasattr(RepositoryDeliveryProvider, "delete_branch")
+    assert not hasattr(GitHubDeliveryProvider, "delete_branch")
+
+
+# 21. Fix 3: 401 during find_existing_pull_request propagates failure without calling create_pull_request
+@pytest.mark.asyncio
+async def test_find_existing_pr_401_fails_delivery_without_calling_create_pr(db_session: Session, base_entities):
+    scan, finding, patch = base_entities
+    mock_provider = MockDeliveryProvider()
+
+    async def _failing_find_pr(owner, repo, head, base):
+        raise GitHubAPIError("Bad credentials", status_code=401)
+
+    mock_provider.find_existing_pull_request = _failing_find_pr
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _fake_snapshot(scan_id, db=None):
+        with tempfile.TemporaryDirectory() as fresh_ws:
+            os.makedirs(os.path.join(fresh_ws, "app"), exist_ok=True)
+            with open(os.path.join(fresh_ws, "app", "storage.py"), "w", encoding="utf-8") as f:
+                f.write("def read_file(p):\n    return open(p)\n")
+            yield fresh_ws
+
+    with mock_patch("app.delivery.service.get_snapshot_service") as mock_snap, \
+         mock_patch("app.delivery.validator.get_snapshot_service") as mock_val_snap:
+        mock_inst = MagicMock()
+        mock_inst.snapshot_context.side_effect = _fake_snapshot
+        mock_snap.return_value = mock_inst
+        mock_val_snap.return_value = mock_inst
+
+        service = DeliveryService(provider=mock_provider)
+        res = await service.deliver_patch(db=db_session, patch_id=patch.id, payload=DeliveryRequest())
+
+        assert res.status == DeliveryStatus.FAILED.value
+        assert res.failure_code == "GITHUB_401"
+        assert len(mock_provider.prs_created) == 0
+
+
+# 22. Fix 3: PR create timeout but subsequent reconciliation finds PR -> PR_CREATED
+@pytest.mark.asyncio
+async def test_pr_create_timeout_with_successful_reconciliation(db_session: Session, base_entities):
+    scan, finding, patch = base_entities
+    mock_provider = MockDeliveryProvider()
+
+    # Make first find_existing_pull_request return None
+    # Then create_pull_request raises timeout, but sets remote state
+    # Then retry find_existing_pull_request returns the created PR
+    created_pr = GitPullRequestInfo(
+        number=42,
+        html_url="https://github.com/example-org/secure-app/pull/42",
+        head_branch=sanitize_branch_name(finding.id, patch.id),
+        base_branch="main",
+        title="fix(repolens): remediate Path traversal vulnerability",
+    )
+
+    find_calls = 0
+    async def _mock_find_pr(owner, repo, head, base):
+        nonlocal find_calls
+        find_calls += 1
+        if find_calls == 1:
+            return None
+        return created_pr
+
+    async def _failing_create_pr(owner, repo, title, body, head, base):
+        raise GitHubAPIError("Request timed out", status_code=504, safe_code="GITHUB_TIMEOUT")
+
+    mock_provider.find_existing_pull_request = _mock_find_pr
+    mock_provider.create_pull_request = _failing_create_pr
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _fake_snapshot(scan_id, db=None):
+        with tempfile.TemporaryDirectory() as fresh_ws:
+            os.makedirs(os.path.join(fresh_ws, "app"), exist_ok=True)
+            with open(os.path.join(fresh_ws, "app", "storage.py"), "w", encoding="utf-8") as f:
+                f.write("def read_file(p):\n    return open(p)\n")
+            yield fresh_ws
+
+    with mock_patch("app.delivery.service.get_snapshot_service") as mock_snap, \
+         mock_patch("app.delivery.validator.get_snapshot_service") as mock_val_snap:
+        mock_inst = MagicMock()
+        mock_inst.snapshot_context.side_effect = _fake_snapshot
+        mock_snap.return_value = mock_inst
+        mock_val_snap.return_value = mock_inst
+
+        service = DeliveryService(provider=mock_provider)
+        res = await service.deliver_patch(db=db_session, patch_id=patch.id, payload=DeliveryRequest())
+
+        assert res.status == DeliveryStatus.PR_CREATED.value
+        assert res.pr_number == 42
+        assert res.pr_url == "https://github.com/example-org/secure-app/pull/42"
+
+
+# 23. Fix 4: DeliveryValidator invokes canonical verifier and blocks on syntax failure
+@pytest.mark.asyncio
+async def test_delivery_validator_blocks_on_syntax_error_via_canonical_verifier(db_session: Session, base_entities):
+    scan, finding, patch = base_entities
+    # Introduce syntax-breaking code in patch
+    syntax_error_diff = "--- a/app/storage.py\n+++ b/app/storage.py\n@@ -1,2 +1,3 @@\n+def broken_syntax(:\n def read_file(p):\n     return open(p)\n"
+    patch.unified_diff = syntax_error_diff
+    db_session.commit()
+
+    mock_provider = MockDeliveryProvider()
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _fake_snapshot(scan_id, db=None):
+        with tempfile.TemporaryDirectory() as fresh_ws:
+            os.makedirs(os.path.join(fresh_ws, "app"), exist_ok=True)
+            with open(os.path.join(fresh_ws, "app", "storage.py"), "w", encoding="utf-8") as f:
+                f.write("def read_file(p):\n    return open(p)\n")
+            yield fresh_ws
+
+    with mock_patch("app.delivery.validator.get_snapshot_service") as mock_val_snap:
+        mock_inst = MagicMock()
+        mock_inst.snapshot_context.side_effect = _fake_snapshot
+        mock_val_snap.return_value = mock_inst
+
+        val_res = await DeliveryValidator.validate(db=db_session, patch_id=patch.id, provider=mock_provider)
+        assert not val_res.eligible
+        assert val_res.failure_code in ("PATCH_SYNTAX_ERROR", "VERIFICATION_FAILED", "VERIFICATION_CHECK_FAILED")
+
+
+# 24. Fix 5: GITHUB_DELIVERY_ENABLED=False disables delivery even if token is present
+@pytest.mark.asyncio
+async def test_github_delivery_disabled_by_feature_flag(db_session: Session, base_entities):
+    scan, finding, patch = base_entities
+    provider = GitHubDeliveryProvider(token="ghp_dummytoken12345678901234567890123456", delivery_enabled=False)
+
+    assert provider.credentials_configured is True
+    assert provider.delivery_enabled is False
+    assert provider.is_configured is False
+
+    service = DeliveryService(provider=provider)
+    preview = await service.get_delivery_preview(db=db_session, patch_id=patch.id)
+    assert preview.github_delivery_configured is False
+
+    with pytest.raises(HTTPException) as exc_info:
+        await service.deliver_patch(db=db_session, patch_id=patch.id, payload=DeliveryRequest())
+    assert exc_info.value.status_code == 503
+
+
+# 25. Fix 5: GITHUB_DELIVERY_ENABLED=True but token absent is unconfigured
+def test_github_delivery_enabled_true_token_absent():
+    provider = GitHubDeliveryProvider(token="", delivery_enabled=True)
+    assert provider.credentials_configured is False
+    assert provider.delivery_enabled is True
+    assert provider.is_configured is False
+
+
+# 26. Fix 5: GITHUB_DELIVERY_ENABLED=True and token present is configured
+def test_github_delivery_enabled_true_token_present():
+    provider = GitHubDeliveryProvider(token="ghp_realkey123456789012345678901234567890", delivery_enabled=True)
+    assert provider.credentials_configured is True
+    assert provider.delivery_enabled is True
+    assert provider.is_configured is True
+
+
+# 27. Fix 8B: Fixed trusted GitHub API origin rejects untrusted base_url
+def test_github_provider_rejects_untrusted_origin():
+    with pytest.raises(ValueError) as exc_info:
+        GitHubDeliveryProvider(token="ghp_test", base_url="https://evil.example.com")
+    assert "Untrusted API origin" in str(exc_info.value)
+
+
+# 28. Fix 6: Scan status != COMPLETED blocks delivery
+@pytest.mark.asyncio
+async def test_scan_status_not_completed_blocks_delivery(db_session: Session, base_entities):
+    scan, finding, patch = base_entities
+    scan.status = ScanStatus.RUNNING.value
+    db_session.commit()
+
+    mock_provider = MockDeliveryProvider()
+    val_res = await DeliveryValidator.validate(db=db_session, patch_id=patch.id, provider=mock_provider)
+    assert not val_res.eligible
+    assert val_res.failure_code == "SCAN_NOT_COMPLETED"
+
+    scan.status = ScanStatus.FAILED.value
+    db_session.commit()
+    val_res2 = await DeliveryValidator.validate(db=db_session, patch_id=patch.id, provider=mock_provider)
+    assert not val_res2.eligible
+    assert val_res2.failure_code == "SCAN_NOT_COMPLETED"
+
+
+# 29. Fix 6: Non-hex or non-40-char commit SHA blocks delivery
+@pytest.mark.asyncio
+async def test_scan_invalid_commit_sha_blocks_delivery(db_session: Session, base_entities):
+    scan, finding, patch = base_entities
+    mock_provider = MockDeliveryProvider()
+
+    # 39 chars
+    scan.commit_hash = "1" * 39
+    db_session.commit()
+    val_res = await DeliveryValidator.validate(db=db_session, patch_id=patch.id, provider=mock_provider)
+    assert not val_res.eligible
+    assert val_res.failure_code == "INVALID_COMMIT_SHA"
+
+    # 40 chars with non-hex characters
+    scan.commit_hash = "111111111111111111111111111111111111111Z"
+    db_session.commit()
+    val_res2 = await DeliveryValidator.validate(db=db_session, patch_id=patch.id, provider=mock_provider)
+    assert not val_res2.eligible
+    assert val_res2.failure_code == "INVALID_COMMIT_SHA"
+
+
+# 30. Fix 6: Missing base branch blocks delivery without guessing main
+@pytest.mark.asyncio
+async def test_scan_missing_base_branch_blocks_delivery(db_session: Session, base_entities):
+    scan, finding, patch = base_entities
+    scan.branch = ""
+    db_session.commit()
+
+    mock_provider = MockDeliveryProvider()
+    val_res = await DeliveryValidator.validate(db=db_session, patch_id=patch.id, provider=mock_provider)
+    assert not val_res.eligible
+    assert val_res.failure_code == "BASE_BRANCH_UNRESOLVED"
+
+
+# 31. Fix 6: Detached HEAD or raw commit SHA as branch blocks delivery
+@pytest.mark.asyncio
+async def test_scan_detached_head_or_sha_branch_blocks_delivery(db_session: Session, base_entities):
+    scan, finding, patch = base_entities
+    mock_provider = MockDeliveryProvider()
+
+    for invalid_branch in ("HEAD", "HEAD@123456", "1111111111111111111111111111111111111111"):
+        scan.branch = invalid_branch
+        db_session.commit()
+        val_res = await DeliveryValidator.validate(db=db_session, patch_id=patch.id, provider=mock_provider)
+        assert not val_res.eligible
+        assert val_res.failure_code == "INVALID_BASE_BRANCH"
+
+
+# 32. Fix 7: Workflow events record explicit delivery_id and preserve commit ordering
+@pytest.mark.asyncio
+async def test_workflow_events_record_typed_delivery_id(db_session: Session, base_entities):
+    scan, finding, patch = base_entities
+    mock_provider = MockDeliveryProvider()
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _fake_snapshot(scan_id, db=None):
+        with tempfile.TemporaryDirectory() as fresh_ws:
+            os.makedirs(os.path.join(fresh_ws, "app"), exist_ok=True)
+            with open(os.path.join(fresh_ws, "app", "storage.py"), "w", encoding="utf-8") as f:
+                f.write("def read_file(p):\n    return open(p)\n")
+            yield fresh_ws
+
+    with mock_patch("app.delivery.service.get_snapshot_service") as mock_snap, \
+         mock_patch("app.delivery.validator.get_snapshot_service") as mock_val_snap:
+        mock_inst = MagicMock()
+        mock_inst.snapshot_context.side_effect = _fake_snapshot
+        mock_snap.return_value = mock_inst
+        mock_val_snap.return_value = mock_inst
+
+        service = DeliveryService(provider=mock_provider)
+        res = await service.deliver_patch(db=db_session, patch_id=patch.id, payload=DeliveryRequest())
+
+        assert res.status == DeliveryStatus.PR_CREATED.value
+
+        # Inspect workflow events
+        events = db_session.query(WorkflowEventModel).filter(WorkflowEventModel.delivery_id == str(res.id)).all()
+        assert len(events) >= 3
+        event_types = [e.event_type for e in events]
+        assert "DELIVERY_REQUESTED" in event_types
+        assert "DELIVERY_COMMIT_CREATED" in event_types
+        assert "DELIVERY_PR_CREATED" in event_types
+
+
+# 33. Fix 8A: DeliveryRequest bounds requested_by to max 128 characters
+def test_delivery_request_bounds_requested_by_too_long():
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        DeliveryRequest(requested_by="a" * 129)
+    # 128 is allowed
+    req = DeliveryRequest(requested_by="a" * 128)
+    assert len(req.requested_by) == 128
+
+
+# 34. Fix 8A: DeliveryRequest bounds notes to max 2000 characters
+def test_delivery_request_bounds_notes_too_long():
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        DeliveryRequest(notes="a" * 2001)
+    # 2000 is allowed
+    req = DeliveryRequest(notes="a" * 2000)
+    assert len(req.notes) == 2000
+
+
+# 35. Fix 8D: Partial failure on PR create with network error and successful reconciliation retry
+@pytest.mark.asyncio
+async def test_phase5_partial_failure_network_drop_and_recovery(db_session: Session, base_entities):
+    scan, finding, patch = base_entities
+    mock_provider = MockDeliveryProvider()
+
+    created_pr = GitPullRequestInfo(
+        number=777,
+        html_url="https://github.com/example-org/secure-app/pull/777",
+        head_branch=sanitize_branch_name(finding.id, patch.id),
+        base_branch="main",
+        title="fix(repolens): remediate Path traversal vulnerability",
+    )
+
+    create_pr_calls = 0
+
+    async def _failing_first_create_pr(owner, repo, title, body, head, base):
+        nonlocal create_pr_calls
+        create_pr_calls += 1
+        # Remotely created the PR, but socket drops before returning response!
+        mock_provider.prs[f"{head}:{base}"] = created_pr
+        raise httpx.ConnectTimeout("Connection dropped while waiting for GitHub PR response")
+
+    mock_provider.create_pull_request = _failing_first_create_pr
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _fake_snapshot(scan_id, db=None):
+        with tempfile.TemporaryDirectory() as fresh_ws:
+            os.makedirs(os.path.join(fresh_ws, "app"), exist_ok=True)
+            with open(os.path.join(fresh_ws, "app", "storage.py"), "w", encoding="utf-8") as f:
+                f.write("def read_file(p):\n    return open(p)\n")
+            yield fresh_ws
+
+    with mock_patch("app.delivery.service.get_snapshot_service") as mock_snap, \
+         mock_patch("app.delivery.validator.get_snapshot_service") as mock_val_snap:
+        mock_inst = MagicMock()
+        mock_inst.snapshot_context.side_effect = _fake_snapshot
+        mock_snap.return_value = mock_inst
+        mock_val_snap.return_value = mock_inst
+
+        service = DeliveryService(provider=mock_provider)
+
+        # Attempt 1: socket drop triggers write uncertainty recovery, which adopts remote PR!
+        res1 = await service.deliver_patch(db=db_session, patch_id=patch.id, payload=DeliveryRequest())
+        assert res1.status == DeliveryStatus.PR_CREATED.value
+        assert res1.pr_number == 777
+
+        # Attempt 2 (Retry): Reconciles cleanly without creating a second PR or failing on existing branch
+        res2 = await service.deliver_patch(db=db_session, patch_id=patch.id, payload=DeliveryRequest())
+        assert res2.id == res1.id
+        assert res2.status == DeliveryStatus.PR_CREATED.value
+        assert res2.pr_number == 777
+        assert create_pr_calls == 1
+
+
+
+
+
+
+
+

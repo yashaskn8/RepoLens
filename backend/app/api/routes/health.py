@@ -91,7 +91,7 @@ def _build_telemetry_report(db: Session) -> TelemetryReport:
         ),
         ProviderTelemetry(
             provider="github",
-            configured=bool(settings.GITHUB_TOKEN and settings.GITHUB_TOKEN.strip()),
+            configured=bool(settings.GITHUB_DELIVERY_ENABLED and settings.GITHUB_TOKEN and settings.GITHUB_TOKEN.strip()),
             default_model="github-git-data-api",
         ),
     ]

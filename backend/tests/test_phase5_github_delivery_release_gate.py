@@ -42,28 +42,50 @@ class E2EMockGitHubProvider(RepositoryDeliveryProvider):
         self.base_tree_sha = base_tree_sha
         self.blobs: Dict[str, str] = {}  # sha -> content
         self.trees: Dict[str, List[GitTreeEntry]] = {}
-        self.commits: Dict[str, dict] = {}
-        self.branches: Dict[str, str] = {}  # branch_name -> commit_sha
+        self.commits: Dict[str, dict] = {
+            remote_head_sha: {
+                "message": "Initial commit",
+                "tree_sha": base_tree_sha,
+                "parents": [],
+            }
+        }
+        self.branches: Dict[str, str] = {
+            "main": remote_head_sha,
+        }  # branch_name -> commit_sha
         self.prs: List[GitPullRequestInfo] = []
+        self.blobs_created: List[str] = []
+        self.trees_created: List[str] = []
+        self.commits_created: List[str] = []
+        self.branches_created: List[str] = []
+        self.prs_created: List[GitPullRequestInfo] = []
         self.calls: List[str] = []
 
     async def get_branch_head(self, owner: str, repo: str, branch: str) -> str:
-        self.calls.append(f"get_branch_head:{owner}/{repo}:{branch}")
-        return self.remote_head_sha
+        clean = branch.replace("refs/heads/", "")
+        self.calls.append(f"get_branch_head:{owner}/{repo}:{clean}")
+        if clean in self.branches:
+            return self.branches[clean]
+        from app.delivery.schemas import GitHubAPIError
+        raise GitHubAPIError(f"Branch '{clean}' not found", status_code=404, safe_code="BRANCH_NOT_FOUND")
 
     async def get_commit(self, owner: str, repo: str, sha: str) -> GitCommitInfo:
         self.calls.append(f"get_commit:{sha}")
-        return GitCommitInfo(sha=sha, tree_sha=self.base_tree_sha)
+        if sha in self.commits:
+            c = self.commits[sha]
+            return GitCommitInfo(sha=sha, tree_sha=c.get("tree_sha", self.base_tree_sha), parents=c.get("parents", []))
+        return GitCommitInfo(sha=sha, tree_sha=self.base_tree_sha, parents=[self.remote_head_sha])
 
     async def create_blob(self, owner: str, repo: str, content: str, encoding: str = "utf-8") -> str:
         blob_sha = f"blob_sha_{len(self.blobs) + 1}_{len(content)}"
         self.blobs[blob_sha] = content
+        self.blobs_created.append(blob_sha)
         self.calls.append(f"create_blob:{blob_sha}")
         return blob_sha
 
     async def create_tree(self, owner: str, repo: str, base_tree_sha: str, tree_entries: List[GitTreeEntry]) -> str:
         tree_sha = f"tree_sha_{len(self.trees) + 1}"
         self.trees[tree_sha] = tree_entries
+        self.trees_created.append(tree_sha)
         self.calls.append(f"create_tree:{tree_sha}")
         return tree_sha
 
@@ -74,13 +96,16 @@ class E2EMockGitHubProvider(RepositoryDeliveryProvider):
             "tree_sha": tree_sha,
             "parents": parent_shas,
         }
+        self.commits_created.append(commit_sha)
         self.calls.append(f"create_commit:{commit_sha}")
         return commit_sha
 
     async def create_branch(self, owner: str, repo: str, branch_name: str, sha: str) -> str:
-        self.branches[branch_name] = sha
-        self.calls.append(f"create_branch:{branch_name}:{sha}")
-        return f"refs/heads/{branch_name}"
+        clean = branch_name.replace("refs/heads/", "")
+        self.branches[clean] = sha
+        self.branches_created.append(clean)
+        self.calls.append(f"create_branch:{clean}:{sha}")
+        return f"refs/heads/{clean}"
 
     async def find_existing_pull_request(self, owner: str, repo: str, head: str, base: str) -> Optional[GitPullRequestInfo]:
         self.calls.append(f"find_existing_pr:{head}:{base}")
@@ -99,6 +124,7 @@ class E2EMockGitHubProvider(RepositoryDeliveryProvider):
             title=title,
         )
         self.prs.append(pr)
+        self.prs_created.append(pr)
         self.calls.append(f"create_pull_request:#{pr_number}")
         return pr
 
@@ -239,42 +265,48 @@ async def test_phase5_e2e_canonical_delivery_flow(client: TestClient, db_session
     finally:
         app.dependency_overrides.pop(get_delivery_service, None)
 
-    # Step C: Fresh DB Session Verification (Session Restart)
-    db_session.expire_all()
+    # Step C: True Fresh DB Session Verification (Session Restart)
+    from tests.conftest import TestingSessionLocal
+    fresh_session = TestingSessionLocal(bind=db_session.get_bind())
+    try:
+        delivery_row = fresh_session.query(DeliveryModel).filter(DeliveryModel.patch_id == patch_id).first()
+        assert delivery_row is not None
+        assert delivery_row.status == DeliveryStatus.PR_CREATED.value
+        assert delivery_row.pr_number == 101
+        assert delivery_row.pr_url == "https://github.com/repolens-org/secure-core/pull/101"
+        assert delivery_row.head_branch.startswith("repolens/fix-")
+        assert delivery_row.base_branch == "main"
+        assert delivery_row.scanned_base_sha == commit_sha
 
-    delivery_row = db_session.query(DeliveryModel).filter(DeliveryModel.patch_id == patch_id).first()
-    assert delivery_row is not None
-    assert delivery_row.status == DeliveryStatus.PR_CREATED.value
-    assert delivery_row.pr_number == 101
-    assert delivery_row.pr_url == "https://github.com/repolens-org/secure-core/pull/101"
+        # Verify Timeline Events
+        events = WorkflowEventService.list_for_delivery(db=fresh_session, delivery_id=delivery_row.id)
+        event_types = [e.event_type for e in events]
+        assert "DELIVERY_REQUESTED" in event_types
+        assert "DELIVERY_VALIDATED" in event_types
+        assert "DELIVERY_COMMIT_CREATED" in event_types
+        assert "DELIVERY_BRANCH_CREATED" in event_types
+        assert "DELIVERY_PR_CREATED" in event_types
 
-    # Verify Timeline Events
-    events = WorkflowEventService.list_for_delivery(db=db_session, delivery_id=delivery_row.id)
-    event_types = [e.event_type for e in events]
-    assert "DELIVERY_REQUESTED" in event_types
-    assert "DELIVERY_VALIDATED" in event_types
-    assert "DELIVERY_COMMIT_CREATED" in event_types
-    assert "DELIVERY_BRANCH_CREATED" in event_types
-    assert "DELIVERY_PR_CREATED" in event_types
+        # Step D: Report Service & Telemetry Derivation
+        report = ScanReportService.build_scan_report(db=fresh_session, scan_id=UUID(scan_id))
+        assert report is not None
+        assert report.summary.total_deliveries == 1
+        assert report.summary.pull_requests_created == 1
+        assert report.summary.deliveries_blocked == 0
+        assert report.findings[0].patches[0].deliveries[0].pr_number == 101
 
-    # Step D: Report Service & Telemetry Derivation
-    report = ScanReportService.build_scan_report(db=db_session, scan_id=UUID(scan_id))
-    assert report is not None
-    assert report.summary.total_deliveries == 1
-    assert report.summary.pull_requests_created == 1
-    assert report.summary.deliveries_blocked == 0
-    assert report.findings[0].patches[0].deliveries[0].pr_number == 101
+        markdown = ScanReportService.render_markdown(report)
+        assert "🚀 GitHub PRs Created | 1" in markdown
+        assert "PR #101" in markdown
 
-    markdown = ScanReportService.render_markdown(report)
-    assert "🚀 GitHub PRs Created | 1" in markdown
-    assert "PR #101" in markdown
-
-    telemetry = ScanReportService.build_scan_telemetry(db=db_session, scan_id=scan_id)
-    assert telemetry is not None
-    assert telemetry.deliveries_requested == 1
-    assert telemetry.pull_requests_created == 1
-    assert telemetry.deliveries_blocked == 0
-    assert telemetry.delivery_failures == 0
+        telemetry = ScanReportService.build_scan_telemetry(db=fresh_session, scan_id=scan_id)
+        assert telemetry is not None
+        assert telemetry.deliveries_requested == 1
+        assert telemetry.pull_requests_created == 1
+        assert telemetry.deliveries_blocked == 0
+        assert telemetry.delivery_failures == 0
+    finally:
+        fresh_session.close()
 
 
 # 2. Base Drift Protection Gate
@@ -360,11 +392,11 @@ async def test_phase5_e2e_base_drift_protection_gate(client: TestClient, db_sess
         app.dependency_overrides.pop(get_delivery_service, None)
 
     # Zero writes occurred
-    assert len(mock_provider.blobs) == 0
-    assert len(mock_provider.trees) == 0
-    assert len(mock_provider.commits) == 0
-    assert len(mock_provider.branches) == 0
-    assert len(mock_provider.prs) == 0
+    assert len(mock_provider.blobs_created) == 0
+    assert len(mock_provider.trees_created) == 0
+    assert len(mock_provider.commits_created) == 0
+    assert len(mock_provider.branches_created) == 0
+    assert len(mock_provider.prs_created) == 0
 
     # Telemetry and report reflect blocked delivery
     report = ScanReportService.build_scan_report(db=db_session, scan_id=UUID(scan_id))

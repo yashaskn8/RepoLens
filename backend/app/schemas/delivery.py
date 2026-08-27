@@ -36,8 +36,8 @@ class DeliveryPreviewResponse(BaseModel):
 class DeliveryRequest(BaseModel):
     """Payload to trigger safe, human-authorized GitHub pull request delivery."""
 
-    requested_by: str = Field(default="user", description="Identifier of the user requesting PR delivery")
-    notes: Optional[str] = Field(default=None, description="Optional delivery or audit sign-off notes")
+    requested_by: str = Field(default="user", max_length=128, description="Identifier of the user requesting PR delivery")
+    notes: Optional[str] = Field(default=None, max_length=2000, description="Optional delivery or audit sign-off notes")
 
 
 class DeliveryResponse(BaseModel):

@@ -27,20 +27,39 @@ class GitHubDeliveryProvider(RepositoryDeliveryProvider):
     def __init__(
         self,
         token: Optional[str] = None,
+        delivery_enabled: Optional[bool] = None,
         base_url: str = GITHUB_API_BASE_URL,
         settings: Optional[Settings] = None,
         client: Optional[httpx.AsyncClient] = None,
     ):
         app_settings = settings or get_settings()
         self._token = token if token is not None else app_settings.GITHUB_TOKEN
-        self.base_url = base_url.rstrip("/")
+        self._delivery_enabled = (
+            delivery_enabled
+            if delivery_enabled is not None
+            else getattr(app_settings, "GITHUB_DELIVERY_ENABLED", False)
+        )
+        cleaned_url = (base_url or GITHUB_API_BASE_URL).rstrip("/")
+        if cleaned_url != GITHUB_API_BASE_URL:
+            raise ValueError(f"Untrusted API origin '{base_url}'. Only '{GITHUB_API_BASE_URL}' is supported.")
+        self.base_url = GITHUB_API_BASE_URL
         self._client = client
         self._timeout = httpx.Timeout(30.0, connect=15.0)
 
     @property
-    def is_configured(self) -> bool:
-        """Return True if a GitHub token is present."""
+    def credentials_configured(self) -> bool:
+        """Return True if GitHub credentials are non-empty."""
         return bool(self._token and len(self._token.strip()) > 0)
+
+    @property
+    def delivery_enabled(self) -> bool:
+        """Return True if GitHub delivery is administratively enabled."""
+        return bool(self._delivery_enabled)
+
+    @property
+    def is_configured(self) -> bool:
+        """Return True only if delivery is enabled AND credentials are present."""
+        return self.credentials_configured and self.delivery_enabled
 
     def _get_headers(self) -> Dict[str, str]:
         """Build safe HTTP headers for GitHub API requests without exposing tokens in logs."""
@@ -259,23 +278,20 @@ class GitHubDeliveryProvider(RepositoryDeliveryProvider):
             "base": clean_base,
             "state": "all",
         }
-        try:
-            data = await self._request("GET", f"/repos/{owner}/{repo}/pulls", params=params)
-            if isinstance(data, list) and len(data) > 0:
-                pr = data[0]
-                pr_num = pr.get("number")
-                if pr_num is not None:
-                    canonical_url = f"https://github.com/{owner}/{repo}/pull/{pr_num}"
-                    return GitPullRequestInfo(
-                        number=int(pr_num),
-                        html_url=canonical_url,
-                        head_branch=clean_head,
-                        base_branch=clean_base,
-                        title=pr.get("title", ""),
-                        state=pr.get("state", "open"),
-                    )
-        except GitHubAPIError:
-            pass
+        data = await self._request("GET", f"/repos/{owner}/{repo}/pulls", params=params)
+        if isinstance(data, list) and len(data) > 0:
+            pr = data[0]
+            pr_num = pr.get("number")
+            if pr_num is not None:
+                canonical_url = f"https://github.com/{owner}/{repo}/pull/{pr_num}"
+                return GitPullRequestInfo(
+                    number=int(pr_num),
+                    html_url=canonical_url,
+                    head_branch=clean_head,
+                    base_branch=clean_base,
+                    title=pr.get("title", ""),
+                    state=pr.get("state", "open"),
+                )
         return None
 
     async def create_pull_request(

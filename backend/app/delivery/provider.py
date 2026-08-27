@@ -2,7 +2,12 @@
 
 from abc import ABC, abstractmethod
 from typing import List, Optional
-from app.delivery.schemas import GitCommitInfo, GitPullRequestInfo, GitTreeEntry
+from app.delivery.schemas import (
+    DeliveryProviderError,
+    GitCommitInfo,
+    GitPullRequestInfo,
+    GitTreeEntry,
+)
 
 
 class RepositoryDeliveryProvider(ABC):
@@ -12,6 +17,15 @@ class RepositoryDeliveryProvider(ABC):
     def is_configured(self) -> bool:
         """Indicates if provider is configured and available for delivery operations."""
         return True
+
+    async def try_get_branch_head(self, owner: str, repo: str, branch: str) -> Optional[str]:
+        """Resolve current commit SHA at the head of a remote branch, returning None ONLY on confirmed 404."""
+        try:
+            return await self.get_branch_head(owner=owner, repo=repo, branch=branch)
+        except DeliveryProviderError as err:
+            if getattr(err, "status_code", None) == 404:
+                return None
+            raise
 
     @abstractmethod
     async def get_branch_head(self, owner: str, repo: str, branch: str) -> str:
