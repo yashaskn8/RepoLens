@@ -245,6 +245,25 @@ class WorkflowEventService:
         )
 
     @staticmethod
+    def list_after_id_for_change_analysis(
+        db: Session,
+        change_analysis_id: str,
+        after_id: int,
+        limit: int = 100,
+    ) -> List[WorkflowEventModel]:
+        """Query workflow events for a given change analysis strictly after a given event ID for SSE replay."""
+        return (
+            db.query(WorkflowEventModel)
+            .filter(
+                WorkflowEventModel.change_analysis_id == str(change_analysis_id),
+                WorkflowEventModel.id > after_id,
+            )
+            .order_by(WorkflowEventModel.id.asc())
+            .limit(limit)
+            .all()
+        )
+
+    @staticmethod
     def list_events(
         db: Session,
         scan_id: str,
@@ -252,4 +271,5 @@ class WorkflowEventService:
     ) -> List[WorkflowEventModel]:
         """Alias for list_for_scan."""
         return WorkflowEventService.list_for_scan(db=db, scan_id=scan_id, limit=limit)
+
 

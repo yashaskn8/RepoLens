@@ -3,9 +3,10 @@
 from datetime import datetime, timezone
 from enum import Enum
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
+
 
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -22,6 +23,9 @@ from app.schemas.metadata import ModelExecutionMetadata
 
 _GITHUB_URL_REGEX = re.compile(
     r"^https://github\.com/([a-zA-Z0-9_\-\.]+)/([a-zA-Z0-9_\-\.]+)$"
+)
+_GITHUB_PR_URL_REGEX = re.compile(
+    r"^https://github\.com/([a-zA-Z0-9_\-\.]+)/([a-zA-Z0-9_\-\.]+)/pull/(\d+)/?$"
 )
 _HEX_40_REGEX = re.compile(r"^[0-9a-fA-F]{40}$")
 _DISALLOWED_CHARS = re.compile(r"[;`$&|><\n\r\t]")
@@ -62,6 +66,45 @@ def _normalize_and_validate_github_url(v: str) -> str:
         raise ValueError("repository_url must specify both owner and repository name")
     
     return canonical_url
+
+
+def _normalize_and_validate_github_pr_url(v: str) -> Tuple[str, str, str, int]:
+    """Validate and parse a GitHub pull request URL.
+    
+    Returns:
+        (canonical_pr_url, owner, repo, pr_number)
+    """
+    if not isinstance(v, str):
+        raise ValueError("pr_url must be a string")
+    url = v.strip()
+    if not url:
+        raise ValueError("pr_url cannot be empty")
+    if _DISALLOWED_CHARS.search(url):
+        raise ValueError("pr_url contains forbidden shell or injection characters")
+    if "@" in url:
+        raise ValueError("pr_url must not contain credentials")
+    
+    parsed = urlparse(url)
+    if parsed.scheme.lower() != "https":
+        raise ValueError("pr_url must use https scheme")
+    if parsed.netloc.lower() not in ("github.com", "www.github.com"):
+        raise ValueError("pr_url must be a github.com domain")
+    
+    clean_path = parsed.path.rstrip("/")
+    canonical_url = f"https://github.com{clean_path}"
+    match = _GITHUB_PR_URL_REGEX.match(canonical_url)
+    if not match:
+        raise ValueError("pr_url must follow format: https://github.com/owner/repository/pull/number")
+    
+    owner, repo, pr_num_str = match.groups()
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+    pr_number = int(pr_num_str)
+    if pr_number < 1:
+        raise ValueError("pr_number must be greater than 0")
+    
+    canonical_url = f"https://github.com/{owner}/{repo}/pull/{pr_number}"
+    return canonical_url, owner, repo, pr_number
 
 
 def _normalize_and_validate_sha(sha: str, field_name: str) -> str:
@@ -124,6 +167,40 @@ class ChangeAnalysisRequest(BaseModel):
         if self.base_commit_sha == self.head_commit_sha:
             raise ValueError("base_commit_sha and head_commit_sha must be distinct revisions")
         return self
+
+
+class ChangeAnalysisPRRequest(BaseModel):
+    """Request payload to initiate change analysis from a public GitHub pull request URL."""
+
+    pr_url: str = Field(
+        ...,
+        description="Public HTTPS GitHub Pull Request URL (e.g., https://github.com/fastapi/fastapi/pull/123)",
+        examples=["https://github.com/fastapi/fastapi/pull/1234"],
+    )
+
+    @field_validator("pr_url")
+    @classmethod
+    def validate_pr_url(cls, v: str) -> str:
+        canonical_url, _, _, _ = _normalize_and_validate_github_pr_url(v)
+        return canonical_url
+
+
+class ResolvedPullRequest(BaseModel):
+    """Normalized, immutable pull request metadata resolved from GitHub REST API."""
+
+    repository_url: str = Field(..., description="Canonical repository URL")
+    repository_owner: str = Field(..., description="Repository owner/org")
+    repository_name: str = Field(..., description="Repository name")
+    pr_number: int = Field(..., description="Pull request number")
+    title: str = Field(..., description="Pull request title")
+    base_branch: str = Field(..., description="Target base branch name")
+    base_commit_sha: str = Field(..., description="Exact 40-character base commit SHA")
+    head_branch: str = Field(..., description="Source head branch or ref name")
+    head_commit_sha: str = Field(..., description="Exact 40-character head commit SHA")
+    head_repo_url: Optional[str] = Field(default=None, description="Head repository URL (different if from fork)")
+    is_fork: bool = Field(default=False, description="True if pull request is from a fork")
+    state: str = Field(default="open", description="Pull request state: open, closed, or merged")
+
 
 
 class ChangeImpactEvidence(BaseModel):

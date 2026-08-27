@@ -866,6 +866,26 @@ export interface ChangeReviewReport {
   model_metadata?: ModelExecutionMetadata | null;
 }
 
+export interface ChangeAnalysisPRRequest {
+  pr_url: string;
+}
+
+export interface ResolvedPullRequest {
+  repository_url: string;
+  repository_owner: string;
+  repository_name: string;
+  pr_number: number;
+  title: string;
+  base_branch: string;
+  base_commit_sha: string;
+  head_branch: string;
+  head_commit_sha: string;
+  head_repo_url?: string | null;
+  is_fork: boolean;
+  state: string;
+}
+
+
 
 
 

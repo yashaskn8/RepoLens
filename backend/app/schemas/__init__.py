@@ -27,6 +27,7 @@ from app.schemas.delivery import (
 )
 from app.schemas.change_analysis import (
     BlastRadiusReport,
+    ChangeAnalysisPRRequest,
     ChangeAnalysisRequest,
     ChangeAnalysisResponse,
     ChangeAnalysisSummary,
@@ -40,12 +41,14 @@ from app.schemas.change_analysis import (
     DependencyDelta,
     FileChangeType,
     FileDiffFact,
+    ResolvedPullRequest,
     RouteContractDelta,
     SchemaModelDelta,
     StructuralDiffResult,
     SymbolChangeType,
     SymbolDiffFact,
 )
+
 
 
 
@@ -108,6 +111,8 @@ __all__ = [
     "DeliveryResponse",
     "BlastRadiusReport",
     "ChangeAnalysisRequest",
+    "ChangeAnalysisPRRequest",
+    "ResolvedPullRequest",
     "ChangeAnalysisSummary",
     "ChangeImpact",
     "ChangeImpactEvidence",
