@@ -318,6 +318,15 @@ class DeliveryService:
         )
 
         # 7. Execute Git Data API steps
+        pr_info = None
+        delivery_id = str(delivery.id)
+        head_branch_name = delivery.head_branch
+        idem_key_local = delivery.idempotency_key
+        scan_id_str = str(scan.id)
+        finding_id_str = str(finding.id)
+        patch_id_str = str(patch.id)
+        repo_url_str = scan.repository_url
+        requested_by_str = delivery.requested_by or "system"
         try:
             # 7a. CREATING_COMMIT
             delivery.status = DeliveryStatus.CREATING_COMMIT.value
@@ -575,34 +584,91 @@ class DeliveryService:
             return delivery
 
         except Exception as exc:
-            logger.error(f"Delivery failed during execution for patch {patch.id}: {exc}", exc_info=True)
-            try:
-                delivery.status = DeliveryStatus.FAILED.value
-                delivery.failure_code = getattr(exc, "safe_code", "DELIVERY_FAILED")
-                delivery.failure_message = redact_secrets(str(exc))[:512]
-                delivery.completed_at = _utc_now()
-                db.commit()
-                db.refresh(delivery)
+            logger.error(f"Delivery failed during execution for patch {patch_id_str}: {exc}", exc_info=True)
+            # 1. Immediately roll back the failed transaction
+            db.rollback()
 
-                WorkflowEventService.emit(
-                    db=db,
-                    event=WorkflowEventCreate(
-                        event_type=WorkflowEventType.DELIVERY_FAILED,
-                        scan_id=UUID(str(scan.id)),
-                        finding_id=UUID(str(finding.id)),
-                        patch_id=UUID(str(patch.id)),
-                        delivery_id=UUID(str(delivery.id)),
-                        stage="delivery",
-                        provider="github",
-                        message=f"Delivery execution failed: {delivery.failure_message}",
-                        metadata_payload={
-                            "failure_code": delivery.failure_code,
-                        },
-                    ),
-                    critical=False,
-                )
+            # Determine failure code
+            failure_code = getattr(
+                exc, "safe_code", "LOCAL_STATE_PERSISTENCE_FAILED" if pr_info else "DELIVERY_FAILED"
+            )
+            failure_message = redact_secrets(str(exc))[:512]
+
+            # 2. Re-query DeliveryModel on clean session if persistence is possible
+            try:
+                failed_delivery = db.query(DeliveryModel).filter(DeliveryModel.id == delivery_id).first()
+                if failed_delivery:
+                    failed_delivery.status = DeliveryStatus.FAILED.value
+                    failed_delivery.failure_code = failure_code
+                    failed_delivery.failure_message = failure_message
+                    failed_delivery.completed_at = _utc_now()
+                    db.commit()
+                    db.refresh(failed_delivery)
+
+                    try:
+                        WorkflowEventService.emit(
+                            db=db,
+                            event=WorkflowEventCreate(
+                                event_type=WorkflowEventType.DELIVERY_FAILED,
+                                scan_id=UUID(scan_id_str),
+                                finding_id=UUID(finding_id_str),
+                                patch_id=UUID(patch_id_str),
+                                delivery_id=UUID(str(failed_delivery.id)),
+                                stage="delivery",
+                                provider="github",
+                                message=f"Delivery execution failed: {failed_delivery.failure_message}",
+                                metadata_payload={
+                                    "failure_code": failed_delivery.failure_code,
+                                },
+                            ),
+                            critical=False,
+                        )
+                    except Exception as evt_err:
+                        logger.warning(f"Could not emit failure event: {evt_err}")
+
+                    return failed_delivery
             except Exception as save_err:
-                logger.warning(f"Could not persist failure status: {save_err}")
+                logger.warning(f"Could not persist failure status after rollback: {save_err}")
                 db.rollback()
 
-            return delivery
+            # 3. If the delivery row was lost during rollback, attempt fresh re-query
+            try:
+                failed_delivery = db.query(DeliveryModel).filter(DeliveryModel.id == delivery_id).first()
+                if failed_delivery:
+                    return failed_delivery
+            except Exception:
+                pass
+
+            # 4. Last resort: re-create a minimal failed delivery row so caller gets a clean response
+            try:
+                failed_delivery = DeliveryModel(
+                    id=delivery_id,
+                    scan_id=scan_id_str,
+                    finding_id=finding_id_str,
+                    patch_id=patch_id_str,
+                    provider="github",
+                    repository_url=repo_url_str or f"https://github.com/{owner}/{repo}",
+                    repository_owner=owner,
+                    repository_name=repo,
+                    base_branch=base_branch,
+                    scanned_base_sha=scanned_sha,
+                    head_branch=head_branch_name,
+                    status=DeliveryStatus.FAILED.value,
+                    failure_code=failure_code,
+                    failure_message=failure_message,
+                    idempotency_key=idem_key_local,
+                    requested_by=requested_by_str,
+                    completed_at=_utc_now(),
+                )
+                db.add(failed_delivery)
+                db.commit()
+                db.refresh(failed_delivery)
+                return failed_delivery
+            except Exception as recreate_err:
+                logger.warning(f"Could not re-create delivery row after rollback: {recreate_err}")
+                db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Delivery failed and could not persist failure state: {failure_message}",
+                )
+

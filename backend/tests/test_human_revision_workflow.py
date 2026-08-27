@@ -5,7 +5,7 @@ import os
 import tempfile
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -17,6 +17,7 @@ from app.models.finding import EvidenceModel, FindingModel
 from app.models.patch import PatchModel
 from app.models.scan import ScanModel
 from app.patching.schemas import CriticVerdict, PatchCriticReport, PatchProposal, PatchVerificationResult, PatchWorkflowResult, VerificationStatus
+from app.planning.schemas import FixPlan, OrderedChangeStep
 from app.schemas.enums import FindingStatus, PatchStatus, Severity, VerificationVerdict
 
 
@@ -165,10 +166,30 @@ def test_revise_race_condition_returns_409(client, db_session):
         with tempfile.TemporaryDirectory() as td:
             yield td
 
+    mock_plan_id = uuid4()
+    mock_revised_plan = FixPlan(
+        id=mock_plan_id,
+        finding_id=UUID(finding_id),
+        root_cause="Race condition in query",
+        objective="Fix race condition",
+        files_expected_to_change=["app/query.py"],
+        symbols_expected_to_change=[],
+        ordered_changes=[
+            OrderedChangeStep(
+                step_number=1,
+                target_file="app/query.py",
+                description="Fix race",
+                rationale="Thread safety",
+            )
+        ],
+        validation_plan=["Check race"],
+    )
+
     mock_wf_result = MagicMock()
     mock_wf_result.machine_verdict = "PASSED"
     mock_wf_result.proposal = PatchProposal(
-        finding_id=finding_id,
+        finding_id=UUID(finding_id),
+        plan_id=mock_plan_id,
         unified_diff="--- a/query.py\n+++ b/query.py\n@@ -5,1 +5,1 @@\n-old\n+new\n",
         files_modified=["app/query.py"],
         explanation="Race fix",
@@ -203,7 +224,7 @@ def test_revise_race_condition_returns_409(client, db_session):
     with patch("app.ingestion.snapshot.RepositorySnapshotService.open_snapshot", _mock_open_snapshot), \
          patch("app.analysis.service.RepositoryIntelligenceService.analyze_repository", AsyncMock()), \
          patch("app.context.runtime.ScanIntelligenceRuntime.build", AsyncMock()), \
-         patch("app.planning.service.FixPlanningService.create_fix_plan", AsyncMock()), \
+         patch("app.planning.service.FixPlanningService.create_fix_plan", AsyncMock(return_value=mock_revised_plan)), \
          patch("app.patching.workflow.PatchWorkflowCoordinator.execute_patch_workflow", AsyncMock(return_value=mock_wf_result)):
         # Monkey-patch query on the session to bypass the pre-check
         original_query = db_session.query

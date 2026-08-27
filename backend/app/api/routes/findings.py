@@ -202,6 +202,14 @@ async def request_patch_generation(
                 repository_graph=runtime.repository_graph,
                 manifest=runtime.manifest,
             )
+            if not isinstance(fix_plan, FixPlan):
+                try:
+                    fix_plan = FixPlan.model_validate(fix_plan)
+                except Exception as e:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=f"PATCH_PLAN_PROVENANCE_MISMATCH: Invalid canonical FixPlan: {e}",
+                    )
 
             # 2. Execute Patch Workflow (Generator -> Sandbox Verifier -> Critic)
             coordinator = PatchWorkflowCoordinator()
@@ -214,6 +222,16 @@ async def request_patch_generation(
             )
 
             proposal = workflow_result.proposal
+            if not (
+                proposal.finding_id == fix_plan.finding_id
+                and proposal.plan_id == fix_plan.id
+                and fix_plan.finding_id == finding_schema.id
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="PATCH_PLAN_PROVENANCE_MISMATCH: Patch proposal plan or finding identity does not match canonical FixPlan.",
+                )
+
             patch_status = PatchStatus.VERIFIED if workflow_result.final_verdict in ("PASSED", "APPROVED") else (
                 PatchStatus.REJECTED if workflow_result.final_verdict == "REJECTED" else PatchStatus.NEEDS_REVIEW
             )
@@ -241,22 +259,12 @@ async def request_patch_generation(
             except Exception as exc:
                 logger.warning("Notice initializing remediation thread %s: %s", remediation_thread_id, str(exc))
 
-            if hasattr(fix_plan, "model_dump") and not type(fix_plan).__name__.endswith("Mock"):
-                plan_id_str = str(fix_plan.id)
-                plan_snapshot = fix_plan.model_dump(mode="json")
-            elif isinstance(fix_plan, dict):
-                plan_id_str = str(fix_plan.get("id", uuid4()))
-                plan_snapshot = fix_plan
-            else:
-                plan_id_str = str(getattr(fix_plan, "id", uuid4())) if not type(getattr(fix_plan, "id", None)).__name__.endswith("Mock") else str(uuid4())
-                plan_snapshot = None
-
             # 4. Persist Patch Proposal into database
             patch_model = PatchModel(
                 id=str(proposal.id),
                 finding_id=str(finding_id),
-                plan_id=plan_id_str,
-                fix_plan_snapshot=plan_snapshot,
+                plan_id=str(fix_plan.id),
+                fix_plan_snapshot=fix_plan.model_dump(mode="json"),
                 scan_id=str(scan.id),
                 thread_id=remediation_thread_id,
                 status=patch_status.value,

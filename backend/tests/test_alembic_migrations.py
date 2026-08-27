@@ -2,7 +2,7 @@
 
 import os
 import tempfile
-from uuid import uuid4
+from uuid import UUID, uuid4
 import pytest
 from alembic import command
 from alembic.config import Config
@@ -13,6 +13,7 @@ from app.models.delivery import DeliveryModel
 from app.models.finding import EvidenceModel, FindingModel
 from app.models.patch import PatchModel
 from app.models.scan import ScanModel
+from app.planning.schemas import FixPlan, FixScope, OrderedChangeStep
 from app.schemas.enums import DeliveryStatus, FindingStatus, PatchStatus, ScanStatus, Severity, VerificationVerdict
 
 
@@ -149,9 +150,26 @@ def test_alembic_upgrade_head_on_empty_db_creates_complete_schema():
             )
             db.add(evidence)
 
+            plan_id = uuid4()
+            fix_plan = FixPlan(
+                id=plan_id,
+                finding_id=UUID(finding.id),
+                root_cause="Insecure cookie flags",
+                objective="Add Secure and HttpOnly flags",
+                files_expected_to_change=["app/auth.py"],
+                symbols_expected_to_change=[],
+                ordered_changes=[
+                    OrderedChangeStep(step_number=1, target_file="app/auth.py", description="Add flags", rationale="Security")
+                ],
+                validation_plan=["pytest"],
+                estimated_scope=FixScope.FILE,
+            )
+
             patch = PatchModel(
                 id=str(uuid4()),
                 finding_id=finding.id,
+                plan_id=str(plan_id),
+                fix_plan_snapshot=fix_plan.model_dump(mode="json"),
                 scan_id=scan.id,
                 thread_id=f"remediation-{uuid4()}",
                 status=PatchStatus.APPROVED.value,
@@ -188,12 +206,16 @@ def test_alembic_upgrade_head_on_empty_db_creates_complete_schema():
             db.add(delivery)
             db.commit()
 
-            # Read back and verify relationships
+            # Read back and verify relationships and FixPlan JSON round-trip
             persisted_delivery = db.query(DeliveryModel).filter(DeliveryModel.id == delivery.id).first()
             assert persisted_delivery is not None
             assert persisted_delivery.pr_number == 42
             assert persisted_delivery.status == DeliveryStatus.PR_CREATED.value
             assert persisted_delivery.patch.status == PatchStatus.APPROVED.value
+            assert persisted_delivery.patch.fix_plan_snapshot is not None
+            round_trip_plan = FixPlan.model_validate(persisted_delivery.patch.fix_plan_snapshot)
+            assert str(round_trip_plan.id) == persisted_delivery.patch.plan_id
+            assert str(round_trip_plan.finding_id) == persisted_delivery.patch.finding_id
             assert persisted_delivery.finding.title == "Insecure cookie"
             assert persisted_delivery.scan.repository_url == "https://github.com/fastapi/fastapi"
 
@@ -345,25 +367,27 @@ def test_alembic_007_fix_plan_snapshot_orm_read_write():
             )
             db.add(finding)
 
-            snapshot_data = {
-                "id": str(uuid4()),
-                "finding_id": finding.id,
-                "root_cause": "Test root cause",
-                "objective": "Test objective",
-                "files_expected_to_change": ["app/main.py"],
-                "symbols_expected_to_change": [],
-                "ordered_changes": [
-                    {"step_number": 1, "target_file": "app/main.py", "description": "Fix", "rationale": "Reason"}
+            plan_id = uuid4()
+            fix_plan = FixPlan(
+                id=plan_id,
+                finding_id=UUID(finding.id),
+                root_cause="Test root cause",
+                objective="Test objective",
+                files_expected_to_change=["app/main.py"],
+                symbols_expected_to_change=[],
+                ordered_changes=[
+                    OrderedChangeStep(step_number=1, target_file="app/main.py", description="Fix", rationale="Reason")
                 ],
-                "validation_plan": ["Check fix"],
-                "estimated_scope": "FILE",
-            }
+                validation_plan=["Check fix"],
+                estimated_scope=FixScope.FILE,
+            )
+            snapshot_data = fix_plan.model_dump(mode="json")
 
             # 1. Write patch WITH fix_plan_snapshot
             patch_with = PatchModel(
                 id=str(uuid4()),
                 finding_id=finding.id,
-                plan_id=snapshot_data["id"],
+                plan_id=str(plan_id),
                 fix_plan_snapshot=snapshot_data,
                 scan_id=scan.id,
                 thread_id=f"remediation-{uuid4()}",
@@ -396,10 +420,12 @@ def test_alembic_007_fix_plan_snapshot_orm_read_write():
             loaded_with = db.query(PatchModel).filter(PatchModel.id == patch_with.id).first()
             assert loaded_with is not None
             assert loaded_with.fix_plan_snapshot is not None
-            assert loaded_with.fix_plan_snapshot["id"] == snapshot_data["id"]
-            assert loaded_with.fix_plan_snapshot["root_cause"] == "Test root cause"
-            assert loaded_with.fix_plan_snapshot["files_expected_to_change"] == ["app/main.py"]
-            assert loaded_with.plan_id == snapshot_data["id"]
+            round_trip = FixPlan.model_validate(loaded_with.fix_plan_snapshot)
+            assert str(round_trip.id) == loaded_with.plan_id
+            assert str(round_trip.finding_id) == loaded_with.finding_id
+            assert round_trip.root_cause == "Test root cause"
+            assert round_trip.files_expected_to_change == ["app/main.py"]
+            assert loaded_with.plan_id == str(plan_id)
 
             loaded_without = db.query(PatchModel).filter(PatchModel.id == patch_without.id).first()
             assert loaded_without is not None

@@ -19,6 +19,7 @@ from app.patching.workflow_graph import (
     RemediationState,
     build_remediation_graph,
 )
+from app.planning.schemas import FixPlan, OrderedChangeStep
 from app.schemas.enums import FindingStatus, PatchStatus, ScanStatus, Severity
 
 
@@ -104,10 +105,30 @@ def test_patch_api_lifecycle_inspect_approve_reject_revise(client, db_session):
         with tempfile.TemporaryDirectory() as td:
             yield td
 
+    mock_plan_id = uuid4()
+    mock_revised_plan = FixPlan(
+        id=mock_plan_id,
+        finding_id=UUID(finding_id),
+        root_cause="Missing type annotations",
+        objective="Add explicit type annotations",
+        files_expected_to_change=["app/db.py"],
+        symbols_expected_to_change=[],
+        ordered_changes=[
+            OrderedChangeStep(
+                step_number=1,
+                target_file="app/db.py",
+                description="Add explicit type annotations",
+                rationale="Types aligned",
+            )
+        ],
+        validation_plan=["Check types"],
+    )
+
     mock_wf_result = MagicMock()
     mock_wf_result.machine_verdict = "NEEDS_REVIEW"
     mock_wf_result.proposal = PatchProposal(
         finding_id=UUID(finding_id),
+        plan_id=mock_plan_id,
         unified_diff="--- a/app/db.py\n+++ b/app/db.py\n@@ -1,1 +1,1 @@\n-old\n+new_with_types\n",
         files_modified=["app/db.py"],
         explanation="Added explicit type annotations",
@@ -119,7 +140,7 @@ def test_patch_api_lifecycle_inspect_approve_reject_revise(client, db_session):
     with patch("app.ingestion.snapshot.RepositorySnapshotService.open_snapshot", _mock_open_snapshot), \
          patch("app.analysis.service.RepositoryIntelligenceService.analyze_repository", AsyncMock()), \
          patch("app.context.runtime.ScanIntelligenceRuntime.build", AsyncMock()), \
-         patch("app.planning.service.FixPlanningService.create_fix_plan", AsyncMock()), \
+         patch("app.planning.service.FixPlanningService.create_fix_plan", AsyncMock(return_value=mock_revised_plan)), \
          patch("app.patching.workflow.PatchWorkflowCoordinator.execute_patch_workflow", AsyncMock(return_value=mock_wf_result)):
         revise_res = client.post(
             f"/api/v1/patches/{patch_id}/revise",

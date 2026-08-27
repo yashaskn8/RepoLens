@@ -13,6 +13,7 @@ from app.agents.checkpointer import get_sqlite_checkpointer
 from app.core.database import get_db
 from app.models.patch import PatchModel
 from app.patching.workflow_graph import RemediationState, build_remediation_graph
+from app.planning.schemas import FixPlan
 from app.schemas.enums import PatchStatus
 from app.schemas.patch import (
     PatchRejectRequest,
@@ -347,6 +348,15 @@ async def request_patch_revision(
             repository_graph=runtime.repository_graph,
             manifest=runtime.manifest,
         )
+        if not isinstance(fix_plan, FixPlan):
+            try:
+                fix_plan = FixPlan.model_validate(fix_plan)
+            except Exception as e:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"PATCH_PLAN_PROVENANCE_MISMATCH: Invalid canonical FixPlan: {e}",
+                )
+
         # Inject reviewer feedback into fix plan objective
         fix_plan.objective = f"{fix_plan.objective} (Human reviewer feedback: {payload.user_feedback})"
 
@@ -360,6 +370,15 @@ async def request_patch_revision(
         )
 
         proposal = workflow_result.proposal
+        if not (
+            proposal.plan_id == fix_plan.id
+            and proposal.finding_id == fix_plan.finding_id
+            and fix_plan.finding_id == finding_schema.id
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="PATCH_PLAN_PROVENANCE_MISMATCH: Patch proposal plan or finding identity does not match canonical FixPlan.",
+            )
 
         # Map machine verdict directly to status (never APPROVED without explicit human /approve)
         if workflow_result.machine_verdict == "PASSED" or (
@@ -399,21 +418,11 @@ async def request_patch_revision(
             logger.warning("Notice initializing child remediation thread %s: %s", child_thread_id, str(exc))
 
         # 4. Persist child PatchModel with audit lineage
-        if hasattr(fix_plan, "model_dump") and not type(fix_plan).__name__.endswith("Mock"):
-            plan_id_str = str(fix_plan.id)
-            plan_snapshot = fix_plan.model_dump(mode="json")
-        elif isinstance(fix_plan, dict):
-            plan_id_str = str(fix_plan.get("id", uuid4()))
-            plan_snapshot = fix_plan
-        else:
-            plan_id_str = str(getattr(fix_plan, "id", uuid4())) if not type(getattr(fix_plan, "id", None)).__name__.endswith("Mock") else str(uuid4())
-            plan_snapshot = None
-
         child_patch_model = PatchModel(
             id=str(proposal.id),
             finding_id=str(finding_schema.id),
-            plan_id=plan_id_str,
-            fix_plan_snapshot=plan_snapshot,
+            plan_id=str(fix_plan.id),
+            fix_plan_snapshot=fix_plan.model_dump(mode="json"),
             scan_id=str(scan.id),
             parent_patch_id=str(patch_model.id),
             revision_number=(patch_model.revision_number or 0) + 1,

@@ -1272,6 +1272,286 @@ async def test_revision_child_persists_exact_revised_fix_plan_snapshot(db_sessio
 
 
 @pytest.mark.asyncio
+async def test_initial_patch_generation_proposal_plan_id_mismatch_blocks_persistence(db_session: Session, base_entities):
+    from app.api.routes.findings import request_patch_generation
+    from app.patching.schemas import PatchProposal, PatchWorkflowResult, VerificationStatus, PatchVerificationResult
+    from app.planning.schemas import FixPlan, FixScope, OrderedChangeStep
+
+    scan, finding, _ = base_entities
+    finding_id = finding.id
+
+    real_plan_id = uuid4()
+    mock_plan = FixPlan(
+        id=real_plan_id,
+        finding_id=UUID(finding_id),
+        root_cause="User supplied path is not confined.",
+        objective="Validate path confinement before file operations",
+        files_expected_to_change=["app/storage.py"],
+        symbols_expected_to_change=[],
+        ordered_changes=[
+            OrderedChangeStep(step_number=1, target_file="app/storage.py", description="Add validation", rationale="Security")
+        ],
+        validation_plan=["Check path confinement"],
+        estimated_scope=FixScope.FILE,
+    )
+
+    prop_id = uuid4()
+    # proposal with mismatched plan_id
+    mock_proposal = PatchProposal(
+        id=prop_id,
+        finding_id=UUID(finding_id),
+        plan_id=uuid4(),  # Mismatched plan_id!
+        unified_diff="--- a/app/storage.py\n+++ b/app/storage.py\n@@ -1,2 +1,3 @@\n def read_file(p):\n+    validate(p)\n     return open(p)\n",
+        files_modified=["app/storage.py"],
+        explanation="Added path confinement validation",
+        expected_behavior_change="Rejects traversals",
+    )
+
+    mock_wf_result = PatchWorkflowResult(
+        finding_id=UUID(finding_id),
+        proposal=mock_proposal,
+        verification_result=PatchVerificationResult(
+            patch_id=prop_id,
+            finding_id=UUID(finding_id),
+            status=VerificationStatus.PASSED,
+            syntax_valid=True,
+            security_clean=True,
+            contract_aligned=True,
+            target_finding_resolved=True,
+            explanation="All checks passed",
+            checks=[],
+        ),
+        machine_verdict="PASSED",
+        final_verdict="PASSED",
+    )
+
+    from contextlib import asynccontextmanager
+    @asynccontextmanager
+    async def _fake_open_snapshot(scan_id, db=None):
+        with tempfile.TemporaryDirectory() as fresh_ws:
+            os.makedirs(os.path.join(fresh_ws, "app"), exist_ok=True)
+            with open(os.path.join(fresh_ws, "app", "storage.py"), "w", encoding="utf-8") as f:
+                f.write("def read_file(p):\n    return open(p)\n")
+            yield fresh_ws
+
+    with mock_patch("app.api.routes.findings.get_snapshot_service") as mock_snap, \
+         mock_patch("app.api.routes.findings.get_intelligence_service") as mock_intel, \
+         mock_patch("app.api.routes.findings.ScanIntelligenceRuntime.build") as mock_runtime_build, \
+         mock_patch("app.api.routes.findings.FixPlanningService.create_fix_plan", new_callable=AsyncMock) as mock_create_plan, \
+         mock_patch("app.api.routes.findings.PatchWorkflowCoordinator.execute_patch_workflow", new_callable=AsyncMock) as mock_exec_wf:
+
+        mock_inst = MagicMock()
+        mock_inst.open_snapshot.side_effect = _fake_open_snapshot
+        mock_snap.return_value = mock_inst
+
+        mock_intel_inst = MagicMock()
+        mock_intel_inst.analyze_repository = AsyncMock(return_value=MagicMock(manifest=MagicMock()))
+        mock_intel.return_value = mock_intel_inst
+
+        mock_runtime_inst = MagicMock(context_engine=MagicMock(), repository_graph=MagicMock(), manifest=MagicMock())
+        mock_runtime_build.return_value = mock_runtime_inst
+
+        mock_create_plan.return_value = mock_plan
+        mock_exec_wf.return_value = mock_wf_result
+
+        with pytest.raises(HTTPException) as exc_info:
+            await request_patch_generation(finding_id=UUID(finding_id), db=db_session)
+        assert exc_info.value.status_code == 422
+        assert "PATCH_PLAN_PROVENANCE_MISMATCH" in exc_info.value.detail
+
+        # Assert no PatchModel was persisted in DB
+        saved_patch = db_session.query(PatchModel).filter(PatchModel.id == str(prop_id)).first()
+        assert saved_patch is None
+
+
+@pytest.mark.asyncio
+async def test_initial_patch_generation_proposal_finding_id_mismatch_blocks_persistence(db_session: Session, base_entities):
+    from app.api.routes.findings import request_patch_generation
+    from app.patching.schemas import PatchProposal, PatchWorkflowResult, VerificationStatus, PatchVerificationResult
+    from app.planning.schemas import FixPlan, FixScope, OrderedChangeStep
+
+    scan, finding, _ = base_entities
+    finding_id = finding.id
+
+    real_plan_id = uuid4()
+    mock_plan = FixPlan(
+        id=real_plan_id,
+        finding_id=UUID(finding_id),
+        root_cause="User supplied path is not confined.",
+        objective="Validate path confinement before file operations",
+        files_expected_to_change=["app/storage.py"],
+        symbols_expected_to_change=[],
+        ordered_changes=[
+            OrderedChangeStep(step_number=1, target_file="app/storage.py", description="Add validation", rationale="Security")
+        ],
+        validation_plan=["Check path confinement"],
+        estimated_scope=FixScope.FILE,
+    )
+
+    prop_id = uuid4()
+    # proposal with mismatched finding_id
+    mock_proposal = PatchProposal(
+        id=prop_id,
+        finding_id=uuid4(),  # Mismatched finding_id!
+        plan_id=real_plan_id,
+        unified_diff="--- a/app/storage.py\n+++ b/app/storage.py\n@@ -1,2 +1,3 @@\n def read_file(p):\n+    validate(p)\n     return open(p)\n",
+        files_modified=["app/storage.py"],
+        explanation="Added path confinement validation",
+        expected_behavior_change="Rejects traversals",
+    )
+
+    mock_wf_result = PatchWorkflowResult(
+        finding_id=mock_proposal.finding_id,
+        proposal=mock_proposal,
+        verification_result=PatchVerificationResult(
+            patch_id=prop_id,
+            finding_id=mock_proposal.finding_id,
+            status=VerificationStatus.PASSED,
+            syntax_valid=True,
+            security_clean=True,
+            contract_aligned=True,
+            target_finding_resolved=True,
+            explanation="All checks passed",
+            checks=[],
+        ),
+        machine_verdict="PASSED",
+        final_verdict="PASSED",
+    )
+
+    from contextlib import asynccontextmanager
+    @asynccontextmanager
+    async def _fake_open_snapshot(scan_id, db=None):
+        with tempfile.TemporaryDirectory() as fresh_ws:
+            os.makedirs(os.path.join(fresh_ws, "app"), exist_ok=True)
+            with open(os.path.join(fresh_ws, "app", "storage.py"), "w", encoding="utf-8") as f:
+                f.write("def read_file(p):\n    return open(p)\n")
+            yield fresh_ws
+
+    with mock_patch("app.api.routes.findings.get_snapshot_service") as mock_snap, \
+         mock_patch("app.api.routes.findings.get_intelligence_service") as mock_intel, \
+         mock_patch("app.api.routes.findings.ScanIntelligenceRuntime.build") as mock_runtime_build, \
+         mock_patch("app.api.routes.findings.FixPlanningService.create_fix_plan", new_callable=AsyncMock) as mock_create_plan, \
+         mock_patch("app.api.routes.findings.PatchWorkflowCoordinator.execute_patch_workflow", new_callable=AsyncMock) as mock_exec_wf:
+
+        mock_inst = MagicMock()
+        mock_inst.open_snapshot.side_effect = _fake_open_snapshot
+        mock_snap.return_value = mock_inst
+
+        mock_intel_inst = MagicMock()
+        mock_intel_inst.analyze_repository = AsyncMock(return_value=MagicMock(manifest=MagicMock()))
+        mock_intel.return_value = mock_intel_inst
+
+        mock_runtime_inst = MagicMock(context_engine=MagicMock(), repository_graph=MagicMock(), manifest=MagicMock())
+        mock_runtime_build.return_value = mock_runtime_inst
+
+        mock_create_plan.return_value = mock_plan
+        mock_exec_wf.return_value = mock_wf_result
+
+        with pytest.raises(HTTPException) as exc_info:
+            await request_patch_generation(finding_id=UUID(finding_id), db=db_session)
+        assert exc_info.value.status_code == 422
+        assert "PATCH_PLAN_PROVENANCE_MISMATCH" in exc_info.value.detail
+
+        saved_patch = db_session.query(PatchModel).filter(PatchModel.id == str(prop_id)).first()
+        assert saved_patch is None
+
+
+@pytest.mark.asyncio
+async def test_revision_patch_proposal_plan_id_mismatch_blocks_persistence(db_session: Session, base_entities):
+    from app.api.routes.patches import request_patch_revision
+    from app.schemas.patch import PatchReviseRequest
+    from app.patching.schemas import PatchProposal, PatchWorkflowResult, VerificationStatus, PatchVerificationResult
+    from app.planning.schemas import FixPlan, FixScope, OrderedChangeStep
+
+    scan, finding, patch = base_entities
+    patch.status = PatchStatus.NEEDS_REVIEW.value
+    db_session.commit()
+
+    revised_plan_id = uuid4()
+    mock_revised_plan = FixPlan(
+        id=revised_plan_id,
+        finding_id=UUID(finding.id),
+        root_cause="User supplied path is not confined.",
+        objective="Added path confinement validation",
+        files_expected_to_change=["app/storage.py"],
+        symbols_expected_to_change=[],
+        ordered_changes=[
+            OrderedChangeStep(step_number=1, target_file="app/storage.py", description="Add path validation", rationale="Security")
+        ],
+        validation_plan=["Check file path confinement"],
+        estimated_scope=FixScope.FILE,
+    )
+
+    child_prop_id = uuid4()
+    # proposal with mismatched plan_id
+    mock_child_proposal = PatchProposal(
+        id=child_prop_id,
+        finding_id=UUID(finding.id),
+        plan_id=uuid4(),  # Mismatched plan_id!
+        unified_diff="--- a/app/storage.py\n+++ b/app/storage.py\n@@ -1,2 +1,3 @@\n def read_file(p):\n+    validate_chroot(p)\n     return open(p)\n",
+        files_modified=["app/storage.py"],
+        explanation="Added path confinement and chroot validation",
+        expected_behavior_change="Rejects traversals and non-chroot paths",
+    )
+
+    mock_wf_result = PatchWorkflowResult(
+        finding_id=UUID(finding.id),
+        proposal=mock_child_proposal,
+        verification_result=PatchVerificationResult(
+            patch_id=child_prop_id,
+            finding_id=UUID(finding.id),
+            status=VerificationStatus.PASSED,
+            syntax_valid=True,
+            security_clean=True,
+            contract_aligned=True,
+            target_finding_resolved=True,
+            explanation="All checks passed",
+            checks=[],
+        ),
+        machine_verdict="PASSED",
+        final_verdict="PASSED",
+    )
+
+    from contextlib import asynccontextmanager
+    @asynccontextmanager
+    async def _fake_open_snapshot(scan_id, db=None):
+        with tempfile.TemporaryDirectory() as fresh_ws:
+            os.makedirs(os.path.join(fresh_ws, "app"), exist_ok=True)
+            with open(os.path.join(fresh_ws, "app", "storage.py"), "w", encoding="utf-8") as f:
+                f.write("def read_file(p):\n    return open(p)\n")
+            yield fresh_ws
+
+    with mock_patch("app.ingestion.snapshot.get_snapshot_service") as mock_snap, \
+         mock_patch("app.analysis.service.get_intelligence_service") as mock_intel, \
+         mock_patch("app.context.runtime.ScanIntelligenceRuntime.build") as mock_runtime_build, \
+         mock_patch("app.planning.service.FixPlanningService.create_fix_plan", new_callable=AsyncMock) as mock_create_plan, \
+         mock_patch("app.patching.workflow.PatchWorkflowCoordinator.execute_patch_workflow", new_callable=AsyncMock) as mock_exec_wf:
+
+        mock_inst = MagicMock()
+        mock_inst.open_snapshot.side_effect = _fake_open_snapshot
+        mock_snap.return_value = mock_inst
+
+        mock_intel_inst = MagicMock()
+        mock_intel_inst.analyze_repository = AsyncMock(return_value=MagicMock(manifest=MagicMock()))
+        mock_intel.return_value = mock_intel_inst
+
+        mock_runtime_inst = MagicMock(context_engine=MagicMock(), repository_graph=MagicMock(), manifest=MagicMock())
+        mock_runtime_build.return_value = mock_runtime_inst
+
+        mock_create_plan.return_value = mock_revised_plan
+        mock_exec_wf.return_value = mock_wf_result
+
+        req = PatchReviseRequest(user_feedback="please add chroot checks")
+        with pytest.raises(HTTPException) as exc_info:
+            await request_patch_revision(patch_id=patch.id, payload=req, db=db_session)
+        assert exc_info.value.status_code == 422
+        assert "PATCH_PLAN_PROVENANCE_MISMATCH" in exc_info.value.detail
+
+        child_patch = db_session.query(PatchModel).filter(PatchModel.id == str(child_prop_id)).first()
+        assert child_patch is None
+
+
+@pytest.mark.asyncio
 async def test_missing_fix_plan_snapshot_blocks_delivery_with_typed_error(db_session: Session, base_entities):
     scan, finding, patch = base_entities
     patch.fix_plan_snapshot = None
@@ -1610,6 +1890,7 @@ async def test_existing_branch_missing_head_sha_merge_commit_blocked(db_session:
 @pytest.mark.asyncio
 async def test_phase5_remote_pr_created_local_db_failure_recovery(db_session: Session, base_entities):
     scan, finding, patch = base_entities
+    patch_id = patch.id
     mock_provider = MockDeliveryProvider()
 
     from contextlib import contextmanager
@@ -1638,48 +1919,60 @@ async def test_phase5_remote_pr_created_local_db_failure_recovery(db_session: Se
 
         service = DeliveryService(provider=mock_provider)
 
-        # Intercept db.commit to inject failure specifically during the PR_CREATED transition
-        orig_commit = db_session.commit
+        from sqlalchemy import event
+        from sqlalchemy.exc import SQLAlchemyError
+
+        # Inject real SQLAlchemy flush failure during PR_CREATED transition via before_flush listener
         fail_injected = False
 
-        def _flaky_commit():
+        def _fail_on_pr_created_flush(session, flush_context, instances):
             nonlocal fail_injected
-            # Check if delivery status in session is being set to PR_CREATED
-            for obj in db_session.dirty:
-                if isinstance(obj, DeliveryModel) and obj.status == DeliveryStatus.PR_CREATED.value:
-                    if not fail_injected:
+            if not fail_injected:
+                for obj in session.dirty:
+                    if isinstance(obj, DeliveryModel) and obj.status == DeliveryStatus.PR_CREATED.value:
                         fail_injected = True
-                        raise Exception("Simulated DB connection failure during PR_CREATED commit")
-            return orig_commit()
+                        raise SQLAlchemyError("Simulated real SQLAlchemy flush failure on PR_CREATED commit")
 
-        db_session.commit = _flaky_commit
-
-        # Attempt 1: Remote PR succeeds, but final local commit fails and rolls back safely!
-        res1 = await service.deliver_patch(db=db_session, patch_id=patch.id, payload=DeliveryRequest())
-        assert res1.status == DeliveryStatus.FAILED.value
-        assert len(mock_provider.prs_created) == 1
-
-        # Restore normal commit
-        db_session.commit = orig_commit
-
-        # Close session and open a fresh session to simulate restart/retry
-        from tests.conftest import TestingSessionLocal
-        fresh_session = TestingSessionLocal(bind=db_session.get_bind())
+        event.listen(db_session, "before_flush", _fail_on_pr_created_flush)
 
         try:
-            # Attempt 2 (Retry on fresh session): Reconciles existing PR and existing branch!
-            res2 = await service.deliver_patch(db=fresh_session, patch_id=patch.id, payload=DeliveryRequest())
-            assert res2.status == DeliveryStatus.PR_CREATED.value
-            assert res2.pr_number == 1
-            assert res2.pr_url == "https://github.com/example-org/secure-app/pull/1"
-            assert len(mock_provider.prs_created) == 1  # Still exactly 1 PR created!
-
-            # Check event exists in fresh session
-            events = WorkflowEventService.list_for_delivery(db=fresh_session, delivery_id=res2.id)
-            event_types = [e.event_type for e in events]
-            assert "DELIVERY_PR_CREATED" in event_types
+            # Attempt 1: Remote PR succeeds, but real SQLAlchemy flush fails and rolls back safely!
+            res1 = await service.deliver_patch(db=db_session, patch_id=patch_id, payload=DeliveryRequest())
+            assert res1.status == DeliveryStatus.FAILED.value
+            assert res1.failure_code == "LOCAL_STATE_PERSISTENCE_FAILED"
+            assert len(mock_provider.prs_created) == 1
         finally:
-            fresh_session.close()
+            event.remove(db_session, "before_flush", _fail_on_pr_created_flush)
+
+        # Attempt 2 (Retry on session): Reconciles existing PR and existing branch!
+        res2 = await service.deliver_patch(db=db_session, patch_id=patch_id, payload=DeliveryRequest())
+        assert res2.status == DeliveryStatus.PR_CREATED.value
+        assert res2.pr_number == 1
+        assert res2.pr_url == "https://github.com/example-org/secure-app/pull/1"
+        assert len(mock_provider.prs_created) == 1  # Still exactly 1 PR created!
+
+        # Assert remote branch HEAD == final DeliveryModel.head_sha
+        remote_branch_head = await mock_provider.get_branch_head(
+            owner=res2.repository_owner,
+            repo=res2.repository_name,
+            branch=res2.head_branch,
+        )
+        assert remote_branch_head == res2.head_sha
+
+        # Assert exactly one delivery row
+        all_deliveries = db_session.query(DeliveryModel).filter(DeliveryModel.patch_id == patch_id).all()
+        assert len(all_deliveries) == 1
+
+        # Check event exists in session
+        events = WorkflowEventService.list_for_delivery(db=db_session, delivery_id=res2.id)
+        event_types = [e.event_type for e in events]
+        assert "DELIVERY_PR_CREATED" in event_types
+
+
+@pytest.mark.asyncio
+async def test_phase5_remote_pr_success_real_db_transaction_failure_recovery(db_session: Session, base_entities):
+    """Alias pointing to the real transaction failure recovery test."""
+    await test_phase5_remote_pr_created_local_db_failure_recovery(db_session, base_entities)
 
 
 

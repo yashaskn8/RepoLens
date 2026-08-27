@@ -20,6 +20,9 @@ from app.services.scan_recovery import ScanDispatcher, ScanRecoveryService
 @pytest.mark.asyncio
 async def test_startup_recovery_resumes_interrupted_scans(db_session):
     """Verify that scans in PENDING or RUNNING status on startup are dispatched to resume."""
+    db_session.query(ScanModel).filter(ScanModel.status.in_([ScanStatus.PENDING.value, ScanStatus.RUNNING.value])).delete()
+    db_session.commit()
+
     scan1 = ScanModel(
         id=str(uuid4()),
         repository_url="https://github.com/org/repo1",

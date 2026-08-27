@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 import os
 import tempfile
 from unittest.mock import AsyncMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 import pytest
 
 from app.models.finding import FindingModel
@@ -200,7 +200,7 @@ def test_request_patch_generation_endpoint(client, db_session):
     db_session.commit()
 
     mock_plan = FixPlan(
-        finding_id=uuid4(),
+        finding_id=UUID(finding_id),
         root_cause="Cookie flags missing",
         objective="Add Secure and HttpOnly flags",
         files_expected_to_change=["app/auth/cookie.py"],
@@ -211,7 +211,7 @@ def test_request_patch_generation_endpoint(client, db_session):
     )
 
     mock_proposal = PatchProposal(
-        finding_id=uuid4(),
+        finding_id=UUID(finding_id),
         plan_id=mock_plan.id,
         unified_diff="--- a/app/auth/cookie.py\n+++ b/app/auth/cookie.py\n@@ -1,1 +1,1 @@\n-s\n+s; Secure; HttpOnly\n",
         files_modified=["app/auth/cookie.py"],
@@ -353,7 +353,7 @@ def test_remediation_eligibility_enforced_across_all_endpoints(client, db_sessio
 
     # 5. Test CONFIRMED -> allowed (200) when dependencies succeed
     mock_plan = FixPlan(
-        finding_id=uuid4(),
+        finding_id=UUID(confirmed_id),
         root_cause="Confirmed issue root cause",
         objective="Fix confirmed issue",
         files_expected_to_change=["app/db.py"],
@@ -363,7 +363,7 @@ def test_remediation_eligibility_enforced_across_all_endpoints(client, db_sessio
         validation_plan=["pytest"],
     )
     mock_proposal = PatchProposal(
-        finding_id=uuid4(),
+        finding_id=UUID(confirmed_id),
         plan_id=mock_plan.id,
         unified_diff="--- a/app/db.py\n+++ b/app/db.py\n@@ -1 +1 @@\n-old\n+new\n",
         files_modified=["app/db.py"],

@@ -576,3 +576,207 @@ async def test_phase5_e2e_partial_failure_and_resume_reconciliation(db_session: 
         assert d2.id == d1.id
         assert d2.pr_number == d1.pr_number
         assert len(mock_provider.prs) == 1
+
+
+# 4. Genuine Route-Level Full Lifecycle Release Gate (POST /findings/{id}/patch -> /approve -> /deliver)
+@pytest.mark.asyncio
+async def test_phase5_e2e_full_route_level_lifecycle_gate(client: TestClient, db_session: Session, local_git_repo):
+    """Proves the full unshortcutted lifecycle from actual finding patch generation route to GitHub PR delivery."""
+    repo_path, commit_sha = local_git_repo
+
+    # 1. Create canonical completed ScanModel
+    scan_id = str(uuid4())
+    scan = ScanModel(
+        id=scan_id,
+        repository_url="https://github.com/repolens-org/secure-core.git",
+        status=ScanStatus.COMPLETED.value,
+        branch="main",
+        commit_hash=commit_sha,
+    )
+    db_session.add(scan)
+
+    # 2. Create grounded CONFIRMED FindingModel + EvidenceModel
+    finding_id = str(uuid4())
+    finding = FindingModel(
+        id=finding_id,
+        scan_id=scan.id,
+        title="Insecure Plaintext Password Authentication",
+        description="Password comparison uses plaintext equality instead of constant-time hash.",
+        severity=Severity.CRITICAL.value,
+        status=FindingStatus.OPEN.value,
+        verification_verdict="CONFIRMED",
+        rule_id="security.insecure-auth",
+        category="Security",
+    )
+    db_session.add(finding)
+
+    evidence = EvidenceModel(
+        id=str(uuid4()),
+        finding_id=finding_id,
+        file_path="app/auth.py",
+        start_line=1,
+        end_line=3,
+        code_snippet="return user == pwd",
+    )
+    db_session.add(evidence)
+    db_session.commit()
+
+    # Define the canonical FixPlan and PatchProposal
+    plan_id = uuid4()
+    real_fix_plan = FixPlan(
+        id=plan_id,
+        finding_id=UUID(finding_id),
+        root_cause="Insecure direct plaintext password comparison",
+        objective="Replace plaintext comparison with verify_hash",
+        files_expected_to_change=["app/auth.py"],
+        symbols_expected_to_change=[],
+        ordered_changes=[
+            OrderedChangeStep(
+                step_number=1,
+                target_file="app/auth.py",
+                description="Use constant-time verification",
+                rationale="Eliminate timing side channel",
+            )
+        ],
+        validation_plan=["Verify password hash checking"],
+        estimated_scope=FixScope.FILE,
+    )
+
+    from app.patching.schemas import PatchProposal, PatchWorkflowResult, VerificationStatus, PatchVerificationResult
+
+    prop_id = uuid4()
+    patch_diff = (
+        "--- a/app/auth.py\n"
+        "+++ b/app/auth.py\n"
+        "@@ -1,3 +1,3 @@\n"
+        " def authenticate(user, pwd):\n"
+        "-    # Vulnerable plain text check\n"
+        "-    return user == pwd\n"
+        "+    # Secure constant-time hash comparison\n"
+        "+    return verify_hash(user, pwd)\n"
+    )
+    real_proposal = PatchProposal(
+        id=prop_id,
+        finding_id=UUID(finding_id),
+        plan_id=plan_id,
+        unified_diff=patch_diff,
+        files_modified=["app/auth.py"],
+        explanation="Replaced plaintext comparison with verify_hash",
+        expected_behavior_change="Secure constant-time password verification",
+    )
+
+    real_wf_result = PatchWorkflowResult(
+        finding_id=UUID(finding_id),
+        proposal=real_proposal,
+        verification_result=PatchVerificationResult(
+            patch_id=prop_id,
+            finding_id=UUID(finding_id),
+            status=VerificationStatus.PASSED,
+            syntax_valid=True,
+            security_clean=True,
+            contract_aligned=True,
+            target_finding_resolved=True,
+            explanation="All checks passed",
+            checks=[],
+        ),
+        machine_verdict="PASSED",
+        final_verdict="PASSED",
+    )
+
+    # Configure mock GitHub provider matching the scanned commit SHA
+    mock_provider = E2EMockGitHubProvider(remote_head_sha=commit_sha)
+    service = DeliveryService(provider=mock_provider)
+
+    from app.api.routes.deliveries import get_delivery_service
+    app.dependency_overrides[get_delivery_service] = lambda: service
+
+    from contextlib import asynccontextmanager
+    @asynccontextmanager
+    async def _async_snapshot_ctx(scan_id, db=None):
+        with tempfile.TemporaryDirectory() as fresh_ws:
+            shutil.copytree(repo_path, fresh_ws, dirs_exist_ok=True)
+            yield fresh_ws
+
+    mock_ctx_fn = _make_local_snapshot_context(repo_path)
+
+    try:
+        with mock_patch("app.ingestion.snapshot.RepositorySnapshotService.open_snapshot", side_effect=_async_snapshot_ctx), \
+             mock_patch("app.analysis.service.RepositoryIntelligenceService.analyze_repository", AsyncMock(return_value=MagicMock(manifest=MagicMock()))), \
+             mock_patch("app.context.runtime.ScanIntelligenceRuntime.build", AsyncMock(return_value=MagicMock(context_engine=MagicMock(), repository_graph=MagicMock(), manifest=MagicMock()))), \
+             mock_patch("app.planning.service.FixPlanningService.create_fix_plan", AsyncMock(return_value=real_fix_plan)), \
+             mock_patch("app.patching.workflow.PatchWorkflowCoordinator.execute_patch_workflow", AsyncMock(return_value=real_wf_result)), \
+             mock_patch("app.delivery.service.get_snapshot_service") as mock_svc_snap, \
+             mock_patch("app.delivery.validator.get_snapshot_service") as mock_val_snap:
+
+            mock_inst = MagicMock()
+            mock_inst.snapshot_context.side_effect = mock_ctx_fn
+            mock_svc_snap.return_value = mock_inst
+            mock_val_snap.return_value = mock_inst
+
+            # Step 1: Execute actual route POST /api/v1/findings/{finding_id}/patch
+            gen_resp = client.post(f"/api/v1/findings/{finding_id}/patch")
+            assert gen_resp.status_code == 200
+            gen_data = gen_resp.json()
+            assert gen_data["final_verdict"] == "PASSED"
+            persisted_patch_id = gen_data["proposal"]["id"]
+            assert persisted_patch_id == str(prop_id)
+
+            # Re-query patch from DB to verify it was persisted with fix_plan_snapshot
+            db_patch = db_session.query(PatchModel).filter(PatchModel.id == persisted_patch_id).first()
+            assert db_patch is not None
+            assert db_patch.status == PatchStatus.VERIFIED.value
+            assert db_patch.plan_id == str(plan_id)
+            assert db_patch.fix_plan_snapshot is not None
+            assert db_patch.fix_plan_snapshot["id"] == str(plan_id)
+            assert db_patch.fix_plan_snapshot["finding_id"] == finding_id
+            FixPlan.model_validate(db_patch.fix_plan_snapshot)
+
+            # Step 2: Attempt delivery BEFORE approval -> BLOCKED (HTTP 409)
+            unapproved_resp = client.post(
+                f"/api/v1/patches/{persisted_patch_id}/deliver",
+                json={"requested_by": "sec-lead", "notes": "Premature attempt"},
+            )
+            assert unapproved_resp.status_code == 409
+            assert len(mock_provider.prs) == 0
+
+            # Step 3: Approve patch via POST /api/v1/patches/{patch_id}/approve
+            appr_resp = client.post(
+                f"/api/v1/patches/{persisted_patch_id}/approve",
+                json={"approved_by": "security-lead", "notes": "Production hotfix approved"},
+            )
+            assert appr_resp.status_code == 200
+            assert appr_resp.json()["status"] == "APPROVED"
+
+            # Verify machine verdict preserved
+            db_session.refresh(db_patch)
+            assert db_patch.status == PatchStatus.APPROVED.value
+            assert db_patch.machine_verdict == "PASSED"
+
+            # Step 4: Preview delivery
+            prev_resp = client.get(f"/api/v1/patches/{persisted_patch_id}/delivery-preview")
+            assert prev_resp.status_code == 200
+            assert prev_resp.json()["eligible"] is True
+
+            # Step 5: Deliver patch via POST /api/v1/patches/{patch_id}/deliver
+            del_resp = client.post(
+                f"/api/v1/patches/{persisted_patch_id}/deliver",
+                json={"requested_by": "lead-sec-eng", "notes": "Production hotfix"},
+            )
+            assert del_resp.status_code == 200
+            del_data = del_resp.json()
+            assert del_data["status"] == "PR_CREATED"
+            assert del_data["pr_number"] == 101
+            assert del_data["base_branch"] == "main"
+            assert del_data["head_branch"].startswith("repolens/fix-")
+
+            # Invariants
+            assert len(mock_provider.prs) == 1
+            assert len(mock_provider.prs_created) == 1
+            assert mock_provider.branches_created[0] == del_data["head_branch"]
+            created_commit = mock_provider.commits[del_data["head_sha"]]
+            assert created_commit["parents"] == [commit_sha]
+            assert "main" not in mock_provider.branches_created  # No default branch mutation!
+
+    finally:
+        app.dependency_overrides.pop(get_delivery_service, None)
+
