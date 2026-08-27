@@ -27,6 +27,18 @@ from app.ingestion.snapshot import (
     SnapshotVerificationError,
     get_snapshot_service,
 )
+from app.ingestion.comparison_snapshot import (
+    ChangeAnalysisNotFoundError,
+    ComparisonSnapshotError,
+    ComparisonSnapshotService,
+    ComparisonWorkspacePair,
+    InvalidRevisionError,
+    ResourceLimitExceededError,
+    SubmoduleExecutionError,
+    SymlinkEscapeError,
+    get_comparison_snapshot_service,
+    validate_workspace_safety,
+)
 
 __all__ = [
     "CloneFailedError",
@@ -43,6 +55,16 @@ __all__ = [
     "SnapshotMetadataError",
     "SnapshotRehydrationError",
     "SnapshotVerificationError",
+    "ComparisonSnapshotError",
+    "ChangeAnalysisNotFoundError",
+    "InvalidRevisionError",
+    "ResourceLimitExceededError",
+    "SymlinkEscapeError",
+    "SubmoduleExecutionError",
+    "ComparisonSnapshotService",
+    "ComparisonWorkspacePair",
+    "get_comparison_snapshot_service",
+    "validate_workspace_safety",
     "SymbolKind",
     "build_manifest",
     "clone_repository",
@@ -52,4 +74,5 @@ __all__ = [
     "parse_file_with_calls",
     "validate_github_url",
 ]
+
 
