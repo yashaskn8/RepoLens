@@ -404,10 +404,18 @@ class ChangeReviewVerifier:
         # 4. route: prefix
         if clean_ref.startswith("route:"):
             route_target = clean_ref[6:].lower()
+            route_name_part = route_target.split(":")[-1]
             for r in diff_result.route_deltas:
-                if route_target in r.route_name.lower() or (r.base_path and route_target in r.base_path.lower()) or (r.head_path and route_target in r.head_path.lower()):
+                if (
+                    route_target in r.route_name.lower()
+                    or route_name_part in r.route_name.lower()
+                    or r.route_name.lower() in route_target
+                    or (r.base_path and (route_target in r.base_path.lower() or r.base_path.lower() in route_target))
+                    or (r.head_path and (route_target in r.head_path.lower() or r.head_path.lower() in route_target))
+                ):
                     return True, "Matched route delta"
             return False, f"Unknown route reference '{clean_ref}'"
+
 
         # 5. config: prefix
         if clean_ref.startswith("config:"):

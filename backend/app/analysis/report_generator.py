@@ -234,8 +234,7 @@ def generate_change_analysis_report(model: ChangeAnalysisModel) -> ChangeAnalysi
             affected_symbol=imp.affected_symbol,
             evidence_payload=imp.evidence_payload or {},
             confidence=imp.confidence,
-            verification_status=ImpactVerificationStatus(imp.verification_status),
-            created_at=imp.created_at,
+                  created_at=imp.created_at or datetime.now(timezone.utc),
         )
         for imp in (model.impacts or [])
     ]
@@ -256,7 +255,6 @@ def generate_change_analysis_report(model: ChangeAnalysisModel) -> ChangeAnalysi
     security_impacts = sum(
         1 for imp in impacts if imp.impact_type == ChangeImpactType.SECURITY_SENSITIVE_CHANGE
     )
-
 
     duration_sec: Optional[float] = None
     if model.created_at and model.completed_at:
@@ -312,12 +310,13 @@ def generate_change_analysis_report(model: ChangeAnalysisModel) -> ChangeAnalysi
         status=ChangeAnalysisStatus(model.status),
         risk_level=risk_enum,
         risk_explanation=risk_expl,
-        created_at=model.created_at,
+        created_at=model.created_at or datetime.now(timezone.utc),
         completed_at=model.completed_at,
         duration_seconds=duration_sec,
-        files_changed_count=model.changed_files_count,
-        symbols_changed_count=model.changed_symbols_count,
-        impacted_symbols_count=model.impacted_symbols_count,
+        files_changed_count=model.changed_files_count or 0,
+        symbols_changed_count=model.changed_symbols_count or 0,
+        impacted_symbols_count=model.impacted_symbols_count or 0,
+
         contract_breaks_count=contract_breaks,
         security_impacts_count=security_impacts,
         route_deltas=route_deltas,
@@ -381,9 +380,10 @@ def generate_change_analysis_telemetry(model: ChangeAnalysisModel) -> ChangeAnal
         status=model.status,
         risk_level=model.risk_level,
         duration_ms=duration_ms,
-        files_changed=model.changed_files_count,
-        symbols_changed=model.changed_symbols_count,
-        impacted_symbols=model.impacted_symbols_count,
+        files_changed=model.changed_files_count or 0,
+        symbols_changed=model.changed_symbols_count or 0,
+        impacted_symbols=model.impacted_symbols_count or 0,
+
         direct_impacts=direct_count,
         transitive_impacts=transitive_count,
         contract_breaks=contract_breaks,
