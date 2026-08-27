@@ -28,6 +28,7 @@ from app.schemas.delivery import (
 from app.schemas.change_analysis import (
     BlastRadiusReport,
     ChangeAnalysisPRRequest,
+    ChangeAnalysisReportResponse,
     ChangeAnalysisRequest,
     ChangeAnalysisResponse,
     ChangeAnalysisSummary,
@@ -73,12 +74,14 @@ from app.schemas.workflow_event import (
     WorkflowEventType,
 )
 from app.schemas.telemetry import (
+    ChangeAnalysisTelemetry,
     MetricsTelemetry,
     ProviderTelemetry,
     ScanTelemetry,
     StorageTelemetry,
     TelemetryReport,
 )
+
 
 __all__ = [
     "Severity",
@@ -117,12 +120,15 @@ __all__ = [
     "ChangeImpact",
     "ChangeImpactEvidence",
     "ChangeAnalysisResponse",
+    "ChangeAnalysisReportResponse",
+    "ChangeAnalysisTelemetry",
     "ChangeReviewFinding",
     "ChangeReviewReport",
     "ChangeReviewRiskType",
     "ChangeReviewVerdict",
     "FileChangeType",
     "SymbolChangeType",
+
 
     "FileDiffFact",
     "SymbolDiffFact",

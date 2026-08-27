@@ -88,3 +88,42 @@ class ScanTelemetry(BaseModel):
     analysis_truncated: bool = False
     analysis_truncation_reason: Optional[str] = None
 
+
+class ChangeAnalysisTelemetry(BaseModel):
+    """Authoritative operational telemetry and metrics aggregated for a Change Analysis."""
+
+    analysis_id: str
+    repository_url: str
+    base_commit_sha: str
+    head_commit_sha: str
+    status: str
+    risk_level: Optional[str] = None
+
+    duration_ms: Optional[int] = None
+
+    files_changed: int = 0
+    symbols_changed: int = 0
+    impacted_symbols: int = 0
+
+    direct_impacts: int = 0
+    transitive_impacts: int = 0
+    contract_breaks: int = 0
+    security_impacts: int = 0
+
+    impacts_by_type: Dict[str, int] = Field(default_factory=dict)
+    impacts_by_severity: Dict[str, int] = Field(default_factory=dict)
+    impacts_by_verification_status: Dict[str, int] = Field(default_factory=dict)
+
+    review_findings_count: int = 0
+    confirmed_findings: int = 0
+    supported_inferences: int = 0
+    rejected_findings: int = 0
+
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+    total_tokens: Optional[int] = None
+
+    is_truncated: bool = False
+    truncation_reason: Optional[str] = None
+
+

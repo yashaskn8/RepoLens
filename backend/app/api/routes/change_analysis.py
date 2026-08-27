@@ -26,6 +26,7 @@ from app.models.change_analysis import ChangeAnalysisModel, ChangeImpactModel
 from app.models.workflow_event import WorkflowEventModel
 from app.schemas.change_analysis import (
     ChangeAnalysisPRRequest,
+    ChangeAnalysisReportResponse,
     ChangeAnalysisRequest,
     ChangeAnalysisResponse,
     ChangeAnalysisSummary,
@@ -34,8 +35,10 @@ from app.schemas.change_analysis import (
     ResolvedPullRequest,
 )
 from app.schemas.enums import ChangeAnalysisStatus, ChangeImpactType, ImpactVerificationStatus, Severity
+from app.schemas.telemetry import ChangeAnalysisTelemetry
 from app.schemas.workflow_event import WorkflowEventCreate, WorkflowEventResponse, WorkflowEventType
 from app.services.workflow_event_service import WorkflowEventService
+
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/change-analyses", tags=["Change Analyses"])
@@ -348,6 +351,111 @@ def get_change_analysis_review(
             "overall_risk_level": model.risk_level or "LOW",
         }
     return review_report
+
+
+@router.get(
+    "/{analysis_id}/diff",
+    response_model=Dict[str, Any],
+    summary="Get structural diff result for analysis",
+)
+def get_change_analysis_diff(
+    analysis_id: UUID,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Retrieve deterministic structural diff facts including file, symbol, route, and schema deltas."""
+    model = db.query(ChangeAnalysisModel).filter(ChangeAnalysisModel.id == str(analysis_id)).first()
+    if not model:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Change analysis '{analysis_id}' not found",
+        )
+    meta = model.model_metadata or {}
+    diff_data = meta.get("diff_result")
+    if not diff_data:
+        return {
+            "base_commit_sha": model.base_commit_sha,
+            "head_commit_sha": model.head_commit_sha,
+            "repository_url": model.repository_url,
+            "changed_files": [],
+            "changed_symbols": [],
+            "route_deltas": [],
+            "schema_deltas": [],
+            "dependency_deltas": [],
+            "config_deltas": [],
+            "summary": {},
+        }
+    return diff_data
+
+
+@router.get(
+    "/{analysis_id}/report",
+    response_model=ChangeAnalysisReportResponse,
+    summary="Get comprehensive Change Intelligence Report (Structured JSON + Markdown)",
+)
+def get_change_analysis_report(
+    analysis_id: UUID,
+    db: Session = Depends(get_db),
+) -> ChangeAnalysisReportResponse:
+    """Generate and retrieve authoritative Change Intelligence Report."""
+    from app.analysis.report_generator import generate_change_analysis_report
+
+    model = db.query(ChangeAnalysisModel).filter(ChangeAnalysisModel.id == str(analysis_id)).first()
+    if not model:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Change analysis '{analysis_id}' not found",
+        )
+    return generate_change_analysis_report(model)
+
+
+@router.get(
+    "/{analysis_id}/markdown",
+    response_class=Response,
+    summary="Download Change Analysis Report as raw Markdown",
+)
+def get_change_analysis_markdown_report(
+    analysis_id: UUID,
+    db: Session = Depends(get_db),
+) -> Response:
+    """Download deterministic Markdown Change Intelligence Report."""
+    from app.analysis.report_generator import generate_change_analysis_report
+
+    model = db.query(ChangeAnalysisModel).filter(ChangeAnalysisModel.id == str(analysis_id)).first()
+    if not model:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Change analysis '{analysis_id}' not found",
+        )
+    report = generate_change_analysis_report(model)
+    return Response(
+        content=report.markdown_report,
+        media_type="text/markdown",
+        headers={
+            "Content-Disposition": f"attachment; filename=repolens_change_report_{str(analysis_id)[:8]}.md"
+        },
+    )
+
+
+@router.get(
+    "/{analysis_id}/telemetry",
+    response_model=ChangeAnalysisTelemetry,
+    summary="Get authoritative Change Analysis operational telemetry",
+)
+def get_change_analysis_telemetry_endpoint(
+    analysis_id: UUID,
+    db: Session = Depends(get_db),
+) -> ChangeAnalysisTelemetry:
+    """Retrieve authoritative operational metrics aggregated for Change Analysis without secrets."""
+    from app.analysis.report_generator import generate_change_analysis_telemetry
+
+    model = db.query(ChangeAnalysisModel).filter(ChangeAnalysisModel.id == str(analysis_id)).first()
+    if not model:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Change analysis '{analysis_id}' not found",
+        )
+    return generate_change_analysis_telemetry(model)
+
 
 
 @router.get(

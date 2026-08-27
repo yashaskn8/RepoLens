@@ -277,4 +277,141 @@ export async function fetchDeliveryByPatch(patchId: string): Promise<import('@/t
   return response.json();
 }
 
+export async function startChangeAnalysis(
+  payload: import('@/types/domain').ChangeAnalysisRequest
+): Promise<import('@/types/domain').ChangeAnalysisResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/change-analyses`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to start change analysis (${response.status})`);
+  }
+
+  return response.json();
+}
+
+export async function startChangeAnalysisFromPR(
+  payload: import('@/types/domain').ChangeAnalysisPRRequest
+): Promise<import('@/types/domain').ChangeAnalysisResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/change-analyses/from-pr`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to resolve PR and start analysis (${response.status})`);
+  }
+
+  return response.json();
+}
+
+export async function fetchChangeAnalysis(
+  analysisId: string
+): Promise<import('@/types/domain').ChangeAnalysisResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/change-analyses/${analysisId}`, {
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json' },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch change analysis (${response.status})`);
+  }
+
+  return response.json();
+}
+
+export async function fetchChangeAnalysisDiff(
+  analysisId: string
+): Promise<import('@/types/domain').StructuralDiffResult> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/change-analyses/${analysisId}/diff`, {
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json' },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch diff results (${response.status})`);
+  }
+
+  return response.json();
+}
+
+export async function fetchChangeAnalysisImpacts(
+  analysisId: string
+): Promise<import('@/types/domain').ChangeImpact[]> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/change-analyses/${analysisId}/impacts`, {
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json' },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch impacts (${response.status})`);
+  }
+
+  return response.json();
+}
+
+export async function fetchChangeAnalysisReview(
+  analysisId: string
+): Promise<import('@/types/domain').ChangeReviewReport> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/change-analyses/${analysisId}/review`, {
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json' },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch review findings (${response.status})`);
+  }
+
+  return response.json();
+}
+
+export async function fetchChangeAnalysisReport(
+  analysisId: string
+): Promise<import('@/types/domain').ChangeAnalysisReportResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/change-analyses/${analysisId}/report`, {
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json' },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch change analysis report (${response.status})`);
+  }
+
+  return response.json();
+}
+
+export async function fetchChangeAnalysisTelemetry(
+  analysisId: string
+): Promise<import('@/types/domain').ChangeAnalysisTelemetry> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/change-analyses/${analysisId}/telemetry`, {
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json' },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch change analysis telemetry (${response.status})`);
+  }
+
+  return response.json();
+}
+
+export async function downloadChangeAnalysisMarkdown(analysisId: string): Promise<string> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/change-analyses/${analysisId}/markdown`, {
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to download report markdown (${response.status})`);
+  }
+
+  return response.text();
+}
+
+
 

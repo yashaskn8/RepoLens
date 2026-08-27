@@ -718,8 +718,9 @@ export interface ChangeAnalysisSummary {
 
 export interface ChangeAnalysisResponse extends ChangeAnalysisSummary {
   impacts: ChangeImpact[];
-  model_metadata?: ModelExecutionMetadata | null;
+  model_metadata?: Record<string, any> | null;
 }
+
 
 export type FileChangeType = 'ADDED' | 'DELETED' | 'MODIFIED' | 'RENAMED' | 'UNMODIFIED';
 
@@ -866,9 +867,18 @@ export interface ChangeReviewReport {
   model_metadata?: ModelExecutionMetadata | null;
 }
 
+export interface ChangeAnalysisRequest {
+  repository_url: string;
+  base_commit_sha: string;
+  head_commit_sha: string;
+  base_ref?: string | null;
+  head_ref?: string | null;
+}
+
 export interface ChangeAnalysisPRRequest {
   pr_url: string;
 }
+
 
 export interface ResolvedPullRequest {
   repository_url: string;
@@ -884,6 +894,80 @@ export interface ResolvedPullRequest {
   is_fork: boolean;
   state: string;
 }
+
+export interface ChangeAnalysisReportResponse {
+  analysis_id: string;
+  repository_url: string;
+  repository_owner: string;
+  repository_name: string;
+  base_commit_sha: string;
+  head_commit_sha: string;
+  base_ref?: string | null;
+  head_ref?: string | null;
+  pr_number?: number | null;
+  pr_title?: string | null;
+  status: ChangeAnalysisStatus;
+  risk_level?: ChangeRiskLevel | null;
+  risk_explanation: string;
+  created_at: string;
+  completed_at?: string | null;
+  duration_seconds?: number | null;
+
+  files_changed_count: number;
+  symbols_changed_count: number;
+  impacted_symbols_count: number;
+  contract_breaks_count: number;
+  security_impacts_count: number;
+
+  route_deltas: RouteContractDelta[];
+  schema_deltas: SchemaModelDelta[];
+  dependency_deltas: DependencyDelta[];
+  config_deltas: ConfigDelta[];
+
+  impacts: ChangeImpact[];
+  review_findings: ChangeReviewFinding[];
+
+  tool_availability: Record<string, boolean>;
+  limitations: string[];
+  markdown_report: string;
+}
+
+export interface ChangeAnalysisTelemetry {
+  analysis_id: string;
+  repository_url: string;
+  base_commit_sha: string;
+  head_commit_sha: string;
+  status: string;
+  risk_level?: string | null;
+
+  duration_ms?: number | null;
+
+  files_changed: number;
+  symbols_changed: number;
+  impacted_symbols: number;
+
+  direct_impacts: number;
+  transitive_impacts: number;
+  contract_breaks: number;
+  security_impacts: number;
+
+  impacts_by_type: Record<string, number>;
+  impacts_by_severity: Record<string, number>;
+  impacts_by_verification_status: Record<string, number>;
+
+  review_findings_count: number;
+  confirmed_findings: number;
+  supported_inferences: number;
+  rejected_findings: number;
+
+  prompt_tokens?: number | null;
+  completion_tokens?: number | null;
+  total_tokens?: number | null;
+
+  is_truncated: boolean;
+  truncation_reason?: string | null;
+}
+
 
 
 

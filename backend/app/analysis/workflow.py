@@ -170,13 +170,18 @@ async def execute_background_change_analysis(
                     ),
                 )
 
-            # 5. Persist review findings to model_metadata
+            # 5. Persist diff_result, blast_radius, and review findings to model_metadata
             meta = dict(analysis_model.model_metadata or {})
+            if diff_res:
+                meta["diff_result"] = diff_res.model_dump(mode="json")
+            if blast_radius:
+                meta["blast_radius"] = blast_radius.model_dump(mode="json")
             if review_rep:
                 meta["review_report"] = review_rep.model_dump(mode="json")
                 if review_rep.overall_risk_level != ChangeRiskLevel.LOW:
                     analysis_model.risk_level = review_rep.overall_risk_level.value
             analysis_model.model_metadata = meta
+
 
             # 6. Mark COMPLETED
             analysis_model.status = ChangeAnalysisStatus.COMPLETED.value

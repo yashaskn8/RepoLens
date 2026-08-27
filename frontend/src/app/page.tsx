@@ -10,10 +10,12 @@ import {
   VerificationVerdict,
 } from '@/types/domain';
 import { fetchHealth, fetchScan, fetchScanFindings, fetchScanTelemetry, startScan } from '@/lib/api';
+import { ChangeAnalysisExperience } from '@/components/ChangeAnalysisExperience';
 import { RemediationLifecycle } from '@/components/RemediationLifecycle';
 import { WorkflowTimeline } from '@/components/WorkflowTimeline';
 
 export default function HomePage() {
+  const [appMode, setAppMode] = useState<'SCAN' | 'CHANGE_ANALYSIS'>('SCAN');
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [repoUrl, setRepoUrl] = useState<string>('https://github.com/yashaskn8/RepoLens');
   const [branch, setBranch] = useState<string>('main');
@@ -25,6 +27,7 @@ export default function HomePage() {
   const [verdictFilter, setVerdictFilter] = useState<string>('ALL');
   const [expandedFindingId, setExpandedFindingId] = useState<string | null>(null);
   const [telemetry, setTelemetry] = useState<ScanTelemetry | null>(null);
+
 
   // 1. Initial health check
   useEffect(() => {
@@ -137,22 +140,47 @@ export default function HomePage() {
         </div>
       </header>
 
-      {/* Hero */}
-      <section className="hero">
-        <div className="hero-pill">Multi-Agent Static & LLM Analysis</div>
-        <h1>Deterministic Evidence & Multi-Agent Intelligence</h1>
-        <p>
-          Analyze public GitHub repositories with Tree-sitter AST structural parsing, Semgrep, Trivy, OSV-Scanner,
-          and parallel specialist agents grounded in source evidence.
-        </p>
-      </section>
+      {/* Mode Switcher Navigation */}
+      <div style={{ display: 'flex', justifyContent: 'center', gap: '0.75rem', marginBottom: '2.5rem' }}>
+        <button
+          type="button"
+          className={`filter-btn ${appMode === 'SCAN' ? 'filter-btn-active' : ''}`}
+          style={{ padding: '0.65rem 1.25rem', fontSize: '0.95rem', borderRadius: '999px' }}
+          onClick={() => setAppMode('SCAN')}
+        >
+          🛡️ Security & Multi-Agent Scan
+        </button>
+        <button
+          type="button"
+          className={`filter-btn ${appMode === 'CHANGE_ANALYSIS' ? 'filter-btn-active' : ''}`}
+          style={{ padding: '0.65rem 1.25rem', fontSize: '0.95rem', borderRadius: '999px' }}
+          onClick={() => setAppMode('CHANGE_ANALYSIS')}
+        >
+          🔍 Change Intelligence & PR Review
+        </button>
+      </div>
 
-      {/* Scan Input Form */}
-      <div className="glass-card" style={{ marginBottom: '2rem' }}>
-        <div className="card-title">
-          <span>Analyze Public GitHub Repository</span>
-          <span className="badge-tag">HTTPS Only</span>
-        </div>
+      {appMode === 'CHANGE_ANALYSIS' ? (
+        <ChangeAnalysisExperience />
+      ) : (
+        <>
+          {/* Hero */}
+          <section className="hero">
+            <div className="hero-pill">Multi-Agent Static & LLM Analysis</div>
+            <h1>Deterministic Evidence & Multi-Agent Intelligence</h1>
+            <p>
+              Analyze public GitHub repositories with Tree-sitter AST structural parsing, Semgrep, Trivy, OSV-Scanner,
+              and parallel specialist agents grounded in source evidence.
+            </p>
+          </section>
+
+          {/* Scan Input Form */}
+          <div className="glass-card" style={{ marginBottom: '2rem' }}>
+            <div className="card-title">
+              <span>Analyze Public GitHub Repository</span>
+              <span className="badge-tag">HTTPS Only</span>
+            </div>
+
 
         <form onSubmit={handleStartScan} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
           <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
@@ -514,6 +542,9 @@ export default function HomePage() {
           )}
         </div>
       )}
+        </>
+      )}
     </main>
   );
 }
+

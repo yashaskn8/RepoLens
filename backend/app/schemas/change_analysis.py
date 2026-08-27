@@ -494,4 +494,57 @@ class ChangeReviewReport(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+# =========================================================================
+# Change Analysis Report Contracts (Phase 6G)
+# =========================================================================
+
+
+class ChangeAnalysisReportResponse(BaseModel):
+    """Comprehensive structured and Markdown change intelligence report."""
+
+    analysis_id: UUID = Field(..., description="Unique change analysis identifier")
+    repository_url: str = Field(..., description="Canonical repository URL")
+    repository_owner: str = Field(..., description="Repository owner/organization")
+    repository_name: str = Field(..., description="Repository name")
+    base_commit_sha: str = Field(..., description="Exact 40-character base commit SHA")
+    head_commit_sha: str = Field(..., description="Exact 40-character head commit SHA")
+    base_ref: Optional[str] = Field(default=None, description="Base branch or ref name")
+    head_ref: Optional[str] = Field(default=None, description="Head branch or ref name")
+    pr_number: Optional[int] = Field(default=None, description="GitHub pull request number if analyzed from PR")
+    pr_title: Optional[str] = Field(default=None, description="GitHub pull request title")
+    status: ChangeAnalysisStatus = Field(..., description="Analysis lifecycle status")
+    risk_level: Optional[ChangeRiskLevel] = Field(default=None, description="Deterministic risk level rating")
+    risk_explanation: str = Field(default="", description="Deterministic justification for assigned risk level")
+    created_at: datetime = Field(..., description="Analysis creation timestamp")
+    completed_at: Optional[datetime] = Field(default=None, description="Analysis completion timestamp")
+    duration_seconds: Optional[float] = Field(default=None, description="Total execution duration in seconds")
+
+    # Metrics
+    files_changed_count: int = Field(default=0, ge=0, description="Total changed files count")
+    symbols_changed_count: int = Field(default=0, ge=0, description="Total changed symbols count")
+    impacted_symbols_count: int = Field(default=0, ge=0, description="Total impacted symbols/callers count")
+    contract_breaks_count: int = Field(default=0, ge=0, description="Identified contract break impacts count")
+    security_impacts_count: int = Field(default=0, ge=0, description="Identified security-sensitive impacts count")
+
+    # Contract Deltas
+    route_deltas: List[RouteContractDelta] = Field(default_factory=list, description="API route contract deltas")
+    schema_deltas: List[SchemaModelDelta] = Field(default_factory=list, description="Data schema and model deltas")
+    dependency_deltas: List[DependencyDelta] = Field(default_factory=list, description="Manifest dependency deltas")
+    config_deltas: List[ConfigDelta] = Field(default_factory=list, description="Configuration and environment deltas")
+
+    # Blast Radius & Findings
+    impacts: List[ChangeImpact] = Field(default_factory=list, description="All evidence-backed impact records")
+    review_findings: List[ChangeReviewFinding] = Field(default_factory=list, description="Verified AI review findings")
+
+    # Tooling and Evidence Limitations
+    tool_availability: Dict[str, bool] = Field(default_factory=dict, description="Availability state of analysis engines")
+    limitations: List[str] = Field(default_factory=list, description="Disclosed analysis constraints and epistemic limitations")
+
+    # Deterministic Markdown Render
+    markdown_report: str = Field(..., description="Deterministic, human-readable Markdown change report")
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+
 

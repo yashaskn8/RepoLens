@@ -17,7 +17,8 @@ export interface UseWorkflowStreamResult {
 
 export function useWorkflowStream(
   scanId: string | null | undefined,
-  enabled: boolean = true
+  enabled: boolean = true,
+  changeAnalysisId: string | null | undefined = null
 ): UseWorkflowStreamResult {
   const [events, setEvents] = useState<WorkflowEvent[]>([]);
   const [status, setStatus] = useState<StreamStatus>('idle');
@@ -27,6 +28,8 @@ export function useWorkflowStream(
   const eventSourceRef = useRef<EventSource | null>(null);
   const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const terminalReceivedRef = useRef<boolean>(false);
+
+  const targetId = changeAnalysisId || scanId;
 
   const clearEvents = () => {
     setEvents([]);
@@ -45,7 +48,7 @@ export function useWorkflowStream(
       retryTimeoutRef.current = null;
     }
 
-    if (!scanId || !enabled) {
+    if (!targetId || !enabled) {
       setStatus('idle');
       if (eventSourceRef.current) {
         eventSourceRef.current.close();
@@ -76,7 +79,12 @@ export function useWorkflowStream(
           });
 
           // Check if terminal event received
-          if (parsed.event_type === 'SCAN_COMPLETED' || parsed.event_type === 'SCAN_FAILED') {
+          if (
+            parsed.event_type === 'SCAN_COMPLETED' ||
+            parsed.event_type === 'SCAN_FAILED' ||
+            parsed.event_type === 'CHANGE_ANALYSIS_COMPLETED' ||
+            parsed.event_type === 'CHANGE_ANALYSIS_FAILED'
+          ) {
             terminalReceivedRef.current = true;
             setStatus('completed');
 
@@ -109,9 +117,12 @@ export function useWorkflowStream(
       setStatus(lastEventIdRef.current > 0 ? 'reconnecting' : 'connecting');
       setError(null);
 
-      const streamUrl = `${API_BASE_URL}/api/v1/scans/${scanId}/events?after_id=${lastEventIdRef.current}`;
+      const streamUrl = changeAnalysisId
+        ? `${API_BASE_URL}/api/v1/change-analyses/${changeAnalysisId}/events?after_id=${lastEventIdRef.current}`
+        : `${API_BASE_URL}/api/v1/scans/${scanId}/events?after_id=${lastEventIdRef.current}`;
       const es = new EventSource(streamUrl);
       eventSourceRef.current = es;
+
 
       es.onopen = () => {
         if (!isMounted) return;
