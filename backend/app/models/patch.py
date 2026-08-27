@@ -21,6 +21,7 @@ class PatchModel(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
     finding_id = Column(String(36), ForeignKey("findings.id", ondelete="CASCADE"), nullable=False, index=True)
     plan_id = Column(String(36), nullable=True)
+    fix_plan_snapshot = Column(JSON, nullable=True)
     scan_id = Column(String(36), ForeignKey("scans.id", ondelete="CASCADE"), nullable=False, index=True)
     parent_patch_id = Column(String(36), ForeignKey("patches.id", ondelete="RESTRICT"), unique=True, nullable=True, index=True)
     revision_number = Column(Integer, default=0, nullable=False)

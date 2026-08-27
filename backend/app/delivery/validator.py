@@ -259,7 +259,74 @@ class DeliveryValidator:
                 failure_code="FILE_SET_MISMATCH",
             )
 
-        # 14 & 15. Rehydrate exact snapshot and rerun canonical deterministic verification
+        # 14. FixPlan provenance verification
+        if not patch.fix_plan_snapshot:
+            return DeliveryValidationResult(
+                eligible=False,
+                blocking_reason="Patch proposal is missing canonical fix plan provenance.",
+                failure_code="FIX_PLAN_PROVENANCE_MISSING",
+                repository_url=norm_repo_url,
+                repository_owner=owner,
+                repository_name=repo,
+                base_branch=base_branch,
+                scanned_base_sha=scan.commit_hash,
+                observed_base_sha=observed_sha or scan.commit_hash,
+                files_modified=patch.files_modified or [],
+                patch_status=PatchStatus.APPROVED,
+                machine_verdict=patch.machine_verdict,
+                human_approved=True,
+                proposed_branch_name=proposed_branch,
+                proposed_pr_title=proposed_title,
+            )
+
+        try:
+            fix_plan = FixPlan.model_validate(patch.fix_plan_snapshot)
+        except Exception as exc:
+            return DeliveryValidationResult(
+                eligible=False,
+                blocking_reason=f"Persisted fix plan snapshot is invalid: {exc}",
+                failure_code="FIX_PLAN_INVALID",
+                repository_url=norm_repo_url,
+                repository_owner=owner,
+                repository_name=repo,
+                base_branch=base_branch,
+                scanned_base_sha=scan.commit_hash,
+                observed_base_sha=observed_sha or scan.commit_hash,
+                files_modified=patch.files_modified or [],
+                patch_status=PatchStatus.APPROVED,
+                machine_verdict=patch.machine_verdict,
+                human_approved=True,
+                proposed_branch_name=proposed_branch,
+                proposed_pr_title=proposed_title,
+            )
+
+        if (
+            not patch.plan_id
+            or str(fix_plan.id) != str(patch.plan_id)
+            or str(fix_plan.finding_id) != str(patch.finding_id)
+        ):
+            return DeliveryValidationResult(
+                eligible=False,
+                blocking_reason=(
+                    f"Persisted fix plan identity ({fix_plan.id}) or finding ({fix_plan.finding_id}) "
+                    f"does not match patch metadata (plan_id: {patch.plan_id}, finding_id: {patch.finding_id})."
+                ),
+                failure_code="FIX_PLAN_PROVENANCE_MISMATCH",
+                repository_url=norm_repo_url,
+                repository_owner=owner,
+                repository_name=repo,
+                base_branch=base_branch,
+                scanned_base_sha=scan.commit_hash,
+                observed_base_sha=observed_sha or scan.commit_hash,
+                files_modified=patch.files_modified or [],
+                patch_status=PatchStatus.APPROVED,
+                machine_verdict=patch.machine_verdict,
+                human_approved=True,
+                proposed_branch_name=proposed_branch,
+                proposed_pr_title=proposed_title,
+            )
+
+        # 15. Rehydrate exact snapshot and rerun canonical deterministic verification
         snapshot_service = get_snapshot_service()
         try:
             with snapshot_service.snapshot_context(str(scan.id), db=db) as workspace:
@@ -280,44 +347,8 @@ class DeliveryValidator:
                     expected_behavior_change=patch.explanation or f"Remediation patch for {finding.title}",
                 )
 
-                finding_schema = Finding(
-                    id=UUID(str(finding.id)),
-                    scan_id=UUID(str(scan.id)),
-                    title=finding.title,
-                    description=finding.description or "",
-                    severity=Severity(finding.severity),
-                    status=FindingStatus(finding.status),
-                    rule_id=finding.rule_id,
-                    category=finding.category,
-                    verification_verdict=VerificationVerdict(finding.verification_verdict) if finding.verification_verdict else None,
-                    verification_reason=finding.verification_reason,
-                    created_at=finding.created_at,
-                    updated_at=finding.updated_at,
-                )
-
-                from app.planning.schemas import OrderedChangeStep
-
-                ordered_steps = [
-                    OrderedChangeStep(
-                        step_number=idx + 1,
-                        target_file=f_path,
-                        description=f"Remediate vulnerability in {f_path}",
-                        rationale=f"Fix identified finding: {finding.title}",
-                    )
-                    for idx, f_path in enumerate(patch.files_modified or ["unknown"])
-                ]
-
-                fix_plan = FixPlan(
-                    id=UUID(str(patch.plan_id)) if patch.plan_id else uuid4(),
-                    finding_id=UUID(str(finding.id)),
-                    root_cause=finding.description or f"Root cause for {finding.title}",
-                    objective=f"Remediate {finding.title}",
-                    files_expected_to_change=patch.files_modified or ["unknown"],
-                    symbols_expected_to_change=[],
-                    ordered_changes=ordered_steps,
-                    validation_plan=["Verify syntax, boundaries, and security properties"],
-                    estimated_scope=FixScope.FILE if len(patch.files_modified or []) <= 1 else FixScope.CROSS_FILE,
-                )
+                from app.services.domain_mapping import finding_model_to_schema
+                finding_schema = finding_model_to_schema(finding)
 
                 verification_service = PatchVerificationService()
                 verif_res = await verification_service.verify_patch(

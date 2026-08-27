@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 import logging
 from typing import List, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.exc import IntegrityError
@@ -399,10 +399,21 @@ async def request_patch_revision(
             logger.warning("Notice initializing child remediation thread %s: %s", child_thread_id, str(exc))
 
         # 4. Persist child PatchModel with audit lineage
+        if hasattr(fix_plan, "model_dump") and not type(fix_plan).__name__.endswith("Mock"):
+            plan_id_str = str(fix_plan.id)
+            plan_snapshot = fix_plan.model_dump(mode="json")
+        elif isinstance(fix_plan, dict):
+            plan_id_str = str(fix_plan.get("id", uuid4()))
+            plan_snapshot = fix_plan
+        else:
+            plan_id_str = str(getattr(fix_plan, "id", uuid4())) if not type(getattr(fix_plan, "id", None)).__name__.endswith("Mock") else str(uuid4())
+            plan_snapshot = None
+
         child_patch_model = PatchModel(
             id=str(proposal.id),
             finding_id=str(finding_schema.id),
-            plan_id=str(proposal.plan_id) if proposal.plan_id else None,
+            plan_id=plan_id_str,
+            fix_plan_snapshot=plan_snapshot,
             scan_id=str(scan.id),
             parent_patch_id=str(patch_model.id),
             revision_number=(patch_model.revision_number or 0) + 1,

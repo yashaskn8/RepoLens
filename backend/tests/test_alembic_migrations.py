@@ -55,7 +55,7 @@ def test_alembic_upgrade_head_on_empty_db_creates_complete_schema():
                 "machine_verdict", "unified_diff", "files_modified", "explanation", "expected_behavior_change",
                 "generated_tests_or_test_plan", "verification_report", "critic_report",
                 "user_feedback", "approved_by", "approved_at", "rejected_reason",
-                "model_metadata", "created_at", "updated_at",
+                "model_metadata", "created_at", "updated_at", "fix_plan_snapshot",
             }
             assert expected_patch_cols.issubset(set(patch_cols.keys())), f"Missing patch columns: {expected_patch_cols - set(patch_cols.keys())}"
 
@@ -212,15 +212,30 @@ def test_alembic_migration_upgrade_downgrade_reupgrade_cycle():
         engine = create_engine(db_url)
 
         try:
-            # 1. Upgrade to head (006_deliveries_table)
+            # 1. Upgrade to head (007_patch_fix_plan_snapshot)
             command.upgrade(alembic_cfg, "head")
             inspector = inspect(engine)
             assert "deliveries" in inspector.get_table_names()
             assert "workflow_events" in inspector.get_table_names()
             assert "patches" in inspector.get_table_names()
             assert "findings" in inspector.get_table_names()
+            patch_cols_head = {col["name"] for col in inspector.get_columns("patches")}
+            assert "fix_plan_snapshot" in patch_cols_head
 
-            # 2. Downgrade one revision (back to 005_workflow_events_table)
+            # 2. Downgrade one revision (007 -> 006: drop fix_plan_snapshot)
+            command.downgrade(alembic_cfg, "006_deliveries_table")
+            inspector = inspect(engine)
+            patch_cols_006 = {col["name"] for col in inspector.get_columns("patches")}
+            assert "fix_plan_snapshot" not in patch_cols_006
+            assert "deliveries" in inspector.get_table_names()
+
+            # 3. Re-upgrade 006 -> 007 (idempotent re-add)
+            command.upgrade(alembic_cfg, "007_patch_fix_plan_snapshot")
+            inspector = inspect(engine)
+            patch_cols_007 = {col["name"] for col in inspector.get_columns("patches")}
+            assert "fix_plan_snapshot" in patch_cols_007
+
+            # 4. Downgrade to 005_workflow_events_table
             command.downgrade(alembic_cfg, "005_workflow_events_table")
             inspector = inspect(engine)
             assert "deliveries" not in inspector.get_table_names()
@@ -228,7 +243,7 @@ def test_alembic_migration_upgrade_downgrade_reupgrade_cycle():
             event_cols_005 = {col["name"] for col in inspector.get_columns("workflow_events")}
             assert "delivery_id" not in event_cols_005
 
-            # 3. Downgrade another revision (back to 004_patch_machine_verdict)
+            # 5. Downgrade to 004_patch_machine_verdict
             command.downgrade(alembic_cfg, "004_patch_machine_verdict")
             inspector = inspect(engine)
             assert "workflow_events" not in inspector.get_table_names()
@@ -236,36 +251,38 @@ def test_alembic_migration_upgrade_downgrade_reupgrade_cycle():
             patch_cols_004 = {col["name"] for col in inspector.get_columns("patches")}
             assert "machine_verdict" in patch_cols_004
 
-            # 4. Downgrade another revision (back to 003_phase36_durability_and_provenance)
+            # 6. Downgrade to 003_phase36_durability_and_provenance
             command.downgrade(alembic_cfg, "003_phase36_durability_and_provenance")
             inspector = inspect(engine)
             patch_cols_003 = {col["name"] for col in inspector.get_columns("patches")}
             assert "machine_verdict" not in patch_cols_003
             assert "parent_patch_id" in patch_cols_003
 
-            # 5. Downgrade to 002_patches_table
+            # 7. Downgrade to 002_patches_table
             command.downgrade(alembic_cfg, "002_patches_table")
             inspector = inspect(engine)
             patch_cols_002 = {col["name"] for col in inspector.get_columns("patches")}
             assert "parent_patch_id" not in patch_cols_002
 
-            # 6. Downgrade to 001_initial_schema
+            # 8. Downgrade to 001_initial_schema
             command.downgrade(alembic_cfg, "001_initial_schema")
             inspector = inspect(engine)
             assert "patches" not in inspector.get_table_names()
             assert "findings" in inspector.get_table_names()
             assert "scans" in inspector.get_table_names()
 
-            # 7. Downgrade all the way to base
+            # 9. Downgrade all the way to base
             command.downgrade(alembic_cfg, "base")
             inspector = inspect(engine)
             user_tables = [t for t in inspector.get_table_names() if t != "alembic_version"]
             assert len(user_tables) == 0, f"Expected zero user tables after downgrade to base, got {user_tables}"
 
-            # 8. Re-upgrade all the way to head
+            # 10. Re-upgrade all the way to head
             command.upgrade(alembic_cfg, "head")
             inspector = inspect(engine)
             assert {"scans", "findings", "evidences", "patches", "workflow_events", "deliveries"}.issubset(set(inspector.get_table_names()))
+            patch_cols_final = {col["name"] for col in inspector.get_columns("patches")}
+            assert "fix_plan_snapshot" in patch_cols_final
         finally:
             engine.dispose()
 
@@ -293,3 +310,102 @@ async def test_production_startup_does_not_mutate_schema_silently():
             assert len(inspector_after.get_table_names()) == 0
         finally:
             raw_engine.dispose()
+
+
+def test_alembic_007_fix_plan_snapshot_orm_read_write():
+    """Verify that migration 007 fix_plan_snapshot column supports ORM JSON read/write correctly."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "test_007.db")
+        db_url = f"sqlite:///{db_path}"
+
+        alembic_cfg = _get_alembic_config(db_url)
+        command.upgrade(alembic_cfg, "head")
+
+        engine = create_engine(db_url)
+        try:
+            SessionLocal = sessionmaker(bind=engine)
+            db = SessionLocal()
+
+            scan = ScanModel(
+                id=str(uuid4()),
+                repository_url="https://github.com/test-org/test-repo",
+                status=ScanStatus.COMPLETED.value,
+                commit_hash="aabbccdd" * 5,
+            )
+            db.add(scan)
+
+            finding = FindingModel(
+                id=str(uuid4()),
+                scan_id=scan.id,
+                title="Test finding for 007",
+                description="Validates fix_plan_snapshot column",
+                severity=Severity.MEDIUM.value,
+                status=FindingStatus.OPEN.value,
+                verification_verdict="CONFIRMED",
+            )
+            db.add(finding)
+
+            snapshot_data = {
+                "id": str(uuid4()),
+                "finding_id": finding.id,
+                "root_cause": "Test root cause",
+                "objective": "Test objective",
+                "files_expected_to_change": ["app/main.py"],
+                "symbols_expected_to_change": [],
+                "ordered_changes": [
+                    {"step_number": 1, "target_file": "app/main.py", "description": "Fix", "rationale": "Reason"}
+                ],
+                "validation_plan": ["Check fix"],
+                "estimated_scope": "FILE",
+            }
+
+            # 1. Write patch WITH fix_plan_snapshot
+            patch_with = PatchModel(
+                id=str(uuid4()),
+                finding_id=finding.id,
+                plan_id=snapshot_data["id"],
+                fix_plan_snapshot=snapshot_data,
+                scan_id=scan.id,
+                thread_id=f"remediation-{uuid4()}",
+                status=PatchStatus.VERIFIED.value,
+                machine_verdict="PASSED",
+                unified_diff="--- a/app/main.py\n+++ b/app/main.py\n",
+                files_modified=["app/main.py"],
+                explanation="Test patch",
+                expected_behavior_change="Fixed",
+            )
+            db.add(patch_with)
+
+            # 2. Write patch WITHOUT fix_plan_snapshot (nullable)
+            patch_without = PatchModel(
+                id=str(uuid4()),
+                finding_id=finding.id,
+                scan_id=scan.id,
+                thread_id=f"remediation-{uuid4()}",
+                status=PatchStatus.DRAFT.value,
+                machine_verdict="NEEDS_REVIEW",
+                unified_diff="--- a/app/main.py\n+++ b/app/main.py\n",
+                files_modified=["app/main.py"],
+                explanation="Draft patch",
+                expected_behavior_change="None",
+            )
+            db.add(patch_without)
+            db.commit()
+
+            # 3. Read back and verify
+            loaded_with = db.query(PatchModel).filter(PatchModel.id == patch_with.id).first()
+            assert loaded_with is not None
+            assert loaded_with.fix_plan_snapshot is not None
+            assert loaded_with.fix_plan_snapshot["id"] == snapshot_data["id"]
+            assert loaded_with.fix_plan_snapshot["root_cause"] == "Test root cause"
+            assert loaded_with.fix_plan_snapshot["files_expected_to_change"] == ["app/main.py"]
+            assert loaded_with.plan_id == snapshot_data["id"]
+
+            loaded_without = db.query(PatchModel).filter(PatchModel.id == patch_without.id).first()
+            assert loaded_without is not None
+            assert loaded_without.fix_plan_snapshot is None
+            assert loaded_without.plan_id is None
+
+            db.close()
+        finally:
+            engine.dispose()

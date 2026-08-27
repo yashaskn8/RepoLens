@@ -28,7 +28,7 @@ from app.models.delivery import DeliveryModel
 from app.models.finding import EvidenceModel, FindingModel
 from app.models.patch import PatchModel
 from app.models.scan import ScanModel
-from app.models.workflow_event import WorkflowEventModel
+from app.planning.schemas import FixPlan, FixScope, OrderedChangeStep
 from app.schemas.enums import DeliveryStatus, FindingStatus, PatchStatus, ScanStatus, Severity
 from app.services.report_service import ScanReportService
 from app.services.workflow_event_service import WorkflowEventService
@@ -206,19 +206,40 @@ async def test_phase5_e2e_canonical_delivery_flow(client: TestClient, db_session
         "+    # Secure constant-time hash comparison\n"
         "+    return verify_hash(user, pwd)\n"
     )
+    plan_id_1 = uuid4()
+    plan_1 = FixPlan(
+        id=plan_id_1,
+        finding_id=UUID(finding.id),
+        root_cause="Insecure direct plaintext password comparison",
+        objective="Replace plaintext comparison with verify_hash",
+        files_expected_to_change=["app/auth.py"],
+        symbols_expected_to_change=[],
+        ordered_changes=[
+            OrderedChangeStep(
+                step_number=1,
+                target_file="app/auth.py",
+                description="Use constant-time verification",
+                rationale="Eliminate timing side channel",
+            )
+        ],
+        validation_plan=["Verify password hash checking"],
+        estimated_scope=FixScope.FILE,
+    )
+
     patch_id = str(uuid4())
     patch = PatchModel(
         id=patch_id,
         finding_id=finding.id,
+        plan_id=str(plan_id_1),
+        fix_plan_snapshot=plan_1.model_dump(mode="json"),
         scan_id=scan.id,
         thread_id=f"remediation-{uuid4()}",
-        status=PatchStatus.APPROVED.value,
+        status=PatchStatus.VERIFIED.value,
         machine_verdict="PASSED",
         unified_diff=patch_diff,
         files_modified=["app/auth.py"],
         explanation="Replaced plaintext comparison with verify_hash",
         expected_behavior_change="Secure constant-time password verification",
-        approved_by="security-lead",
     )
     db_session.add(patch)
     db_session.commit()
@@ -240,7 +261,22 @@ async def test_phase5_e2e_canonical_delivery_flow(client: TestClient, db_session
             mock_svc_snap.return_value = mock_inst
             mock_val_snap.return_value = mock_inst
 
-            # Step A: Query Delivery Preview
+            # Step 1: Unapproved patch delivery is blocked with HTTP 409
+            unapproved_resp = client.post(
+                f"/api/v1/patches/{patch_id}/deliver",
+                json={"requested_by": "lead-sec-eng", "notes": "Premature delivery attempt"},
+            )
+            assert unapproved_resp.status_code == 409
+
+            # Step 2: Explicit Human Approval via API
+            appr_resp = client.post(
+                f"/api/v1/patches/{patch_id}/approve",
+                json={"approved_by": "security-lead", "notes": "Production hotfix approved"},
+            )
+            assert appr_resp.status_code == 200
+            assert appr_resp.json()["status"] == "APPROVED"
+
+            # Step 3: Query Delivery Preview
             prev_resp = client.get(f"/api/v1/patches/{patch_id}/delivery-preview")
             assert prev_resp.status_code == 200
             prev_data = prev_resp.json()
@@ -250,7 +286,7 @@ async def test_phase5_e2e_canonical_delivery_flow(client: TestClient, db_session
             assert prev_data["proposed_branch_name"].startswith("repolens/fix-")
             assert "auth.py" in prev_data["files_modified"][0]
 
-            # Step B: Deliver Patch (Human Triggered)
+            # Step 4: Deliver Patch (Human Triggered)
             del_resp = client.post(
                 f"/api/v1/patches/{patch_id}/deliver",
                 json={"requested_by": "lead-sec-eng", "notes": "Production hotfix approved"},
@@ -265,10 +301,26 @@ async def test_phase5_e2e_canonical_delivery_flow(client: TestClient, db_session
     finally:
         app.dependency_overrides.pop(get_delivery_service, None)
 
-    # Step C: True Fresh DB Session Verification (Session Restart)
+    # Step 5: True Fresh DB Session Verification (Session Restart)
     from tests.conftest import TestingSessionLocal
-    fresh_session = TestingSessionLocal(bind=db_session.get_bind())
+    db_bind = db_session.get_bind()
+    db_session.close()
+
+    fresh_session = TestingSessionLocal(bind=db_bind)
     try:
+        # Re-query all models in fresh session
+        fresh_scan = fresh_session.query(ScanModel).filter(ScanModel.id == scan_id).first()
+        assert fresh_scan is not None
+
+        fresh_finding = fresh_session.query(FindingModel).filter(FindingModel.id == finding_id).first()
+        assert fresh_finding is not None
+
+        fresh_patch = fresh_session.query(PatchModel).filter(PatchModel.id == patch_id).first()
+        assert fresh_patch is not None
+        assert fresh_patch.status == PatchStatus.APPROVED.value
+        assert fresh_patch.fix_plan_snapshot is not None
+        assert fresh_patch.fix_plan_snapshot["id"] == str(plan_id_1)
+
         delivery_row = fresh_session.query(DeliveryModel).filter(DeliveryModel.patch_id == patch_id).first()
         assert delivery_row is not None
         assert delivery_row.status == DeliveryStatus.PR_CREATED.value
@@ -338,10 +390,32 @@ async def test_phase5_e2e_base_drift_protection_gate(client: TestClient, db_sess
     )
     db_session.add(finding)
 
+    plan_id_2 = uuid4()
+    plan_2 = FixPlan(
+        id=plan_id_2,
+        finding_id=UUID(finding.id),
+        root_cause="Weak secret key generation using random",
+        objective="Use secrets module for cryptographic randomness",
+        files_expected_to_change=["app/utils.py"],
+        symbols_expected_to_change=[],
+        ordered_changes=[
+            OrderedChangeStep(
+                step_number=1,
+                target_file="app/utils.py",
+                description="Import secrets and use for keys",
+                rationale="Provide cryptographic randomness",
+            )
+        ],
+        validation_plan=["Check secrets import"],
+        estimated_scope=FixScope.FILE,
+    )
+
     patch_id = str(uuid4())
     patch = PatchModel(
         id=patch_id,
         finding_id=finding.id,
+        plan_id=str(plan_id_2),
+        fix_plan_snapshot=plan_2.model_dump(mode="json"),
         scan_id=scan.id,
         thread_id=f"remediation-{uuid4()}",
         status=PatchStatus.APPROVED.value,
@@ -439,10 +513,32 @@ async def test_phase5_e2e_partial_failure_and_resume_reconciliation(db_session: 
     )
     db_session.add(finding)
 
+    plan_id_3 = uuid4()
+    plan_3 = FixPlan(
+        id=plan_id_3,
+        finding_id=UUID(finding.id),
+        root_cause="Reliability issue",
+        objective="Add safe comment",
+        files_expected_to_change=["app/utils.py"],
+        symbols_expected_to_change=[],
+        ordered_changes=[
+            OrderedChangeStep(
+                step_number=1,
+                target_file="app/utils.py",
+                description="Add safe comment",
+                rationale="Improve reliability",
+            )
+        ],
+        validation_plan=["Check utils comments"],
+        estimated_scope=FixScope.FILE,
+    )
+
     patch_id = str(uuid4())
     patch = PatchModel(
         id=patch_id,
         finding_id=finding.id,
+        plan_id=str(plan_id_3),
+        fix_plan_snapshot=plan_3.model_dump(mode="json"),
         scan_id=scan.id,
         thread_id=f"remediation-{uuid4()}",
         status=PatchStatus.APPROVED.value,

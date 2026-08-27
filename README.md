@@ -45,7 +45,7 @@ RepoLens/
 │   │   ├── schemas/         # Canonical Pydantic schemas, enums, delivery, reports & telemetry
 │   │   ├── security/        # Secret redaction, prompt injection and Markdown sanitization
 │   │   └── services/        # Scan recovery, workflow events, report & delivery orchestrators
-│   ├── alembic/             # Database migrations (001, 002, 003, 004, 005, 006)
+│   ├── alembic/             # Database migrations (001, 002, 003, 004, 005, 006, 007)
 │   └── tests/               # 405+ comprehensive Pytest verification & security release tests
 └── frontend/                 # Next.js + React 19 + TypeScript frontend
     └── src/
@@ -62,12 +62,13 @@ RepoLens/
 | Variable | Default | Purpose |
 |---|---|---|
 | `DATABASE_URL` | `sqlite:///./repolens.db` | Main relational database (SQLite or PostgreSQL) |
-| `CHECKPOINTER_DB_PATH` | `sqlite:///./repolens_checkpoints.db` | Durable LangGraph workflow execution checkpointer |
+| `CHECKPOINT_DB_FILE` | `checkpoints.db` | Durable LangGraph workflow execution checkpointer |
 | `GITHUB_DELIVERY_ENABLED` | `False` | Feature toggle enabling safe GitHub Pull Request delivery |
 | `GITHUB_TOKEN` | `""` | GitHub Personal Access Token (PAT) with repository content & PR write scope |
-| `OPENAI_API_KEY` | `""` | Primary LLM Provider (GPT-4o) |
-| `ANTHROPIC_API_KEY` | `""` | Secondary LLM Provider (Claude 3.5 Sonnet) |
-| `GEMINI_API_KEY` | `""` | Alternative LLM Provider (Gemini 1.5 Pro) |
+| `GEMINI_API_KEY` | `""` | LLM Provider — Gemini (architecture model: gemini-3.7-flash) |
+| `GROQ_API_KEY` | `""` | LLM Provider — Groq (hosted open-weight models) |
+| `NVIDIA_API_KEY` | `""` | LLM Provider — NVIDIA (NeMo / NeMoTron verification models) |
+| `HUGGINGFACE_API_KEY` | `""` | LLM Provider — HuggingFace (hosted open-weight models) |
 
 
 ---
@@ -156,4 +157,4 @@ By default, RepoLens uses SQLite for local zero-dependency development (`sqlite:
 ```bash
 DATABASE_URL="postgresql://user:password@localhost:5432/repolens"
 ```
-Alembic migrations (001, 002, 003, 004, 005, 006) and SQLAlchemy models are designed to be fully compatible with both SQLite and PostgreSQL.
+Alembic migrations (001, 002, 003, 004, 005, 006, 007) and SQLAlchemy models are designed to be fully compatible with both SQLite and PostgreSQL.

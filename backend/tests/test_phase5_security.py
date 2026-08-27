@@ -1,11 +1,10 @@
-"""Phase 5 Security, Idempotency, and Failure-Hardening Unit Test Suite for RepoLens."""
-
+import hashlib
 import os
 import shutil
 import tempfile
 from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch as mock_patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 import pytest
 from fastapi import HTTPException
 import httpx
@@ -35,6 +34,7 @@ from app.models.scan import ScanModel
 from app.models.workflow_event import WorkflowEventModel
 from app.schemas.enums import DeliveryStatus, FindingStatus, PatchStatus, ScanStatus, Severity
 from app.schemas.delivery import DeliveryRequest
+from app.services.workflow_event_service import WorkflowEventService
 
 
 class MockDeliveryProvider(RepositoryDeliveryProvider):
@@ -71,12 +71,13 @@ class MockDeliveryProvider(RepositoryDeliveryProvider):
         return GitCommitInfo(sha=sha, tree_sha=self.base_tree_sha, parents=[self.base_head_sha])
 
     async def create_blob(self, owner: str, repo: str, content: str, encoding: str = "utf-8") -> str:
-        blob_sha = f"blob_{len(self.blobs_created) + 1}_{len(content)}"
+        blob_sha = f"blob_{hashlib.sha256(content.encode('utf-8')).hexdigest()[:12]}"
         self.blobs_created.append({"owner": owner, "repo": repo, "content": content, "sha": blob_sha})
         return blob_sha
 
     async def create_tree(self, owner: str, repo: str, base_tree_sha: str, tree_entries: list[GitTreeEntry]) -> str:
-        tree_sha = f"tree_{len(self.trees_created) + 1}"
+        entries_repr = "_".join(sorted(f"{e.path}:{e.mode}:{e.sha}" for e in tree_entries))
+        tree_sha = f"tree_{hashlib.sha256(entries_repr.encode('utf-8')).hexdigest()[:12]}"
         self.trees_created.append({"owner": owner, "repo": repo, "base_tree_sha": base_tree_sha, "entries": tree_entries, "sha": tree_sha})
         return tree_sha
 
@@ -154,10 +155,33 @@ def base_entities(db_session: Session):
     )
     db_session.add(evidence)
 
+    from app.planning.schemas import FixPlan, FixScope, OrderedChangeStep
+    plan_id = uuid4()
+    plan = FixPlan(
+        id=plan_id,
+        finding_id=UUID(finding.id),
+        root_cause="User supplied path is not confined.",
+        objective="Added path confinement validation",
+        files_expected_to_change=["app/storage.py"],
+        symbols_expected_to_change=[],
+        ordered_changes=[
+            OrderedChangeStep(
+                step_number=1,
+                target_file="app/storage.py",
+                description="Add path validation",
+                rationale="Prevent path traversal",
+            )
+        ],
+        validation_plan=["Check file path confinement"],
+        estimated_scope=FixScope.FILE,
+    )
+
     valid_diff = "--- a/app/storage.py\n+++ b/app/storage.py\n@@ -1,2 +1,3 @@\n def read_file(p):\n+    validate(p)\n     return open(p)\n"
     patch = PatchModel(
         id=str(uuid4()),
         finding_id=finding.id,
+        plan_id=str(plan_id),
+        fix_plan_snapshot=plan.model_dump(mode="json"),
         scan_id=scan.id,
         thread_id=f"remediation-{uuid4()}",
         status=PatchStatus.APPROVED.value,
@@ -575,9 +599,12 @@ async def test_reconciliation_missing_local_head_sha_verified_commit_adopted(db_
     branch_name = sanitize_branch_name(finding.id, patch.id)
     remote_sha = "4444444444444444444444444444444444444444"
     mock_provider.branches[branch_name] = remote_sha
+    expected_content = "def read_file(p):\n    validate(p)\n    return open(p)\n"
+    blob_sha = f"blob_{hashlib.sha256(expected_content.encode('utf-8')).hexdigest()[:12]}"
+    expected_tree_sha = f"tree_{hashlib.sha256(f'app/storage.py:100644:{blob_sha}'.encode('utf-8')).hexdigest()[:12]}"
     mock_provider.commits[remote_sha] = GitCommitInfo(
         sha=remote_sha,
-        tree_sha="tree_1",  # Matches the tree created for this patch
+        tree_sha=expected_tree_sha,
         parents=[scan.commit_hash],
     )
 
@@ -1002,6 +1029,658 @@ async def test_phase5_partial_failure_network_drop_and_recovery(db_session: Sess
         assert res2.status == DeliveryStatus.PR_CREATED.value
         assert res2.pr_number == 777
         assert create_pr_calls == 1
+
+
+# ============================================================
+# FIX 1: FixPlan Provenance Persistence and Delivery Enforcement
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_initial_patch_generation_persists_exact_fix_plan_snapshot(db_session: Session):
+    from app.api.routes.findings import request_patch_generation
+    from app.patching.schemas import PatchProposal, PatchWorkflowResult, VerificationStatus, PatchVerificationResult
+    from app.planning.schemas import FixPlan, FixScope, OrderedChangeStep
+
+    scan_id = str(uuid4())
+    scan = ScanModel(
+        id=scan_id,
+        repository_url="https://github.com/example-org/secure-app",
+        status=ScanStatus.COMPLETED.value,
+        branch="main",
+        commit_hash="1111111111111111111111111111111111111111",
+    )
+    db_session.add(scan)
+
+    finding_id = str(uuid4())
+    finding = FindingModel(
+        id=finding_id,
+        scan_id=scan.id,
+        title="Path traversal vulnerability",
+        description="User supplied path is not confined.",
+        severity=Severity.HIGH.value,
+        status=FindingStatus.OPEN.value,
+        verification_verdict="CONFIRMED",
+        rule_id="security.path-traversal",
+        category="Security",
+    )
+    db_session.add(finding)
+    db_session.commit()
+
+    test_plan_id = uuid4()
+    mock_plan = FixPlan(
+        id=test_plan_id,
+        finding_id=UUID(finding_id),
+        root_cause="User supplied path is not confined.",
+        objective="Added path confinement validation",
+        files_expected_to_change=["app/storage.py"],
+        symbols_expected_to_change=[],
+        ordered_changes=[
+            OrderedChangeStep(
+                step_number=1,
+                target_file="app/storage.py",
+                description="Add path validation",
+                rationale="Prevent path traversal",
+            )
+        ],
+        validation_plan=["Check file path confinement"],
+        estimated_scope=FixScope.FILE,
+    )
+
+    prop_id = uuid4()
+    mock_proposal = PatchProposal(
+        id=prop_id,
+        finding_id=UUID(finding_id),
+        plan_id=test_plan_id,
+        unified_diff="--- a/app/storage.py\n+++ b/app/storage.py\n@@ -1,2 +1,3 @@\n def read_file(p):\n+    validate(p)\n     return open(p)\n",
+        files_modified=["app/storage.py"],
+        explanation="Added path confinement validation",
+        expected_behavior_change="Rejects traversals",
+    )
+
+    mock_wf_result = PatchWorkflowResult(
+        finding_id=UUID(finding_id),
+        proposal=mock_proposal,
+        verification_result=PatchVerificationResult(
+            patch_id=prop_id,
+            finding_id=UUID(finding_id),
+            status=VerificationStatus.PASSED,
+            syntax_valid=True,
+            security_clean=True,
+            contract_aligned=True,
+            target_finding_resolved=True,
+            explanation="All checks passed",
+            checks=[],
+        ),
+        machine_verdict="PASSED",
+        final_verdict="PASSED",
+    )
+
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _fake_open_snapshot(scan_id, db=None):
+        with tempfile.TemporaryDirectory() as fresh_ws:
+            os.makedirs(os.path.join(fresh_ws, "app"), exist_ok=True)
+            with open(os.path.join(fresh_ws, "app", "storage.py"), "w", encoding="utf-8") as f:
+                f.write("def read_file(p):\n    return open(p)\n")
+            yield fresh_ws
+
+    with mock_patch("app.api.routes.findings.get_snapshot_service") as mock_snap, \
+         mock_patch("app.api.routes.findings.get_intelligence_service") as mock_intel, \
+         mock_patch("app.api.routes.findings.ScanIntelligenceRuntime.build") as mock_runtime_build, \
+         mock_patch("app.api.routes.findings.FixPlanningService.create_fix_plan", new_callable=AsyncMock) as mock_create_plan, \
+         mock_patch("app.api.routes.findings.PatchWorkflowCoordinator.execute_patch_workflow", new_callable=AsyncMock) as mock_exec_wf:
+
+        mock_inst = MagicMock()
+        mock_inst.open_snapshot.side_effect = _fake_open_snapshot
+        mock_snap.return_value = mock_inst
+
+        mock_intel_inst = MagicMock()
+        mock_intel_inst.analyze_repository = AsyncMock(return_value=MagicMock(manifest=MagicMock()))
+        mock_intel.return_value = mock_intel_inst
+
+        mock_runtime_inst = MagicMock(
+            context_engine=MagicMock(),
+            repository_graph=MagicMock(),
+            manifest=MagicMock(),
+        )
+        mock_runtime_build.return_value = mock_runtime_inst
+
+        mock_create_plan.return_value = mock_plan
+        mock_exec_wf.return_value = mock_wf_result
+
+        result = await request_patch_generation(finding_id=UUID(finding_id), db=db_session)
+        assert result.machine_verdict == "PASSED"
+
+        # Verify persisted PatchModel in database
+        saved_patch = db_session.query(PatchModel).filter(PatchModel.id == str(prop_id)).first()
+        assert saved_patch is not None
+        assert saved_patch.plan_id == str(test_plan_id)
+        assert saved_patch.fix_plan_snapshot is not None
+        assert saved_patch.fix_plan_snapshot["id"] == str(test_plan_id)
+        assert saved_patch.fix_plan_snapshot["finding_id"] == str(finding_id)
+        assert saved_patch.fix_plan_snapshot["files_expected_to_change"] == ["app/storage.py"]
+
+
+@pytest.mark.asyncio
+async def test_revision_child_persists_exact_revised_fix_plan_snapshot(db_session: Session, base_entities):
+    from app.api.routes.patches import request_patch_revision
+    from app.schemas.patch import PatchReviseRequest
+    from app.patching.schemas import PatchProposal, PatchWorkflowResult, VerificationStatus, PatchVerificationResult
+    from app.planning.schemas import FixPlan, FixScope, OrderedChangeStep
+
+    scan, finding, patch = base_entities
+    patch.status = PatchStatus.NEEDS_REVIEW.value
+    db_session.commit()
+
+    revised_plan_id = uuid4()
+    mock_revised_plan = FixPlan(
+        id=revised_plan_id,
+        finding_id=UUID(finding.id),
+        root_cause="User supplied path is not confined.",
+        objective="Added path confinement validation (Human reviewer feedback: please add chroot checks)",
+        files_expected_to_change=["app/storage.py"],
+        symbols_expected_to_change=[],
+        ordered_changes=[
+            OrderedChangeStep(
+                step_number=1,
+                target_file="app/storage.py",
+                description="Add path validation",
+                rationale="Prevent path traversal",
+            )
+        ],
+        validation_plan=["Check file path confinement"],
+        estimated_scope=FixScope.FILE,
+    )
+
+    child_prop_id = uuid4()
+    mock_child_proposal = PatchProposal(
+        id=child_prop_id,
+        finding_id=UUID(finding.id),
+        plan_id=revised_plan_id,
+        unified_diff="--- a/app/storage.py\n+++ b/app/storage.py\n@@ -1,2 +1,3 @@\n def read_file(p):\n+    validate_chroot(p)\n     return open(p)\n",
+        files_modified=["app/storage.py"],
+        explanation="Added path confinement and chroot validation",
+        expected_behavior_change="Rejects traversals and non-chroot paths",
+    )
+
+    mock_wf_result = PatchWorkflowResult(
+        finding_id=UUID(finding.id),
+        proposal=mock_child_proposal,
+        verification_result=PatchVerificationResult(
+            patch_id=child_prop_id,
+            finding_id=UUID(finding.id),
+            status=VerificationStatus.PASSED,
+            syntax_valid=True,
+            security_clean=True,
+            contract_aligned=True,
+            target_finding_resolved=True,
+            explanation="All checks passed",
+            checks=[],
+        ),
+        machine_verdict="PASSED",
+        final_verdict="PASSED",
+    )
+
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _fake_open_snapshot(scan_id, db=None):
+        with tempfile.TemporaryDirectory() as fresh_ws:
+            os.makedirs(os.path.join(fresh_ws, "app"), exist_ok=True)
+            with open(os.path.join(fresh_ws, "app", "storage.py"), "w", encoding="utf-8") as f:
+                f.write("def read_file(p):\n    return open(p)\n")
+            yield fresh_ws
+
+    with mock_patch("app.ingestion.snapshot.get_snapshot_service") as mock_snap, \
+         mock_patch("app.analysis.service.get_intelligence_service") as mock_intel, \
+         mock_patch("app.context.runtime.ScanIntelligenceRuntime.build") as mock_runtime_build, \
+         mock_patch("app.planning.service.FixPlanningService.create_fix_plan", new_callable=AsyncMock) as mock_create_plan, \
+         mock_patch("app.patching.workflow.PatchWorkflowCoordinator.execute_patch_workflow", new_callable=AsyncMock) as mock_exec_wf:
+
+        mock_inst = MagicMock()
+        mock_inst.open_snapshot.side_effect = _fake_open_snapshot
+        mock_snap.return_value = mock_inst
+
+        mock_intel_inst = MagicMock()
+        mock_intel_inst.analyze_repository = AsyncMock(return_value=MagicMock(manifest=MagicMock()))
+        mock_intel.return_value = mock_intel_inst
+
+        mock_runtime_inst = MagicMock(
+            context_engine=MagicMock(),
+            repository_graph=MagicMock(),
+            manifest=MagicMock(),
+        )
+        mock_runtime_build.return_value = mock_runtime_inst
+
+        mock_create_plan.return_value = mock_revised_plan
+        mock_exec_wf.return_value = mock_wf_result
+
+        req = PatchReviseRequest(user_feedback="please add chroot checks")
+        res = await request_patch_revision(patch_id=patch.id, payload=req, db=db_session)
+
+        assert res.id == str(child_prop_id)
+        assert res.revision_number == 1
+
+        child_patch = db_session.query(PatchModel).filter(PatchModel.id == str(child_prop_id)).first()
+        assert child_patch is not None
+        assert child_patch.plan_id == str(revised_plan_id)
+        assert child_patch.fix_plan_snapshot is not None
+        assert child_patch.fix_plan_snapshot["id"] == str(revised_plan_id)
+        assert child_patch.fix_plan_snapshot["finding_id"] == str(finding.id)
+        assert "Human reviewer feedback: please add chroot checks" in child_patch.fix_plan_snapshot["objective"]
+
+
+@pytest.mark.asyncio
+async def test_missing_fix_plan_snapshot_blocks_delivery_with_typed_error(db_session: Session, base_entities):
+    scan, finding, patch = base_entities
+    patch.fix_plan_snapshot = None
+    db_session.commit()
+
+    mock_provider = MockDeliveryProvider()
+    service = DeliveryService(provider=mock_provider)
+
+    res = await service.deliver_patch(db=db_session, patch_id=patch.id, payload=DeliveryRequest())
+    assert res.status == DeliveryStatus.FAILED.value
+    assert res.failure_code == "FIX_PLAN_PROVENANCE_MISSING"
+    assert "missing canonical fix plan provenance" in res.failure_message
+    assert len(mock_provider.prs_created) == 0
+
+
+@pytest.mark.asyncio
+async def test_malformed_fix_plan_snapshot_blocks_delivery_with_typed_error(db_session: Session, base_entities):
+    scan, finding, patch = base_entities
+    patch.fix_plan_snapshot = {"not_a_valid_field": 123}
+    db_session.commit()
+
+    mock_provider = MockDeliveryProvider()
+    service = DeliveryService(provider=mock_provider)
+
+    res = await service.deliver_patch(db=db_session, patch_id=patch.id, payload=DeliveryRequest())
+    assert res.status == DeliveryStatus.FAILED.value
+    assert res.failure_code == "FIX_PLAN_INVALID"
+    assert len(mock_provider.prs_created) == 0
+
+
+@pytest.mark.asyncio
+async def test_plan_id_or_finding_id_mismatch_blocks_delivery(db_session: Session, base_entities):
+    scan, finding, patch = base_entities
+    # Tamper with plan_id
+    patch.plan_id = str(uuid4())
+    db_session.commit()
+
+    mock_provider = MockDeliveryProvider()
+    service = DeliveryService(provider=mock_provider)
+
+    res = await service.deliver_patch(db=db_session, patch_id=patch.id, payload=DeliveryRequest())
+    assert res.status == DeliveryStatus.FAILED.value
+    assert res.failure_code == "FIX_PLAN_PROVENANCE_MISMATCH"
+    assert len(mock_provider.prs_created) == 0
+
+
+@pytest.mark.asyncio
+async def test_tampered_patch_files_modified_against_fix_plan_blocks_delivery(db_session: Session, base_entities):
+    scan, finding, patch = base_entities
+    # Tamper with files_modified to touch an unauthorized file
+    patch.files_modified = ["app/storage.py", "app/unauthorized.py"]
+    db_session.commit()
+
+    mock_provider = MockDeliveryProvider()
+    service = DeliveryService(provider=mock_provider)
+
+    res = await service.deliver_patch(db=db_session, patch_id=patch.id, payload=DeliveryRequest())
+    assert res.status == DeliveryStatus.FAILED.value
+    assert res.failure_code == "FILE_SET_MISMATCH"
+    assert len(mock_provider.prs_created) == 0
+
+
+# ============================================================
+# FIX 2: Full Canonical Finding Provenance
+# ============================================================
+
+def test_finding_provenance_preserved_in_domain_mapping(db_session: Session):
+    from app.services.domain_mapping import finding_model_to_schema
+
+    scan_id = str(uuid4())
+    finding_id = str(uuid4())
+    evidence_id = str(uuid4())
+
+    fm = FindingModel(
+        id=finding_id,
+        scan_id=scan_id,
+        title="SQL Injection in auth handler",
+        description="Raw SQL query constructed with string formatting",
+        severity="CRITICAL",
+        status="OPEN",
+        rule_id="python.lang.security.audit.sqli",
+        category="Security",
+        mitigation_guidance="Use parameterized queries",
+        verification_verdict="CONFIRMED",
+        verification_reason="Static analysis confirms user input reaches execute()",
+        source_tool="semgrep",
+        detector_id="python.lang.security.audit.sqli.rule-42",
+        detector_kind="static_scanner",
+    )
+    db_session.add(fm)
+
+    em = EvidenceModel(
+        id=evidence_id,
+        finding_id=finding_id,
+        file_path="app/auth.py",
+        start_line=25,
+        end_line=30,
+        code_snippet='db.execute(f"SELECT * FROM users WHERE id = {user_id}")',
+        context_notes="User parameter unescaped in auth query",
+    )
+    db_session.add(em)
+    db_session.commit()
+
+    # Query with relationships loaded
+    loaded_fm = db_session.query(FindingModel).filter(FindingModel.id == finding_id).first()
+    assert loaded_fm is not None
+
+    schema = finding_model_to_schema(loaded_fm)
+    assert str(schema.id) == finding_id
+    assert str(schema.scan_id) == scan_id
+    assert schema.title == "SQL Injection in auth handler"
+    assert schema.severity.value == "CRITICAL"
+    assert schema.status.value == "OPEN"
+    assert schema.rule_id == "python.lang.security.audit.sqli"
+    assert schema.category == "Security"
+    assert schema.mitigation_guidance == "Use parameterized queries"
+    assert schema.verification_verdict.value == "CONFIRMED"
+    assert schema.source_tool == "semgrep"
+    assert schema.detector_id == "python.lang.security.audit.sqli.rule-42"
+    assert schema.detector_kind == "static_scanner"
+    assert len(schema.evidences) == 1
+    assert schema.evidences[0].file_path == "app/auth.py"
+    assert schema.evidences[0].start_line == 25
+    assert schema.evidences[0].end_line == 30
+    assert "db.execute" in schema.evidences[0].code_snippet
+    assert schema.evidences[0].context_notes == "User parameter unescaped in auth query"
+
+
+def test_route_contract_and_secret_detector_provenance_preserved(db_session: Session):
+    from app.services.domain_mapping import finding_model_to_schema
+
+    fm1 = FindingModel(
+        id=str(uuid4()),
+        scan_id=str(uuid4()),
+        title="Route parameter mismatch",
+        description="Route path parameter does not match handler signature",
+        severity="MEDIUM",
+        status="OPEN",
+        rule_id="route.contract.mismatch",
+        category="Architecture",
+        verification_verdict="CONFIRMED",
+        source_tool="route_contract",
+        detector_id="fastapi.route.param_check",
+        detector_kind="contract_matcher",
+    )
+    fm2 = FindingModel(
+        id=str(uuid4()),
+        scan_id=str(uuid4()),
+        title="Hardcoded API key detected",
+        description="High entropy string matched known API key format",
+        severity="CRITICAL",
+        status="OPEN",
+        rule_id="secret.api_key",
+        category="Security",
+        verification_verdict="CONFIRMED",
+        source_tool="repolens-secret",
+        detector_id="entropy.high_confidence_token",
+        detector_kind="deterministic_secret",
+    )
+    db_session.add_all([fm1, fm2])
+    db_session.commit()
+
+    s1 = finding_model_to_schema(fm1)
+    assert s1.source_tool == "route_contract"
+    assert s1.detector_kind == "contract_matcher"
+
+    s2 = finding_model_to_schema(fm2)
+    assert s2.source_tool == "repolens-secret"
+    assert s2.detector_kind == "deterministic_secret"
+
+
+# ============================================================
+# FIX 3: Tree and Parent Reconciliation for Existing Delivery Branches
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_existing_branch_matching_head_sha_wrong_tree_blocked(db_session: Session, base_entities):
+    scan, finding, patch = base_entities
+    branch_name = sanitize_branch_name(finding.id, patch.id)
+    head_sha = "2222222222222222222222222222222222222222"
+
+    mock_provider = MockDeliveryProvider()
+    mock_provider.branches[branch_name] = head_sha
+    # Commit with WRONG tree_sha
+    mock_provider.commits[head_sha] = GitCommitInfo(
+        sha=head_sha,
+        tree_sha="wrong_tree_sha_0000000000000000000000",
+        parents=[scan.commit_hash],
+    )
+
+    # Pre-create delivery with head_sha matching the branch
+    delivery = DeliveryModel(
+        scan_id=scan.id,
+        finding_id=finding.id,
+        patch_id=patch.id,
+        provider="github",
+        repository_url=scan.repository_url,
+        repository_owner="example-org",
+        repository_name="secure-app",
+        base_branch=scan.branch,
+        scanned_base_sha=scan.commit_hash,
+        head_branch=branch_name,
+        head_sha=head_sha,
+        status=DeliveryStatus.CREATING_COMMIT.value,
+        idempotency_key=compute_idempotency_key("example-org", "secure-app", patch.id, scan.branch, scan.commit_hash),
+        attempt_count=1,
+    )
+    db_session.add(delivery)
+    db_session.commit()
+
+    from contextlib import contextmanager
+    @contextmanager
+    def _fake_snapshot(scan_id, db=None):
+        with tempfile.TemporaryDirectory() as fresh_ws:
+            os.makedirs(os.path.join(fresh_ws, "app"), exist_ok=True)
+            with open(os.path.join(fresh_ws, "app", "storage.py"), "w", encoding="utf-8") as f:
+                f.write("def read_file(p):\n    return open(p)\n")
+            yield fresh_ws
+
+    with mock_patch("app.delivery.service.get_snapshot_service") as mock_snap, \
+         mock_patch("app.delivery.validator.get_snapshot_service") as mock_val_snap:
+        mock_inst = MagicMock()
+        mock_inst.snapshot_context.side_effect = _fake_snapshot
+        mock_snap.return_value = mock_inst
+        mock_val_snap.return_value = mock_inst
+
+        service = DeliveryService(provider=mock_provider)
+        res = await service.deliver_patch(db=db_session, patch_id=patch.id, payload=DeliveryRequest())
+
+        assert res.status == DeliveryStatus.FAILED.value
+        assert res.failure_code == "HEAD_BRANCH_COLLISION"
+        assert len(mock_provider.prs_created) == 0
+
+
+@pytest.mark.asyncio
+async def test_existing_branch_matching_head_sha_two_parents_merge_commit_blocked(db_session: Session, base_entities):
+    scan, finding, patch = base_entities
+    branch_name = sanitize_branch_name(finding.id, patch.id)
+    head_sha = "2222222222222222222222222222222222222222"
+
+    mock_provider = MockDeliveryProvider()
+    mock_provider.branches[branch_name] = head_sha
+    # Commit with TWO parents (merge commit)
+    mock_provider.commits[head_sha] = GitCommitInfo(
+        sha=head_sha,
+        tree_sha="tree_1",
+        parents=[scan.commit_hash, "9999999999999999999999999999999999999999"],
+    )
+
+    delivery = DeliveryModel(
+        scan_id=scan.id,
+        finding_id=finding.id,
+        patch_id=patch.id,
+        provider="github",
+        repository_url=scan.repository_url,
+        repository_owner="example-org",
+        repository_name="secure-app",
+        base_branch=scan.branch,
+        scanned_base_sha=scan.commit_hash,
+        head_branch=branch_name,
+        head_sha=head_sha,
+        status=DeliveryStatus.CREATING_COMMIT.value,
+        idempotency_key=compute_idempotency_key("example-org", "secure-app", patch.id, scan.branch, scan.commit_hash),
+        attempt_count=1,
+    )
+    db_session.add(delivery)
+    db_session.commit()
+
+    from contextlib import contextmanager
+    @contextmanager
+    def _fake_snapshot(scan_id, db=None):
+        with tempfile.TemporaryDirectory() as fresh_ws:
+            os.makedirs(os.path.join(fresh_ws, "app"), exist_ok=True)
+            with open(os.path.join(fresh_ws, "app", "storage.py"), "w", encoding="utf-8") as f:
+                f.write("def read_file(p):\n    return open(p)\n")
+            yield fresh_ws
+
+    with mock_patch("app.delivery.service.get_snapshot_service") as mock_snap, \
+         mock_patch("app.delivery.validator.get_snapshot_service") as mock_val_snap:
+        mock_inst = MagicMock()
+        mock_inst.snapshot_context.side_effect = _fake_snapshot
+        mock_snap.return_value = mock_inst
+        mock_val_snap.return_value = mock_inst
+
+        service = DeliveryService(provider=mock_provider)
+        res = await service.deliver_patch(db=db_session, patch_id=patch.id, payload=DeliveryRequest())
+
+        assert res.status == DeliveryStatus.FAILED.value
+        assert res.failure_code == "HEAD_BRANCH_COLLISION"
+        assert len(mock_provider.prs_created) == 0
+
+
+@pytest.mark.asyncio
+async def test_existing_branch_missing_head_sha_merge_commit_blocked(db_session: Session, base_entities):
+    scan, finding, patch = base_entities
+    branch_name = sanitize_branch_name(finding.id, patch.id)
+    head_sha = "2222222222222222222222222222222222222222"
+
+    mock_provider = MockDeliveryProvider()
+    mock_provider.branches[branch_name] = head_sha
+    # Merge commit with scanned_sha as one of multiple parents
+    mock_provider.commits[head_sha] = GitCommitInfo(
+        sha=head_sha,
+        tree_sha="tree_1",
+        parents=[scan.commit_hash, "8888888888888888888888888888888888888888"],
+    )
+
+    from contextlib import contextmanager
+    @contextmanager
+    def _fake_snapshot(scan_id, db=None):
+        with tempfile.TemporaryDirectory() as fresh_ws:
+            os.makedirs(os.path.join(fresh_ws, "app"), exist_ok=True)
+            with open(os.path.join(fresh_ws, "app", "storage.py"), "w", encoding="utf-8") as f:
+                f.write("def read_file(p):\n    return open(p)\n")
+            yield fresh_ws
+
+    with mock_patch("app.delivery.service.get_snapshot_service") as mock_snap, \
+         mock_patch("app.delivery.validator.get_snapshot_service") as mock_val_snap:
+        mock_inst = MagicMock()
+        mock_inst.snapshot_context.side_effect = _fake_snapshot
+        mock_snap.return_value = mock_inst
+        mock_val_snap.return_value = mock_inst
+
+        service = DeliveryService(provider=mock_provider)
+        res = await service.deliver_patch(db=db_session, patch_id=patch.id, payload=DeliveryRequest())
+
+        assert res.status == DeliveryStatus.FAILED.value
+        assert res.failure_code == "HEAD_BRANCH_COLLISION"
+        assert len(mock_provider.prs_created) == 0
+
+
+# ============================================================
+# FIX 4: Remote PR Success + Local DB Failure Recovery
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_phase5_remote_pr_created_local_db_failure_recovery(db_session: Session, base_entities):
+    scan, finding, patch = base_entities
+    mock_provider = MockDeliveryProvider()
+
+    from contextlib import contextmanager
+    @contextmanager
+    def _fake_snapshot(scan_id, db=None):
+        with tempfile.TemporaryDirectory() as fresh_ws:
+            os.makedirs(os.path.join(fresh_ws, "app"), exist_ok=True)
+            with open(os.path.join(fresh_ws, "app", "storage.py"), "w", encoding="utf-8") as f:
+                f.write("def read_file(p):\n    return open(p)\n")
+            yield fresh_ws
+
+    # Wrap mock_provider.create_pull_request to record PR in prs dict so reconciliation finds it
+    orig_create_pr = mock_provider.create_pull_request
+    async def _recording_create_pr(owner, repo, title, body, head, base):
+        pr = await orig_create_pr(owner, repo, title, body, head, base)
+        mock_provider.prs[f"{head}:{base}"] = pr
+        return pr
+    mock_provider.create_pull_request = _recording_create_pr
+
+    with mock_patch("app.delivery.service.get_snapshot_service") as mock_snap, \
+         mock_patch("app.delivery.validator.get_snapshot_service") as mock_val_snap:
+        mock_inst = MagicMock()
+        mock_inst.snapshot_context.side_effect = _fake_snapshot
+        mock_snap.return_value = mock_inst
+        mock_val_snap.return_value = mock_inst
+
+        service = DeliveryService(provider=mock_provider)
+
+        # Intercept db.commit to inject failure specifically during the PR_CREATED transition
+        orig_commit = db_session.commit
+        fail_injected = False
+
+        def _flaky_commit():
+            nonlocal fail_injected
+            # Check if delivery status in session is being set to PR_CREATED
+            for obj in db_session.dirty:
+                if isinstance(obj, DeliveryModel) and obj.status == DeliveryStatus.PR_CREATED.value:
+                    if not fail_injected:
+                        fail_injected = True
+                        raise Exception("Simulated DB connection failure during PR_CREATED commit")
+            return orig_commit()
+
+        db_session.commit = _flaky_commit
+
+        # Attempt 1: Remote PR succeeds, but final local commit fails and rolls back safely!
+        res1 = await service.deliver_patch(db=db_session, patch_id=patch.id, payload=DeliveryRequest())
+        assert res1.status == DeliveryStatus.FAILED.value
+        assert len(mock_provider.prs_created) == 1
+
+        # Restore normal commit
+        db_session.commit = orig_commit
+
+        # Close session and open a fresh session to simulate restart/retry
+        from tests.conftest import TestingSessionLocal
+        fresh_session = TestingSessionLocal(bind=db_session.get_bind())
+
+        try:
+            # Attempt 2 (Retry on fresh session): Reconciles existing PR and existing branch!
+            res2 = await service.deliver_patch(db=fresh_session, patch_id=patch.id, payload=DeliveryRequest())
+            assert res2.status == DeliveryStatus.PR_CREATED.value
+            assert res2.pr_number == 1
+            assert res2.pr_url == "https://github.com/example-org/secure-app/pull/1"
+            assert len(mock_provider.prs_created) == 1  # Still exactly 1 PR created!
+
+            # Check event exists in fresh session
+            events = WorkflowEventService.list_for_delivery(db=fresh_session, delivery_id=res2.id)
+            event_types = [e.event_type for e in events]
+            assert "DELIVERY_PR_CREATED" in event_types
+        finally:
+            fresh_session.close()
+
 
 
 

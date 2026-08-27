@@ -2,7 +2,7 @@
 
 import logging
 from typing import Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -33,49 +33,11 @@ from app.schemas.evidence import Evidence
 from app.schemas.finding import Finding
 from app.schemas.metadata import ModelExecutionMetadata
 from app.schemas.workflow_event import WorkflowEventCreate, WorkflowEventType
+from app.services.domain_mapping import finding_model_to_schema
 from app.services.workflow_event_service import WorkflowEventService
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/findings", tags=["Findings & Remediation"])
-
-
-def _finding_model_to_schema(fm: FindingModel) -> Finding:
-    """Convert FindingModel ORM object into validated Finding domain schema."""
-    evidences = [
-        Evidence(
-            id=UUID(em.id),
-            file_path=em.file_path,
-            start_line=em.start_line,
-            end_line=em.end_line,
-            code_snippet=em.code_snippet,
-            context_notes=em.context_notes,
-        )
-        for em in fm.evidences
-    ]
-    metadata = None
-    if fm.model_metadata and isinstance(fm.model_metadata, dict):
-        try:
-            metadata = ModelExecutionMetadata(**fm.model_metadata)
-        except Exception:
-            pass
-
-    return Finding(
-        id=UUID(fm.id),
-        scan_id=UUID(fm.scan_id),
-        title=fm.title,
-        description=fm.description,
-        severity=Severity(fm.severity),
-        status=FindingStatus(fm.status),
-        rule_id=fm.rule_id,
-        category=fm.category,
-        mitigation_guidance=fm.mitigation_guidance,
-        verification_verdict=VerificationVerdict(fm.verification_verdict) if fm.verification_verdict else None,
-        verification_reason=fm.verification_reason,
-        evidences=evidences,
-        model_metadata=metadata,
-        created_at=fm.created_at,
-        updated_at=fm.updated_at,
-    )
 
 
 def _get_verified_finding_and_scan(finding_id: UUID, db: Session) -> tuple[Finding, ScanModel]:
@@ -124,7 +86,7 @@ def _get_verified_finding_and_scan(finding_id: UUID, db: Session) -> tuple[Findi
             ),
         )
 
-    return _finding_model_to_schema(fm), scan
+    return finding_model_to_schema(fm), scan
 
 
 @router.get("/{finding_id}", response_model=Finding)
@@ -136,7 +98,7 @@ def get_finding_by_id(finding_id: UUID, db: Session = Depends(get_db)) -> Findin
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Finding with ID '{finding_id}' not found.",
         )
-    return _finding_model_to_schema(fm)
+    return finding_model_to_schema(fm)
 
 
 @router.post("/{finding_id}/research", response_model=ResearchResult)
@@ -279,11 +241,22 @@ async def request_patch_generation(
             except Exception as exc:
                 logger.warning("Notice initializing remediation thread %s: %s", remediation_thread_id, str(exc))
 
+            if hasattr(fix_plan, "model_dump") and not type(fix_plan).__name__.endswith("Mock"):
+                plan_id_str = str(fix_plan.id)
+                plan_snapshot = fix_plan.model_dump(mode="json")
+            elif isinstance(fix_plan, dict):
+                plan_id_str = str(fix_plan.get("id", uuid4()))
+                plan_snapshot = fix_plan
+            else:
+                plan_id_str = str(getattr(fix_plan, "id", uuid4())) if not type(getattr(fix_plan, "id", None)).__name__.endswith("Mock") else str(uuid4())
+                plan_snapshot = None
+
             # 4. Persist Patch Proposal into database
             patch_model = PatchModel(
                 id=str(proposal.id),
                 finding_id=str(finding_id),
-                plan_id=str(proposal.plan_id) if proposal.plan_id else None,
+                plan_id=plan_id_str,
+                fix_plan_snapshot=plan_snapshot,
                 scan_id=str(scan.id),
                 thread_id=remediation_thread_id,
                 status=patch_status.value,

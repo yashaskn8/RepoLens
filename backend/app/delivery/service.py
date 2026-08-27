@@ -427,6 +427,14 @@ class DeliveryService:
                         safe_code="HEAD_BRANCH_SHA_MISMATCH",
                     )
 
+                created_commit_info = await self.provider.get_commit(owner=owner, repo=repo, sha=head_sha)
+                if created_commit_info.tree_sha != tree_sha or created_commit_info.parents != [scanned_sha]:
+                    raise DeliveryProviderError(
+                        f"Created commit {head_sha} failed verification: expected tree {tree_sha} and parent [{scanned_sha}], observed tree {created_commit_info.tree_sha} and parents {created_commit_info.parents}",
+                        status_code=409,
+                        safe_code="HEAD_BRANCH_COLLISION",
+                    )
+
             else:
                 # Dedicated branch ALREADY EXISTS
                 if delivery.head_sha:
@@ -437,11 +445,18 @@ class DeliveryService:
                             status_code=409,
                             safe_code="HEAD_BRANCH_COLLISION",
                         )
+                    branch_commit = await self.provider.get_commit(owner=owner, repo=repo, sha=existing_branch_sha)
+                    if branch_commit.sha != existing_branch_sha or branch_commit.tree_sha != tree_sha or branch_commit.parents != [scanned_sha]:
+                        raise DeliveryProviderError(
+                            f"Dedicated branch '{delivery.head_branch}' commit {existing_branch_sha} does not match expected parent [{scanned_sha}] and tree {tree_sha}",
+                            status_code=409,
+                            safe_code="HEAD_BRANCH_COLLISION",
+                        )
                     head_sha = delivery.head_sha
                 else:
                     # CASE C: Head branch exists but local head_sha is missing
                     branch_commit = await self.provider.get_commit(owner=owner, repo=repo, sha=existing_branch_sha)
-                    matches_parent = (scanned_sha in branch_commit.parents or branch_commit.parents == [scanned_sha])
+                    matches_parent = (branch_commit.parents == [scanned_sha])
                     matches_tree = (branch_commit.tree_sha == tree_sha)
 
                     if matches_parent and matches_tree:
@@ -452,7 +467,7 @@ class DeliveryService:
                         logger.info(f"Reconciled and adopted existing verified branch commit {head_sha} for branch {delivery.head_branch}")
                     else:
                         raise DeliveryProviderError(
-                            f"Existing branch '{delivery.head_branch}' commit {existing_branch_sha} does not match expected parent {scanned_sha} and tree {tree_sha}",
+                            f"Existing branch '{delivery.head_branch}' commit {existing_branch_sha} does not match expected parent [{scanned_sha}] and tree {tree_sha}",
                             status_code=409,
                             safe_code="HEAD_BRANCH_COLLISION",
                         )
@@ -561,28 +576,33 @@ class DeliveryService:
 
         except Exception as exc:
             logger.error(f"Delivery failed during execution for patch {patch.id}: {exc}", exc_info=True)
-            delivery.status = DeliveryStatus.FAILED.value
-            delivery.failure_code = getattr(exc, "safe_code", "DELIVERY_FAILED")
-            delivery.failure_message = redact_secrets(str(exc))[:512]
-            delivery.completed_at = _utc_now()
-            db.commit()
-            db.refresh(delivery)
+            try:
+                delivery.status = DeliveryStatus.FAILED.value
+                delivery.failure_code = getattr(exc, "safe_code", "DELIVERY_FAILED")
+                delivery.failure_message = redact_secrets(str(exc))[:512]
+                delivery.completed_at = _utc_now()
+                db.commit()
+                db.refresh(delivery)
 
-            WorkflowEventService.emit(
-                db=db,
-                event=WorkflowEventCreate(
-                    event_type=WorkflowEventType.DELIVERY_FAILED,
-                    scan_id=UUID(str(scan.id)),
-                    finding_id=UUID(str(finding.id)),
-                    patch_id=UUID(str(patch.id)),
-                    delivery_id=UUID(str(delivery.id)),
-                    stage="delivery",
-                    provider="github",
-                    message=f"Delivery execution failed: {delivery.failure_message}",
-                    metadata_payload={
-                        "failure_code": delivery.failure_code,
-                    },
-                ),
-                critical=False,
-            )
+                WorkflowEventService.emit(
+                    db=db,
+                    event=WorkflowEventCreate(
+                        event_type=WorkflowEventType.DELIVERY_FAILED,
+                        scan_id=UUID(str(scan.id)),
+                        finding_id=UUID(str(finding.id)),
+                        patch_id=UUID(str(patch.id)),
+                        delivery_id=UUID(str(delivery.id)),
+                        stage="delivery",
+                        provider="github",
+                        message=f"Delivery execution failed: {delivery.failure_message}",
+                        metadata_payload={
+                            "failure_code": delivery.failure_code,
+                        },
+                    ),
+                    critical=False,
+                )
+            except Exception as save_err:
+                logger.warning(f"Could not persist failure status: {save_err}")
+                db.rollback()
+
             return delivery
