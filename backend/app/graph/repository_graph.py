@@ -109,6 +109,23 @@ class RepositoryGraph:
             metadata=data.get("metadata", {}),
         )
 
+    def get_nodes(self) -> List[GraphNode]:
+        """Retrieve all nodes in the graph."""
+        nodes = []
+        for n_id, data in self._graph.nodes(data=True):
+            nodes.append(
+                GraphNode(
+                    id=n_id,
+                    kind=NodeKind(data["kind"]),
+                    label=data["label"],
+                    file_path=data.get("file_path"),
+                    start_line=data.get("start_line"),
+                    end_line=data.get("end_line"),
+                    metadata=data.get("metadata", {}),
+                )
+            )
+        return nodes
+
     def get_nodes_by_kind(self, kind: NodeKind) -> List[GraphNode]:
         """Retrieve all nodes matching a specific kind."""
         nodes = []
@@ -126,6 +143,7 @@ class RepositoryGraph:
                     )
                 )
         return nodes
+
 
     def get_edges(self, kind: Optional[EdgeKind] = None) -> List[GraphEdge]:
         """Retrieve all edges, optionally filtered by kind."""

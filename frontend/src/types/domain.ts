@@ -820,6 +820,53 @@ export interface BlastRadiusReport {
   summary_by_severity: Record<string, number>;
 }
 
+export type ChangeReviewVerdict = 'CONFIRMED' | 'SUPPORTED_INFERENCE' | 'REJECTED';
+
+export type ChangeReviewRiskType =
+  | 'API_CONTRACT_BREAK'
+  | 'REGRESSION_RISK'
+  | 'SECURITY_REGRESSION'
+  | 'BEHAVIORAL_CHANGE'
+  | 'RESOURCE_LEAK'
+  | 'UNHANDLED_EDGE_CASE'
+  | 'PERFORMANCE_DEGRADATION'
+  | 'CONFIG_MISMATCH'
+  | 'DEPENDENCY_INCOMPATIBILITY'
+  | 'SCHEMA_INCOMPATIBILITY';
+
+export interface ChangeReviewFinding {
+  id: string;
+  title: string;
+  risk_type: string;
+  severity: Severity;
+  reasoning_summary: string;
+  evidence_refs: string[];
+  affected_files: string[];
+  affected_symbols: string[];
+  confidence: number;
+  assumptions: string[];
+  verdict: ChangeReviewVerdict;
+  verification_reason?: string | null;
+  created_at: string;
+}
+
+export interface ChangeReviewReport {
+  analysis_id: string;
+  findings: ChangeReviewFinding[];
+  rejected_findings: Record<string, unknown>[];
+  summary: string;
+  total_findings: number;
+  facts_count: number;
+  inferences_count: number;
+  assumptions_count: number;
+  confirmed_count: number;
+  supported_inference_count: number;
+  rejected_count: number;
+  overall_risk_level: ChangeRiskLevel;
+  model_metadata?: ModelExecutionMetadata | null;
+}
+
+
 
 
 

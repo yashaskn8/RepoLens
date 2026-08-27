@@ -5,7 +5,7 @@ from enum import Enum
 import re
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
-from uuid import UUID
+from uuid import UUID, uuid4
 
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -17,6 +17,8 @@ from app.schemas.enums import (
     ImpactVerificationStatus,
     Severity,
 )
+from app.schemas.metadata import ModelExecutionMetadata
+
 
 _GITHUB_URL_REGEX = re.compile(
     r"^https://github\.com/([a-zA-Z0-9_\-\.]+)/([a-zA-Z0-9_\-\.]+)$"
@@ -345,5 +347,74 @@ class BlastRadiusReport(BaseModel):
     overall_risk_level: ChangeRiskLevel = Field(default=ChangeRiskLevel.LOW, description="Aggregated risk level rating")
     summary_by_type: Dict[str, int] = Field(default_factory=dict, description="Count of impacts by ChangeImpactType")
     summary_by_severity: Dict[str, int] = Field(default_factory=dict, description="Count of impacts by Severity")
+
+
+# =========================================================================
+# Grounded AI Change Review Contracts (Phase 6E)
+# =========================================================================
+
+
+class ChangeReviewVerdict(str, Enum):
+    """Verification verdict for AI change review findings."""
+
+    CONFIRMED = "CONFIRMED"
+    SUPPORTED_INFERENCE = "SUPPORTED_INFERENCE"
+    REJECTED = "REJECTED"
+
+
+class ChangeReviewRiskType(str, Enum):
+    """Taxonomy of risk types identified by AI change reviewer."""
+
+    API_CONTRACT_BREAK = "API_CONTRACT_BREAK"
+    REGRESSION_RISK = "REGRESSION_RISK"
+    SECURITY_REGRESSION = "SECURITY_REGRESSION"
+    BEHAVIORAL_CHANGE = "BEHAVIORAL_CHANGE"
+    RESOURCE_LEAK = "RESOURCE_LEAK"
+    UNHANDLED_EDGE_CASE = "UNHANDLED_EDGE_CASE"
+    PERFORMANCE_DEGRADATION = "PERFORMANCE_DEGRADATION"
+    CONFIG_MISMATCH = "CONFIG_MISMATCH"
+    DEPENDENCY_INCOMPATIBILITY = "DEPENDENCY_INCOMPATIBILITY"
+    SCHEMA_INCOMPATIBILITY = "SCHEMA_INCOMPATIBILITY"
+
+
+class ChangeReviewFinding(BaseModel):
+    """A structured AI change review finding grounded in deterministic diff and impact facts."""
+
+    id: UUID = Field(default_factory=uuid4, description="Unique finding identifier")
+    title: str = Field(..., max_length=256, description="Concise title summarizing the identified change risk")
+    risk_type: str = Field(..., description="Categorized risk type (e.g. API_CONTRACT_BREAK, REGRESSION_RISK)")
+    severity: Severity = Field(default=Severity.MEDIUM, description="Assessed finding severity")
+    reasoning_summary: str = Field(..., description="Step-by-step reasoning connecting facts to the identified risk")
+    evidence_refs: List[str] = Field(default_factory=list, description="Explicit deterministic evidence identifiers or references (diff facts, symbols, files, lines)")
+    affected_files: List[str] = Field(default_factory=list, description="List of affected repository relative file paths")
+    affected_symbols: List[str] = Field(default_factory=list, description="List of affected symbol identifiers or function/class names")
+    confidence: float = Field(default=0.8, ge=0.0, le=1.0, description="Reviewer confidence score (0.0 to 1.0)")
+    assumptions: List[str] = Field(default_factory=list, description="Explicitly disclosed assumptions or preconditions")
+    verdict: ChangeReviewVerdict = Field(default=ChangeReviewVerdict.SUPPORTED_INFERENCE, description="Verification verdict: CONFIRMED, SUPPORTED_INFERENCE, or REJECTED")
+    verification_reason: Optional[str] = Field(default=None, description="Deterministic verifier justification")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Timestamp")
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ChangeReviewReport(BaseModel):
+    """Complete structured AI change review report produced by ChangeReviewAgent and verified by ChangeReviewVerifier."""
+
+    analysis_id: UUID = Field(..., description="Parent ChangeAnalysis identifier")
+    findings: List[ChangeReviewFinding] = Field(default_factory=list, description="Verified AI review findings")
+    rejected_findings: List[Dict[str, Any]] = Field(default_factory=list, description="Findings rejected by deterministic verifier with rejection reasons")
+    summary: str = Field(default="", description="Executive summary of the change review")
+    total_findings: int = Field(default=0, description="Total verified findings count")
+    facts_count: int = Field(default=0, description="Count of directly verified facts")
+    inferences_count: int = Field(default=0, description="Count of supported inferences")
+    assumptions_count: int = Field(default=0, description="Count of disclosed assumptions")
+    confirmed_count: int = Field(default=0, description="Count of CONFIRMED findings")
+    supported_inference_count: int = Field(default=0, description="Count of SUPPORTED_INFERENCE findings")
+    rejected_count: int = Field(default=0, description="Count of REJECTED findings")
+    overall_risk_level: ChangeRiskLevel = Field(default=ChangeRiskLevel.LOW, description="Aggregated risk assessment")
+    model_metadata: Optional[ModelExecutionMetadata] = Field(default=None, description="LLM execution telemetry and token usage")
+
+    model_config = ConfigDict(from_attributes=True)
+
 
 

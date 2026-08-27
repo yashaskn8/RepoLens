@@ -32,6 +32,10 @@ from app.schemas.change_analysis import (
     ChangeAnalysisSummary,
     ChangeImpact,
     ChangeImpactEvidence,
+    ChangeReviewFinding,
+    ChangeReviewReport,
+    ChangeReviewRiskType,
+    ChangeReviewVerdict,
     ConfigDelta,
     DependencyDelta,
     FileChangeType,
@@ -42,6 +46,7 @@ from app.schemas.change_analysis import (
     SymbolChangeType,
     SymbolDiffFact,
 )
+
 
 
 
@@ -107,6 +112,10 @@ __all__ = [
     "ChangeImpact",
     "ChangeImpactEvidence",
     "ChangeAnalysisResponse",
+    "ChangeReviewFinding",
+    "ChangeReviewReport",
+    "ChangeReviewRiskType",
+    "ChangeReviewVerdict",
     "FileChangeType",
     "SymbolChangeType",
 
