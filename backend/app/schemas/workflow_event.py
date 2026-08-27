@@ -45,6 +45,13 @@ class WorkflowEventType(str, Enum):
     DELIVERY_PR_CREATED = "DELIVERY_PR_CREATED"
     DELIVERY_FAILED = "DELIVERY_FAILED"
 
+    CHANGE_ANALYSIS_REQUESTED = "CHANGE_ANALYSIS_REQUESTED"
+    CHANGE_REVISIONS_ACQUIRED = "CHANGE_REVISIONS_ACQUIRED"
+    CHANGE_DIFF_COMPLETED = "CHANGE_DIFF_COMPLETED"
+    CHANGE_IMPACT_ANALYZED = "CHANGE_IMPACT_ANALYZED"
+    CHANGE_ANALYSIS_COMPLETED = "CHANGE_ANALYSIS_COMPLETED"
+    CHANGE_ANALYSIS_FAILED = "CHANGE_ANALYSIS_FAILED"
+
     WORKFLOW_ERROR = "WORKFLOW_ERROR"
 
 
@@ -52,7 +59,8 @@ class WorkflowEventBase(BaseModel):
     """Base schema for workflow event payload."""
 
     event_type: WorkflowEventType = Field(..., description="Canonical event type from WorkflowEventType taxonomy")
-    scan_id: UUID = Field(..., description="Associated scan ID")
+    scan_id: Optional[UUID] = Field(default=None, description="Associated scan ID if applicable")
+    change_analysis_id: Optional[UUID] = Field(default=None, description="Associated change analysis ID if applicable")
     finding_id: Optional[UUID] = Field(default=None, description="Optional finding ID if event pertains to a specific finding")
     patch_id: Optional[UUID] = Field(default=None, description="Optional patch ID if event pertains to a specific patch proposal")
     delivery_id: Optional[UUID] = Field(default=None, description="Optional delivery ID if event pertains to a pull request delivery")

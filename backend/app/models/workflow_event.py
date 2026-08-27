@@ -17,7 +17,8 @@ class WorkflowEventModel(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     event_type = Column(String(64), nullable=False, index=True)
-    scan_id = Column(String(36), ForeignKey("scans.id", ondelete="CASCADE"), nullable=False, index=True)
+    scan_id = Column(String(36), ForeignKey("scans.id", ondelete="CASCADE"), nullable=True, index=True)
+    change_analysis_id = Column(String(36), ForeignKey("change_analyses.id", ondelete="SET NULL"), nullable=True, index=True)
     finding_id = Column(String(36), ForeignKey("findings.id", ondelete="SET NULL"), nullable=True, index=True)
     patch_id = Column(String(36), ForeignKey("patches.id", ondelete="SET NULL"), nullable=True, index=True)
     delivery_id = Column(String(36), ForeignKey("deliveries.id", ondelete="SET NULL"), nullable=True, index=True)
@@ -33,6 +34,7 @@ class WorkflowEventModel(Base):
 
     # Relationships
     scan = relationship("ScanModel", back_populates="events")
+    change_analysis = relationship("ChangeAnalysisModel", back_populates="events")
     finding = relationship("FindingModel")
     patch = relationship("PatchModel")
     delivery = relationship("DeliveryModel", back_populates="events")

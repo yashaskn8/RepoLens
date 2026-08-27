@@ -61,3 +61,46 @@ class DeliveryStatus(str, Enum):
     CREATING_PR = "CREATING_PR"
     PR_CREATED = "PR_CREATED"
     FAILED = "FAILED"
+
+
+class ChangeAnalysisStatus(str, Enum):
+    """Lifecycle status of a revision-to-revision change analysis."""
+
+    PENDING = "PENDING"
+    ACQUIRING = "ACQUIRING"
+    DIFFING = "DIFFING"
+    ANALYZING = "ANALYZING"
+    VERIFYING = "VERIFYING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+class ChangeImpactType(str, Enum):
+    """Evidence-backed taxonomy of semantic impact categories."""
+
+    SYMBOL_CHANGE = "SYMBOL_CHANGE"
+    CALLER_IMPACT = "CALLER_IMPACT"
+    API_CONTRACT_CHANGE = "API_CONTRACT_CHANGE"
+    SCHEMA_CHANGE = "SCHEMA_CHANGE"
+    DEPENDENCY_CHANGE = "DEPENDENCY_CHANGE"
+    CONFIG_CHANGE = "CONFIG_CHANGE"
+    SECURITY_SENSITIVE_CHANGE = "SECURITY_SENSITIVE_CHANGE"
+
+
+class ImpactVerificationStatus(str, Enum):
+    """Epistemic certainty status of an impact record, distinguishing deterministic facts from inferences."""
+
+    FACT = "FACT"
+    INFERENCE = "INFERENCE"
+    ASSUMPTION = "ASSUMPTION"
+
+
+class ChangeRiskLevel(str, Enum):
+    """Aggregate risk rating for a change set."""
+
+    CRITICAL = "CRITICAL"
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    LOW = "LOW"
+    NONE = "NONE"
+

@@ -1,4 +1,15 @@
-from app.schemas.enums import DeliveryStatus, FindingStatus, PatchStatus, ScanStatus, Severity, VerificationVerdict
+from app.schemas.enums import (
+    ChangeAnalysisStatus,
+    ChangeImpactType,
+    ChangeRiskLevel,
+    DeliveryStatus,
+    FindingStatus,
+    ImpactVerificationStatus,
+    PatchStatus,
+    ScanStatus,
+    Severity,
+    VerificationVerdict,
+)
 from app.schemas.evidence import Evidence, EvidenceBase, EvidenceCreate
 from app.schemas.finding import Finding, FindingBase, FindingCreate, FindingUpdate
 from app.schemas.metadata import ModelExecutionMetadata
@@ -13,6 +24,13 @@ from app.schemas.delivery import (
     DeliveryPreviewResponse,
     DeliveryRequest,
     DeliveryResponse,
+)
+from app.schemas.change_analysis import (
+    ChangeAnalysisRequest,
+    ChangeAnalysisResponse,
+    ChangeAnalysisSummary,
+    ChangeImpact,
+    ChangeImpactEvidence,
 )
 
 from app.schemas.static_finding import (
@@ -49,6 +67,10 @@ __all__ = [
     "VerificationVerdict",
     "PatchStatus",
     "DeliveryStatus",
+    "ChangeAnalysisStatus",
+    "ChangeImpactType",
+    "ImpactVerificationStatus",
+    "ChangeRiskLevel",
     "ModelExecutionMetadata",
     "EvidenceBase",
     "EvidenceCreate",
@@ -67,6 +89,11 @@ __all__ = [
     "DeliveryPreviewResponse",
     "DeliveryRequest",
     "DeliveryResponse",
+    "ChangeAnalysisRequest",
+    "ChangeAnalysisSummary",
+    "ChangeImpact",
+    "ChangeImpactEvidence",
+    "ChangeAnalysisResponse",
     "SymbolKind",
     "ParsedSymbol",
     "FileEntry",
@@ -85,3 +112,4 @@ __all__ = [
     "StorageTelemetry",
     "MetricsTelemetry",
 ]
+

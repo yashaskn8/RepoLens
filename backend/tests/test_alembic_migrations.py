@@ -9,12 +9,27 @@ from alembic.config import Config
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import sessionmaker
 
+from app.models.change_analysis import ChangeAnalysisModel, ChangeImpactModel
 from app.models.delivery import DeliveryModel
 from app.models.finding import EvidenceModel, FindingModel
 from app.models.patch import PatchModel
 from app.models.scan import ScanModel
+from app.models.workflow_event import WorkflowEventModel
 from app.planning.schemas import FixPlan, FixScope, OrderedChangeStep
-from app.schemas.enums import DeliveryStatus, FindingStatus, PatchStatus, ScanStatus, Severity, VerificationVerdict
+from app.schemas.enums import (
+    ChangeAnalysisStatus,
+    ChangeImpactType,
+    ChangeRiskLevel,
+    DeliveryStatus,
+    FindingStatus,
+    ImpactVerificationStatus,
+    PatchStatus,
+    ScanStatus,
+    Severity,
+    VerificationVerdict,
+)
+from app.schemas.workflow_event import WorkflowEventType
+
 
 
 def _get_alembic_config(db_url: str) -> Config:
@@ -46,7 +61,17 @@ def test_alembic_upgrade_head_on_empty_db_creates_complete_schema():
             inspector = inspect(engine)
 
             table_names = set(inspector.get_table_names())
-            expected_tables = {"scans", "findings", "evidences", "patches", "workflow_events", "deliveries", "alembic_version"}
+            expected_tables = {
+                "scans",
+                "findings",
+                "evidences",
+                "patches",
+                "workflow_events",
+                "deliveries",
+                "change_analyses",
+                "change_impacts",
+                "alembic_version",
+            }
             assert expected_tables.issubset(table_names), f"Missing tables: {expected_tables - table_names}"
 
             # 3. Verify 'patches' table columns
@@ -73,7 +98,7 @@ def test_alembic_upgrade_head_on_empty_db_creates_complete_schema():
             # 5. Verify 'workflow_events' table columns
             event_cols = {col["name"]: col for col in inspector.get_columns("workflow_events")}
             expected_event_cols = {
-                "id", "event_type", "scan_id", "finding_id", "patch_id", "delivery_id", "thread_id", "commit_sha",
+                "id", "event_type", "scan_id", "change_analysis_id", "finding_id", "patch_id", "delivery_id", "thread_id", "commit_sha",
                 "stage", "tool_name", "provider", "model_name", "message", "metadata_payload", "created_at",
             }
             assert expected_event_cols.issubset(set(event_cols.keys())), f"Missing event columns: {expected_event_cols - set(event_cols.keys())}"
@@ -90,22 +115,48 @@ def test_alembic_upgrade_head_on_empty_db_creates_complete_schema():
             }
             assert expected_delivery_cols.issubset(set(delivery_cols.keys())), f"Missing delivery columns: {expected_delivery_cols - set(delivery_cols.keys())}"
 
-            # 7. Verify 'workflow_events' foreign keys
+            # 7. Verify 'change_analyses' table columns
+            ca_cols = {col["name"]: col for col in inspector.get_columns("change_analyses")}
+            expected_ca_cols = {
+                "id", "repository_url", "repository_owner", "repository_name",
+                "base_ref", "base_commit_sha", "head_ref", "head_commit_sha",
+                "status", "changed_files_count", "changed_symbols_count", "impacted_symbols_count",
+                "risk_level", "failure_code", "failure_message", "model_metadata",
+                "created_at", "updated_at", "completed_at",
+            }
+            assert expected_ca_cols.issubset(set(ca_cols.keys())), f"Missing change_analyses columns: {expected_ca_cols - set(ca_cols.keys())}"
+
+            # 8. Verify 'change_impacts' table columns
+            ci_cols = {col["name"]: col for col in inspector.get_columns("change_impacts")}
+            expected_ci_cols = {
+                "id", "analysis_id", "impact_type", "severity", "title", "description",
+                "source_file", "source_symbol", "affected_file", "affected_symbol",
+                "evidence_payload", "confidence", "verification_status", "created_at",
+            }
+            assert expected_ci_cols.issubset(set(ci_cols.keys())), f"Missing change_impacts columns: {expected_ci_cols - set(ci_cols.keys())}"
+
+            # 9. Verify 'workflow_events' foreign keys
             event_fks = inspector.get_foreign_keys("workflow_events")
             event_fk_targets = {fk["referred_table"] for fk in event_fks}
             assert "scans" in event_fk_targets
             assert "findings" in event_fk_targets
             assert "patches" in event_fk_targets
             assert "deliveries" in event_fk_targets
+            assert "change_analyses" in event_fk_targets
 
-            # 8. Verify 'deliveries' foreign keys
+            # 10. Verify 'change_impacts' foreign keys
+            ci_fks = inspector.get_foreign_keys("change_impacts")
+            ci_fk_targets = {fk["referred_table"] for fk in ci_fks}
+            assert "change_analyses" in ci_fk_targets
+
+            # 11. Verify 'deliveries' foreign keys
             del_fks = inspector.get_foreign_keys("deliveries")
             del_fk_targets = {fk["referred_table"] for fk in del_fks}
             assert "scans" in del_fk_targets
             assert "findings" in del_fk_targets
             assert "patches" in del_fk_targets
 
-            # 9. Verify 'deliveries' indexes
+            # 12. Verify 'deliveries' indexes
             del_indexes = {idx["name"] for idx in inspector.get_indexes("deliveries")}
             assert any("ix_deliveries_id" in idx for idx in del_indexes)
             assert any("ix_deliveries_scan_id" in idx for idx in del_indexes)
@@ -113,6 +164,19 @@ def test_alembic_upgrade_head_on_empty_db_creates_complete_schema():
             assert any("ix_deliveries_patch_id" in idx for idx in del_indexes)
             assert any("ix_deliveries_status" in idx for idx in del_indexes)
             assert any("ix_deliveries_idempotency_key" in idx for idx in del_indexes)
+
+            # 13. Verify 'change_analyses' and 'change_impacts' indexes
+            ca_indexes = {idx["name"] for idx in inspector.get_indexes("change_analyses")}
+            assert any("ix_change_analyses_id" in idx for idx in ca_indexes)
+            assert any("ix_change_analyses_base_commit_sha" in idx for idx in ca_indexes)
+            assert any("ix_change_analyses_head_commit_sha" in idx for idx in ca_indexes)
+            assert any("ix_change_analyses_status" in idx for idx in ca_indexes)
+
+            ci_indexes = {idx["name"] for idx in inspector.get_indexes("change_impacts")}
+            assert any("ix_change_impacts_id" in idx for idx in ci_indexes)
+            assert any("ix_change_impacts_analysis_id" in idx for idx in ci_indexes)
+            assert any("ix_change_impacts_impact_type" in idx for idx in ci_indexes)
+
 
             # 10. Verify ORM read/write compatibility against migrated database
             SessionLocal = sessionmaker(bind=engine)
@@ -234,24 +298,44 @@ def test_alembic_migration_upgrade_downgrade_reupgrade_cycle():
         engine = create_engine(db_url)
 
         try:
-            # 1. Upgrade to head (007_patch_fix_plan_snapshot)
+            # 1. Upgrade to head (008_change_analysis_domain)
             command.upgrade(alembic_cfg, "head")
             inspector = inspect(engine)
+            assert "change_analyses" in inspector.get_table_names()
+            assert "change_impacts" in inspector.get_table_names()
             assert "deliveries" in inspector.get_table_names()
             assert "workflow_events" in inspector.get_table_names()
             assert "patches" in inspector.get_table_names()
             assert "findings" in inspector.get_table_names()
-            patch_cols_head = {col["name"] for col in inspector.get_columns("patches")}
-            assert "fix_plan_snapshot" in patch_cols_head
+            event_cols_head = {col["name"] for col in inspector.get_columns("workflow_events")}
+            assert "change_analysis_id" in event_cols_head
 
-            # 2. Downgrade one revision (007 -> 006: drop fix_plan_snapshot)
+            # 2. Downgrade one revision (008 -> 007: drop change_analyses, change_impacts, change_analysis_id)
+            command.downgrade(alembic_cfg, "007_patch_fix_plan_snapshot")
+            inspector = inspect(engine)
+            assert "change_analyses" not in inspector.get_table_names()
+            assert "change_impacts" not in inspector.get_table_names()
+            event_cols_007 = {col["name"] for col in inspector.get_columns("workflow_events")}
+            assert "change_analysis_id" not in event_cols_007
+            patch_cols_007 = {col["name"] for col in inspector.get_columns("patches")}
+            assert "fix_plan_snapshot" in patch_cols_007
+
+            # 3. Re-upgrade 007 -> 008 (idempotent re-add)
+            command.upgrade(alembic_cfg, "008_change_analysis_domain")
+            inspector = inspect(engine)
+            assert "change_analyses" in inspector.get_table_names()
+            assert "change_impacts" in inspector.get_table_names()
+            event_cols_008 = {col["name"] for col in inspector.get_columns("workflow_events")}
+            assert "change_analysis_id" in event_cols_008
+
+            # 4. Downgrade two revisions (008 -> 006: drop fix_plan_snapshot)
             command.downgrade(alembic_cfg, "006_deliveries_table")
             inspector = inspect(engine)
             patch_cols_006 = {col["name"] for col in inspector.get_columns("patches")}
             assert "fix_plan_snapshot" not in patch_cols_006
             assert "deliveries" in inspector.get_table_names()
 
-            # 3. Re-upgrade 006 -> 007 (idempotent re-add)
+            # 5. Re-upgrade 006 -> 007
             command.upgrade(alembic_cfg, "007_patch_fix_plan_snapshot")
             inspector = inspect(engine)
             patch_cols_007 = {col["name"] for col in inspector.get_columns("patches")}
@@ -435,3 +519,121 @@ def test_alembic_007_fix_plan_snapshot_orm_read_write():
             db.close()
         finally:
             engine.dispose()
+
+
+def test_alembic_008_change_analysis_domain_orm_read_write():
+    """Verify that migration 008 creates change_analyses and change_impacts tables,
+    and supports ORM read/write of ChangeAnalysisModel, ChangeImpactModel, and WorkflowEventModel.change_analysis_id.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "test_008.db")
+        db_url = f"sqlite:///{db_path}"
+
+        alembic_cfg = _get_alembic_config(db_url)
+        command.upgrade(alembic_cfg, "head")
+
+        engine = create_engine(db_url)
+        try:
+            SessionLocal = sessionmaker(bind=engine)
+            db = SessionLocal()
+
+            analysis_id = str(uuid4())
+            base_sha = "1111111111111111111111111111111111111111"
+            head_sha = "2222222222222222222222222222222222222222"
+
+            # 1. Create ChangeAnalysisModel
+            analysis = ChangeAnalysisModel(
+                id=analysis_id,
+                repository_url="https://github.com/test-org/test-repo",
+                repository_owner="test-org",
+                repository_name="test-repo",
+                base_ref="main",
+                base_commit_sha=base_sha,
+                head_ref="feature/branch",
+                head_commit_sha=head_sha,
+                status=ChangeAnalysisStatus.COMPLETED.value,
+                changed_files_count=3,
+                changed_symbols_count=6,
+                impacted_symbols_count=14,
+                risk_level=ChangeRiskLevel.HIGH.value,
+                model_metadata={"analyzer": "repolens-v6", "duration_ms": 420},
+            )
+            db.add(analysis)
+
+            # 2. Create ChangeImpactModel with structured evidence_payload
+            impact_id = str(uuid4())
+            evidence = {
+                "file_path": "app/auth.py",
+                "symbol_name": "verify_token",
+                "base_line_range": [10, 25],
+                "head_line_range": [10, 35],
+                "edge_type": "CALLS",
+                "caller_file": "app/main.py",
+                "caller_symbol": "login_route",
+                "breaking": True,
+            }
+            impact = ChangeImpactModel(
+                id=impact_id,
+                analysis_id=analysis_id,
+                impact_type=ChangeImpactType.API_CONTRACT_CHANGE.value,
+                severity=Severity.HIGH.value,
+                title="Signature change on verify_token",
+                description="Added required parameter 'issuer'",
+                source_file="app/auth.py",
+                source_symbol="verify_token",
+                affected_file="app/main.py",
+                affected_symbol="login_route",
+                evidence_payload=evidence,
+                confidence=1.0,
+                verification_status=ImpactVerificationStatus.FACT.value,
+            )
+            db.add(impact)
+
+            # 3. Create WorkflowEventModel with change_analysis_id and NULL scan_id
+            event = WorkflowEventModel(
+                event_type=WorkflowEventType.CHANGE_ANALYSIS_COMPLETED.value,
+                scan_id=None,
+                change_analysis_id=analysis_id,
+                stage="analysis",
+                message="Analysis completed successfully",
+                metadata_payload={"risk_level": "HIGH", "impacts_count": 1},
+            )
+            db.add(event)
+            db.commit()
+
+            # 4. Read back and verify
+            loaded_analysis = db.query(ChangeAnalysisModel).filter(ChangeAnalysisModel.id == analysis_id).first()
+            assert loaded_analysis is not None
+            assert loaded_analysis.repository_owner == "test-org"
+            assert loaded_analysis.base_commit_sha == base_sha
+            assert loaded_analysis.head_commit_sha == head_sha
+            assert loaded_analysis.changed_files_count == 3
+            assert loaded_analysis.risk_level == "HIGH"
+            assert loaded_analysis.model_metadata["analyzer"] == "repolens-v6"
+
+            assert len(loaded_analysis.impacts) == 1
+            loaded_impact = loaded_analysis.impacts[0]
+            assert loaded_impact.id == impact_id
+            assert loaded_impact.impact_type == ChangeImpactType.API_CONTRACT_CHANGE.value
+            assert loaded_impact.evidence_payload["breaking"] is True
+            assert loaded_impact.verification_status == "FACT"
+
+            assert len(loaded_analysis.events) == 1
+            loaded_event = loaded_analysis.events[0]
+            assert loaded_event.event_type == WorkflowEventType.CHANGE_ANALYSIS_COMPLETED.value
+            assert loaded_event.change_analysis_id == analysis_id
+            assert loaded_event.scan_id is None
+
+            # 5. Verify cascade deletion of impacts and SET NULL on events
+            db.delete(loaded_analysis)
+            db.commit()
+
+            assert db.query(ChangeImpactModel).filter(ChangeImpactModel.id == impact_id).first() is None
+            persisted_event = db.query(WorkflowEventModel).filter(WorkflowEventModel.id == loaded_event.id).first()
+            assert persisted_event is not None
+            assert persisted_event.change_analysis_id is None
+
+            db.close()
+        finally:
+            engine.dispose()
+

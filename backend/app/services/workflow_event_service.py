@@ -27,9 +27,14 @@ def _build_event_model(event: WorkflowEventCreate) -> WorkflowEventModel:
     if not delivery_id and event.metadata_payload and "delivery_id" in event.metadata_payload:
         delivery_id = str(event.metadata_payload["delivery_id"])
 
+    change_analysis_id = str(event.change_analysis_id) if event.change_analysis_id else None
+    if not change_analysis_id and event.metadata_payload and "change_analysis_id" in event.metadata_payload:
+        change_analysis_id = str(event.metadata_payload["change_analysis_id"])
+
     return WorkflowEventModel(
         event_type=event.event_type.value if hasattr(event.event_type, "value") else str(event.event_type),
-        scan_id=str(event.scan_id),
+        scan_id=str(event.scan_id) if event.scan_id else None,
+        change_analysis_id=change_analysis_id,
         finding_id=str(event.finding_id) if event.finding_id else None,
         patch_id=str(event.patch_id) if event.patch_id else None,
         delivery_id=delivery_id,
@@ -225,6 +230,21 @@ class WorkflowEventService:
         )
 
     @staticmethod
+    def list_for_change_analysis(
+        db: Session,
+        change_analysis_id: str,
+        limit: int = 100,
+    ) -> List[WorkflowEventModel]:
+        """Query workflow events for a specific change intelligence analysis."""
+        return (
+            db.query(WorkflowEventModel)
+            .filter(WorkflowEventModel.change_analysis_id == str(change_analysis_id))
+            .order_by(WorkflowEventModel.id.asc())
+            .limit(limit)
+            .all()
+        )
+
+    @staticmethod
     def list_events(
         db: Session,
         scan_id: str,
@@ -232,3 +252,4 @@ class WorkflowEventService:
     ) -> List[WorkflowEventModel]:
         """Alias for list_for_scan."""
         return WorkflowEventService.list_for_scan(db=db, scan_id=scan_id, limit=limit)
+

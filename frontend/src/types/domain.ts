@@ -567,6 +567,12 @@ export type WorkflowEventType =
   | 'DELIVERY_BRANCH_CREATED'
   | 'DELIVERY_PR_CREATED'
   | 'DELIVERY_FAILED'
+  | 'CHANGE_ANALYSIS_REQUESTED'
+  | 'CHANGE_REVISIONS_ACQUIRED'
+  | 'CHANGE_DIFF_COMPLETED'
+  | 'CHANGE_IMPACT_ANALYZED'
+  | 'CHANGE_ANALYSIS_COMPLETED'
+  | 'CHANGE_ANALYSIS_FAILED'
   | 'WORKFLOW_ERROR';
 
 export const WORKFLOW_EVENT_TYPES: readonly WorkflowEventType[] = [
@@ -598,13 +604,20 @@ export const WORKFLOW_EVENT_TYPES: readonly WorkflowEventType[] = [
   'DELIVERY_BRANCH_CREATED',
   'DELIVERY_PR_CREATED',
   'DELIVERY_FAILED',
+  'CHANGE_ANALYSIS_REQUESTED',
+  'CHANGE_REVISIONS_ACQUIRED',
+  'CHANGE_DIFF_COMPLETED',
+  'CHANGE_IMPACT_ANALYZED',
+  'CHANGE_ANALYSIS_COMPLETED',
+  'CHANGE_ANALYSIS_FAILED',
   'WORKFLOW_ERROR',
 ] as const;
 
 export interface WorkflowEvent {
   id: number;
   event_type: WorkflowEventType;
-  scan_id: string;
+  scan_id?: string | null;
+  change_analysis_id?: string | null;
   finding_id?: string | null;
   patch_id?: string | null;
   delivery_id?: string | null;
@@ -618,4 +631,94 @@ export interface WorkflowEvent {
   metadata_payload?: Record<string, unknown>;
   created_at: string;
 }
+
+export type ChangeAnalysisStatus =
+  | 'PENDING'
+  | 'ACQUIRING'
+  | 'DIFFING'
+  | 'ANALYZING'
+  | 'VERIFYING'
+  | 'COMPLETED'
+  | 'FAILED';
+
+export type ChangeImpactType =
+  | 'SYMBOL_CHANGE'
+  | 'CALLER_IMPACT'
+  | 'API_CONTRACT_CHANGE'
+  | 'SCHEMA_CHANGE'
+  | 'DEPENDENCY_CHANGE'
+  | 'CONFIG_CHANGE'
+  | 'SECURITY_SENSITIVE_CHANGE';
+
+export type ImpactVerificationStatus = 'FACT' | 'INFERENCE' | 'ASSUMPTION';
+
+export type ChangeRiskLevel = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'NONE';
+
+export interface ChangeAnalysisRequest {
+  repository_url: string;
+  base_commit_sha: string;
+  head_commit_sha: string;
+  base_ref?: string | null;
+  head_ref?: string | null;
+}
+
+export interface ChangeImpactEvidence {
+  file_path: string;
+  symbol_name?: string | null;
+  base_line_range?: [number, number] | null;
+  head_line_range?: [number, number] | null;
+  edge_type?: string | null;
+  caller_file?: string | null;
+  caller_symbol?: string | null;
+  callee_file?: string | null;
+  callee_symbol?: string | null;
+  contract_name?: string | null;
+  code_snippet?: string | null;
+  context_notes?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ChangeImpact {
+  id: string;
+  analysis_id: string;
+  impact_type: ChangeImpactType;
+  severity: Severity;
+  title: string;
+  description: string;
+  source_file?: string | null;
+  source_symbol?: string | null;
+  affected_file?: string | null;
+  affected_symbol?: string | null;
+  evidence_payload: Record<string, unknown>;
+  confidence: number;
+  verification_status: ImpactVerificationStatus;
+  created_at: string;
+}
+
+export interface ChangeAnalysisSummary {
+  id: string;
+  repository_url: string;
+  repository_owner: string;
+  repository_name: string;
+  base_ref?: string | null;
+  base_commit_sha: string;
+  head_ref?: string | null;
+  head_commit_sha: string;
+  status: ChangeAnalysisStatus;
+  changed_files_count: number;
+  changed_symbols_count: number;
+  impacted_symbols_count: number;
+  risk_level?: ChangeRiskLevel | null;
+  failure_code?: string | null;
+  failure_message?: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at?: string | null;
+}
+
+export interface ChangeAnalysisResponse extends ChangeAnalysisSummary {
+  impacts: ChangeImpact[];
+  model_metadata?: ModelExecutionMetadata | null;
+}
+
 
