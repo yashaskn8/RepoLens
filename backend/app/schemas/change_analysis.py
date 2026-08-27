@@ -325,3 +325,25 @@ class StructuralDiffResult(BaseModel):
     schema_deltas: List[SchemaModelDelta] = Field(default_factory=list, description="Data model and schema deltas")
     summary: Dict[str, int] = Field(default_factory=dict, description="Numerical summary of all detected changes")
 
+
+# =========================================================================
+# Graph-Aware Blast Radius Contracts (Phase 6D)
+# =========================================================================
+
+
+class BlastRadiusReport(BaseModel):
+    """Aggregated report of graph-aware blast radius analysis."""
+
+    analysis_id: UUID = Field(..., description="Parent ChangeAnalysis identifier")
+    impacts: List[ChangeImpact] = Field(default_factory=list, description="Computed structured change impact records")
+    total_impacts: int = Field(default=0, description="Total impact records generated")
+    direct_impacts_count: int = Field(default=0, description="Count of direct (depth 1) impacts")
+    transitive_impacts_count: int = Field(default=0, description="Count of multi-hop (depth > 1) impacts")
+    is_truncated: bool = Field(default=False, description="True if traversal reached max depth or max results limit")
+    truncation_reason: Optional[str] = Field(default=None, description="Reason traversal was truncated if applicable")
+    max_depth_reached: int = Field(default=0, description="Maximum traversal depth reached during exploration")
+    overall_risk_level: ChangeRiskLevel = Field(default=ChangeRiskLevel.LOW, description="Aggregated risk level rating")
+    summary_by_type: Dict[str, int] = Field(default_factory=dict, description="Count of impacts by ChangeImpactType")
+    summary_by_severity: Dict[str, int] = Field(default_factory=dict, description="Count of impacts by Severity")
+
+

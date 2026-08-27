@@ -4,6 +4,7 @@ from app.analysis.adapters import OSVScannerAdapter, SemgrepAdapter, TrivyAdapte
 from app.analysis.base import BaseScannerAdapter, ScannerOutputError
 from app.analysis.schemas import ScannerResult, StaticFinding, ToolStatus
 from app.analysis.diff_engine import ChangeDiffEngine, get_diff_engine
+from app.analysis.impact_engine import ChangeImpactEngine, get_impact_engine
 from app.analysis.service import RepositoryIntelligenceService, get_intelligence_service
 from app.analysis.store import EvidenceStore
 
@@ -21,6 +22,9 @@ __all__ = [
     "get_intelligence_service",
     "ChangeDiffEngine",
     "get_diff_engine",
+    "ChangeImpactEngine",
+    "get_impact_engine",
 ]
+
 
 

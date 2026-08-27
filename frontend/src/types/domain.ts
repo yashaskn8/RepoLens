@@ -806,5 +806,20 @@ export interface StructuralDiffResult {
   summary: Record<string, number>;
 }
 
+export interface BlastRadiusReport {
+  analysis_id: string;
+  impacts: ChangeImpact[];
+  total_impacts: number;
+  direct_impacts_count: number;
+  transitive_impacts_count: number;
+  is_truncated: boolean;
+  truncation_reason?: string | null;
+  max_depth_reached: number;
+  overall_risk_level: ChangeRiskLevel;
+  summary_by_type: Record<string, number>;
+  summary_by_severity: Record<string, number>;
+}
+
+
 
 
