@@ -413,5 +413,70 @@ export async function downloadChangeAnalysisMarkdown(analysisId: string): Promis
   return response.text();
 }
 
+export async function fetchReviewPublication(
+  analysisId: string
+): Promise<import('@/types/domain').ReviewPublicationPreviewResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/change-analyses/${analysisId}/review-publication`, {
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json' },
+  });
 
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail?.message || err.detail || `Failed to fetch review publication (${response.status})`);
+  }
 
+  return response.json();
+}
+
+export async function generateReviewPublicationPreview(
+  analysisId: string
+): Promise<import('@/types/domain').ReviewPublicationPreviewResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/change-analyses/${analysisId}/review-publication/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail?.message || err.detail || `Failed to generate review preview (${response.status})`);
+  }
+
+  return response.json();
+}
+
+export async function approveReviewPublication(
+  analysisId: string,
+  expectedPreviewDigest: string
+): Promise<import('@/types/domain').ReviewPublicationPreviewResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/change-analyses/${analysisId}/review-publication/approve`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ expected_preview_digest: expectedPreviewDigest }),
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail?.message || err.detail || `Failed to approve review publication (${response.status})`);
+  }
+
+  return response.json();
+}
+
+export async function publishReviewPublication(
+  analysisId: string,
+  expectedPreviewDigest: string
+): Promise<import('@/types/domain').ReviewPublicationPublishResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/change-analyses/${analysisId}/review-publication/publish`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ expected_preview_digest: expectedPreviewDigest }),
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail?.message || err.detail || `Failed to publish review (${response.status})`);
+  }
+
+  return response.json();
+}

@@ -968,9 +968,73 @@ export interface ChangeAnalysisTelemetry {
   truncation_reason?: string | null;
 }
 
+export type ReviewPublicationStatus =
+  | 'PENDING'
+  | 'PREVIEW_READY'
+  | 'APPROVED'
+  | 'PUBLISHING'
+  | 'PUBLISHED'
+  | 'BLOCKED'
+  | 'FAILED';
 
+export interface InlineReviewComment {
+  path: string;
+  line: number;
+  side: string;
+  body: string;
+}
 
+export interface InlineReviewCommentPreview {
+  path: string;
+  line: number;
+  side: string;
+  body: string;
+  finding_id?: string | null;
+  finding_title?: string | null;
+  severity?: string | null;
+}
 
+export interface ReviewPublicationPreviewResponse {
+  publication_id: string;
+  analysis_id: string;
+  status: ReviewPublicationStatus;
+  repository_owner: string;
+  repository_name: string;
+  pr_number: number;
+  base_commit_sha: string;
+  head_commit_sha: string;
+  body_markdown: string;
+  preview_digest: string;
+  inline_comments: InlineReviewCommentPreview[];
+  review_event: string;
+  is_truncated: boolean;
+  truncation_reason?: string | null;
+  approved_at?: string | null;
+  published_at?: string | null;
+  github_review_id?: number | null;
+  github_review_url?: string | null;
+  reconciliation_occurred: boolean;
+  failure_code?: string | null;
+  failure_message?: string | null;
+  created_at: string;
+  updated_at: string;
+}
 
+export interface ReviewPublicationApproveRequest {
+  expected_preview_digest: string;
+}
 
+export interface ReviewPublicationPublishRequest {
+  expected_preview_digest: string;
+}
 
+export interface ReviewPublicationPublishResponse {
+  publication_id: string;
+  analysis_id: string;
+  status: ReviewPublicationStatus;
+  github_review_id?: number | null;
+  github_review_url?: string | null;
+  published_at?: string | null;
+  inline_comments_count: number;
+  reconciliation_occurred: boolean;
+}

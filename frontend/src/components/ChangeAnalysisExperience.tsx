@@ -12,11 +12,14 @@ import {
   ChangeReviewFinding,
   ConfigDelta,
   DependencyDelta,
+  ReviewPublicationPreviewResponse,
+  ReviewPublicationStatus,
   RouteContractDelta,
   SchemaModelDelta,
   Severity,
 } from '@/types/domain';
 import {
+  approveReviewPublication,
   downloadChangeAnalysisMarkdown,
   fetchChangeAnalysis,
   fetchChangeAnalysisDiff,
@@ -24,6 +27,9 @@ import {
   fetchChangeAnalysisReport,
   fetchChangeAnalysisReview,
   fetchChangeAnalysisTelemetry,
+  fetchReviewPublication,
+  generateReviewPublicationPreview,
+  publishReviewPublication,
   startChangeAnalysis,
   startChangeAnalysisFromPR,
 } from '@/lib/api';
@@ -60,8 +66,17 @@ export function ChangeAnalysisExperience() {
     config_deltas: [],
   });
 
+  // Review publication state (Phase 7)
+  const [publication, setPublication] = useState<ReviewPublicationPreviewResponse | null>(null);
+  const [isGeneratingPreview, setIsGeneratingPreview] = useState<boolean>(false);
+  const [isApprovingPub, setIsApprovingPub] = useState<boolean>(false);
+  const [isPublishingPub, setIsPublishingPub] = useState<boolean>(false);
+  const [pubError, setPubError] = useState<string | null>(null);
+  const [showPublishConfirm, setShowPublishConfirm] = useState<boolean>(false);
+  const [copiedDigest, setCopiedDigest] = useState<boolean>(false);
+
   // UI exploration tabs & filters
-  const [activeTab, setActiveTab] = useState<'IMPACTS' | 'CONTRACTS' | 'REVIEW' | 'REPORT' | 'TELEMETRY'>('IMPACTS');
+  const [activeTab, setActiveTab] = useState<'IMPACTS' | 'CONTRACTS' | 'REVIEW' | 'REPORT' | 'TELEMETRY' | 'PUBLISH'>('IMPACTS');
   const [severityFilter, setSeverityFilter] = useState<string>('ALL');
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
   const [expandedImpactId, setExpandedImpactId] = useState<string | null>(null);
@@ -101,12 +116,13 @@ export function ChangeAnalysisExperience() {
 
   const loadCompletedAnalysisData = async (analysisId: string) => {
     try {
-      const [fetchedImpacts, fetchedReview, fetchedReport, fetchedTelemetry, fetchedDiff] = await Promise.all([
+      const [fetchedImpacts, fetchedReview, fetchedReport, fetchedTelemetry, fetchedDiff, fetchedPub] = await Promise.all([
         fetchChangeAnalysisImpacts(analysisId).catch(() => []),
         fetchChangeAnalysisReview(analysisId).catch(() => null),
         fetchChangeAnalysisReport(analysisId).catch(() => null),
         fetchChangeAnalysisTelemetry(analysisId).catch(() => null),
         fetchChangeAnalysisDiff(analysisId).catch(() => null),
+        fetchReviewPublication(analysisId).catch(() => null),
       ]);
 
       setImpacts(fetchedImpacts || []);
@@ -127,8 +143,63 @@ export function ChangeAnalysisExperience() {
           config_deltas: fetchedDiff.config_deltas || [],
         });
       }
+      if (fetchedPub) {
+        setPublication(fetchedPub);
+      }
     } catch (err) {
       console.error('Failed to load completed analysis artifacts:', err);
+    }
+  };
+
+  const handleGeneratePreview = async () => {
+    if (!activeAnalysis) return;
+    setIsGeneratingPreview(true);
+    setPubError(null);
+    try {
+      const pub = await generateReviewPublicationPreview(activeAnalysis.id);
+      setPublication(pub);
+    } catch (err: any) {
+      setPubError(err.message || 'Failed to generate review publication preview');
+    } finally {
+      setIsGeneratingPreview(false);
+    }
+  };
+
+  const handleApprovePublication = async () => {
+    if (!activeAnalysis || !publication) return;
+    setIsApprovingPub(true);
+    setPubError(null);
+    try {
+      const pub = await approveReviewPublication(activeAnalysis.id, publication.preview_digest);
+      setPublication(pub);
+    } catch (err: any) {
+      setPubError(err.message || 'Failed to approve review publication');
+    } finally {
+      setIsApprovingPub(false);
+    }
+  };
+
+  const handlePublishReview = async () => {
+    if (!activeAnalysis || !publication) return;
+    setIsPublishingPub(true);
+    setPubError(null);
+    try {
+      await publishReviewPublication(activeAnalysis.id, publication.preview_digest);
+      const updated = await fetchReviewPublication(activeAnalysis.id);
+      setPublication(updated);
+      setShowPublishConfirm(false);
+    } catch (err: any) {
+      setPubError(err.message || 'Failed to publish review to GitHub');
+    } finally {
+      setIsPublishingPub(false);
+    }
+  };
+
+  const handleCopyDigest = () => {
+    if (publication?.preview_digest) {
+      navigator.clipboard.writeText(publication.preview_digest);
+      setCopiedDigest(true);
+      setTimeout(() => setCopiedDigest(false), 2000);
     }
   };
 
@@ -524,6 +595,13 @@ export function ChangeAnalysisExperience() {
             >
               📊 Telemetry
             </button>
+            <button
+              type="button"
+              className={`filter-btn ${activeTab === 'PUBLISH' ? 'filter-btn-active' : ''}`}
+              onClick={() => setActiveTab('PUBLISH')}
+            >
+              🚀 GitHub PR Review {publication?.status === 'PUBLISHED' ? '✓' : publication?.status ? `(${publication.status})` : ''}
+            </button>
           </div>
 
           {/* TAB 1: BLAST RADIUS IMPACT EXPLORER */}
@@ -890,6 +968,462 @@ export function ChangeAnalysisExperience() {
                 </div>
                 <pre className="code-snippet">{JSON.stringify(telemetry || {}, null, 2)}</pre>
               </div>
+            </div>
+          )}
+
+          {/* TAB 6: SAFE GITHUB PR REVIEW PUBLICATION */}
+          {activeTab === 'PUBLISH' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+              {/* Publication Header & Invariants Banner */}
+              <div
+                style={{
+                  padding: '1.25rem',
+                  background: 'rgba(15, 23, 42, 0.75)',
+                  border: '1px solid rgba(255, 255, 255, 0.1)',
+                  borderRadius: '12px',
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
+                  <div>
+                    <div style={{ fontSize: '1.25rem', fontWeight: 700, color: '#f8fafc' }}>
+                      Safe GitHub Pull Request Review Publication
+                    </div>
+                    <div style={{ fontSize: '0.85rem', color: '#94a3b8', marginTop: '0.25rem' }}>
+                      Publish verified change review directly back to the pull request with strict human authorization.
+                    </div>
+                  </div>
+
+                  {publication && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>Status:</span>
+                      <span
+                        className="badge"
+                        style={{
+                          background:
+                            publication.status === 'PUBLISHED'
+                              ? 'rgba(34, 197, 94, 0.2)'
+                              : publication.status === 'APPROVED'
+                              ? 'rgba(234, 179, 8, 0.2)'
+                              : publication.status === 'PREVIEW_READY'
+                              ? 'rgba(56, 189, 248, 0.2)'
+                              : 'rgba(239, 68, 68, 0.2)',
+                          color:
+                            publication.status === 'PUBLISHED'
+                              ? '#4ade80'
+                              : publication.status === 'APPROVED'
+                              ? '#facc15'
+                              : publication.status === 'PREVIEW_READY'
+                              ? '#38bdf8'
+                              : '#f87171',
+                          border: `1px solid ${
+                            publication.status === 'PUBLISHED'
+                              ? 'rgba(34, 197, 94, 0.4)'
+                              : publication.status === 'APPROVED'
+                              ? 'rgba(234, 179, 8, 0.4)'
+                              : publication.status === 'PREVIEW_READY'
+                              ? 'rgba(56, 189, 248, 0.4)'
+                              : 'rgba(239, 68, 68, 0.4)'
+                          }`,
+                          padding: '0.35rem 0.75rem',
+                          borderRadius: '6px',
+                          fontWeight: 700,
+                        }}
+                      >
+                        {publication.status}
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Safety Invariants Checklist */}
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+                    gap: '0.75rem',
+                    marginTop: '1rem',
+                    paddingTop: '1rem',
+                    borderTop: '1px solid rgba(255, 255, 255, 0.08)',
+                    fontSize: '0.8rem',
+                    color: '#cbd5e1',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                    <span style={{ color: '#4ade80' }}>✓</span> Review Event: <code>COMMENT</code> only
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                    <span style={{ color: '#4ade80' }}>✓</span> Autonomous PR Merge/Approval: <code>Disabled</code>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                    <span style={{ color: '#4ade80' }}>✓</span> SHA-256 Digest Parity: <code>Enforced</code>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                    <span style={{ color: '#4ade80' }}>✓</span> Secret Redaction: <code>Active</code>
+                  </div>
+                </div>
+              </div>
+
+              {/* Error Banner */}
+              {pubError && (
+                <div
+                  style={{
+                    padding: '1rem',
+                    background: 'rgba(239, 68, 68, 0.1)',
+                    border: '1px solid rgba(239, 68, 68, 0.3)',
+                    borderRadius: '8px',
+                    color: '#fca5a5',
+                    fontSize: '0.875rem',
+                  }}
+                >
+                  ⚠️ <strong>Action Failed:</strong> {pubError}
+                </div>
+              )}
+
+              {/* State 1: No preview generated yet */}
+              {!publication && (
+                <div
+                  className="glass-card"
+                  style={{
+                    padding: '2.5rem',
+                    textAlign: 'center',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    gap: '1rem',
+                  }}
+                >
+                  <div style={{ fontSize: '2.5rem' }}>📋</div>
+                  <div style={{ fontSize: '1.2rem', fontWeight: 600, color: '#f1f5f9' }}>
+                    Generate Review Publication Preview
+                  </div>
+                  <div style={{ maxWidth: '540px', color: '#94a3b8', fontSize: '0.875rem', lineHeight: 1.5 }}>
+                    Compute the exact deterministic review markdown, verify live pull request drift against immutable commit SHAs, and calculate the cryptographic SHA-256 preview digest. <strong>Makes ZERO writes to GitHub.</strong>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    disabled={isGeneratingPreview || activeAnalysis.status !== 'COMPLETED'}
+                    onClick={handleGeneratePreview}
+                    style={{ padding: '0.75rem 1.75rem', fontSize: '0.95rem' }}
+                  >
+                    {isGeneratingPreview ? '⏳ Computing Preview...' : '✨ Generate Review Preview'}
+                  </button>
+                </div>
+              )}
+
+              {/* State 2+: Publication object exists */}
+              {publication && (
+                <>
+                  {/* Status Banner */}
+                  {publication.status === 'PUBLISHED' && (
+                    <div
+                      style={{
+                        padding: '1.25rem',
+                        background: 'rgba(34, 197, 94, 0.1)',
+                        border: '1px solid rgba(34, 197, 94, 0.3)',
+                        borderRadius: '10px',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        flexWrap: 'wrap',
+                        gap: '1rem',
+                      }}
+                    >
+                      <div>
+                        <div style={{ fontSize: '1rem', fontWeight: 700, color: '#4ade80' }}>
+                          ✓ Review Successfully Published to GitHub Pull Request #{publication.pr_number}
+                        </div>
+                        <div style={{ fontSize: '0.825rem', color: '#cbd5e1', marginTop: '0.25rem' }}>
+                          Review ID: <code>{publication.github_review_id}</code> • Published at:{' '}
+                          {publication.published_at ? new Date(publication.published_at).toLocaleString() : 'Just now'}
+                          {publication.reconciliation_occurred && (
+                            <span style={{ marginLeft: '0.5rem', color: '#38bdf8' }}>
+                              (Reconciled via hidden audit marker)
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      {publication.github_review_url && (
+                        <a
+                          href={publication.github_review_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="btn-primary"
+                          style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}
+                        >
+                          🔗 View Review on GitHub ↗
+                        </a>
+                      )}
+                    </div>
+                  )}
+
+                  {(publication.status === 'BLOCKED' || publication.status === 'FAILED') && (
+                    <div
+                      style={{
+                        padding: '1rem 1.25rem',
+                        background: 'rgba(239, 68, 68, 0.12)',
+                        border: '1px solid rgba(239, 68, 68, 0.4)',
+                        borderRadius: '10px',
+                      }}
+                    >
+                      <div style={{ fontSize: '0.95rem', fontWeight: 700, color: '#f87171' }}>
+                        🚫 Publication {publication.status}: {publication.failure_code || 'ERROR'}
+                      </div>
+                      <div style={{ fontSize: '0.85rem', color: '#fca5a5', marginTop: '0.35rem' }}>
+                        {publication.failure_message || 'Pull request drift or policy constraint blocked publication.'}
+                      </div>
+                      <button
+                        type="button"
+                        className="filter-btn"
+                        onClick={handleGeneratePreview}
+                        disabled={isGeneratingPreview}
+                        style={{ marginTop: '0.75rem' }}
+                      >
+                        {isGeneratingPreview ? 'Refreshing...' : '🔄 Re-evaluate PR & Generate Fresh Preview'}
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Cryptographic Digest & Action Controls */}
+                  <div
+                    className="glass-card"
+                    style={{
+                      padding: '1.25rem',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '1rem',
+                    }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem' }}>
+                      <div style={{ fontSize: '0.85rem', color: '#94a3b8' }}>
+                        CANONICAL PREVIEW DIGEST (SHA-256)
+                      </div>
+                      <div style={{ fontSize: '0.8rem', color: '#64748b' }}>
+                        Base: <code>{publication.base_commit_sha.slice(0, 8)}</code> → Head:{' '}
+                        <code>{publication.head_commit_sha.slice(0, 8)}</code>
+                      </div>
+                    </div>
+
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '0.75rem',
+                        background: '#090d16',
+                        padding: '0.65rem 1rem',
+                        borderRadius: '8px',
+                        border: '1px solid rgba(255,255,255,0.08)',
+                        fontFamily: 'monospace',
+                        fontSize: '0.85rem',
+                        color: '#38bdf8',
+                        overflowX: 'auto',
+                      }}
+                    >
+                      <span style={{ flex: 1, wordBreak: 'break-all' }}>{publication.preview_digest}</span>
+                      <button
+                        type="button"
+                        className="filter-btn"
+                        onClick={handleCopyDigest}
+                        style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem', whiteSpace: 'nowrap' }}
+                      >
+                        {copiedDigest ? '✓ Copied' : '📋 Copy'}
+                      </button>
+                    </div>
+
+                    {/* Action Buttons */}
+                    <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center', marginTop: '0.5rem' }}>
+                      {publication.status === 'PREVIEW_READY' && (
+                        <>
+                          <button
+                            type="button"
+                            className="btn-primary"
+                            disabled={isApprovingPub || isGeneratingPreview}
+                            onClick={handleApprovePublication}
+                            style={{ padding: '0.65rem 1.5rem', background: '#2563eb' }}
+                          >
+                            {isApprovingPub ? '⏳ Authorizing...' : '✍️ Approve Review Publication'}
+                          </button>
+                          <button
+                            type="button"
+                            className="filter-btn"
+                            disabled={isGeneratingPreview}
+                            onClick={handleGeneratePreview}
+                          >
+                            {isGeneratingPreview ? 'Refreshing...' : '🔄 Refresh Preview'}
+                          </button>
+                        </>
+                      )}
+
+                      {publication.status === 'APPROVED' && (
+                        <>
+                          <button
+                            type="button"
+                            className="btn-primary"
+                            disabled={isPublishingPub}
+                            onClick={() => setShowPublishConfirm(true)}
+                            style={{ padding: '0.65rem 1.5rem', background: '#16a34a' }}
+                          >
+                            🚀 Publish Review to GitHub PR #{publication.pr_number}
+                          </button>
+                          <button
+                            type="button"
+                            className="filter-btn"
+                            disabled={isGeneratingPreview}
+                            onClick={handleGeneratePreview}
+                          >
+                            🔄 Regenerate Preview (Resets Approval)
+                          </button>
+                        </>
+                      )}
+
+                      {publication.status === 'PUBLISHED' && (
+                        <button
+                          type="button"
+                          className="filter-btn"
+                          disabled={isGeneratingPreview}
+                          onClick={handleGeneratePreview}
+                        >
+                          🔄 Re-verify & Check Publication Status
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Safety Confirmation Modal */}
+                  {showPublishConfirm && (
+                    <div
+                      style={{
+                        position: 'fixed',
+                        inset: 0,
+                        backgroundColor: 'rgba(0, 0, 0, 0.75)',
+                        backdropFilter: 'blur(4px)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        zIndex: 50,
+                        padding: '1rem',
+                      }}
+                      onClick={() => setShowPublishConfirm(false)}
+                    >
+                      <div
+                        className="glass-card"
+                        style={{
+                          maxWidth: '560px',
+                          width: '100%',
+                          padding: '1.75rem',
+                          background: '#0f172a',
+                          border: '1px solid rgba(255, 255, 255, 0.15)',
+                          borderRadius: '16px',
+                          boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.5)',
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <div style={{ fontSize: '1.25rem', fontWeight: 700, color: '#f8fafc', marginBottom: '0.75rem' }}>
+                          Authorize Pull Request Review Publication
+                        </div>
+                        <div style={{ fontSize: '0.875rem', color: '#cbd5e1', lineHeight: 1.6, marginBottom: '1.25rem' }}>
+                          You are about to publish a <strong>COMMENT</strong> review to GitHub. Please verify the publication targets:
+                        </div>
+
+                        <div
+                          style={{
+                            background: '#090d16',
+                            borderRadius: '8px',
+                            padding: '1rem',
+                            fontSize: '0.825rem',
+                            fontFamily: 'monospace',
+                            color: '#e2e8f0',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '0.5rem',
+                            marginBottom: '1.5rem',
+                          }}
+                        >
+                          <div><strong>Repository:</strong> {publication.repository_owner}/{publication.repository_name}</div>
+                          <div><strong>Pull Request:</strong> #{publication.pr_number}</div>
+                          <div><strong>Head Commit:</strong> {publication.head_commit_sha}</div>
+                          <div><strong>Inline Comments:</strong> {publication.inline_comments?.length || 0} verified comment(s)</div>
+                          <div><strong>Review Event:</strong> <code>COMMENT</code> (strictly non-mutating)</div>
+                          <div style={{ wordBreak: 'break-all' }}><strong>Digest:</strong> {publication.preview_digest}</div>
+                        </div>
+
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem' }}>
+                          <button
+                            type="button"
+                            className="filter-btn"
+                            onClick={() => setShowPublishConfirm(false)}
+                            disabled={isPublishingPub}
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-primary"
+                            style={{ background: '#16a34a' }}
+                            disabled={isPublishingPub}
+                            onClick={handlePublishReview}
+                          >
+                            {isPublishingPub ? '⏳ Publishing to GitHub...' : '✓ Confirm & Publish Review'}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Inline Comments Preview */}
+                  {publication.inline_comments && publication.inline_comments.length > 0 && (
+                    <div>
+                      <div style={{ fontSize: '1rem', fontWeight: 600, color: '#f1f5f9', marginBottom: '0.75rem' }}>
+                        💬 Mapped Inline Comments ({publication.inline_comments.length})
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                        {publication.inline_comments.map((ic, idx) => (
+                          <div key={idx} className="finding-card">
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                <span className="badge badge-high">{ic.severity || 'HIGH'}</span>
+                                <span style={{ fontFamily: 'monospace', fontWeight: 600, color: '#38bdf8' }}>
+                                  {ic.path}:{ic.line}
+                                </span>
+                                <span className="badge-tag">Side: {ic.side}</span>
+                              </div>
+                              {ic.finding_title && (
+                                <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>{ic.finding_title}</span>
+                              )}
+                            </div>
+                            <div style={{ marginTop: '0.6rem', fontSize: '0.85rem', color: '#cbd5e1', whiteSpace: 'pre-wrap' }}>
+                              {ic.body}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Rendered Review Markdown Preview */}
+                  <div>
+                    <div style={{ fontSize: '1rem', fontWeight: 600, color: '#f1f5f9', marginBottom: '0.75rem' }}>
+                      📄 Top-Level Review Body Preview
+                    </div>
+                    <pre
+                      style={{
+                        background: '#090d16',
+                        border: '1px solid rgba(255,255,255,0.08)',
+                        borderRadius: '8px',
+                        padding: '1.25rem',
+                        fontSize: '0.85rem',
+                        fontFamily: 'monospace',
+                        whiteSpace: 'pre-wrap',
+                        color: '#e2e8f0',
+                        maxHeight: '400px',
+                        overflowY: 'auto',
+                      }}
+                    >
+                      {publication.body_markdown}
+                    </pre>
+                  </div>
+                </>
+              )}
             </div>
           )}
         </div>
