@@ -168,6 +168,13 @@ class ReviewPublicationService:
                 f"Phase 6 review_report in analysis metadata is malformed: {redact_secrets(str(e))[:256]}"
             )
 
+        # FIX A: Bind verified review to current analysis ID
+        if str(review_report.analysis_id) != str(analysis.id):
+            raise VerifiedReviewInvalidError(
+                f"Phase 6 review_report analysis_id '{review_report.analysis_id}' does not match "
+                f"ChangeAnalysis ID '{analysis.id}'"
+            )
+
         # 6. Render deterministic review publication
         rendered = self.renderer.render_publication(
             analysis=analysis,
@@ -195,6 +202,8 @@ class ReviewPublicationService:
                 truncation_reason=rendered.truncation_reason,
             )
             self.db.add(pub)
+            # FIX F: Materialize pub.id within caller transaction before emitting audit event
+            self.db.flush()
         else:
             # FIX 1: PUBLISHING is uncertain-write; reconcile instead of blind reset
             if pub.status == ReviewPublicationStatus.PUBLISHING.value:
@@ -237,13 +246,13 @@ class ReviewPublicationService:
             pub.failure_code = None
             pub.failure_message = None
 
-        # FIX 3: Emit audit event BEFORE commit for atomicity
+        # FIX 3: Emit audit event BEFORE commit for atomicity (pub.id guaranteed materialized)
         self.event_service.emit_critical(
             self.db,
             WorkflowEventCreate(
                 event_type=WorkflowEventType.PR_REVIEW_PREVIEW_READY,
                 change_analysis_id=analysis_id,
-                pr_review_publication_id=UUID(pub.id) if pub.id else None,
+                pr_review_publication_id=UUID(pub.id),
                 commit_sha=analysis.head_commit_sha,
                 message=f"Review publication preview generated for PR #{pr_number}",
                 metadata_payload={
@@ -307,11 +316,16 @@ class ReviewPublicationService:
         if pub.status == ReviewPublicationStatus.PUBLISHED.value:
             return pub
 
-        # Check if currently in uncertain PUBLISHING state (reconcile first)
+        # FIX B: Check if currently in uncertain PUBLISHING state (reconcile first)
         if pub.status == ReviewPublicationStatus.PUBLISHING.value:
             reconciled = await self.reconcile_publication(pub)
             if reconciled.status == ReviewPublicationStatus.PUBLISHED.value:
                 return reconciled
+            raise GitHubReviewStateUncertainError(
+                f"Publication '{pub.id}' is in PUBLISHING state. "
+                f"Reconciliation did not find a matching review on GitHub. "
+                f"State remains PUBLISHING."
+            )
 
         if pub.status != ReviewPublicationStatus.APPROVED.value:
             raise PublicationNotApprovedError(f"Publication must be in APPROVED state before publishing (current: {pub.status})")
@@ -510,6 +524,13 @@ class ReviewPublicationService:
             body = rev.get("body") or ""
             if marker1 in body or marker2 in body:
                 github_review_id = rev.get("id")
+                # FIX C: Validate review ID as a positive integer during reconciliation
+                if not isinstance(github_review_id, int) or github_review_id <= 0:
+                    logger.warning(
+                        f"Reconciliation matched marker for publication {pub.id} but review ID is invalid: {github_review_id}"
+                    )
+                    continue
+
                 github_review_url = f"https://github.com/{pub.repository_owner}/{pub.repository_name}/pull/{pub.pr_number}#pullrequestreview-{github_review_id}"
 
                 pub.status = ReviewPublicationStatus.PUBLISHED.value

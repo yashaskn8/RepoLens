@@ -18,7 +18,8 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -28,16 +29,19 @@ from app.delivery.publication_provider import GitHubReviewPublicationProvider
 from app.models.base import Base
 from app.models.change_analysis import ChangeAnalysisModel, ChangeImpactModel
 from app.models.review_publication import PullRequestReviewPublicationModel
+from app.models.workflow_event import WorkflowEventModel
 from app.schemas.change_analysis import ChangeReviewFinding, ChangeReviewReport, ChangeReviewVerdict, ResolvedPullRequest
 from app.schemas.enums import ChangeImpactType, ChangeRiskLevel, ImpactVerificationStatus, Severity
 from app.schemas.review_publication import (
     GitHubAuthFailedError,
     GitHubPRMetadataInvalidError,
+    GitHubReviewStateUncertainError,
     PRBaseDriftError,
     PRHeadDriftError,
     PreviewDigestMismatchError,
     PublicationNotApprovedError,
     ReviewPublicationStatus,
+    VerifiedReviewInvalidError,
 )
 from app.services.review_publication_service import ReviewPublicationService
 
@@ -371,7 +375,7 @@ async def test_e2e_d_wrong_digest_rejected(fresh_db_engine):
 
 @pytest.mark.asyncio
 async def test_e2e_e_crash_after_external_success_reconciliation(fresh_db_engine):
-    """Prove crash recovery: GitHub write succeeds, DB commit fails, rollback first, fresh session reconciles with exactly 1 POST."""
+    """Prove crash recovery: GitHub write succeeds, real SQLAlchemy flush fails, rollback first, fresh session reconciles with exactly 1 POST."""
     Session = sessionmaker(bind=fresh_db_engine)
     session1 = Session()
 
@@ -405,23 +409,15 @@ async def test_e2e_e_crash_after_external_success_reconciliation(fresh_db_engine
     digest = pub.preview_digest
     await service1.approve_preview(analysis_id, expected_preview_digest=digest)
 
-    # Patch session1.commit to simulate database failure on post-write commit
-    original_commit = session1.commit
-    commit_call_count = 0
+    # Attach genuine SQLAlchemy event listener on session1 that fails during flush of PUBLISHED state
+    @event.listens_for(session1, "before_flush")
+    def simulate_real_db_failure(session, flush_context, instances):
+        for obj in session.dirty:
+            if isinstance(obj, PullRequestReviewPublicationModel) and obj.status == ReviewPublicationStatus.PUBLISHED.value:
+                raise OperationalError("Simulated database write IO failure during post-write flush", None, None)
 
-    def faulty_commit():
-        nonlocal commit_call_count
-        commit_call_count += 1
-        # Step 2 commit (APPROVED -> PUBLISHING) succeeds (count == 1)
-        # Step 4 commit (PUBLISHED + audit event) fails (count >= 2)
-        if commit_call_count >= 2:
-            raise RuntimeError("Simulated database crash during post-write commit")
-        return original_commit()
-
-    session1.commit = faulty_commit
-
-    # Publish attempt raises RuntimeError due to DB crash; rollback-first handles cleanup
-    with pytest.raises(RuntimeError, match="Simulated database crash"):
+    # Publish attempt raises OperationalError due to genuine DB flush crash; rollback-first handles cleanup
+    with pytest.raises(OperationalError, match="Simulated database write IO failure"):
         await service1.publish_review(analysis_id, expected_preview_digest=digest)
 
     # Verify GitHub POST was executed once
@@ -462,12 +458,18 @@ async def test_e2e_e_crash_after_external_success_reconciliation(fresh_db_engine
     session2.close()
 
 
-# ── E2E F: Multi-Session Concurrent Publish Ownership ─────────────────
+# ── E2E F: File-Backed Multi-Connection Concurrent Publish Ownership ──
 
 @pytest.mark.asyncio
-async def test_e2e_f_concurrent_publish_ownership(fresh_db_engine):
-    """Verify multi-session concurrent publish operations execute exactly one GitHub POST."""
-    Session = sessionmaker(bind=fresh_db_engine)
+async def test_e2e_f_concurrent_publish_ownership(tmp_path):
+    """Verify multi-session concurrent publish operations on file-backed database execute exactly one GitHub POST."""
+    db_file = tmp_path / "phase7_concurrency.sqlite"
+    engine = create_engine(
+        f"sqlite:///{db_file.as_posix()}",
+        connect_args={"check_same_thread": False, "timeout": 30},
+    )
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
     init_session = Session()
 
     analysis = _seed_completed_pr_analysis(init_session)
@@ -526,6 +528,7 @@ async def test_e2e_f_concurrent_publish_ownership(fresh_db_engine):
 
     session_a.close()
     session_b.close()
+    engine.dispose()
 
 
 # ── E2E G: Inline Preview Parity & Unmappable Finding ─────────────────
@@ -728,3 +731,267 @@ async def test_e2e_j_malformed_github_pr_metadata_fail_closed():
     )
     with pytest.raises(GitHubPRMetadataInvalidError, match="missing valid 40-char base.sha"):
         await provider.get_current_pull_request(owner="o", repo="r", pr_number=1)
+
+
+# ── E2E K: Review Analysis ID Mismatch ────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_e2e_k_review_analysis_id_mismatch_rejected(fresh_db_engine):
+    """Verify Phase 6 report with mismatched analysis_id raises VerifiedReviewInvalidError and does 0 writes."""
+    import copy
+    from sqlalchemy.orm.attributes import flag_modified
+
+    Session = sessionmaker(bind=fresh_db_engine)
+    session = Session()
+
+    analysis = _seed_completed_pr_analysis(session)
+    analysis_id = UUID(analysis.id)
+
+    # Mutate model_metadata review_report to have a different analysis_id
+    different_analysis_id = str(uuid4())
+    meta = copy.deepcopy(analysis.model_metadata)
+    meta["review_report"]["analysis_id"] = different_analysis_id
+    analysis.model_metadata = meta
+    flag_modified(analysis, "model_metadata")
+    session.commit()
+    session.refresh(analysis)
+
+    mock_provider = MagicMock()
+    mock_provider.get_current_pull_request = AsyncMock(
+        return_value=ResolvedPullRequest(
+            repository_url="https://github.com/octocat/RepoLens-Target",
+            repository_owner="octocat",
+            repository_name="RepoLens-Target",
+            pr_number=42,
+            title="PR",
+            base_branch="main",
+            base_commit_sha=analysis.base_commit_sha,
+            head_branch="feature",
+            head_commit_sha=analysis.head_commit_sha,
+            state="open",
+            is_fork=False,
+        )
+    )
+    mock_provider.get_pull_request_diff_files = AsyncMock(return_value=[])
+
+    service = ReviewPublicationService(db=session, provider=mock_provider)
+
+    with pytest.raises(VerifiedReviewInvalidError, match="does not match ChangeAnalysis ID"):
+        await service.generate_preview(analysis_id)
+
+    # Zero writes made to GitHub
+    mock_provider.create_comment_review.assert_not_called()
+
+    # Now fix the analysis_id to match -> generate_preview succeeds
+    meta = copy.deepcopy(analysis.model_metadata)
+    meta["review_report"]["analysis_id"] = str(analysis_id)
+    analysis.model_metadata = meta
+    flag_modified(analysis, "model_metadata")
+    session.commit()
+    session.refresh(analysis)
+
+    pub = await service.generate_preview(analysis_id)
+    assert pub.status == ReviewPublicationStatus.PREVIEW_READY.value
+    session.close()
+
+
+# ── E2E L: Unresolved PUBLISHING Retry Returns Uncertain ─────────────
+
+@pytest.mark.asyncio
+async def test_e2e_l_unresolved_publishing_retry_returns_uncertain(fresh_db_engine):
+    """Verify unresolved PUBLISHING publication raises GitHubReviewStateUncertainError and executes 0 POSTs."""
+    Session = sessionmaker(bind=fresh_db_engine)
+    session = Session()
+
+    analysis = _seed_completed_pr_analysis(session)
+    analysis_id = UUID(analysis.id)
+
+    # Directly seed a publication in PUBLISHING state
+    pub = PullRequestReviewPublicationModel(
+        id=str(uuid4()),
+        analysis_id=str(analysis_id),
+        repository_owner="octocat",
+        repository_name="RepoLens-Target",
+        pr_number=42,
+        base_commit_sha=analysis.base_commit_sha,
+        head_commit_sha=analysis.head_commit_sha,
+        status=ReviewPublicationStatus.PUBLISHING.value,
+        preview_body="## Review",
+        preview_digest="a" * 64,
+        inline_comments_payload=[],
+    )
+    session.add(pub)
+    session.commit()
+
+    mock_provider = MagicMock()
+    mock_provider.write_enabled = True
+    mock_provider.list_pull_request_reviews = AsyncMock(return_value=[])  # Unreconciled
+    mock_provider.create_comment_review = AsyncMock()
+
+    service = ReviewPublicationService(db=session, provider=mock_provider)
+
+    with pytest.raises(GitHubReviewStateUncertainError, match="is in PUBLISHING state"):
+        await service.publish_review(analysis_id, expected_preview_digest="a" * 64)
+
+    # Status must remain PUBLISHING (never FAILED, APPROVED, or PREVIEW_READY)
+    session.refresh(pub)
+    assert pub.status == ReviewPublicationStatus.PUBLISHING.value
+    assert mock_provider.create_comment_review.call_count == 0
+
+    session.close()
+
+
+# ── E2E M: Invalid Reconciliation IDs Rejected ────────────────────────
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_id", [None, "abc", 0, -1])
+async def test_e2e_m_invalid_reconciliation_ids_rejected(fresh_db_engine, invalid_id):
+    """Verify reconciliation ignores marker-bearing reviews with non-positive or non-integer IDs."""
+    Session = sessionmaker(bind=fresh_db_engine)
+    session = Session()
+
+    analysis = _seed_completed_pr_analysis(session)
+    analysis_id = UUID(analysis.id)
+    digest = "b" * 64
+
+    pub = PullRequestReviewPublicationModel(
+        id=str(uuid4()),
+        analysis_id=str(analysis_id),
+        repository_owner="octocat",
+        repository_name="RepoLens-Target",
+        pr_number=42,
+        base_commit_sha=analysis.base_commit_sha,
+        head_commit_sha=analysis.head_commit_sha,
+        status=ReviewPublicationStatus.PUBLISHING.value,
+        preview_body="## Review",
+        preview_digest=digest,
+        inline_comments_payload=[],
+    )
+    session.add(pub)
+    session.commit()
+
+    mock_provider = MagicMock()
+    mock_provider.write_enabled = True
+    mock_provider.list_pull_request_reviews = AsyncMock(
+        return_value=[
+            {
+                "id": invalid_id,
+                "body": f"<!-- repolens-review:{analysis_id}:{digest} -->",
+                "html_url": "https://github.com/octocat/RepoLens-Target/pull/42#pullrequestreview-invalid",
+            }
+        ]
+    )
+
+    service = ReviewPublicationService(db=session, provider=mock_provider)
+
+    # Reconcile publication directly
+    reconciled = await service.reconcile_publication(pub)
+
+    # Must NOT transition to PUBLISHED
+    assert reconciled.status == ReviewPublicationStatus.PUBLISHING.value
+    assert reconciled.github_review_id is None
+    assert reconciled.reconciliation_occurred is not True
+
+    session.close()
+
+
+# ── E2E N: Valid Reconciliation ID Succeeds ───────────────────────────
+
+@pytest.mark.asyncio
+async def test_e2e_n_valid_positive_reconciliation_id_succeeds(fresh_db_engine):
+    """Verify reconciliation adopts positive integer review ID and updates state to PUBLISHED."""
+    Session = sessionmaker(bind=fresh_db_engine)
+    session = Session()
+
+    analysis = _seed_completed_pr_analysis(session)
+    analysis_id = UUID(analysis.id)
+    digest = "c" * 64
+
+    pub = PullRequestReviewPublicationModel(
+        id=str(uuid4()),
+        analysis_id=str(analysis_id),
+        repository_owner="octocat",
+        repository_name="RepoLens-Target",
+        pr_number=42,
+        base_commit_sha=analysis.base_commit_sha,
+        head_commit_sha=analysis.head_commit_sha,
+        status=ReviewPublicationStatus.PUBLISHING.value,
+        preview_body="## Review",
+        preview_digest=digest,
+        inline_comments_payload=[],
+    )
+    session.add(pub)
+    session.commit()
+
+    valid_id = 54321
+    mock_provider = MagicMock()
+    mock_provider.list_pull_request_reviews = AsyncMock(
+        return_value=[
+            {
+                "id": valid_id,
+                "body": f"<!-- repolens-review:{analysis_id}:{digest} -->",
+                "html_url": f"https://github.com/octocat/RepoLens-Target/pull/42#pullrequestreview-{valid_id}",
+            }
+        ]
+    )
+
+    service = ReviewPublicationService(db=session, provider=mock_provider)
+    reconciled = await service.reconcile_publication(pub)
+
+    assert reconciled.status == ReviewPublicationStatus.PUBLISHED.value
+    assert reconciled.github_review_id == 54321
+    assert reconciled.github_review_url == f"https://github.com/octocat/RepoLens-Target/pull/42#pullrequestreview-{valid_id}"
+    assert reconciled.reconciliation_occurred is True
+
+    session.close()
+
+
+# ── E2E Q: Initial Preview Audit Event FK Linkage ─────────────────────
+
+@pytest.mark.asyncio
+async def test_e2e_q_initial_preview_audit_event_fk_linkage(fresh_db_engine):
+    """Verify fresh publication flush materializes ID so PR_REVIEW_PREVIEW_READY event carries exact FK."""
+    Session = sessionmaker(bind=fresh_db_engine)
+    session1 = Session()
+
+    analysis = _seed_completed_pr_analysis(session1)
+    analysis_id = UUID(analysis.id)
+
+    mock_provider = MagicMock()
+    mock_provider.get_current_pull_request = AsyncMock(
+        return_value=ResolvedPullRequest(
+            repository_url="https://github.com/octocat/RepoLens-Target",
+            repository_owner="octocat",
+            repository_name="RepoLens-Target",
+            pr_number=42,
+            title="PR",
+            base_branch="main",
+            base_commit_sha=analysis.base_commit_sha,
+            head_branch="feature",
+            head_commit_sha=analysis.head_commit_sha,
+            state="open",
+            is_fork=False,
+        )
+    )
+    mock_provider.get_pull_request_diff_files = AsyncMock(return_value=[])
+
+    service1 = ReviewPublicationService(db=session1, provider=mock_provider)
+    pub = await service1.generate_preview(analysis_id)
+    session1.close()
+
+    # Open fresh session to query database directly
+    session2 = Session()
+    persisted_pub = session2.query(PullRequestReviewPublicationModel).filter_by(analysis_id=str(analysis_id)).first()
+    assert persisted_pub is not None
+    assert persisted_pub.id is not None
+
+    event_row = session2.query(WorkflowEventModel).filter_by(
+        change_analysis_id=str(analysis_id),
+        event_type="PR_REVIEW_PREVIEW_READY",
+    ).first()
+
+    assert event_row is not None
+    assert event_row.pr_review_publication_id == str(persisted_pub.id)
+    assert event_row.pr_review_publication_id is not None
+
+    session2.close()

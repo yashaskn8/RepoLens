@@ -220,15 +220,20 @@ def test_schema_contracts_and_digest_calculation():
 
 def test_alembic_migration_009_roundtrip():
     """Verify Alembic migration 008 -> 009 -> 008 -> 009 roundtrip cycle."""
-    config = Config("backend/alembic.ini")
-    config.set_main_option("script_location", "backend/alembic")
-    config.set_main_option("sqlalchemy.url", "sqlite:///test_alembic_phase7.db")
-
     import os
-    if os.path.exists("test_alembic_phase7.db"):
-        os.remove("test_alembic_phase7.db")
+    import tempfile
 
-    try:
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    ini_path = os.path.join(base_dir, "alembic.ini")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "test_alembic_phase7.db")
+        db_url = f"sqlite:///{db_path}"
+
+        config = Config(ini_path)
+        config.set_main_option("script_location", os.path.join(base_dir, "alembic"))
+        config.set_main_option("sqlalchemy.url", db_url)
+
         # Upgrade to head (009)
         command.upgrade(config, "head")
 
@@ -237,6 +242,4 @@ def test_alembic_migration_009_roundtrip():
 
         # Re-upgrade to head (009)
         command.upgrade(config, "head")
-    finally:
-        if os.path.exists("test_alembic_phase7.db"):
-            os.remove("test_alembic_phase7.db")
+
