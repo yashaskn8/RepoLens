@@ -16,6 +16,7 @@ import pytest
 
 from app.delivery.publication_provider import GITHUB_API_BASE_URL, GitHubReviewPublicationProvider
 from app.delivery.review_renderer import ReviewPublicationRenderer
+from app.schemas.change_analysis import ResolvedPullRequest
 from app.schemas.review_publication import (
     GitHubReviewWriteDisabledError,
     InlineReviewComment,
@@ -197,5 +198,81 @@ def test_security_secrets_never_in_rendered_output():
 
     renderer = ReviewPublicationRenderer()
     pub = renderer.render_publication(analysis=analysis, pr_number=1, review_report=report)
-
     assert raw_secret not in pub.preview_body, "Secrets MUST be redacted from review body"
+
+
+# ── Invariant 7: Provider API has zero merge/close/approve methods ────
+
+def test_security_provider_has_zero_merge_or_close_methods():
+    """Verify provider does not expose any method to merge, close, or alter PR state."""
+    provider = GitHubReviewPublicationProvider(token="tok")
+    dangerous_keywords = ["merge", "close", "delete_branch", "approve_pr", "request_changes", "dismiss"]
+    for attr in dir(provider):
+        for kw in dangerous_keywords:
+            assert kw not in attr.lower(), f"Provider MUST NOT contain dangerous method: {attr}"
+
+
+# ── Invariant 8: Failure message redaction ────────────────────────────
+
+@pytest.mark.asyncio
+async def test_security_failure_message_redaction():
+    """Verify service failure messages are always redacted before persistence."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from app.models.base import Base
+    from app.models.change_analysis import ChangeAnalysisModel
+    from app.models.review_publication import PullRequestReviewPublicationModel
+    from app.services.review_publication_service import ReviewPublicationService
+    from uuid import UUID
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    db = Session()
+
+    analysis = ChangeAnalysisModel(
+        id=str(uuid4()), repository_url="https://github.com/o/r",
+        repository_owner="o", repository_name="r",
+        base_commit_sha="a" * 40, head_commit_sha="b" * 40, status="COMPLETED",
+        model_metadata={"pr_number": 1, "is_fork": False},
+    )
+    db.add(analysis)
+    db.commit()
+
+    raw_token = "ghp_SECRET_TOKEN_IN_ERROR_123456789"
+    mock_provider = MagicMock()
+    mock_provider.write_enabled = True
+    mock_provider.get_current_pull_request = AsyncMock(
+        return_value=ResolvedPullRequest(
+            repository_url="https://github.com/o/r",
+            repository_owner="o",
+            repository_name="r",
+            pr_number=1,
+            title="PR",
+            base_branch="main",
+            base_commit_sha="a" * 40,
+            head_branch="patch",
+            head_commit_sha="b" * 40,
+            state="open",
+            is_fork=False,
+        )
+    )
+    mock_provider.get_pull_request_diff_files = AsyncMock(return_value=[])
+    mock_provider.create_comment_review = AsyncMock(
+        side_effect=Exception(f"Connection failed to GitHub with auth: Bearer {raw_token}")
+    )
+    mock_provider.list_pull_request_reviews = AsyncMock(return_value=[])
+
+    service = ReviewPublicationService(db=db, provider=mock_provider)
+    pub = await service.generate_preview(UUID(analysis.id))
+    digest = pub.preview_digest
+    await service.approve_preview(UUID(analysis.id), expected_preview_digest=digest)
+
+    with pytest.raises(Exception):
+        await service.publish_review(UUID(analysis.id), expected_preview_digest=digest)
+
+    db.refresh(pub)
+    assert raw_token not in (pub.failure_message or ""), "Token MUST NOT leak into publication.failure_message"
+
+    db.close()
+

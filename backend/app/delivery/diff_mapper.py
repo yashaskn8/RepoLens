@@ -115,6 +115,20 @@ class PullRequestDiffMapper:
                     except ValueError:
                         pass
 
+        # 3. Search for direct "filepath:line_number" format (e.g. "app/db.py:45")
+        for ev in finding.evidence_refs:
+            if ":" in ev and not ev.startswith(("line:", "symbol:", "http://", "https://")):
+                parts = ev.split(":")
+                if len(parts) == 2:
+                    file_part = parts[0].replace("\\", "/")
+                    line_str = parts[1].split("-")[0]
+                    try:
+                        line_no = int(line_str)
+                        if line_no > 0:
+                            return (file_part, line_no)
+                    except ValueError:
+                        pass
+
         return None
 
     def map_findings_to_inline_comments(

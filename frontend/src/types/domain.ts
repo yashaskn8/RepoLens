@@ -966,6 +966,12 @@ export interface ChangeAnalysisTelemetry {
 
   is_truncated: boolean;
   truncation_reason?: string | null;
+
+  review_publication_status?: ReviewPublicationStatus | string;
+  review_publication_inline_comments_count?: number;
+  review_publication_reconciliation_occurred?: boolean;
+  review_publication_published?: boolean;
+  review_publication_block_reason?: string | null;
 }
 
 export type ReviewPublicationStatus =

@@ -43,6 +43,7 @@ from app.schemas.review_publication import (
     ReviewPublicationStatus,
 )
 from app.schemas.workflow_event import WorkflowEventCreate, WorkflowEventType
+from app.security.redaction import redact_secrets
 from app.services.workflow_event_service import WorkflowEventService
 
 logger = logging.getLogger(__name__)
@@ -74,9 +75,18 @@ class ReviewPublicationService:
     def _extract_pr_provenance(self, analysis: ChangeAnalysisModel) -> tuple[int, bool]:
         """Extract and validate immutable PR provenance from analysis metadata."""
         meta = analysis.model_metadata or {}
-        pr_meta = meta.get("pr_metadata") or meta.get("pull_request") or {}
 
-        pr_number = pr_meta.get("pr_number")
+        # Primary: Canonical top-level PR metadata persisted by Phase 6 /from-pr
+        pr_number = meta.get("pr_number")
+        is_fork = meta.get("is_fork")
+
+        # Fallback: Legacy nested representation if present
+        if pr_number is None:
+            nested = meta.get("pr_metadata") or meta.get("pull_request") or {}
+            pr_number = nested.get("pr_number")
+            if is_fork is None:
+                is_fork = nested.get("is_fork")
+
         if pr_number is None:
             raise NotPRAnalysisError("ChangeAnalysis does not contain valid pull request provenance (missing pr_number)")
 
@@ -84,14 +94,20 @@ class ReviewPublicationService:
             pr_num_int = int(pr_number)
             if pr_num_int <= 0:
                 raise ValueError()
-        except ValueError:
+        except (TypeError, ValueError):
             raise NotPRAnalysisError(f"Invalid pull request number: {pr_number}")
 
-        is_fork = bool(pr_meta.get("is_fork", False))
-        if is_fork:
+        is_fork_bool = bool(is_fork) if is_fork is not None else False
+        if is_fork_bool:
             raise ForkPRUnsupportedError("Pull request originates from a fork repository")
 
-        return pr_num_int, is_fork
+        if not analysis.repository_owner or not analysis.repository_name:
+            raise NotPRAnalysisError("ChangeAnalysis is missing valid repository owner or name")
+
+        if not analysis.base_commit_sha or not analysis.head_commit_sha:
+            raise NotPRAnalysisError("ChangeAnalysis is missing base or head commit SHA")
+
+        return pr_num_int, is_fork_bool
 
     async def generate_preview(self, analysis_id: UUID) -> PullRequestReviewPublicationModel:
         """Generate deterministic review publication preview (ZERO GitHub writes)."""
@@ -357,14 +373,15 @@ class ReviewPublicationService:
                 comments=inline_comments,
             )
         except Exception as external_exc:
-            logger.warning(f"External write threw exception: {external_exc}. Attempting reconciliation...")
+            safe_ext_err = redact_secrets(str(external_exc))[:500]
+            logger.warning(f"External write threw exception: {safe_ext_err}. Attempting reconciliation...")
             reconciled = await self.reconcile_publication(pub)
             if reconciled.status == ReviewPublicationStatus.PUBLISHED.value:
                 return reconciled
 
             pub.status = ReviewPublicationStatus.FAILED.value
             pub.failure_code = "GITHUB_REVIEW_CREATE_FAILED"
-            pub.failure_message = str(external_exc)
+            pub.failure_message = safe_ext_err
             self.db.commit()
             raise
 
@@ -382,7 +399,8 @@ class ReviewPublicationService:
         except Exception as db_exc:
             # Rule 6: Rollback first on DB failure after external write
             self.db.rollback()
-            logger.error(f"Database commit failed after successful GitHub review creation: {db_exc}")
+            safe_db_err = redact_secrets(str(db_exc))[:500]
+            logger.error(f"Database commit failed after successful GitHub review creation: {safe_db_err}")
             raise
 
         # Step 5: Emit completion event
@@ -421,7 +439,8 @@ class ReviewPublicationService:
                 per_page=100,
             )
         except Exception as e:
-            logger.warning(f"Reconciliation list_reviews failed: {e}")
+            safe_recon_err = redact_secrets(str(e))[:500]
+            logger.warning(f"Reconciliation list_reviews failed: {safe_recon_err}")
             return pub
 
         for rev in reviews:

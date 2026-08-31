@@ -39,7 +39,7 @@ def db_session():
 
 
 def _create_mock_pr_analysis(db_session, status="COMPLETED", is_fork=False):
-    """Helper creating a test ChangeAnalysisModel with valid PR metadata."""
+    """Helper creating a test ChangeAnalysisModel with canonical Phase 6 top-level PR metadata."""
     analysis = ChangeAnalysisModel(
         id=str(uuid4()),
         repository_url="https://github.com/octocat/Hello-World",
@@ -49,11 +49,12 @@ def _create_mock_pr_analysis(db_session, status="COMPLETED", is_fork=False):
         head_commit_sha="b" * 40,
         status=status,
         model_metadata={
-            "pr_metadata": {
-                "canonical_pr_url": "https://github.com/octocat/Hello-World/pull/42",
-                "pr_number": 42,
-                "is_fork": is_fork,
-            }
+            "pr_url": "https://github.com/octocat/Hello-World/pull/42",
+            "pr_number": 42,
+            "pr_title": "Update app",
+            "head_repo_url": "https://github.com/octocat/Hello-World",
+            "is_fork": is_fork,
+            "pr_state": "open",
         },
     )
     db_session.add(analysis)
@@ -251,3 +252,64 @@ async def test_publish_reconciliation_on_crash_recovery(db_session):
 
     # Zero additional create_comment_review calls!
     mock_provider.create_comment_review.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_provenance_canonical_and_legacy(db_session):
+    """Verify both canonical top-level PR metadata and legacy nested metadata extract correctly."""
+    service = ReviewPublicationService(db=db_session)
+
+    # 1. Canonical top-level
+    a1 = ChangeAnalysisModel(
+        id=str(uuid4()),
+        repository_url="https://github.com/o/r",
+        repository_owner="o",
+        repository_name="r",
+        base_commit_sha="a" * 40,
+        head_commit_sha="b" * 40,
+        model_metadata={"pr_number": 99, "is_fork": False, "pr_url": "https://github.com/o/r/pull/99"},
+    )
+    pr_num, is_fork = service._extract_pr_provenance(a1)
+    assert pr_num == 99
+    assert is_fork is False
+
+    # 2. Legacy nested
+    a2 = ChangeAnalysisModel(
+        id=str(uuid4()),
+        repository_url="https://github.com/o/r",
+        repository_owner="o",
+        repository_name="r",
+        base_commit_sha="a" * 40,
+        head_commit_sha="b" * 40,
+        model_metadata={"pr_metadata": {"pr_number": 101, "is_fork": False}},
+    )
+    pr_num2, is_fork2 = service._extract_pr_provenance(a2)
+    assert pr_num2 == 101
+    assert is_fork2 is False
+
+    # 3. Missing pr_number
+    a3 = ChangeAnalysisModel(
+        id=str(uuid4()),
+        repository_url="https://github.com/o/r",
+        repository_owner="o",
+        repository_name="r",
+        base_commit_sha="a" * 40,
+        head_commit_sha="b" * 40,
+        model_metadata={},
+    )
+    with pytest.raises(NotPRAnalysisError):
+        service._extract_pr_provenance(a3)
+
+    # 4. Fork rejected
+    a4 = ChangeAnalysisModel(
+        id=str(uuid4()),
+        repository_url="https://github.com/o/r",
+        repository_owner="o",
+        repository_name="r",
+        base_commit_sha="a" * 40,
+        head_commit_sha="b" * 40,
+        model_metadata={"pr_number": 5, "is_fork": True},
+    )
+    with pytest.raises(ForkPRUnsupportedError):
+        service._extract_pr_provenance(a4)
+

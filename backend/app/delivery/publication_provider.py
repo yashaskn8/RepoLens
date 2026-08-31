@@ -20,6 +20,7 @@ from app.delivery.diff_mapper import GitHubDiffFile
 from app.schemas.change_analysis import ResolvedPullRequest
 from app.schemas.review_publication import (
     GitHubAuthFailedError,
+    GitHubPRMetadataInvalidError,
     GitHubRateLimitedError,
     GitHubReviewCreateFailedError,
     GitHubReviewStateUncertainError,
@@ -200,8 +201,28 @@ class GitHubReviewPublicationProvider(PullRequestReviewPublicationProvider):
     async def get_current_pull_request(self, owner: str, repo: str, pr_number: int) -> ResolvedPullRequest:
         """Fetch current pull request state and immutable commit SHAs from GitHub."""
         data = await self._request("GET", f"/repos/{owner}/{repo}/pulls/{pr_number}", is_write=False)
-        head_data = data.get("head", {})
-        base_data = data.get("base", {})
+        head_data = data.get("head") if isinstance(data.get("head"), dict) else {}
+        base_data = data.get("base") if isinstance(data.get("base"), dict) else {}
+
+        # Validate base.ref
+        base_ref = base_data.get("ref")
+        if not base_ref or not isinstance(base_ref, str) or not base_ref.strip():
+            raise GitHubPRMetadataInvalidError(f"GitHub PR response missing valid base.ref on PR #{pr_number}")
+
+        # Validate head.ref
+        head_ref = head_data.get("ref")
+        if not head_ref or not isinstance(head_ref, str) or not head_ref.strip():
+            raise GitHubPRMetadataInvalidError(f"GitHub PR response missing valid head.ref on PR #{pr_number}")
+
+        # Validate base.sha (must be 40-char hex)
+        base_sha = base_data.get("sha")
+        if not base_sha or not isinstance(base_sha, str) or len(base_sha) != 40 or not all(c in "0123456789abcdefABCDEF" for c in base_sha):
+            raise GitHubPRMetadataInvalidError(f"GitHub PR response missing valid 40-char base.sha on PR #{pr_number}")
+
+        # Validate head.sha (must be 40-char hex)
+        head_sha = head_data.get("sha")
+        if not head_sha or not isinstance(head_sha, str) or len(head_sha) != 40 or not all(c in "0123456789abcdefABCDEF" for c in head_sha):
+            raise GitHubPRMetadataInvalidError(f"GitHub PR response missing valid 40-char head.sha on PR #{pr_number}")
 
         is_fork = False
         head_repo = head_data.get("repo")
@@ -215,10 +236,10 @@ class GitHubReviewPublicationProvider(PullRequestReviewPublicationProvider):
             repository_name=repo,
             pr_number=pr_number,
             title=data.get("title", ""),
-            base_branch=base_data.get("ref", "main"),
-            base_commit_sha=base_data.get("sha", ""),
-            head_branch=head_data.get("ref", "patch"),
-            head_commit_sha=head_data.get("sha", ""),
+            base_branch=base_ref.strip(),
+            base_commit_sha=base_sha.lower(),
+            head_branch=head_ref.strip(),
+            head_commit_sha=head_sha.lower(),
             is_fork=is_fork,
             state="merged" if data.get("merged") else data.get("state", "open"),
         )

@@ -206,6 +206,11 @@ class GitHubReviewStateUncertainError(ReviewPublicationError):
         super().__init__(message, error_code="GITHUB_REVIEW_STATE_UNCERTAIN", status_code=502)
 
 
+class GitHubPRMetadataInvalidError(ReviewPublicationError):
+    def __init__(self, message: str = "GitHub pull request metadata is invalid or missing required fields (base/head ref or sha)"):
+        super().__init__(message, error_code="GITHUB_PR_METADATA_INVALID", status_code=502)
+
+
 class ReconciliationFailedError(ReviewPublicationError):
     def __init__(self, message: str = "Failed to reconcile pull request review status from GitHub"):
         super().__init__(message, error_code="RECONCILIATION_FAILED", status_code=502)

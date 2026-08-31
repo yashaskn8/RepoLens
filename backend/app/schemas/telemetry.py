@@ -126,4 +126,9 @@ class ChangeAnalysisTelemetry(BaseModel):
     is_truncated: bool = False
     truncation_reason: Optional[str] = None
 
-
+    # Phase 7: Authoritative PR Review Publication state
+    review_publication_status: str = "NOT_REQUESTED"
+    review_publication_inline_comments_count: int = 0
+    review_publication_reconciliation_occurred: bool = False
+    review_publication_published: bool = False
+    review_publication_block_reason: Optional[str] = None

@@ -8,7 +8,7 @@ Strict invariants:
 """
 
 import logging
-from typing import Optional
+from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.models.review_publication import PullRequestReviewPublicationModel
 from app.schemas.review_publication import (
+    InlineReviewCommentPreview,
     ReviewPublicationApproveRequest,
     ReviewPublicationError,
     ReviewPublicationPreviewResponse,
@@ -35,7 +36,23 @@ router = APIRouter(
 
 
 def _pub_to_preview_response(pub: PullRequestReviewPublicationModel) -> ReviewPublicationPreviewResponse:
-    """Map ORM model to Pydantic response schema."""
+    """Map ORM model to Pydantic response schema with deserialized inline comment previews."""
+    inline_previews: List[InlineReviewCommentPreview] = []
+    if pub.inline_comments_payload:
+        for c in pub.inline_comments_payload:
+            if isinstance(c, dict):
+                inline_previews.append(
+                    InlineReviewCommentPreview(
+                        path=c.get("path", ""),
+                        line=int(c.get("line", 1)),
+                        side=c.get("side", "RIGHT"),
+                        body=c.get("body", ""),
+                        finding_id=c.get("finding_id"),
+                        finding_title=c.get("finding_title"),
+                        severity=c.get("severity"),
+                    )
+                )
+
     return ReviewPublicationPreviewResponse(
         publication_id=UUID(pub.id),
         analysis_id=UUID(pub.analysis_id),
@@ -47,7 +64,7 @@ def _pub_to_preview_response(pub: PullRequestReviewPublicationModel) -> ReviewPu
         head_commit_sha=pub.head_commit_sha,
         body_markdown=pub.preview_body or "",
         preview_digest=pub.preview_digest or "",
-        inline_comments=[],
+        inline_comments=inline_previews,
         review_event="COMMENT",
         is_truncated=pub.is_truncated or False,
         truncation_reason=pub.truncation_reason,

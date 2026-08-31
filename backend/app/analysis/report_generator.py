@@ -24,6 +24,7 @@ from app.schemas.change_analysis import (
 )
 from app.schemas.enums import ChangeImpactType, ChangeRiskLevel, ImpactVerificationStatus
 from app.schemas.telemetry import ChangeAnalysisTelemetry
+from app.security.redaction import redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -206,9 +207,6 @@ def _render_markdown_report(
         agent_row = "| **Change Review Agent** | ⚠️ Unavailable — deterministic-only result | Fallback Mode |"
     elif llm_status == "FAILED":
         agent_row = "| **Change Review Agent** | ❌ Failed — deterministic fallback | Fallback Mode |"
-    else:
-        agent_row = "| **Change Review Agent** | ⚠️ Unavailable — deterministic-only result | Fallback Mode |"
-
     lines.append(agent_row)
     lines.append("| **Runtime Sandbox / Dynamic Testing** | ❌ Not Executed | Static Evidence Only |")
     lines.append("")
@@ -216,6 +214,44 @@ def _render_markdown_report(
     lines.append("- **Static Analysis Boundary**: Analysis operates purely on static source AST and repository dependency graphs. No repository code was executed in a sandbox.")
     lines.append("- **No Test Execution**: Repository test suites, integration tests, and CI/CD pipelines were **NOT executed**.")
     lines.append("- **Dynamic Dispatch**: Dynamic reflection, runtime monkeypatching, and duck-typed method invocation cannot be completely proven via static traversal.")
+    lines.append("")
+
+    # 7. Phase 7: GitHub Review Publication State
+    pub = getattr(analysis, "review_publication", None)
+    lines.append("## 🚀 GitHub Review Publication")
+    lines.append("")
+    if pub is None:
+        lines.append("- **Status**: `NOT_REQUESTED`")
+    elif pub.status == "PUBLISHED":
+        lines.append("- **Status**: `PUBLISHED`")
+        lines.append("- **Review Type**: `COMMENT`")
+        lines.append(f"- **Repository**: `{pub.repository_owner}/{pub.repository_name}`")
+        lines.append(f"- **Pull Request**: `#{pub.pr_number}`")
+        lines.append(f"- **Base SHA**: `{pub.base_commit_sha}`")
+        lines.append(f"- **Head SHA**: `{pub.head_commit_sha}`")
+        if pub.github_review_id:
+            lines.append(f"- **Review ID**: `{pub.github_review_id}`")
+        if pub.github_review_url:
+            lines.append(f"- **Review URL**: {pub.github_review_url}")
+        if pub.published_at:
+            lines.append(f"- **Published At**: {pub.published_at.isoformat()}")
+        inline_count = len(pub.inline_comments_payload or [])
+        lines.append(f"- **Inline Comments Count**: {inline_count}")
+        lines.append(f"- **Reconciliation Occurred**: {'Yes' if pub.reconciliation_occurred else 'No'}")
+    elif pub.status in ("BLOCKED", "FAILED"):
+        lines.append(f"- **Status**: `{pub.status}`")
+        if pub.failure_code:
+            lines.append(f"- **Failure Code**: `{pub.failure_code}`")
+        if pub.failure_message:
+            safe_msg = redact_secrets(pub.failure_message)[:500]
+            lines.append(f"- **Failure Message**: {safe_msg}")
+    else:
+        # PREVIEW_READY, APPROVED, PUBLISHING
+        lines.append(f"- **Status**: `{pub.status}`")
+        if pub.preview_digest:
+            lines.append(f"- **Preview Digest**: `{pub.preview_digest}`")
+        inline_count = len(pub.inline_comments_payload or [])
+        lines.append(f"- **Inline Comments Count**: {inline_count}")
     lines.append("")
 
     return "\n".join(lines)
@@ -429,4 +465,9 @@ def generate_change_analysis_telemetry(model: ChangeAnalysisModel) -> ChangeAnal
         total_tokens=model_meta.get("total_tokens"),
         is_truncated=bool(blast_data.get("is_truncated", False)),
         truncation_reason=blast_data.get("truncation_reason"),
+        review_publication_status=model.review_publication.status if getattr(model, "review_publication", None) else "NOT_REQUESTED",
+        review_publication_inline_comments_count=len(model.review_publication.inline_comments_payload or []) if getattr(model, "review_publication", None) and model.review_publication.inline_comments_payload else 0,
+        review_publication_reconciliation_occurred=bool(model.review_publication.reconciliation_occurred) if getattr(model, "review_publication", None) else False,
+        review_publication_published=(model.review_publication.status == "PUBLISHED") if getattr(model, "review_publication", None) else False,
+        review_publication_block_reason=model.review_publication.failure_code if getattr(model, "review_publication", None) else None,
     )
