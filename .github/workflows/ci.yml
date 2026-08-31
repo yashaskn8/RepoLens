@@ -5,14 +5,26 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repolens-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   backend-test:
-    name: Backend Tests (Python 3.12)
+    name: Backend Quality, Migrations & Tests (Python 3.12)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       DATABASE_URL: "sqlite:///./ci_test.db"
       TESTING: "true"
+      ENVIRONMENT: "development"
+      GITHUB_DELIVERY_ENABLED: "false"
+      GITHUB_PR_REVIEW_WRITE_ENABLED: "false"
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -30,12 +42,28 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
+      - name: Verify Dependencies & Python Bytecode
+        run: |
+          cd backend
+          python -m pip check
+          python -m compileall -q app
+
       - name: Verify Module Imports
         run: |
           cd backend
-          python -c "import app.main; import app.patching.workflow; import app.services.scan_recovery; print('Module imports OK')"
+          python -c "import app.main; import app.services.authorization_service; import app.services.quota_service; import app.ingestion.github_pr; import app.delivery.github_client; print('RepoLens backend import smoke: OK')"
 
-      - name: Run Fresh Alembic Migrations
+      - name: Reversible Migration Lifecycle Proof
+        run: |
+          cd backend
+          export DATABASE_URL="sqlite:///./ci_migration.db"
+          alembic upgrade head
+          alembic current
+          alembic downgrade base
+          alembic upgrade head
+          rm -f ci_migration.db
+
+      - name: Bootstrap Test Database Migrations
         run: |
           cd backend
           alembic upgrade head
@@ -46,8 +74,9 @@ jobs:
           python -m pytest tests -v
 
   frontend-check:
-    name: Frontend Typecheck, Lint & Build
+    name: Frontend Typecheck, Lint & Build (Node 20)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -78,4 +107,3 @@ jobs:
         run: |
           cd frontend
           npm run build
-

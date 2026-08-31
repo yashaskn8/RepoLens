@@ -21,9 +21,9 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Set database URL dynamically from Pydantic settings if not already provided
+# Set database URL dynamically from config / environment / Pydantic settings
 settings = get_settings()
-db_url = config.get_main_option("sqlalchemy.url") or settings.DATABASE_URL
+db_url = config.get_main_option("sqlalchemy.url") or os.environ.get("DATABASE_URL") or settings.DATABASE_URL
 config.set_main_option("sqlalchemy.url", db_url)
 
 target_metadata = Base.metadata
@@ -31,7 +31,7 @@ target_metadata = Base.metadata
 
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode."""
-    url = config.get_main_option("sqlalchemy.url") or settings.DATABASE_URL
+    url = config.get_main_option("sqlalchemy.url") or os.environ.get("DATABASE_URL") or settings.DATABASE_URL
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -49,7 +49,7 @@ def run_migrations_online() -> None:
     configuration = config.get_section(config.config_ini_section)
     if configuration is None:
         configuration = {}
-    configuration["sqlalchemy.url"] = config.get_main_option("sqlalchemy.url") or settings.DATABASE_URL
+    configuration["sqlalchemy.url"] = config.get_main_option("sqlalchemy.url") or os.environ.get("DATABASE_URL") or settings.DATABASE_URL
 
     connectable = engine_from_config(
         configuration,

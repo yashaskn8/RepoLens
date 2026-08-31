@@ -206,19 +206,16 @@ def test_revise_race_condition_returns_409(client, db_session):
         simulating the race window where Request B hasn't seen Request A's child yet."""
         real_q = _real_query(model)
         if model is PatchModel:
-            original_filter = real_q.filter
+            class _RaceConditionPatchQuery(type(real_q)):
+                def filter(self, *args):
+                    filter_str = str(args[0]) if args else ""
+                    if "parent_patch_id" in filter_str:
+                        mock_result = MagicMock()
+                        mock_result.first.return_value = None
+                        return mock_result
+                    return super().filter(*args)
 
-            def _patched_filter(*args):
-                result = original_filter(*args)
-                # Check if this is the parent_patch_id filter (existing_child check)
-                filter_str = str(args[0]) if args else ""
-                if "parent_patch_id" in filter_str:
-                    # Return a query that yields None (simulating race window)
-                    mock_result = MagicMock()
-                    mock_result.first.return_value = None
-                    return mock_result
-                return result
-            real_q.filter = _patched_filter
+            real_q.__class__ = _RaceConditionPatchQuery
         return real_q
 
     with patch("app.ingestion.snapshot.RepositorySnapshotService.open_snapshot", _mock_open_snapshot), \
