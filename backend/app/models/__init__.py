@@ -7,6 +7,7 @@ from app.models.finding import EvidenceModel, FindingModel
 from app.models.patch import PatchModel
 from app.models.review_publication import PullRequestReviewPublicationModel
 from app.models.scan import ScanModel
+from app.models.user import UsageCounterModel, UserModel, UserSessionModel
 from app.models.workflow_event import WorkflowEventModel
 
 __all__ = [
@@ -20,5 +21,8 @@ __all__ = [
     "ChangeAnalysisModel",
     "ChangeImpactModel",
     "PullRequestReviewPublicationModel",
+    "UserModel",
+    "UserSessionModel",
+    "UsageCounterModel",
 ]
 

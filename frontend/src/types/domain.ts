@@ -1044,3 +1044,24 @@ export interface ReviewPublicationPublishResponse {
   inline_comments_count: number;
   reconciliation_occurred: boolean;
 }
+
+export type UserRole = 'USER' | 'OPERATOR';
+
+export interface UserResponse {
+  id: string;
+  email: string;
+  role: UserRole;
+  is_active: boolean;
+  created_at?: string | null;
+  last_login_at?: string | null;
+}
+
+export interface UserLoginRequest {
+  email: string;
+  password: string;
+}
+
+export interface UserRegisterRequest {
+  email: string;
+  password: string;
+}

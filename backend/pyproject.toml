@@ -26,6 +26,8 @@ dependencies = [
     "aiosqlite>=0.20.0",
     "networkx>=3.0",
     "mcp>=1.28.0,<2.0.0",
+    "argon2-cffi>=23.1.0",
+    "email-validator>=2.0.0",
 ]
 
 [project.optional-dependencies]
@@ -45,6 +47,7 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 asyncio_mode = "auto"
+addopts = "-p no:phoenix"
 markers = [
     "integration: marks integration tests requiring external services (e.g. real PostgreSQL/pgvector)",
 ]

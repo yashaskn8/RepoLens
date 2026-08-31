@@ -131,19 +131,30 @@ def e2e_fixture_git_repo():
 
 @pytest.fixture
 def e2e_client():
-    """Isolated TestClient yielding fresh TestingSessionLocal per dependency call."""
+    """Isolated TestClient yielding fresh TestingSessionLocal per dependency call with authenticated operator."""
+    from app.cli.create_operator import create_or_elevate_operator
     from app.core.database import get_db
     from app.main import app
+    from app.services.auth_service import AuthService
+
+    db = TestingSessionLocal()
+    user = create_or_elevate_operator(db, email="e2e_tester@example.com", password="E2ETestPassword12345!")
+    auth_service = AuthService(db)
+    raw_session, raw_csrf, _ = auth_service.create_session(user)
+    db.close()
 
     def override_get_db():
-        db = TestingSessionLocal()
+        session = TestingSessionLocal()
         try:
-            yield db
+            yield session
         finally:
-            db.close()
+            session.close()
 
     app.dependency_overrides[get_db] = override_get_db
     with TestClient(app) as test_client:
+        test_client.cookies.set("repolens_session", raw_session)
+        test_client.cookies.set("repolens_csrf", raw_csrf)
+        test_client.headers["X-CSRF-Token"] = raw_csrf
         yield test_client
     app.dependency_overrides.clear()
 

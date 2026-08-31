@@ -1,7 +1,7 @@
 """Application settings and configuration using Pydantic Settings."""
 
 from functools import lru_cache
-from typing import List, Union
+from typing import List, Optional, Union
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -89,6 +89,27 @@ class Settings(BaseSettings):
     MAX_REVIEW_INLINE_COMMENTS: int = 20
     MAX_REVIEW_BODY_CHARS: int = 50_000
 
+    # Authentication & Session Settings (Phase 8)
+    AUTH_SESSION_TTL_SECONDS: int = 86400  # 24 hours
+    AUTH_MAX_FAILED_LOGIN_ATTEMPTS: int = 5
+    AUTH_LOCKOUT_SECONDS: int = 900  # 15 minutes
+    AUTH_COOKIE_NAME: str = "repolens_session"
+    AUTH_COOKIE_SECURE: bool = False
+    AUTH_COOKIE_SAMESITE: str = "lax"
+    AUTH_COOKIE_DOMAIN: Optional[str] = None
+
+    # CSRF Protection Settings (Phase 8)
+    CSRF_COOKIE_NAME: str = "repolens_csrf"
+    CSRF_HEADER_NAME: str = "X-CSRF-Token"
+
+    # Daily Quota Limits Per User (Phase 8)
+    MAX_DAILY_SCANS_PER_USER: int = 20
+    MAX_DAILY_CHANGE_ANALYSES_PER_USER: int = 50
+    MAX_DAILY_PATCH_GENERATIONS_PER_USER: int = 50
+
+    # Production Hardening & Network Controls (Phase 8)
+    TRUSTED_HOSTS: Union[List[str], str] = ["localhost", "127.0.0.1", "testserver"]
+    ENABLE_API_DOCS: bool = True
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
@@ -100,10 +121,25 @@ class Settings(BaseSettings):
             return v
         return []
 
+    @field_validator("TRUSTED_HOSTS", mode="before")
+    @classmethod
+    def assemble_trusted_hosts(cls, v: Union[str, List[str]]) -> List[str]:
+        """Parse comma-separated string into a list of trusted hosts if provided as string."""
+        if isinstance(v, str):
+            return [i.strip() for i in v.split(",") if i.strip()]
+        elif isinstance(v, list):
+            return v
+        return ["localhost", "127.0.0.1", "testserver"]
+
     @property
     def is_sqlite(self) -> bool:
         """Helper to determine if the configured database is SQLite."""
         return self.DATABASE_URL.startswith("sqlite")
+
+    @property
+    def is_production(self) -> bool:
+        """Helper to determine if running in production mode."""
+        return self.ENVIRONMENT.lower() == "production"
 
     model_config = SettingsConfigDict(
         env_file=".env",

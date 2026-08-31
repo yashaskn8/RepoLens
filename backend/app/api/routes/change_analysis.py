@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.analysis.workflow import execute_background_change_analysis
+from app.api.dependencies import get_current_user, verify_csrf
 from app.core.database import get_db
 from app.ingestion.github_pr import (
     GitHubPRForbiddenError,
@@ -24,6 +25,7 @@ from app.ingestion.github_pr import (
 )
 from app.models.change_analysis import ChangeAnalysisModel, ChangeImpactModel
 from app.models.workflow_event import WorkflowEventModel
+from app.schemas.auth import CurrentUser
 from app.schemas.change_analysis import (
     ChangeAnalysisPRRequest,
     ChangeAnalysisReportResponse,
@@ -34,9 +36,12 @@ from app.schemas.change_analysis import (
     ChangeReviewReport,
     ResolvedPullRequest,
 )
-from app.schemas.enums import ChangeAnalysisStatus, ChangeImpactType, ImpactVerificationStatus, Severity
+from app.schemas.enums import ChangeAnalysisStatus, ChangeImpactType, ImpactVerificationStatus, Severity, UsageOperation
 from app.schemas.telemetry import ChangeAnalysisTelemetry
 from app.schemas.workflow_event import WorkflowEventCreate, WorkflowEventResponse, WorkflowEventType
+from app.schemas.auth import get_user_id
+from app.services.authorization_service import get_owned_change_analysis_or_404
+from app.services.quota_service import check_and_increment_quota
 from app.services.workflow_event_service import WorkflowEventService
 
 
@@ -109,9 +114,14 @@ def _serialize_analysis(model: ChangeAnalysisModel) -> ChangeAnalysisResponse:
 )
 async def create_change_analysis(
     payload: ChangeAnalysisRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+    _csrf: None = Depends(verify_csrf),
     db: Session = Depends(get_db),
 ) -> ChangeAnalysisResponse:
     """Initiate asynchronous change intelligence analysis between two exact commit SHAs."""
+    # 1. Quota check & increment
+    check_and_increment_quota(db, current_user, UsageOperation.CHANGE_ANALYSIS_CREATE.value)
+
     owner, repo = _extract_repo_owner_name(payload.repository_url)
     analysis_id = str(uuid4())
 
@@ -124,6 +134,7 @@ async def create_change_analysis(
         base_commit_sha=payload.base_commit_sha,
         head_ref=payload.head_ref,
         head_commit_sha=payload.head_commit_sha,
+        owner_user_id=get_user_id(current_user),
         status=ChangeAnalysisStatus.PENDING.value,
         model_metadata={},
     )
@@ -136,6 +147,7 @@ async def create_change_analysis(
         event=WorkflowEventCreate(
             event_type=WorkflowEventType.CHANGE_ANALYSIS_REQUESTED,
             change_analysis_id=UUID(analysis_id),
+            actor_user_id=get_user_id(current_user),
             message=f"Change analysis requested for {owner}/{repo} ({payload.base_commit_sha[:8]} -> {payload.head_commit_sha[:8]})",
             metadata_payload={
                 "repository_url": payload.repository_url,
@@ -159,9 +171,14 @@ async def create_change_analysis(
 )
 async def create_change_analysis_from_pr(
     payload: ChangeAnalysisPRRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+    _csrf: None = Depends(verify_csrf),
     db: Session = Depends(get_db),
 ) -> ChangeAnalysisResponse:
     """Resolve public GitHub PR metadata, persist immutable base/head commit SHAs, and start asynchronous analysis."""
+    # 1. Quota check & increment
+    check_and_increment_quota(db, current_user, UsageOperation.CHANGE_ANALYSIS_CREATE.value)
+
     resolver = get_github_pr_resolver()
 
     try:
@@ -206,6 +223,7 @@ async def create_change_analysis_from_pr(
         base_commit_sha=resolved_pr.base_commit_sha,
         head_ref=resolved_pr.head_branch,
         head_commit_sha=resolved_pr.head_commit_sha,
+        owner_user_id=get_user_id(current_user),
         status=ChangeAnalysisStatus.PENDING.value,
         model_metadata=metadata,
     )
@@ -218,6 +236,7 @@ async def create_change_analysis_from_pr(
         event=WorkflowEventCreate(
             event_type=WorkflowEventType.CHANGE_ANALYSIS_REQUESTED,
             change_analysis_id=UUID(analysis_id),
+            actor_user_id=get_user_id(current_user),
             message=f"Change analysis requested for PR #{resolved_pr.pr_number}: '{resolved_pr.title}' ({resolved_pr.base_commit_sha[:8]} -> {resolved_pr.head_commit_sha[:8]})",
             metadata_payload=metadata,
         ),
@@ -238,10 +257,11 @@ def list_change_analyses(
     repository_url: Optional[str] = Query(None, description="Filter by repository URL"),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> List[ChangeAnalysisSummary]:
-    """Retrieve list of change intelligence analyses."""
-    query = db.query(ChangeAnalysisModel)
+    """Retrieve list of change intelligence analyses for the authenticated user."""
+    query = db.query(ChangeAnalysisModel).filter(ChangeAnalysisModel.owner_user_id == get_user_id(current_user))
     if repository_url:
         query = query.filter(ChangeAnalysisModel.repository_url == repository_url)
     
@@ -278,15 +298,11 @@ def list_change_analyses(
 )
 def get_change_analysis(
     analysis_id: UUID,
+    current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ChangeAnalysisResponse:
     """Retrieve complete change intelligence analysis by ID."""
-    model = db.query(ChangeAnalysisModel).filter(ChangeAnalysisModel.id == str(analysis_id)).first()
-    if not model:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Change analysis '{analysis_id}' not found",
-        )
+    model = get_owned_change_analysis_or_404(db, str(analysis_id), current_user)
     return _serialize_analysis(model)
 
 
@@ -297,15 +313,11 @@ def get_change_analysis(
 )
 def get_change_analysis_impacts(
     analysis_id: UUID,
+    current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> List[ChangeImpact]:
     """Retrieve structured blast radius impact records for a specific change analysis."""
-    model = db.query(ChangeAnalysisModel).filter(ChangeAnalysisModel.id == str(analysis_id)).first()
-    if not model:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Change analysis '{analysis_id}' not found",
-        )
+    model = get_owned_change_analysis_or_404(db, str(analysis_id), current_user)
     
     return [
         ChangeImpact(
@@ -335,15 +347,11 @@ def get_change_analysis_impacts(
 )
 def get_change_analysis_review(
     analysis_id: UUID,
+    current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     """Retrieve verified AI change review report for a specific change analysis."""
-    model = db.query(ChangeAnalysisModel).filter(ChangeAnalysisModel.id == str(analysis_id)).first()
-    if not model:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Change analysis '{analysis_id}' not found",
-        )
+    model = get_owned_change_analysis_or_404(db, str(analysis_id), current_user)
     
     meta = model.model_metadata or {}
     review_report = meta.get("review_report")
@@ -366,15 +374,11 @@ def get_change_analysis_review(
 )
 def get_change_analysis_diff(
     analysis_id: UUID,
+    current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     """Retrieve deterministic structural diff facts including file, symbol, route, and schema deltas."""
-    model = db.query(ChangeAnalysisModel).filter(ChangeAnalysisModel.id == str(analysis_id)).first()
-    if not model:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Change analysis '{analysis_id}' not found",
-        )
+    model = get_owned_change_analysis_or_404(db, str(analysis_id), current_user)
     meta = model.model_metadata or {}
     diff_data = meta.get("diff_result")
     if not diff_data:
@@ -400,17 +404,13 @@ def get_change_analysis_diff(
 )
 def get_change_analysis_report(
     analysis_id: UUID,
+    current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ChangeAnalysisReportResponse:
     """Generate and retrieve authoritative Change Intelligence Report."""
     from app.analysis.report_generator import generate_change_analysis_report
 
-    model = db.query(ChangeAnalysisModel).filter(ChangeAnalysisModel.id == str(analysis_id)).first()
-    if not model:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Change analysis '{analysis_id}' not found",
-        )
+    model = get_owned_change_analysis_or_404(db, str(analysis_id), current_user)
     return generate_change_analysis_report(model)
 
 
@@ -421,17 +421,13 @@ def get_change_analysis_report(
 )
 def get_change_analysis_markdown_report(
     analysis_id: UUID,
+    current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Response:
     """Download deterministic Markdown Change Intelligence Report."""
     from app.analysis.report_generator import generate_change_analysis_report
 
-    model = db.query(ChangeAnalysisModel).filter(ChangeAnalysisModel.id == str(analysis_id)).first()
-    if not model:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Change analysis '{analysis_id}' not found",
-        )
+    model = get_owned_change_analysis_or_404(db, str(analysis_id), current_user)
     report = generate_change_analysis_report(model)
     return Response(
         content=report.markdown_report,
@@ -449,19 +445,14 @@ def get_change_analysis_markdown_report(
 )
 def get_change_analysis_telemetry_endpoint(
     analysis_id: UUID,
+    current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ChangeAnalysisTelemetry:
     """Retrieve authoritative operational metrics aggregated for Change Analysis without secrets."""
     from app.analysis.report_generator import generate_change_analysis_telemetry
 
-    model = db.query(ChangeAnalysisModel).filter(ChangeAnalysisModel.id == str(analysis_id)).first()
-    if not model:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Change analysis '{analysis_id}' not found",
-        )
+    model = get_owned_change_analysis_or_404(db, str(analysis_id), current_user)
     return generate_change_analysis_telemetry(model)
-
 
 
 @router.get(
@@ -471,18 +462,14 @@ def get_change_analysis_telemetry_endpoint(
 async def get_change_analysis_events(
     analysis_id: UUID,
     request: Request,
+    current_user: CurrentUser = Depends(get_current_user),
     last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
     after_id: Optional[int] = Query(default=None),
     accept: Optional[str] = Header(None),
     db: Session = Depends(get_db),
 ):
     """Retrieve durable workflow events or stream real-time updates via Server-Sent Events (SSE)."""
-    model = db.query(ChangeAnalysisModel).filter(ChangeAnalysisModel.id == str(analysis_id)).first()
-    if not model:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Change analysis '{analysis_id}' not found",
-        )
+    model = get_owned_change_analysis_or_404(db, str(analysis_id), current_user)
 
     # Parse and validate starting event offset
     start_id = 0

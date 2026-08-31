@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 import uuid
-from sqlalchemy import Column, DateTime, JSON, String
+from sqlalchemy import Column, DateTime, ForeignKey, JSON, String
 from sqlalchemy.orm import relationship
 from app.models.base import Base
 from app.schemas.enums import ScanStatus
@@ -18,6 +18,7 @@ class ScanModel(Base):
     __tablename__ = "scans"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    owner_user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     repository_url = Column(String(512), nullable=False, index=True)
     branch = Column(String(128), nullable=True, default=None)
     commit_hash = Column(String(64), nullable=True)

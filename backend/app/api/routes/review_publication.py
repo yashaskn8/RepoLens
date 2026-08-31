@@ -1,9 +1,11 @@
-"""API routes for Safe Pull Request Review Publication (Phase 7).
+"""API routes for Safe Pull Request Review Publication (Phase 7 & Phase 8).
 
 Strict invariants:
-- All routes require explicit human authorization.
+- All routes require OPERATOR role and explicit human authorization.
+- Cross-tenant access returns 404 (direct joined ownership verification).
+- CSRF verification on state-modifying POST endpoints.
 - Review event is strictly COMMENT (never APPROVE or REQUEST_CHANGES).
-- Preview → Approve → Publish flow enforced by service state machine.
+- Preview -> Approve -> Publish flow enforced by service state machine.
 - All domain exceptions map to typed HTTP error responses.
 """
 
@@ -14,8 +16,9 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.core.database import get_db
+from app.api.dependencies import get_db, require_operator, verify_csrf
 from app.models.review_publication import PullRequestReviewPublicationModel
+from app.schemas.auth import CurrentUser
 from app.schemas.review_publication import (
     InlineReviewCommentPreview,
     ReviewPublicationApproveRequest,
@@ -25,6 +28,7 @@ from app.schemas.review_publication import (
     ReviewPublicationPublishResponse,
     ReviewPublicationStatus,
 )
+from app.services.authorization_service import get_owned_change_analysis_or_404
 from app.services.review_publication_service import ReviewPublicationService
 
 logger = logging.getLogger(__name__)
@@ -101,9 +105,11 @@ def _pub_to_publish_response(pub: PullRequestReviewPublicationModel) -> ReviewPu
 )
 async def get_review_publication(
     analysis_id: UUID,
+    current_user: CurrentUser = Depends(require_operator),
     db: Session = Depends(get_db),
 ):
     """Retrieve the current review publication state for a change analysis."""
+    get_owned_change_analysis_or_404(db, str(analysis_id), current_user)
     pub = db.query(PullRequestReviewPublicationModel).filter_by(analysis_id=str(analysis_id)).first()
     if not pub:
         raise HTTPException(status_code=404, detail="Review publication not found for this analysis")
@@ -117,16 +123,12 @@ async def get_review_publication(
 )
 async def generate_preview(
     analysis_id: UUID,
+    current_user: CurrentUser = Depends(require_operator),
+    _csrf: None = Depends(verify_csrf),
     db: Session = Depends(get_db),
 ):
-    """Generate a deterministic preview of the review that would be published to GitHub.
-
-    This step:
-    - Validates the analysis is COMPLETED and originates from a pull request.
-    - Fetches current PR state from GitHub for drift detection.
-    - Renders the review markdown, computes preview_digest, and maps inline comments.
-    - Makes ZERO writes to GitHub.
-    """
+    """Generate a deterministic preview of the review that would be published to GitHub."""
+    get_owned_change_analysis_or_404(db, str(analysis_id), current_user)
     service = ReviewPublicationService(db=db)
     try:
         pub = await service.generate_preview(analysis_id)
@@ -143,15 +145,12 @@ async def generate_preview(
 async def approve_preview(
     analysis_id: UUID,
     request: ReviewPublicationApproveRequest,
+    current_user: CurrentUser = Depends(require_operator),
+    _csrf: None = Depends(verify_csrf),
     db: Session = Depends(get_db),
 ):
-    """Explicitly approve a review publication preview, binding the approval to the exact preview digest.
-
-    This step:
-    - Verifies the provided digest matches the current preview_digest.
-    - Transitions publication state to APPROVED.
-    - Makes ZERO writes to GitHub.
-    """
+    """Explicitly approve a review publication preview, binding the approval to the exact preview digest."""
+    get_owned_change_analysis_or_404(db, str(analysis_id), current_user)
     service = ReviewPublicationService(db=db)
     try:
         pub = await service.approve_preview(analysis_id, request.expected_preview_digest)
@@ -168,18 +167,12 @@ async def approve_preview(
 async def publish_review(
     analysis_id: UUID,
     request: ReviewPublicationPublishRequest,
+    current_user: CurrentUser = Depends(require_operator),
+    _csrf: None = Depends(verify_csrf),
     db: Session = Depends(get_db),
 ):
-    """Publish the approved review to GitHub as a COMMENT review.
-
-    This step:
-    - Re-validates digest equality.
-    - Performs final drift validation against live GitHub PR state.
-    - Executes atomic APPROVED -> PUBLISHING state transition.
-    - Posts exactly one COMMENT review to GitHub.
-    - Persists PUBLISHED state with GitHub review ID and trusted URL.
-    - Handles crash recovery via deterministic marker reconciliation.
-    """
+    """Publish the approved review to GitHub as a COMMENT review."""
+    get_owned_change_analysis_or_404(db, str(analysis_id), current_user)
     service = ReviewPublicationService(db=db)
     try:
         pub = await service.publish_review(analysis_id, request.expected_preview_digest)

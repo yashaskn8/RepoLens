@@ -23,6 +23,7 @@ class WorkflowEventModel(Base):
     patch_id = Column(String(36), ForeignKey("patches.id", ondelete="SET NULL"), nullable=True, index=True)
     delivery_id = Column(String(36), ForeignKey("deliveries.id", ondelete="SET NULL"), nullable=True, index=True)
     pr_review_publication_id = Column(String(36), ForeignKey("pr_review_publications.id", ondelete="SET NULL"), nullable=True, index=True)
+    actor_user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     thread_id = Column(String(128), nullable=True)
     commit_sha = Column(String(64), nullable=True)
     stage = Column(String(64), nullable=True)

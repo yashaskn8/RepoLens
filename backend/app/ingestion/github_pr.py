@@ -85,8 +85,9 @@ class GitHubPRResolver:
         settings: Optional[Settings] = None,
         client: Optional[httpx.AsyncClient] = None,
     ):
-        app_settings = settings or get_settings()
-        self._token = token if token is not None else getattr(app_settings, "GITHUB_TOKEN", None)
+        # Confused-deputy defense: Public PR reads are credential-free by default
+        # and MUST NOT fall back to server ambient GITHUB_TOKEN.
+        self._token = token if token is not None else ""
         self._client = client
         self._timeout = httpx.Timeout(20.0, connect=10.0)
 

@@ -15,6 +15,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.agents.checkpointer import get_sqlite_checkpointer
 from app.agents.graph import run_analysis_workflow
 from app.analysis.service import get_intelligence_service
+from app.api.dependencies import get_current_user, verify_csrf
 from app.context.runtime import ScanIntelligenceRuntime
 from app.core.database import SessionLocal, get_db
 from app.ingestion.clone import (
@@ -26,7 +27,8 @@ from app.ingestion.clone import (
 from app.ingestion.snapshot import get_snapshot_service
 from app.models.finding import EvidenceModel, FindingModel
 from app.models.scan import ScanModel
-from app.schemas.enums import FindingStatus, ScanStatus, Severity, VerificationVerdict
+from app.schemas.auth import CurrentUser
+from app.schemas.enums import FindingStatus, ScanStatus, Severity, UsageOperation, VerificationVerdict
 from app.schemas.evidence import Evidence
 from app.schemas.finding import Finding
 from app.schemas.metadata import ModelExecutionMetadata
@@ -34,6 +36,9 @@ from app.schemas.scan import Scan, ScanCreate
 from app.schemas.static_finding import ToolStatus
 from app.schemas.workflow_event import WorkflowEventCreate, WorkflowEventType
 from app.security.redaction import redact_secrets
+from app.schemas.auth import get_user_id
+from app.services.authorization_service import get_owned_scan_or_404
+from app.services.quota_service import check_and_increment_quota
 from app.services.scan_recovery import ScanDispatcher
 from app.services.workflow_event_service import WorkflowEventService
 
@@ -412,9 +417,17 @@ async def execute_background_scan(
 
 
 @router.post("", response_model=Scan, status_code=status.HTTP_202_ACCEPTED)
-async def create_scan(payload: ScanCreate, db: Session = Depends(get_db)) -> Scan:
+async def create_scan(
+    payload: ScanCreate,
+    current_user: CurrentUser = Depends(get_current_user),
+    _csrf: None = Depends(verify_csrf),
+    db: Session = Depends(get_db),
+) -> Scan:
     """Initiate a new repository scan asynchronously, returning scan ID immediately."""
-    # 1. Validate GitHub URL strictly
+    # 1. Quota check & increment
+    check_and_increment_quota(db, current_user, UsageOperation.SCAN_CREATE.value)
+
+    # 2. Validate GitHub URL strictly
     try:
         normalized_url = validate_github_url(payload.repository_url)
     except InvalidRepositoryURLError as exc:
@@ -423,11 +436,12 @@ async def create_scan(payload: ScanCreate, db: Session = Depends(get_db)) -> Sca
             detail=f"Invalid repository URL: {str(exc)}",
         )
 
-    # 2. Create Scan record in DB without pre-assuming "main"
+    # 3. Create Scan record in DB with unconditional owner_user_id
     req_branch = payload.requested_branch if payload.requested_branch is not None else payload.branch
     scan_model = ScanModel(
         repository_url=normalized_url,
         branch=req_branch,
+        owner_user_id=get_user_id(current_user),
         status=ScanStatus.PENDING.value,
         created_at=_utc_now(),
         model_metadata={"requested_branch": req_branch} if req_branch else {},
@@ -436,19 +450,20 @@ async def create_scan(payload: ScanCreate, db: Session = Depends(get_db)) -> Sca
     db.commit()
     db.refresh(scan_model)
 
-    # Emit SCAN_CREATED event
+    # Emit SCAN_CREATED event with actor attribution
     WorkflowEventService.emit(
         db=db,
         event=WorkflowEventCreate(
             event_type=WorkflowEventType.SCAN_CREATED,
             scan_id=UUID(scan_model.id),
+            actor_user_id=get_user_id(current_user),
             message="Scan registered and queued for execution",
             metadata_payload={"repository_url": normalized_url, "branch": req_branch},
         ),
     )
     db.commit()
 
-    # 3. Launch background async execution via canonical dispatcher
+    # 4. Launch background async execution via canonical dispatcher
     ScanDispatcher.dispatch_scan(
         scan_id=scan_model.id,
         repo_url=normalized_url,
@@ -473,14 +488,13 @@ async def create_scan(payload: ScanCreate, db: Session = Depends(get_db)) -> Sca
 
 
 @router.get("/{scan_id}", response_model=Scan)
-def get_scan(scan_id: UUID, db: Session = Depends(get_db)) -> Scan:
+def get_scan(
+    scan_id: UUID,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Scan:
     """Retrieve scan status, metadata, and progress by ID."""
-    scan_model = db.query(ScanModel).filter(ScanModel.id == str(scan_id)).first()
-    if not scan_model:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Scan with ID '{scan_id}' not found.",
-        )
+    scan_model = get_owned_scan_or_404(db, str(scan_id), current_user)
 
     findings_count = db.query(FindingModel).filter(FindingModel.scan_id == str(scan_id)).count()
 
@@ -513,14 +527,13 @@ def get_scan(scan_id: UUID, db: Session = Depends(get_db)) -> Scan:
 
 
 @router.get("/{scan_id}/findings", response_model=List[Finding])
-def get_scan_findings(scan_id: UUID, db: Session = Depends(get_db)) -> List[Finding]:
+def get_scan_findings(
+    scan_id: UUID,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> List[Finding]:
     """Retrieve verified findings for a completed or ongoing scan."""
-    scan_model = db.query(ScanModel).filter(ScanModel.id == str(scan_id)).first()
-    if not scan_model:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Scan with ID '{scan_id}' not found.",
-        )
+    scan_model = get_owned_scan_or_404(db, str(scan_id), current_user)
 
     finding_models = db.query(FindingModel).filter(FindingModel.scan_id == str(scan_id)).all()
     results: List[Finding] = []
@@ -572,31 +585,18 @@ def get_scan_findings(scan_id: UUID, db: Session = Depends(get_db)) -> List[Find
 async def stream_scan_events(
     scan_id: UUID,
     request: Request,
+    current_user: CurrentUser = Depends(get_current_user),
     last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
     after_id: Optional[int] = Query(default=None),
     db: Session = Depends(get_db),
 ):
-    """Server-Sent Events (SSE) stream delivering durable workflow events in near real time.
-
-    Guarantees:
-    - Verifies scan existence before stream begins (404 on unknown scan).
-    - Validates Last-Event-ID (400 on malformed header).
-    - Replays historical events first, then streams new events.
-    - Uses short-lived database access per poll to avoid persistent session locks.
-    - Detects disconnects and cleans up async stream tasks.
-    - Yields standard SSE format: id, event, data, and comments for heartbeats.
-    """
+    """Server-Sent Events (SSE) stream delivering durable workflow events in near real time."""
     import json
     from fastapi.responses import StreamingResponse
     from app.schemas.workflow_event import WorkflowEventResponse
 
-    # 1. Verify scan exists
-    scan_model = db.query(ScanModel).filter(ScanModel.id == str(scan_id)).first()
-    if not scan_model:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Scan with ID '{scan_id}' not found.",
-        )
+    # 1. Verify scan exists and belongs to current user
+    scan_model = get_owned_scan_or_404(db, str(scan_id), current_user)
 
     # 2. Parse starting event offset
     start_id = 0
@@ -675,12 +675,14 @@ async def stream_scan_events(
 def get_scan_report(
     scan_id: UUID,
     format: str = Query(default="json", pattern="^(json|markdown)$"),
+    current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Retrieve complete, evidence-grounded scan report in Markdown or JSON format."""
     from fastapi.responses import Response
     from app.services.report_service import ScanReportService
 
+    get_owned_scan_or_404(db, str(scan_id), current_user)
     report = ScanReportService.build_scan_report(db=db, scan_id=str(scan_id))
     if not report:
         raise HTTPException(
@@ -702,11 +704,16 @@ def get_scan_report(
 
 
 @router.get("/{scan_id}/report/markdown", response_class=Response)
-def get_scan_report_markdown(scan_id: UUID, db: Session = Depends(get_db)):
+def get_scan_report_markdown(
+    scan_id: UUID,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Retrieve full GFM Markdown export report for a scan."""
     from fastapi.responses import Response
     from app.services.report_service import ScanReportService
 
+    get_owned_scan_or_404(db, str(scan_id), current_user)
     report = ScanReportService.build_scan_report(db=db, scan_id=str(scan_id))
     if not report:
         raise HTTPException(
@@ -725,10 +732,15 @@ def get_scan_report_markdown(scan_id: UUID, db: Session = Depends(get_db)):
 
 
 @router.get("/{scan_id}/report/json", response_model=None)
-def get_scan_report_json(scan_id: UUID, db: Session = Depends(get_db)):
+def get_scan_report_json(
+    scan_id: UUID,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Retrieve full structured JSON export report for a scan."""
     from app.services.report_service import ScanReportService
 
+    get_owned_scan_or_404(db, str(scan_id), current_user)
     report = ScanReportService.build_scan_report(db=db, scan_id=str(scan_id))
     if not report:
         raise HTTPException(
@@ -740,10 +752,15 @@ def get_scan_report_json(scan_id: UUID, db: Session = Depends(get_db)):
 
 
 @router.get("/{scan_id}/telemetry", response_model=None)
-def get_scan_telemetry(scan_id: UUID, db: Session = Depends(get_db)):
+def get_scan_telemetry(
+    scan_id: UUID,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Retrieve detailed execution telemetry and metric aggregation for a scan."""
     from app.services.report_service import ScanReportService
 
+    get_owned_scan_or_404(db, str(scan_id), current_user)
     telemetry = ScanReportService.build_scan_telemetry(db=db, scan_id=str(scan_id))
     if not telemetry:
         raise HTTPException(

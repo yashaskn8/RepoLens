@@ -18,6 +18,17 @@ from app.models.finding import FindingModel
 from app.models.patch import PatchModel
 from app.models.scan import ScanModel
 from app.agents.checkpointer import get_sqlite_checkpointer
+from app.analysis.service import get_intelligence_service
+from app.analysis.store import EvidenceStore
+from app.api.dependencies import get_current_user, verify_csrf
+from app.context.engine import ContextEngine
+from app.context.runtime import ScanIntelligenceRuntime
+from app.core.database import get_db
+from app.ingestion.schemas import RepositoryManifest
+from app.ingestion.snapshot import SnapshotError, get_snapshot_service
+from app.models.finding import FindingModel
+from app.models.patch import PatchModel
+from app.models.scan import ScanModel
 from app.patching.critic import PatchCriticAgent
 from app.patching.schemas import PatchProposal, PatchWorkflowResult
 from app.patching.service import PatchService
@@ -28,28 +39,31 @@ from app.planning.schemas import FixPlan
 from app.planning.service import FixPlanningService
 from app.research.schemas import ResearchResult
 from app.research.service import ResearchService
-from app.schemas.enums import FindingStatus, PatchStatus, ScanStatus, Severity, VerificationVerdict
+from app.schemas.auth import CurrentUser
+from app.schemas.enums import FindingStatus, PatchStatus, ScanStatus, Severity, UsageOperation, VerificationVerdict
 from app.schemas.evidence import Evidence
 from app.schemas.finding import Finding
 from app.schemas.metadata import ModelExecutionMetadata
 from app.schemas.workflow_event import WorkflowEventCreate, WorkflowEventType
+from app.schemas.auth import get_user_id
+from app.services.authorization_service import get_owned_finding_or_404
 from app.services.domain_mapping import finding_model_to_schema
+from app.services.quota_service import check_and_increment_quota
 from app.services.workflow_event_service import WorkflowEventService
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/findings", tags=["Findings & Remediation"])
 
 
-def _get_verified_finding_and_scan(finding_id: UUID, db: Session) -> tuple[Finding, ScanModel]:
-    """Retrieve finding and associated scan, validating scan completion and provenance."""
-    fm = db.query(FindingModel).filter(FindingModel.id == str(finding_id)).first()
-    if not fm:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Finding with ID '{finding_id}' not found.",
-        )
+def _get_verified_finding_and_scan(finding_id: UUID, current_user: CurrentUser, db: Session) -> tuple[Finding, ScanModel]:
+    """Retrieve finding and associated scan, validating user ownership, scan completion, and provenance."""
+    fm = get_owned_finding_or_404(db, str(finding_id), current_user)
 
-    scan = db.query(ScanModel).filter(ScanModel.id == fm.scan_id).first()
+    user_id = get_user_id(current_user)
+    scan_query = db.query(ScanModel).filter(ScanModel.id == fm.scan_id)
+    if user_id is not None:
+        scan_query = scan_query.filter(ScanModel.owner_user_id == user_id)
+    scan = scan_query.first()
     if not scan:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -90,24 +104,25 @@ def _get_verified_finding_and_scan(finding_id: UUID, db: Session) -> tuple[Findi
 
 
 @router.get("/{finding_id}", response_model=Finding)
-def get_finding_by_id(finding_id: UUID, db: Session = Depends(get_db)) -> Finding:
+def get_finding_by_id(
+    finding_id: UUID,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Finding:
     """Retrieve detailed information and evidence for a specific finding."""
-    fm = db.query(FindingModel).filter(FindingModel.id == str(finding_id)).first()
-    if not fm:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Finding with ID '{finding_id}' not found.",
-        )
+    fm = get_owned_finding_or_404(db, str(finding_id), current_user)
     return finding_model_to_schema(fm)
 
 
 @router.post("/{finding_id}/research", response_model=ResearchResult)
 async def request_finding_research(
     finding_id: UUID,
+    current_user: CurrentUser = Depends(get_current_user),
+    _csrf: None = Depends(verify_csrf),
     db: Session = Depends(get_db),
 ) -> ResearchResult:
     """Execute evidence-grounded technical research and upgrade intelligence against the exact analyzed repository."""
-    finding_schema, scan = _get_verified_finding_and_scan(finding_id, db)
+    finding_schema, scan = _get_verified_finding_and_scan(finding_id, current_user, db)
     snapshot_service = get_snapshot_service()
 
     try:
@@ -135,10 +150,12 @@ async def request_finding_research(
 @router.post("/{finding_id}/plan", response_model=FixPlan)
 async def request_fix_plan(
     finding_id: UUID,
+    current_user: CurrentUser = Depends(get_current_user),
+    _csrf: None = Depends(verify_csrf),
     db: Session = Depends(get_db),
 ) -> FixPlan:
     """Generate and validate a structured, minimal-scope FixPlan against the exact analyzed repository."""
-    finding_schema, scan = _get_verified_finding_and_scan(finding_id, db)
+    finding_schema, scan = _get_verified_finding_and_scan(finding_id, current_user, db)
     snapshot_service = get_snapshot_service()
 
     try:
@@ -173,10 +190,15 @@ async def request_fix_plan(
 @router.post("/{finding_id}/patch", response_model=PatchWorkflowResult)
 async def request_patch_generation(
     finding_id: UUID,
+    current_user: CurrentUser = Depends(get_current_user),
+    _csrf: None = Depends(verify_csrf),
     db: Session = Depends(get_db),
 ) -> PatchWorkflowResult:
     """Generate, verify in sandbox, conditionally critique, and persist candidate patch against the exact analyzed repository."""
-    finding_schema, scan = _get_verified_finding_and_scan(finding_id, db)
+    # 1. Quota check & increment
+    check_and_increment_quota(db, current_user, UsageOperation.PATCH_GENERATE.value)
+
+    finding_schema, scan = _get_verified_finding_and_scan(finding_id, current_user, db)
     snapshot_service = get_snapshot_service()
 
     try:
@@ -282,7 +304,7 @@ async def request_patch_generation(
             db.commit()
             db.refresh(patch_model)
 
-            # 5. Emit PATCH_GENERATED and machine verification verdict events
+            # 5. Emit PATCH_GENERATED and machine verification verdict events with actor attribution
             WorkflowEventService.emit(
                 db=db,
                 event=WorkflowEventCreate(
@@ -290,6 +312,7 @@ async def request_patch_generation(
                     scan_id=UUID(str(scan.id)),
                     finding_id=UUID(str(finding_id)),
                     patch_id=UUID(str(proposal.id)),
+                    actor_user_id=get_user_id(current_user),
                     thread_id=remediation_thread_id,
                     commit_sha=scan.commit_hash,
                     stage="patch_generation",
@@ -314,6 +337,7 @@ async def request_patch_generation(
                     scan_id=UUID(str(scan.id)),
                     finding_id=UUID(str(finding_id)),
                     patch_id=UUID(str(proposal.id)),
+                    actor_user_id=get_user_id(current_user),
                     thread_id=remediation_thread_id,
                     commit_sha=scan.commit_hash,
                     stage="patch_verification",

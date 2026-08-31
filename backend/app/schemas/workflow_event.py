@@ -78,6 +78,7 @@ class WorkflowEventBase(BaseModel):
     tool_name: Optional[str] = Field(default=None, description="Tool or scanner name (e.g. semgrep, trivy, osv, tree-sitter, github)")
     provider: Optional[str] = Field(default=None, description="LLM or delivery provider if applicable (e.g. gemini, groq, github)")
     model_name: Optional[str] = Field(default=None, description="LLM model identifier if applicable")
+    actor_user_id: Optional[str] = Field(default=None, description="Optional authenticated user ID who initiated or approved the action")
     message: Optional[str] = Field(default=None, description="Human-readable event summary or description")
     metadata_payload: Dict[str, Any] = Field(default_factory=dict, description="Structured event telemetry payload")
 

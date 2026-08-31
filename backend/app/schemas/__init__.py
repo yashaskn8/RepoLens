@@ -8,6 +8,8 @@ from app.schemas.enums import (
     PatchStatus,
     ScanStatus,
     Severity,
+    UsageOperation,
+    UserRole,
     VerificationVerdict,
 )
 from app.schemas.evidence import Evidence, EvidenceBase, EvidenceCreate
@@ -94,6 +96,8 @@ __all__ = [
     "ChangeImpactType",
     "ImpactVerificationStatus",
     "ChangeRiskLevel",
+    "UserRole",
+    "UsageOperation",
     "ModelExecutionMetadata",
     "EvidenceBase",
     "EvidenceCreate",

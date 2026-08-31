@@ -10,11 +10,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.agents.checkpointer import get_sqlite_checkpointer
+from app.api.dependencies import get_current_user, verify_csrf
 from app.core.database import get_db
 from app.models.patch import PatchModel
 from app.patching.workflow_graph import RemediationState, build_remediation_graph
 from app.planning.schemas import FixPlan
-from app.schemas.enums import PatchStatus
+from app.schemas.auth import CurrentUser, get_user_id
+from app.schemas.enums import PatchStatus, UsageOperation
 from app.schemas.patch import (
     PatchRejectRequest,
     PatchResponse,
@@ -22,6 +24,8 @@ from app.schemas.patch import (
     PatchReviseRequest,
 )
 from app.schemas.workflow_event import WorkflowEventCreate, WorkflowEventType
+from app.services.authorization_service import get_owned_patch_or_404, get_owned_scan_or_404
+from app.services.quota_service import check_and_increment_quota
 from app.services.workflow_event_service import WorkflowEventService
 
 logger = logging.getLogger(__name__)
@@ -33,20 +37,24 @@ def _utc_now() -> datetime:
 
 
 @router.get("/{patch_id}", response_model=PatchResponse)
-def get_patch_by_id(patch_id: str, db: Session = Depends(get_db)):
+def get_patch_by_id(
+    patch_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Retrieve details, unified diff, verification report, and approval status for a specific patch."""
-    patch_model = db.query(PatchModel).filter(PatchModel.id == str(patch_id)).first()
-    if not patch_model:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Patch proposal '{patch_id}' not found.",
-        )
+    patch_model = get_owned_patch_or_404(db, str(patch_id), current_user)
     return patch_model
 
 
 @router.get("/scan/{scan_id}", response_model=List[PatchResponse])
-def get_patches_by_scan_id(scan_id: str, db: Session = Depends(get_db)):
+def get_patches_by_scan_id(
+    scan_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Retrieve all patch proposals generated for a specific scan."""
+    get_owned_scan_or_404(db, str(scan_id), current_user)
     return db.query(PatchModel).filter(PatchModel.scan_id == str(scan_id)).all()
 
 
@@ -54,23 +62,12 @@ def get_patches_by_scan_id(scan_id: str, db: Session = Depends(get_db)):
 async def approve_patch(
     patch_id: str,
     payload: PatchReviewRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+    _csrf: None = Depends(verify_csrf),
     db: Session = Depends(get_db),
 ):
-    """Explicit human approval endpoint for a candidate patch.
-
-    Guarantees:
-    - Enforces legal state transitions (REJECTED -> APPROVED directly fails; already APPROVED fails).
-    - An LLM cannot approve its own patch; approval must originate from this human action.
-    - Synchronizes human approval metadata across database and durable LangGraph checkpoint.
-    - Resumes the corresponding LangGraph thread as APPROVED.
-    - Never commits or pushes to the repository automatically.
-    """
-    patch_model = db.query(PatchModel).filter(PatchModel.id == str(patch_id)).first()
-    if not patch_model:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Patch proposal '{patch_id}' not found.",
-        )
+    """Explicit human approval endpoint for a candidate patch."""
+    patch_model = get_owned_patch_or_404(db, str(patch_id), current_user)
 
     # Transition validation
     if patch_model.status == PatchStatus.REJECTED.value:
@@ -130,7 +127,7 @@ async def approve_patch(
         patch_model.user_feedback = payload.notes
     patch_model.thread_id = thread_id
 
-    # Emit durable human audit events
+    # Emit durable human audit events with actor attribution
     WorkflowEventService.emit(
         db=db,
         event=WorkflowEventCreate(
@@ -138,6 +135,7 @@ async def approve_patch(
             scan_id=UUID(str(patch_model.scan_id)),
             finding_id=UUID(str(patch_model.finding_id)),
             patch_id=UUID(str(patch_model.id)),
+            actor_user_id=get_user_id(current_user),
             thread_id=thread_id,
             stage="human_review",
             message=f"Patch approved by {payload.approved_by}",
@@ -152,6 +150,7 @@ async def approve_patch(
             scan_id=UUID(str(patch_model.scan_id)),
             finding_id=UUID(str(patch_model.finding_id)),
             patch_id=UUID(str(patch_model.id)),
+            actor_user_id=get_user_id(current_user),
             thread_id=thread_id,
             stage="human_review",
             message="Patch transitioned to APPROVED status",
@@ -169,21 +168,12 @@ async def approve_patch(
 async def reject_patch(
     patch_id: str,
     payload: PatchRejectRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+    _csrf: None = Depends(verify_csrf),
     db: Session = Depends(get_db),
 ):
-    """Explicit human rejection endpoint for a candidate patch.
-
-    Guarantees:
-    - Enforces legal state transitions (cannot re-reject an already REJECTED patch).
-    - Resumes the corresponding LangGraph thread as REJECTED.
-    - Synchronizes human rejection metadata across database and durable LangGraph checkpoint.
-    """
-    patch_model = db.query(PatchModel).filter(PatchModel.id == str(patch_id)).first()
-    if not patch_model:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Patch proposal '{patch_id}' not found.",
-        )
+    """Explicit human rejection endpoint for a candidate patch."""
+    patch_model = get_owned_patch_or_404(db, str(patch_id), current_user)
 
     # Transition validation
     if patch_model.status == PatchStatus.REJECTED.value:
@@ -229,7 +219,7 @@ async def reject_patch(
     patch_model.rejected_reason = payload.reason
     patch_model.thread_id = thread_id
 
-    # Emit durable human audit events
+    # Emit durable human audit events with actor attribution
     WorkflowEventService.emit(
         db=db,
         event=WorkflowEventCreate(
@@ -237,6 +227,7 @@ async def reject_patch(
             scan_id=UUID(str(patch_model.scan_id)),
             finding_id=UUID(str(patch_model.finding_id)),
             patch_id=UUID(str(patch_model.id)),
+            actor_user_id=get_user_id(current_user),
             thread_id=thread_id,
             stage="human_review",
             message=f"Patch rejected: {payload.reason}",
@@ -251,6 +242,7 @@ async def reject_patch(
             scan_id=UUID(str(patch_model.scan_id)),
             finding_id=UUID(str(patch_model.finding_id)),
             patch_id=UUID(str(patch_model.id)),
+            actor_user_id=get_user_id(current_user),
             thread_id=thread_id,
             stage="human_review",
             message="Patch transitioned to REJECTED status",
@@ -261,6 +253,7 @@ async def reject_patch(
 
     db.commit()
     db.refresh(patch_model)
+
     return patch_model
 
 
@@ -268,21 +261,11 @@ async def reject_patch(
 async def request_patch_revision(
     patch_id: str,
     payload: PatchReviseRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+    _csrf: None = Depends(verify_csrf),
     db: Session = Depends(get_db),
 ):
-    """Request a real human-guided revision generating a new child PatchProposal.
-
-    Guarantees:
-    - Enforces legal state transitions (APPROVED -> REVISE fails; REJECTED -> REVISE fails).
-    - Hard limit of at most ONE human-requested revision per patch lineage (revision_number >= 1 fails).
-    - Database/service concurrency guard: rejects if a child revision already exists for this parent.
-    - Rehydrates exact scan commit SHA and loads original CONFIRMED finding.
-    - Injects human feedback into remediation prompt/plan to generate a fresh diff.
-    - Executes strict sandbox validation, deterministic 12-check verification, and conditional critic.
-    - Persists an immutable new child PatchModel referencing parent_patch_id and revision_number = 1.
-    - Pauses in VERIFIED / NEEDS_REVIEW for explicit human approval or rejection.
-    - Machine verification NEVER produces PatchStatus.APPROVED directly.
-    """
+    """Request a real human-guided revision generating a new child PatchProposal."""
     from app.analysis.service import get_intelligence_service
     from app.api.routes.findings import _get_verified_finding_and_scan
     from app.context.runtime import ScanIntelligenceRuntime
@@ -290,12 +273,10 @@ async def request_patch_revision(
     from app.patching.workflow import PatchWorkflowCoordinator
     from app.planning.service import FixPlanningService
 
-    patch_model = db.query(PatchModel).filter(PatchModel.id == str(patch_id)).first()
-    if not patch_model:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Patch proposal '{patch_id}' not found.",
-        )
+    # 0. Quota check & increment
+    check_and_increment_quota(db, current_user, UsageOperation.PATCH_GENERATE.value)
+
+    patch_model = get_owned_patch_or_404(db, str(patch_id), current_user)
 
     # 1. State transition and lineage validation
     if patch_model.status == PatchStatus.APPROVED.value:
@@ -323,7 +304,7 @@ async def request_patch_revision(
             detail="A revision child has already been created for this patch proposal.",
         )
 
-    finding_schema, scan = _get_verified_finding_and_scan(UUID(patch_model.finding_id), db)
+    finding_schema, scan = _get_verified_finding_and_scan(UUID(patch_model.finding_id), current_user, db)
     snapshot_service = get_snapshot_service()
 
     # 2. Materialize exact snapshot, rebuild intelligence runtime, and generate revised patch
@@ -441,7 +422,7 @@ async def request_patch_revision(
         )
         db.add(child_patch_model)
 
-        # 5. Emit durable human revision and child creation audit events
+        # 5. Emit durable human revision and child creation audit events with actor attribution
         WorkflowEventService.emit(
             db=db,
             event=WorkflowEventCreate(
@@ -449,6 +430,7 @@ async def request_patch_revision(
                 scan_id=UUID(str(scan.id)),
                 finding_id=UUID(str(finding_schema.id)),
                 patch_id=UUID(str(patch_model.id)),
+                actor_user_id=get_user_id(current_user),
                 thread_id=child_thread_id,
                 stage="human_review",
                 message="Human revision requested with feedback",
@@ -463,6 +445,7 @@ async def request_patch_revision(
                 scan_id=UUID(str(scan.id)),
                 finding_id=UUID(str(finding_schema.id)),
                 patch_id=UUID(str(proposal.id)),
+                actor_user_id=get_user_id(current_user),
                 thread_id=child_thread_id,
                 stage="patch_generation",
                 message="Child patch revision created and verified in sandbox",

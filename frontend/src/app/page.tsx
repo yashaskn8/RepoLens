@@ -10,11 +10,15 @@ import {
   VerificationVerdict,
 } from '@/types/domain';
 import { fetchHealth, fetchScan, fetchScanFindings, fetchScanTelemetry, startScan } from '@/lib/api';
+import { useAuth } from '@/context/AuthContext';
+import { AuthModal } from '@/components/auth/AuthModal';
 import { ChangeAnalysisExperience } from '@/components/ChangeAnalysisExperience';
 import { RemediationLifecycle } from '@/components/RemediationLifecycle';
 import { WorkflowTimeline } from '@/components/WorkflowTimeline';
 
 export default function HomePage() {
+  const { user, isAuthenticated, isOperator, logout } = useAuth();
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
   const [appMode, setAppMode] = useState<'SCAN' | 'CHANGE_ANALYSIS'>('SCAN');
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [repoUrl, setRepoUrl] = useState<string>('https://github.com/yashaskn8/RepoLens');
@@ -126,7 +130,7 @@ export default function HomePage() {
             <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>AI Code Intelligence & Security</div>
           </div>
         </div>
-        <div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
           {health ? (
             <span className="status-badge">
               <span className="status-dot" />
@@ -136,6 +140,47 @@ export default function HomePage() {
             <span className="status-badge" style={{ borderColor: 'rgba(239, 68, 68, 0.4)', color: '#fca5a5' }}>
               Backend offline
             </span>
+          )}
+
+          {isAuthenticated ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <span className="status-badge" style={{ borderColor: 'rgba(56, 189, 248, 0.4)', color: '#bae6fd' }}>
+                👤 {user?.email}
+                {isOperator && (
+                  <span
+                    style={{
+                      marginLeft: '0.4rem',
+                      padding: '0.15rem 0.45rem',
+                      background: 'rgba(168, 85, 247, 0.25)',
+                      border: '1px solid #a855f7',
+                      borderRadius: '999px',
+                      color: '#d8b4fe',
+                      fontSize: '0.65rem',
+                      fontWeight: 700,
+                    }}
+                  >
+                    OPERATOR
+                  </span>
+                )}
+              </span>
+              <button
+                type="button"
+                className="filter-btn"
+                style={{ padding: '0.35rem 0.75rem', fontSize: '0.75rem' }}
+                onClick={() => logout()}
+              >
+                Sign Out
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="filter-btn filter-btn-active"
+              style={{ padding: '0.35rem 0.85rem', fontSize: '0.8rem', borderRadius: '8px' }}
+              onClick={() => setIsAuthModalOpen(true)}
+            >
+              Sign In
+            </button>
           )}
         </div>
       </header>
@@ -544,6 +589,9 @@ export default function HomePage() {
       )}
         </>
       )}
+
+      {/* Authentication Modal */}
+      <AuthModal isOpen={isAuthModalOpen} onClose={() => setIsAuthModalOpen(false)} />
     </main>
   );
 }

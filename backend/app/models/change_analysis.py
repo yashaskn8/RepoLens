@@ -18,6 +18,7 @@ class ChangeAnalysisModel(Base):
     __tablename__ = "change_analyses"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid4()), index=True)
+    owner_user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     repository_url = Column(String(512), nullable=False)
     repository_owner = Column(String(256), nullable=False)
     repository_name = Column(String(256), nullable=False)

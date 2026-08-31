@@ -104,3 +104,19 @@ class ChangeRiskLevel(str, Enum):
     LOW = "LOW"
     NONE = "NONE"
 
+
+class UserRole(str, Enum):
+    """Role-based access control roles for RepoLens users."""
+
+    USER = "USER"
+    OPERATOR = "OPERATOR"
+
+
+class UsageOperation(str, Enum):
+    """Taxonomy of quota-tracked expensive operations."""
+
+    SCAN_CREATE = "SCAN_CREATE"
+    CHANGE_ANALYSIS_CREATE = "CHANGE_ANALYSIS_CREATE"
+    PATCH_GENERATE = "PATCH_GENERATE"
+
+
