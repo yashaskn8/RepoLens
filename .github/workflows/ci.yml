@@ -20,7 +20,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      DATABASE_URL: "sqlite:///./ci_test.db"
       TESTING: "true"
       ENVIRONMENT: "development"
       GITHUB_DELIVERY_ENABLED: "false"
