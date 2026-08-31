@@ -20,7 +20,7 @@ RepoLens treats all submitted codebases as untrusted passive data, enforcing hos
 
 ## Why It Is Different
 
-1. **Deterministic Evidence Precedes AI Reasoning**: Rather than passing unindexed code to large language models, RepoLens extracts AST symbols, static findings, and graph topologies first. Models reason over structured evidence, preventing hallucinations.
+1. **Deterministic Evidence Precedes AI Reasoning**: Rather than passing unindexed code to large language models, RepoLens extracts AST symbols, static findings, and graph topologies first. Models reason over structured evidence, while deterministic verification rejects or downgrades unsupported claims.
 2. **Cross-Layer Contract Matching**: While traditional linters analyze single files in isolation, RepoLens connects client API calls in TypeScript to backend route decorators and Pydantic schemas in Python.
 3. **Zero Untrusted Code Execution**: RepoLens never runs repository test suites, never executes arbitrary scripts or Makefiles, and never imports untrusted modules during analysis.
 4. **Guarded GitHub Boundary**: Public repository and PR analyses are completely credential-free. Remote GitHub writes require server `GITHUB_TOKEN`, `OPERATOR` privileges, resource ownership, human approval, explicit feature flags, and remote branch drift checks.
@@ -218,4 +218,4 @@ RepoLens enforces strict controls around external GitHub writes:
 
 ## Release Status
 
-RepoLens is currently at **v1.0.0 Release Candidate** (Phase 9 verification complete, all test suites passing in remote CI).
+RepoLens release version: **v1.0.0** (Phase 9 verification complete, reproducible CI pipeline and migration lifecycle verified).

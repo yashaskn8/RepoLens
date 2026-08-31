@@ -1,7 +1,7 @@
 # RepoLens Architecture Specification
 
-> **Version**: 1.0.0-rc (Phase 9)  
-> **Status**: Production-Ready Release Candidate  
+> **Version**: 1.0.0 (Phase 9)  
+> **Status**: Release-Ready v1.0.0 Build  
 > **Audience**: Systems Engineers, Architects, Technical Reviewers
 
 ---
@@ -112,7 +112,7 @@ flowchart TD
     K -->|Evidence Validated| L[CONFIRMED Finding in Database]
     K -->|Partial Evidence| M[POSSIBLE Finding in Database]
     K -->|Unsubstantiated| N[REJECTED Finding Discarded]
-    L --> O[Candidate Patch Generation<br/>Unified Diff + 12-Check AST Sandbox Verifier]
+    L --> O[Candidate Patch Generation<br/>Unified Diff + 12-Check AST Patch Verifier]
     O --> P[Patch State: VERIFIED / NEEDS_REVIEW]
     P --> Q[Human Review Boundary<br/>Awaiting User Approval]
     Q -->|User Approves| R[Patch State: APPROVED]

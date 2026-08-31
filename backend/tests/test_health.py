@@ -9,7 +9,7 @@ def test_root_endpoint(client: TestClient):
     assert response.status_code == 200
     data = response.json()
     assert data["service"] == "RepoLens"
-    assert data["version"] == "0.1.0"
+    assert data["version"] == "1.0.0"
     assert "health_url" in data
 
 
@@ -21,7 +21,7 @@ def test_health_endpoint_root(client: TestClient):
     assert data["status"] == "healthy"
     assert data["service"] == "RepoLens"
     assert data["database"] == "connected"
-    assert data["version"] == "0.1.0"
+    assert data["version"] == "1.0.0"
 
 
 def test_health_endpoint_api_v1(client: TestClient):

@@ -111,7 +111,7 @@ Open `http://localhost:3000` in your web browser.
 2. Enter the curated repository URL:
    - Repository URL: `https://github.com/pallets/markupsafe`
    - Branch: `main`
-3. Click **Start Repository Scan**.
+3. Click **Analyze Repository**.
 4. Observe the live status updates streamed via Server-Sent Events (SSE):
    - Ephemeral Git shallow clone
    - Tree-sitter AST parsing across source files
@@ -126,7 +126,7 @@ Open `http://localhost:3000` in your web browser.
 
 ### Step 3: Candidate Patch Generation & Human Approval Boundary
 1. On any confirmed finding, click **Generate Candidate Patch**.
-2. RepoLens plans a scoped fix, generates a unified diff, and executes its 12-check sandbox verifier.
+2. RepoLens plans a scoped fix, generates a unified diff, and executes its 12-check patch verifier.
 3. The patch pauses in the **`VERIFIED`** or **`NEEDS_REVIEW`** state.
 4. **Explain Human-in-the-Loop Authority**: The system deliberately does not auto-apply or auto-commit fixes. A human operator must review the unified diff and click **Approve Patch**.
 5. Once approved, notice that the **Deliver to GitHub** button remains safely disabled or guarded because the session is a `USER` (not `OPERATOR`) and `GITHUB_DELIVERY_ENABLED=false`.
@@ -137,7 +137,7 @@ Open `http://localhost:3000` in your web browser.
 1. In the top navigation switcher, click **🔍 Change Intelligence & PR Review**.
 2. Choose **Analyze Public Pull Request** (or analyze an exact commit range).
 3. Enter a public PR URL (or test commit range).
-4. Click **Analyze Pull Request Changes**.
+4. Click **Analyze Pull Request** (or **Analyze Changes**).
 5. **Review the Results**:
    - **AST Structural Diff**: Exact symbol-level additions, modifications, and signature changes.
    - **Cross-Layer Contract Breaks**: Any route changes affecting frontend client endpoints.

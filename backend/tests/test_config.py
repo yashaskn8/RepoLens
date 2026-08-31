@@ -8,7 +8,7 @@ def test_settings_defaults():
     """Verify default configuration values."""
     settings = Settings()
     assert settings.PROJECT_NAME == "RepoLens"
-    assert settings.VERSION == "0.1.0"
+    assert settings.VERSION == "1.0.0"
     assert settings.API_V1_STR == "/api/v1"
     assert settings.DATABASE_URL == "sqlite:///./repolens.db"
     assert settings.is_sqlite is True

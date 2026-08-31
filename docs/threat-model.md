@@ -1,7 +1,7 @@
 # RepoLens Security & Threat Model
 
-> **Version**: 1.0.0-rc (Phase 9)  
-> **Status**: Production-Ready Release Candidate  
+> **Version**: 1.0.0 (Phase 9)  
+> **Status**: Release-Ready v1.0.0 Build  
 > **Evaluation Date**: August 2026
 
 ---
