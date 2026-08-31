@@ -274,7 +274,7 @@ async def request_patch_revision(
     from app.planning.service import FixPlanningService
 
     # 0. Quota check & increment
-    check_and_increment_quota(db, current_user, UsageOperation.PATCH_GENERATE.value)
+    check_and_increment_quota(db, current_user.id, UsageOperation.PATCH_GENERATE.value)
 
     patch_model = get_owned_patch_or_404(db, str(patch_id), current_user)
 

@@ -11,6 +11,7 @@ Verifies:
 """
 
 from datetime import date, timedelta
+from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -22,7 +23,7 @@ from app.services.quota_service import check_and_increment_quota, get_usage_coun
 
 def test_quota_service_direct_increments_and_limits(db_session: Session):
     """Test quota service enforces hard limit and atomic counter increments."""
-    user_id = "quota-test-user-1"
+    user_id = str(uuid4())
     op = UsageOperation.SCAN_CREATE.value
     limit = 20
 
@@ -40,8 +41,8 @@ def test_quota_service_direct_increments_and_limits(db_session: Session):
 
 def test_tenant_quota_isolation(db_session: Session):
     """Test User A consuming their quota does not impact User B."""
-    user_a = "user-a-uuid-1111"
-    user_b = "user-b-uuid-2222"
+    user_a = str(uuid4())
+    user_b = str(uuid4())
     op = UsageOperation.SCAN_CREATE.value
 
     # Exhaust User A's quota

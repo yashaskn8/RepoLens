@@ -2,9 +2,11 @@
 
 All ownership checks are part of DB queries — never query-then-compare in Python.
 Cross-user access returns 404 (not 403) to prevent resource existence leakage.
+
+Authorization identity: CurrentUser ONLY.
+Background workers must not use these HTTP authorization helpers.
 """
 
-from typing import Any, Optional
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -14,31 +16,32 @@ from app.models.finding import FindingModel
 from app.models.patch import PatchModel
 from app.models.review_publication import PullRequestReviewPublicationModel
 from app.models.scan import ScanModel
-from app.models.user import UserModel
 from app.schemas.auth import CurrentUser
 
 _NOT_FOUND = HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resource not found")
 
-
-def _extract_user_id(current_user: Any) -> str:
-    """Extract authenticated user ID or raise 401 AUTH_REQUIRED."""
-    if isinstance(current_user, CurrentUser):
-        if current_user.id and current_user.id.strip():
-            return current_user.id.strip()
-    elif isinstance(current_user, UserModel):
-        if current_user.id and str(current_user.id).strip():
-            return str(current_user.id).strip()
-    elif isinstance(current_user, str):
-        if current_user.strip():
-            return current_user.strip()
-
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail={"error_code": "AUTH_REQUIRED", "message": "Authenticated user required"},
-    )
+_AUTH_REQUIRED = HTTPException(
+    status_code=status.HTTP_401_UNAUTHORIZED,
+    detail={"error_code": "AUTH_REQUIRED", "message": "Authenticated user required"},
+)
 
 
-def get_owned_scan_or_404(db: Session, scan_id: str, current_user: Any) -> ScanModel:
+def _extract_user_id(current_user: CurrentUser) -> str:
+    """Extract authenticated user ID from CurrentUser or raise 401 AUTH_REQUIRED.
+
+    Only CurrentUser (resolved from session cookie via FastAPI Depends) is accepted.
+    Raw strings, UserModel, UUID objects, dicts, and arbitrary objects are rejected.
+    """
+    if not isinstance(current_user, CurrentUser):
+        raise _AUTH_REQUIRED
+
+    if not current_user.id or not current_user.id.strip():
+        raise _AUTH_REQUIRED
+
+    return current_user.id.strip()
+
+
+def get_owned_scan_or_404(db: Session, scan_id: str, current_user: CurrentUser) -> ScanModel:
     """Return scan owned by current_user or raise 404."""
     user_id = _extract_user_id(current_user)
     scan = db.query(ScanModel).filter(
@@ -50,7 +53,7 @@ def get_owned_scan_or_404(db: Session, scan_id: str, current_user: Any) -> ScanM
     return scan
 
 
-def get_owned_finding_or_404(db: Session, finding_id: str, current_user: Any) -> FindingModel:
+def get_owned_finding_or_404(db: Session, finding_id: str, current_user: CurrentUser) -> FindingModel:
     """Return finding belonging to a scan owned by current_user or raise 404."""
     user_id = _extract_user_id(current_user)
     finding = (
@@ -67,7 +70,7 @@ def get_owned_finding_or_404(db: Session, finding_id: str, current_user: Any) ->
     return finding
 
 
-def get_owned_patch_or_404(db: Session, patch_id: str, current_user: Any) -> PatchModel:
+def get_owned_patch_or_404(db: Session, patch_id: str, current_user: CurrentUser) -> PatchModel:
     """Return patch belonging to a scan owned by current_user or raise 404."""
     user_id = _extract_user_id(current_user)
     patch = (
@@ -84,7 +87,7 @@ def get_owned_patch_or_404(db: Session, patch_id: str, current_user: Any) -> Pat
     return patch
 
 
-def get_owned_delivery_or_404(db: Session, delivery_id: str, current_user: Any) -> DeliveryModel:
+def get_owned_delivery_or_404(db: Session, delivery_id: str, current_user: CurrentUser) -> DeliveryModel:
     """Return delivery belonging to a patch/scan owned by current_user or raise 404."""
     user_id = _extract_user_id(current_user)
     delivery = (
@@ -101,7 +104,7 @@ def get_owned_delivery_or_404(db: Session, delivery_id: str, current_user: Any) 
     return delivery
 
 
-def get_owned_change_analysis_or_404(db: Session, analysis_id: str, current_user: Any) -> ChangeAnalysisModel:
+def get_owned_change_analysis_or_404(db: Session, analysis_id: str, current_user: CurrentUser) -> ChangeAnalysisModel:
     """Return change analysis owned by current_user or raise 404."""
     user_id = _extract_user_id(current_user)
     analysis = db.query(ChangeAnalysisModel).filter(
@@ -113,7 +116,7 @@ def get_owned_change_analysis_or_404(db: Session, analysis_id: str, current_user
     return analysis
 
 
-def get_owned_review_publication_or_404(db: Session, pub_id: str, current_user: Any) -> PullRequestReviewPublicationModel:
+def get_owned_review_publication_or_404(db: Session, pub_id: str, current_user: CurrentUser) -> PullRequestReviewPublicationModel:
     """Return review publication belonging to a change analysis owned by current_user or raise 404."""
     user_id = _extract_user_id(current_user)
     pub = (

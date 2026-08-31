@@ -425,7 +425,7 @@ async def create_scan(
 ) -> Scan:
     """Initiate a new repository scan asynchronously, returning scan ID immediately."""
     # 1. Quota check & increment
-    check_and_increment_quota(db, current_user, UsageOperation.SCAN_CREATE.value)
+    check_and_increment_quota(db, current_user.id, UsageOperation.SCAN_CREATE.value)
 
     # 2. Validate GitHub URL strictly
     try:

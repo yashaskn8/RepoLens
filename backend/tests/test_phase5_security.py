@@ -130,7 +130,7 @@ def base_entities(db_session: Session):
         status=ScanStatus.COMPLETED.value,
         branch="main",
         commit_hash=scanned_sha,
-        owner_user_id="phase5-sec-user",
+        owner_user_id=str(uuid4()),
     )
     db_session.add(scan)
 
@@ -1050,7 +1050,7 @@ async def test_initial_patch_generation_persists_exact_fix_plan_snapshot(db_sess
         status=ScanStatus.COMPLETED.value,
         branch="main",
         commit_hash="1111111111111111111111111111111111111111",
-        owner_user_id="phase5-sec-user",
+        owner_user_id=str(uuid4()),
     )
     db_session.add(scan)
 

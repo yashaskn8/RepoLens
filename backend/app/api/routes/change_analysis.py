@@ -120,7 +120,7 @@ async def create_change_analysis(
 ) -> ChangeAnalysisResponse:
     """Initiate asynchronous change intelligence analysis between two exact commit SHAs."""
     # 1. Quota check & increment
-    check_and_increment_quota(db, current_user, UsageOperation.CHANGE_ANALYSIS_CREATE.value)
+    check_and_increment_quota(db, current_user.id, UsageOperation.CHANGE_ANALYSIS_CREATE.value)
 
     owner, repo = _extract_repo_owner_name(payload.repository_url)
     analysis_id = str(uuid4())
@@ -177,7 +177,7 @@ async def create_change_analysis_from_pr(
 ) -> ChangeAnalysisResponse:
     """Resolve public GitHub PR metadata, persist immutable base/head commit SHAs, and start asynchronous analysis."""
     # 1. Quota check & increment
-    check_and_increment_quota(db, current_user, UsageOperation.CHANGE_ANALYSIS_CREATE.value)
+    check_and_increment_quota(db, current_user.id, UsageOperation.CHANGE_ANALYSIS_CREATE.value)
 
     resolver = get_github_pr_resolver()
 

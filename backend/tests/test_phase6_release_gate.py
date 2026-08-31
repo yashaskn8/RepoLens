@@ -564,7 +564,7 @@ async def test_e2e_h_fork_pr_typed_rejection():
     resolver = GitHubPRResolver(client=mock_client)
 
     from app.schemas.auth import CurrentUser
-    test_user = CurrentUser(id="phase6-tester-id", email="p6@example.com", role="USER", is_active=True, session_id="s1")
+    test_user = CurrentUser(id=str(uuid4()), email="p6@example.com", role="USER", is_active=True, session_id="s1")
 
     db = TestingSessionLocal()
     with patch("app.api.routes.change_analysis.get_github_pr_resolver", return_value=resolver):

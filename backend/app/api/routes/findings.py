@@ -196,7 +196,7 @@ async def request_patch_generation(
 ) -> PatchWorkflowResult:
     """Generate, verify in sandbox, conditionally critique, and persist candidate patch against the exact analyzed repository."""
     # 1. Quota check & increment
-    check_and_increment_quota(db, current_user, UsageOperation.PATCH_GENERATE.value)
+    check_and_increment_quota(db, current_user.id, UsageOperation.PATCH_GENERATE.value)
 
     finding_schema, scan = _get_verified_finding_and_scan(finding_id, current_user, db)
     snapshot_service = get_snapshot_service()

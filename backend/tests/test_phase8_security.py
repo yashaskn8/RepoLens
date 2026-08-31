@@ -250,13 +250,55 @@ def test_authorization_helpers_fail_closed_on_none_identity(db_session: Session)
 
 
 def test_authorization_helpers_reject_arbitrary_objects(db_session: Session):
-    """Objects that merely have an 'id' attribute but are not CurrentUser/UserModel must be rejected."""
+    """Objects that merely have an 'id' attribute but are not CurrentUser must be rejected."""
     class FakeIdentity:
         id = "malicious-injected-id"
 
     with pytest.raises(HTTPException) as exc:
         get_owned_scan_or_404(db_session, str(uuid4()), FakeIdentity())
     assert exc.value.status_code == 401
+
+
+def test_authorization_rejects_raw_string_identity(db_session: Session):
+    """Authorization must reject raw string user IDs — only CurrentUser is trusted."""
+    with pytest.raises(HTTPException) as exc:
+        get_owned_scan_or_404(db_session, str(uuid4()), "real-looking-user-id")
+    assert exc.value.status_code == 401
+    assert exc.value.detail["error_code"] == "AUTH_REQUIRED"
+
+
+def test_authorization_rejects_uuid_string_identity(db_session: Session):
+    """Even a valid UUID string must be rejected — only CurrentUser objects are accepted."""
+    valid_uuid_str = str(uuid4())
+    with pytest.raises(HTTPException) as exc:
+        get_owned_scan_or_404(db_session, str(uuid4()), valid_uuid_str)
+    assert exc.value.status_code == 401
+    assert exc.value.detail["error_code"] == "AUTH_REQUIRED"
+
+
+def test_authorization_rejects_user_model_identity(db_session: Session):
+    """UserModel is NOT a trusted authorization identity — only CurrentUser is."""
+    fake_user = UserModel(id=str(uuid4()), email="attacker@example.com", role="USER")
+    with pytest.raises(HTTPException) as exc:
+        get_owned_scan_or_404(db_session, str(uuid4()), fake_user)
+    assert exc.value.status_code == 401
+    assert exc.value.detail["error_code"] == "AUTH_REQUIRED"
+
+
+def test_authorization_rejects_uuid_object_identity(db_session: Session):
+    """UUID objects must be rejected — only CurrentUser is accepted."""
+    with pytest.raises(HTTPException) as exc:
+        get_owned_scan_or_404(db_session, str(uuid4()), uuid4())
+    assert exc.value.status_code == 401
+    assert exc.value.detail["error_code"] == "AUTH_REQUIRED"
+
+
+def test_authorization_rejects_dict_identity(db_session: Session):
+    """A dict with an 'id' key must be rejected."""
+    with pytest.raises(HTTPException) as exc:
+        get_owned_scan_or_404(db_session, str(uuid4()), {"id": str(uuid4()), "role": "OPERATOR"})
+    assert exc.value.status_code == 401
+    assert exc.value.detail["error_code"] == "AUTH_REQUIRED"
 
 
 # =========================================================================
@@ -271,6 +313,51 @@ def test_quota_service_fails_closed_on_missing_or_default_user_id(db_session: Se
 
     with pytest.raises(HTTPException) as exc:
         check_and_increment_quota(db_session, user_id="default-test-user", operation=UsageOperation.SCAN_CREATE.value)
+    assert exc.value.status_code == 401
+
+
+def test_quota_accepts_valid_uuid_string(db_session: Session):
+    """check_and_increment_quota must accept a valid UUID string and increment."""
+    valid_user_id = str(uuid4())
+    count = check_and_increment_quota(db_session, user_id=valid_user_id, operation=UsageOperation.SCAN_CREATE.value)
+    assert count == 1
+
+
+def test_quota_rejects_current_user_object(db_session: Session):
+    """Passing a CurrentUser object directly (instead of current_user.id) must be rejected."""
+    cu = CurrentUser(id=str(uuid4()), email="test@example.com", role="USER", is_active=True, session_id="sess")
+    with pytest.raises(HTTPException) as exc:
+        check_and_increment_quota(db_session, user_id=cu, operation=UsageOperation.SCAN_CREATE.value)
+    assert exc.value.status_code == 401
+
+
+def test_quota_rejects_user_model_object(db_session: Session):
+    """Passing a UserModel object must be rejected — only string UUID accepted."""
+    um = UserModel(id=str(uuid4()), email="model@example.com", role="USER")
+    with pytest.raises(HTTPException) as exc:
+        check_and_increment_quota(db_session, user_id=um, operation=UsageOperation.SCAN_CREATE.value)
+    assert exc.value.status_code == 401
+
+
+def test_quota_rejects_uuid_object(db_session: Session):
+    """Passing a UUID object (not string) must be rejected."""
+    with pytest.raises(HTTPException) as exc:
+        check_and_increment_quota(db_session, user_id=uuid4(), operation=UsageOperation.SCAN_CREATE.value)
+    assert exc.value.status_code == 401
+
+
+def test_quota_rejects_non_uuid_strings(db_session: Session):
+    """Non-UUID strings must be rejected by UUID validation."""
+    for bad_id in ["some-user", "admin", "<injected>", "   ", "12345"]:
+        with pytest.raises(HTTPException) as exc:
+            check_and_increment_quota(db_session, user_id=bad_id, operation=UsageOperation.SCAN_CREATE.value)
+        assert exc.value.status_code == 401, f"Should reject '{bad_id}'"
+
+
+def test_quota_rejects_empty_string(db_session: Session):
+    """Empty string must be rejected."""
+    with pytest.raises(HTTPException) as exc:
+        check_and_increment_quota(db_session, user_id="", operation=UsageOperation.SCAN_CREATE.value)
     assert exc.value.status_code == 401
 
 
@@ -395,9 +482,10 @@ async def test_patch_approval_ignores_spoofed_approved_by_in_payload(db_session:
     """When User A approves a patch, approved_by is set to User A's ID regardless of payload."""
     from app.api.routes.patches import approve_patch
     
-    user_a = CurrentUser(id="user-a-id", email="a@example.com", role="USER", is_active=True, session_id="s1")
+    user_a_id = str(uuid4())
+    user_a = CurrentUser(id=user_a_id, email="a@example.com", role="USER", is_active=True, session_id="s1")
     
-    scan = ScanModel(id=str(uuid4()), repository_url="https://github.com/org/repo", owner_user_id="user-a-id", status="COMPLETED")
+    scan = ScanModel(id=str(uuid4()), repository_url="https://github.com/org/repo", owner_user_id=user_a_id, status="COMPLETED")
     finding = FindingModel(
         id=str(uuid4()),
         scan_id=scan.id,
@@ -437,7 +525,7 @@ async def test_patch_approval_ignores_spoofed_approved_by_in_payload(db_session:
         )
 
     db_session.refresh(patch_obj)
-    assert patch_obj.approved_by == "user-a-id", f"Expected 'user-a-id', got '{patch_obj.approved_by}'"
+    assert patch_obj.approved_by == user_a_id, f"Expected '{user_a_id}', got '{patch_obj.approved_by}'"
     assert patch_obj.status == PatchStatus.APPROVED.value
 
 

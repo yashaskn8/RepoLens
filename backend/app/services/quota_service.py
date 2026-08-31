@@ -2,11 +2,13 @@
 
 Atomic transactional increment with first-insert race handling.
 Quotas are per-user per-UTC-calendar-day per-operation.
+
+Canonical quota API: user_id must be a valid UUID string.
+Routes pass current_user.id — no CurrentUser/UserModel/UUID-object polymorphism.
 """
 
 import logging
 from datetime import date, datetime, timezone
-from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException, status
@@ -15,11 +17,15 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
-from app.models.user import UsageCounterModel, UserModel
-from app.schemas.auth import CurrentUser
+from app.models.user import UsageCounterModel
 from app.schemas.enums import UsageOperation
 
 logger = logging.getLogger(__name__)
+
+_QUOTA_AUTH_REQUIRED = HTTPException(
+    status_code=status.HTTP_401_UNAUTHORIZED,
+    detail={"error_code": "AUTH_REQUIRED", "message": "Valid user ID required for quota enforcement"},
+)
 
 
 def _today_utc() -> date:
@@ -36,27 +42,28 @@ def _get_limit(settings: Settings, operation: str) -> int:
     return limits.get(operation, 999999)
 
 
-def _resolve_user_id(user_or_id: Any) -> str:
-    """Extract string user ID from string, CurrentUser, UserModel, or return empty string."""
-    if user_or_id is None:
-        return ""
-    if isinstance(user_or_id, CurrentUser):
-        return user_or_id.id.strip() if user_or_id.id else ""
-    if isinstance(user_or_id, UserModel):
-        return str(user_or_id.id).strip() if user_or_id.id else ""
-    if isinstance(user_or_id, (str, UUID)):
-        return str(user_or_id).strip()
-    return ""
+def _validate_user_id(user_id: str) -> str:
+    """Validate user_id is a real UUID string. Raises 401 on any invalid input.
+
+    Runtime isinstance check ensures non-string types (CurrentUser, UserModel,
+    UUID objects, None, dicts) are rejected even if Python type annotations
+    are bypassed at the call site.
+    """
+    if not isinstance(user_id, str):
+        raise _QUOTA_AUTH_REQUIRED
+
+    try:
+        return str(UUID(user_id.strip()))
+    except (ValueError, AttributeError, TypeError):
+        raise _QUOTA_AUTH_REQUIRED
 
 
-def get_usage_count(db: Session, user_id: Any, operation: str) -> int:
+def get_usage_count(db: Session, user_id: str, operation: str) -> int:
     """Return the current day's usage count for the given user and operation."""
-    resolved_user_id = _resolve_user_id(user_id)
-    if not resolved_user_id:
-        return 0
+    validated_user_id = _validate_user_id(user_id)
     today = _today_utc()
     counter = db.query(UsageCounterModel).filter(
-        UsageCounterModel.user_id == resolved_user_id,
+        UsageCounterModel.user_id == validated_user_id,
         UsageCounterModel.bucket_date == today,
         UsageCounterModel.operation == operation,
     ).first()
@@ -65,7 +72,7 @@ def get_usage_count(db: Session, user_id: Any, operation: str) -> int:
 
 def check_and_increment_quota(
     db: Session,
-    user_id: Any,
+    user_id: str,
     operation: str,
     settings: Settings | None = None,
 ) -> int:
@@ -73,13 +80,10 @@ def check_and_increment_quota(
 
     Uses atomic conditional DB UPDATE (WHERE count < limit) with first-insert savepoint handling.
     Fails closed on missing or invalid user_id.
+
+    user_id must be a valid UUID string (e.g. current_user.id from routes).
     """
-    resolved_user_id = _resolve_user_id(user_id)
-    if not resolved_user_id or resolved_user_id.startswith("<") or resolved_user_id == "default-test-user":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"error_code": "AUTH_REQUIRED", "message": "Valid user ID required for quota enforcement"},
-        )
+    validated_user_id = _validate_user_id(user_id)
 
     app_settings = settings or get_settings()
     limit = _get_limit(app_settings, operation)
@@ -87,7 +91,7 @@ def check_and_increment_quota(
 
     # Step 1: Ensure counter row exists (handle first insert race safely with savepoint)
     counter = db.query(UsageCounterModel).filter(
-        UsageCounterModel.user_id == resolved_user_id,
+        UsageCounterModel.user_id == validated_user_id,
         UsageCounterModel.bucket_date == today,
         UsageCounterModel.operation == operation,
     ).first()
@@ -97,7 +101,7 @@ def check_and_increment_quota(
             with db.begin_nested():
                 new_row = UsageCounterModel(
                     id=str(uuid4()),
-                    user_id=resolved_user_id,
+                    user_id=validated_user_id,
                     bucket_date=today,
                     operation=operation,
                     count=0,
@@ -112,7 +116,7 @@ def check_and_increment_quota(
     stmt = (
         update(UsageCounterModel)
         .where(
-            UsageCounterModel.user_id == resolved_user_id,
+            UsageCounterModel.user_id == validated_user_id,
             UsageCounterModel.bucket_date == today,
             UsageCounterModel.operation == operation,
             UsageCounterModel.count < limit,
@@ -127,7 +131,7 @@ def check_and_increment_quota(
 
     # Return the newly incremented count
     updated = db.query(UsageCounterModel).filter(
-        UsageCounterModel.user_id == resolved_user_id,
+        UsageCounterModel.user_id == validated_user_id,
         UsageCounterModel.bucket_date == today,
         UsageCounterModel.operation == operation,
     ).first()
