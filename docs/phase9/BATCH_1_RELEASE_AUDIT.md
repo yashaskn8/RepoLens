@@ -21,7 +21,7 @@ Following the completion and verification of Phases 1 through 8 (culminating in 
 
 ## 2. Product Capability Matrix Summary
 
-The detailed capability matrix is documented in [`docs/phase9/product-capability-matrix.md`](file:///c:/Users/prana/OneDrive/Desktop/RepoLens/docs/phase9/product-capability-matrix.md).
+The detailed capability matrix is documented in [Product Capability Matrix](./product-capability-matrix.md).
 
 ### Core Proven Capabilities
 - **Repository Ingestion & Confinement**: Ephemeral Git shallow clone, Tree-sitter AST parsing (Python, JavaScript, TypeScript), and path traversal confinement (`_validate_safe_path`).
@@ -40,7 +40,7 @@ The detailed capability matrix is documented in [`docs/phase9/product-capability
 
 ## 3. Product Flow & Architecture Summary
 
-The complete architecture decision record is documented in [`docs/phase9/release-architecture.md`](file:///c:/Users/prana/OneDrive/Desktop/RepoLens/docs/phase9/release-architecture.md).
+The complete architecture decision record is documented in [Release Architecture](./release-architecture.md).
 
 ### Primary Workflow A: Security Scan & Remediation
 `User` $\to$ `POST /api/v1/scans` $\to$ `Clone & Snapshot` $\to$ `Tree-sitter & Scanners` $\to$ `RepositoryGraph` $\to$ `LangGraph Agents` $\to$ `Verifier` $\to$ `Findings DB` $\to$ `Patch Generation` $\to$ `12-Check Verifier` $\to$ `Human Approval` $\to$ `(Optional Operator PR Delivery)`

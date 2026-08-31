@@ -132,6 +132,6 @@ The GitHub Actions release verification pipeline defined in `.github/workflows/c
 The following non-blocking documentation and presentation items are explicitly scheduled for Batch 3:
 1. **`README.md` Refresh**: Update header, test counts (645 passed), and migration range (001–010).
 2. **`.env.example` Synchronization**: Document Phase 7 & 8 configuration variables (`GITHUB_PR_REVIEW_WRITE_ENABLED`, `AUTH_COOKIE_SECURE`, etc.).
-3. **Repository-Relative Links**: Remove all local machine `file:///c:/Users/...` links in Phase 9 documentation and replace with repository-relative paths.
+3. **Repository-Relative Links**: Remove all machine-local links in Phase 9 documentation and replace with repository-relative paths.
 4. **Canonical Demo & Architecture Suite**: Author `docs/architecture.md`, `docs/threat-model.md`, and `docs/demo.md`.
 5. **Frontend Role Badge**: Visual UI indicator for `OPERATOR` vs `USER` sessions.

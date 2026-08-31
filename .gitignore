@@ -49,6 +49,7 @@ yarn-error.log*
 .idea/
 .claude/
 .serena/
+.playwright-mcp/
 *.swp
 *.swo
 

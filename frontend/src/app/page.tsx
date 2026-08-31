@@ -146,8 +146,9 @@ export default function HomePage() {
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <span className="status-badge" style={{ borderColor: 'rgba(56, 189, 248, 0.4)', color: '#bae6fd' }}>
                 👤 {user?.email}
-                {isOperator && (
+                {isOperator ? (
                   <span
+                    aria-label="User role: OPERATOR"
                     style={{
                       marginLeft: '0.4rem',
                       padding: '0.15rem 0.45rem',
@@ -160,6 +161,22 @@ export default function HomePage() {
                     }}
                   >
                     OPERATOR
+                  </span>
+                ) : (
+                  <span
+                    aria-label="User role: USER"
+                    style={{
+                      marginLeft: '0.4rem',
+                      padding: '0.15rem 0.45rem',
+                      background: 'rgba(56, 189, 248, 0.15)',
+                      border: '1px solid rgba(56, 189, 248, 0.5)',
+                      borderRadius: '999px',
+                      color: '#7dd3fc',
+                      fontSize: '0.65rem',
+                      fontWeight: 700,
+                    }}
+                  >
+                    USER
                   </span>
                 )}
               </span>
