@@ -75,8 +75,8 @@ def mock_pr_payload() -> Dict[str, Any]:
             "ref": "feature/auth-refactor",
             "sha": "2222222222222222222222222222222222222222",
             "repo": {
-                "html_url": "https://github.com/contributor/fastapi",
-                "fork": True,
+                "html_url": "https://github.com/fastapi/fastapi",
+                "fork": False,
             },
         },
     }
@@ -168,7 +168,7 @@ async def test_successful_pr_resolution_and_zero_writes(mock_pr_payload):
     assert resolved.base_commit_sha == "1111111111111111111111111111111111111111"
     assert resolved.head_branch == "feature/auth-refactor"
     assert resolved.head_commit_sha == "2222222222222222222222222222222222222222"
-    assert resolved.is_fork is True
+    assert resolved.is_fork is False
 
     # Zero writes assertion
     assert len(mock_client.calls) == 1

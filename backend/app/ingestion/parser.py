@@ -1,5 +1,7 @@
 """Tree-sitter structural parser for Python, JavaScript, TypeScript, and TSX with deterministic call extraction."""
 
+import hashlib
+import re
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 from tree_sitter import Language, Node, Parser
@@ -8,6 +10,25 @@ import tree_sitter_python as ts_py
 import tree_sitter_typescript as ts_ts
 
 from app.ingestion.schemas import ParsedCall, ParsedSymbol, SymbolKind
+
+
+def compute_symbol_body_fingerprint(node: Optional[Node], source_bytes: bytes) -> str:
+    """Compute deterministic, line-shift-independent structural body fingerprint."""
+    if node is None:
+        return ""
+    body_node = node.child_by_field_name("body")
+    target_node = body_node if body_node is not None else node
+    raw_text = _node_text(target_node, source_bytes)
+    lines = []
+    for line in raw_text.splitlines():
+        # Strip Python and JS comments for semantic stability
+        stripped = re.sub(r"#.*$", "", line)
+        stripped = re.sub(r"//.*$", "", stripped)
+        stripped = stripped.strip()
+        if stripped:
+            lines.append(stripped)
+    normalized = "\n".join(lines)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
 
 
 @lru_cache
@@ -228,6 +249,7 @@ def _extract_python_symbols_and_calls(
                 return_type_node = func_def_node.child_by_field_name("return_type")
                 params_text = _node_text(params_node, source_bytes).strip() if params_node else ""
                 return_type_text = _node_text(return_type_node, source_bytes).strip() if return_type_node else ""
+                fp = compute_symbol_body_fingerprint(func_def_node, source_bytes)
 
                 symbols.append(
                     ParsedSymbol(
@@ -241,6 +263,7 @@ def _extract_python_symbols_and_calls(
                             "async": func_def_node.type == "async_function_definition",
                             "parameters": params_text,
                             "return_type": return_type_text,
+                            "body_fingerprint": fp,
                         },
                     )
                 )
@@ -262,6 +285,7 @@ def _extract_python_symbols_and_calls(
             return_type_node = node.child_by_field_name("return_type")
             params_text = _node_text(params_node, source_bytes).strip() if params_node else ""
             return_type_text = _node_text(return_type_node, source_bytes).strip() if return_type_node else ""
+            fp = compute_symbol_body_fingerprint(node, source_bytes)
 
             symbols.append(
                 ParsedSymbol(
@@ -275,6 +299,7 @@ def _extract_python_symbols_and_calls(
                         "async": node.type == "async_function_definition",
                         "parameters": params_text,
                         "return_type": return_type_text,
+                        "body_fingerprint": fp,
                     },
                 )
             )
@@ -290,6 +315,7 @@ def _extract_python_symbols_and_calls(
             name = _node_text(name_node, source_bytes) if name_node else "anonymous"
             start_l = node.start_point[0] + 1
             end_l = node.end_point[0] + 1
+            fp = compute_symbol_body_fingerprint(node, source_bytes)
 
             # Extract superclasses
             superclasses_node = node.child_by_field_name("superclasses")
@@ -428,6 +454,7 @@ def _extract_js_ts_symbols_and_calls(
             return_type_node = node.child_by_field_name("return_type")
             params_text = _node_text(params_node, source_bytes).strip() if params_node else ""
             return_type_text = _node_text(return_type_node, source_bytes).strip() if return_type_node else ""
+            fp = compute_symbol_body_fingerprint(node, source_bytes)
 
             symbols.append(
                 ParsedSymbol(
@@ -440,6 +467,7 @@ def _extract_js_ts_symbols_and_calls(
                     details={
                         "parameters": params_text,
                         "return_type": return_type_text,
+                        "body_fingerprint": fp,
                     },
                 )
             )
@@ -455,6 +483,7 @@ def _extract_js_ts_symbols_and_calls(
             name = _node_text(name_node, source_bytes) if name_node else "anonymous"
             start_l = node.start_point[0] + 1
             end_l = node.end_point[0] + 1
+            fp = compute_symbol_body_fingerprint(node, source_bytes)
 
             heritage_node = None
             for ch in node.children:
@@ -483,7 +512,7 @@ def _extract_js_ts_symbols_and_calls(
                     end_line=end_l,
                     start_column=node.start_point[1],
                     end_column=node.end_point[1],
-                    details={"heritage": heritage_text, "fields": fields},
+                    details={"heritage": heritage_text, "fields": fields, "body_fingerprint": fp},
                 )
             )
 
@@ -498,6 +527,7 @@ def _extract_js_ts_symbols_and_calls(
             name = _node_text(name_node, source_bytes) if name_node else "anonymous_method"
             start_l = node.start_point[0] + 1
             end_l = node.end_point[0] + 1
+            fp = compute_symbol_body_fingerprint(node, source_bytes)
 
             params_node = node.child_by_field_name("parameters")
             return_type_node = node.child_by_field_name("return_type")
@@ -515,6 +545,7 @@ def _extract_js_ts_symbols_and_calls(
                     details={
                         "parameters": params_text,
                         "return_type": return_type_text,
+                        "body_fingerprint": fp,
                     },
                 )
             )
@@ -532,6 +563,7 @@ def _extract_js_ts_symbols_and_calls(
                 name = _node_text(name_node, source_bytes) if name_node else "anonymous"
                 start_l = node.start_point[0] + 1
                 end_l = node.end_point[0] + 1
+                fp = compute_symbol_body_fingerprint(val_node, source_bytes)
 
                 symbols.append(
                     ParsedSymbol(
@@ -541,7 +573,7 @@ def _extract_js_ts_symbols_and_calls(
                         end_line=end_l,
                         start_column=node.start_point[1],
                         end_column=node.end_point[1],
-                        details={"arrow_function": val_node.type == "arrow_function"},
+                        details={"arrow_function": val_node.type == "arrow_function", "body_fingerprint": fp},
                     )
                 )
 

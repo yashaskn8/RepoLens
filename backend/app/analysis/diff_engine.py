@@ -17,6 +17,7 @@ Guarantees:
 
 from collections import defaultdict
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -27,6 +28,26 @@ from app.ingestion.detector import detect_language
 from app.ingestion.manifest import BINARY_EXTENSIONS, DEFAULT_IGNORE_DIRS, _is_binary_file, build_manifest
 from app.ingestion.parser import parse_file_with_calls
 from app.ingestion.schemas import FileEntry, ParsedCall, ParsedSymbol, RepositoryManifest, SymbolKind
+
+
+def _extract_and_normalize_symbol_lines(file_path: Optional[str], start_line: int, end_line: int) -> str:
+    """Read and normalize symbol source lines, ignoring comments and surrounding whitespace."""
+    if not file_path or not os.path.exists(file_path):
+        return ""
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+        selected = lines[max(0, start_line - 1):end_line]
+        normalized = []
+        for l in selected:
+            l_clean = re.sub(r"#.*$", "", l)
+            l_clean = re.sub(r"//.*$", "", l_clean)
+            l_clean = l_clean.strip()
+            if l_clean:
+                normalized.append(l_clean)
+        return "\n".join(normalized)
+    except OSError:
+        return ""
 from app.schemas.change_analysis import (
     ConfigDelta,
     DependencyDelta,
@@ -197,34 +218,48 @@ class ChangeDiffEngine:
         # 3. Classify file facts and line-level diffs
         changed_files: List[FileDiffFact] = []
         modified_files_list: List[str] = []
+        max_file_size = getattr(self.settings, "MAX_FILE_SIZE_BYTES", 1048576)
 
         # Process Added Files
         for add_path in sorted(added_files):
             abs_p = head_files[add_path]
             is_bin = False
             lines_count = 0
+            file_too_large = False
             try:
-                with open(abs_p, "rb") as f:
-                    sample = f.read(4096)
-                    is_bin = _is_binary_file(add_path, sample)
-                if not is_bin:
-                    with open(abs_p, "r", encoding="utf-8", errors="ignore") as f:
-                        lines_count = len(f.readlines())
+                st = os.stat(abs_p)
+                if st.st_size > max_file_size:
+                    file_too_large = True
+                else:
+                    with open(abs_p, "rb") as f:
+                        sample = f.read(4096)
+                        is_bin = _is_binary_file(add_path, sample)
+                    if not is_bin:
+                        with open(abs_p, "r", encoding="utf-8", errors="ignore") as f:
+                            lines_count = len(f.readlines())
             except OSError:
                 pass
 
             lang = detect_language(add_path)
-            skipped_reason = "BINARY" if is_bin else (None if lang else "UNSUPPORTED_LANGUAGE")
+            if file_too_large:
+                skipped_reason = "EXCEEDS_MAX_FILE_SIZE"
+            elif is_bin:
+                skipped_reason = "BINARY"
+            elif not lang:
+                skipped_reason = "UNSUPPORTED_LANGUAGE"
+            else:
+                skipped_reason = None
+
             changed_files.append(
                 FileDiffFact(
                     file_path=add_path,
                     old_path=None,
                     change_type=FileChangeType.ADDED,
                     is_binary=is_bin,
-                    is_parsed=lang is not None and not is_bin,
+                    is_parsed=lang is not None and not is_bin and not file_too_large,
                     skipped_reason=skipped_reason,
                     language=lang,
-                    changed_line_ranges=[[1, max(1, lines_count)]] if not is_bin and lines_count > 0 else [],
+                    changed_line_ranges=[[1, max(1, lines_count)]] if not is_bin and not file_too_large and lines_count > 0 else [],
                     base_line_ranges=[],
                 )
             )
@@ -234,29 +269,42 @@ class ChangeDiffEngine:
             abs_p = base_files[del_path]
             is_bin = False
             lines_count = 0
+            file_too_large = False
             try:
-                with open(abs_p, "rb") as f:
-                    sample = f.read(4096)
-                    is_bin = _is_binary_file(del_path, sample)
-                if not is_bin:
-                    with open(abs_p, "r", encoding="utf-8", errors="ignore") as f:
-                        lines_count = len(f.readlines())
+                st = os.stat(abs_p)
+                if st.st_size > max_file_size:
+                    file_too_large = True
+                else:
+                    with open(abs_p, "rb") as f:
+                        sample = f.read(4096)
+                        is_bin = _is_binary_file(del_path, sample)
+                    if not is_bin:
+                        with open(abs_p, "r", encoding="utf-8", errors="ignore") as f:
+                            lines_count = len(f.readlines())
             except OSError:
                 pass
 
             lang = detect_language(del_path)
-            skipped_reason = "BINARY" if is_bin else (None if lang else "UNSUPPORTED_LANGUAGE")
+            if file_too_large:
+                skipped_reason = "EXCEEDS_MAX_FILE_SIZE"
+            elif is_bin:
+                skipped_reason = "BINARY"
+            elif not lang:
+                skipped_reason = "UNSUPPORTED_LANGUAGE"
+            else:
+                skipped_reason = None
+
             changed_files.append(
                 FileDiffFact(
                     file_path=del_path,
                     old_path=None,
                     change_type=FileChangeType.DELETED,
                     is_binary=is_bin,
-                    is_parsed=lang is not None and not is_bin,
+                    is_parsed=lang is not None and not is_bin and not file_too_large,
                     skipped_reason=skipped_reason,
                     language=lang,
                     changed_line_ranges=[],
-                    base_line_ranges=[[1, max(1, lines_count)]] if not is_bin and lines_count > 0 else [],
+                    base_line_ranges=[[1, max(1, lines_count)]] if not is_bin and not file_too_large and lines_count > 0 else [],
                 )
             )
 
@@ -264,22 +312,35 @@ class ChangeDiffEngine:
         for old_p, new_p in sorted(renamed_pairs):
             abs_head = head_files[new_p]
             is_bin = False
+            file_too_large = False
             try:
-                with open(abs_head, "rb") as f:
-                    sample = f.read(4096)
-                    is_bin = _is_binary_file(new_p, sample)
+                st = os.stat(abs_head)
+                if st.st_size > max_file_size:
+                    file_too_large = True
+                else:
+                    with open(abs_head, "rb") as f:
+                        sample = f.read(4096)
+                        is_bin = _is_binary_file(new_p, sample)
             except OSError:
                 pass
 
             lang = detect_language(new_p)
-            skipped_reason = "BINARY" if is_bin else (None if lang else "UNSUPPORTED_LANGUAGE")
+            if file_too_large:
+                skipped_reason = "EXCEEDS_MAX_FILE_SIZE"
+            elif is_bin:
+                skipped_reason = "BINARY"
+            elif not lang:
+                skipped_reason = "UNSUPPORTED_LANGUAGE"
+            else:
+                skipped_reason = None
+
             changed_files.append(
                 FileDiffFact(
                     file_path=new_p,
                     old_path=old_p,
                     change_type=FileChangeType.RENAMED,
                     is_binary=is_bin,
-                    is_parsed=lang is not None and not is_bin,
+                    is_parsed=lang is not None and not is_bin and not file_too_large,
                     skipped_reason=skipped_reason,
                     language=lang,
                     changed_line_ranges=[],
@@ -291,6 +352,32 @@ class ChangeDiffEngine:
         for rel_path in sorted(common_rel_paths):
             base_abs = base_files[rel_path]
             head_abs = head_files[rel_path]
+
+            file_too_large = False
+            try:
+                st_b = os.stat(base_abs)
+                st_h = os.stat(head_abs)
+                if st_b.st_size > max_file_size or st_h.st_size > max_file_size:
+                    file_too_large = True
+            except OSError:
+                continue
+
+            if file_too_large:
+                modified_files_list.append(rel_path)
+                changed_files.append(
+                    FileDiffFact(
+                        file_path=rel_path,
+                        old_path=None,
+                        change_type=FileChangeType.MODIFIED,
+                        is_binary=False,
+                        is_parsed=False,
+                        skipped_reason="EXCEEDS_MAX_FILE_SIZE",
+                        language=detect_language(rel_path),
+                        changed_line_ranges=[],
+                        base_line_ranges=[],
+                    )
+                )
+                continue
 
             base_bytes = b""
             head_bytes = b""
@@ -362,7 +449,6 @@ class ChangeDiffEngine:
         # Find Added Symbols
         for (f_path, s_kind, s_name), h_sym in head_symbols_by_key.items():
             if (f_path, s_kind, s_name) not in base_symbols_by_key:
-                # Check if it was renamed with file
                 added_symbols.append(
                     SymbolDiffFact(
                         file_path=f_path,
@@ -402,7 +488,7 @@ class ChangeDiffEngine:
 
         # Find Modified Symbols (common keys)
         common_symbols = set(base_symbols_by_key.keys()) & set(head_symbols_by_key.keys())
-        for f_path, s_kind, s_name in common_symbols:
+        for f_path, s_kind, s_name in sorted(common_symbols):
             b_sym = base_symbols_by_key[(f_path, s_kind, s_name)]
             h_sym = head_symbols_by_key[(f_path, s_kind, s_name)]
 
@@ -443,25 +529,34 @@ class ChangeDiffEngine:
                         },
                     )
                 )
-            elif (
-                b_sym.start_line != h_sym.start_line
-                or b_sym.end_line != h_sym.end_line
-                or b_sym.details != h_sym.details
-            ):
-                modified_symbols.append(
-                    SymbolDiffFact(
-                        file_path=f_path,
-                        symbol_name=s_name,
-                        symbol_kind=s_kind,
-                        change_type=SymbolChangeType.MODIFIED,
-                        base_location=b_loc,
-                        head_location=h_loc,
-                        evidence={
-                            "base_details": b_sym.details,
-                            "head_details": h_sym.details,
-                        },
+            else:
+                # Check for structural body modification (independent of line shifting)
+                b_fp = b_sym.details.get("body_fingerprint")
+                h_fp = h_sym.details.get("body_fingerprint")
+
+                is_body_modified = False
+                if b_fp is not None and h_fp is not None:
+                    is_body_modified = (b_fp != h_fp)
+                else:
+                    b_clean = _extract_and_normalize_symbol_lines(base_files.get(f_path), b_sym.start_line, b_sym.end_line)
+                    h_clean = _extract_and_normalize_symbol_lines(head_files.get(f_path), h_sym.start_line, h_sym.end_line)
+                    is_body_modified = (b_clean != h_clean) if (b_clean or h_clean) else False
+
+                if is_body_modified:
+                    modified_symbols.append(
+                        SymbolDiffFact(
+                            file_path=f_path,
+                            symbol_name=s_name,
+                            symbol_kind=s_kind,
+                            change_type=SymbolChangeType.MODIFIED,
+                            base_location=b_loc,
+                            head_location=h_loc,
+                            evidence={
+                                "base_details": b_sym.details,
+                                "head_details": h_sym.details,
+                            },
+                        )
                     )
-                )
 
         all_changed_symbols = added_symbols + deleted_symbols + modified_symbols
 
@@ -538,7 +633,7 @@ class ChangeDiffEngine:
                         )
                     )
 
-        # 6. Environment & Configuration Deltas
+        # 6. Environment & Configuration Deltas (Secret-Safe: zero raw values stored)
         config_deltas: List[ConfigDelta] = []
         for rel_p in sorted(base_rel_set | head_rel_set):
             if rel_p.endswith((".env", ".env.example", ".env.local", ".env.test", "config.json")):
@@ -574,14 +669,22 @@ class ChangeDiffEngine:
                 for k in sorted(all_keys):
                     b_val = b_dict.get(k)
                     h_val = h_dict.get(k)
+                    b_fp = hashlib.sha256(b_val.encode("utf-8")).hexdigest()[:16] if b_val is not None else None
+                    h_fp = hashlib.sha256(h_val.encode("utf-8")).hexdigest()[:16] if h_val is not None else None
+
                     if b_val is None and h_val is not None:
                         config_deltas.append(
                             ConfigDelta(
                                 file_path=rel_p,
                                 key=k,
-                                base_value=None,
-                                head_value=h_val,
                                 change_type="ADDED",
+                                base_present=False,
+                                head_present=True,
+                                value_changed=True,
+                                base_fingerprint=None,
+                                head_fingerprint=h_fp,
+                                base_value=None,
+                                head_value=None,
                             )
                         )
                     elif b_val is not None and h_val is None:
@@ -589,9 +692,14 @@ class ChangeDiffEngine:
                             ConfigDelta(
                                 file_path=rel_p,
                                 key=k,
-                                base_value=b_val,
-                                head_value=None,
                                 change_type="REMOVED",
+                                base_present=True,
+                                head_present=False,
+                                value_changed=True,
+                                base_fingerprint=b_fp,
+                                head_fingerprint=None,
+                                base_value=None,
+                                head_value=None,
                             )
                         )
                     elif b_val != h_val:
@@ -599,9 +707,14 @@ class ChangeDiffEngine:
                             ConfigDelta(
                                 file_path=rel_p,
                                 key=k,
-                                base_value=b_val,
-                                head_value=h_val,
                                 change_type="MODIFIED",
+                                base_present=True,
+                                head_present=True,
+                                value_changed=True,
+                                base_fingerprint=b_fp,
+                                head_fingerprint=h_fp,
+                                base_value=None,
+                                head_value=None,
                             )
                         )
 

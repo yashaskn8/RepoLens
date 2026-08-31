@@ -347,13 +347,18 @@ class DependencyDelta(BaseModel):
 
 
 class ConfigDelta(BaseModel):
-    """Deterministic configuration or environment variable definition change."""
+    """Deterministic configuration or environment variable definition change with zero raw secrets."""
 
     file_path: str = Field(..., description="Configuration file path (e.g. .env.example, config.yaml, settings.py)")
     key: str = Field(..., description="Config key or environment variable name")
-    base_value: Optional[str] = Field(default=None, description="Original value or description in base")
-    head_value: Optional[str] = Field(default=None, description="New value or description in head")
     change_type: str = Field(..., description="ADDED, REMOVED, or MODIFIED")
+    base_present: bool = Field(default=False, description="Whether key was present in base revision")
+    head_present: bool = Field(default=False, description="Whether key is present in head revision")
+    value_changed: bool = Field(default=False, description="Whether value changed between revisions")
+    base_fingerprint: Optional[str] = Field(default=None, description="One-way non-reversible hash of base value if present")
+    head_fingerprint: Optional[str] = Field(default=None, description="One-way non-reversible hash of head value if present")
+    base_value: Optional[str] = Field(default=None, description="Deprecated compatibility field (always None)")
+    head_value: Optional[str] = Field(default=None, description="Deprecated compatibility field (always None)")
 
 
 class RouteContractDelta(BaseModel):

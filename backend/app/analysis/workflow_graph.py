@@ -103,7 +103,7 @@ async def run_diff_node(state: ChangeAnalysisState) -> Dict[str, Any]:
 
 
 async def run_impact_node(state: ChangeAnalysisState) -> Dict[str, Any]:
-    """Node 3: Graph-aware blast radius analysis."""
+    """Node 3: Graph-aware blast radius analysis using canonical RepositoryGraph."""
     completed = list(state.get("completed_nodes", []))
     if state.get("blast_radius"):
         completed.append("impact")
@@ -112,26 +112,28 @@ async def run_impact_node(state: ChangeAnalysisState) -> Dict[str, Any]:
     diff_res = state["diff_result"]
     impact_engine = get_impact_engine()
 
-    # Build or retrieve base graph
-    base_graph = RepositoryGraph()
-    # Ingest base workspace symbols/files if available
-    try:
-        from app.ingestion.manifest import ManifestBuilder
-        builder = ManifestBuilder()
-        base_manifest = builder.build_manifest(state["base_workspace"])
-        for f in base_manifest.files:
-            base_graph.add_node(f"file:{f.path}", NodeKind.FILE, f.path, file_path=f.path)
-        for s in base_manifest.symbols:
-            base_graph.add_node(
-                f"symbol:{s.file_path}:{s.kind}:{s.name}:{s.start_line}",
-                NodeKind.SYMBOL,
-                s.name,
-                file_path=s.file_path,
-                start_line=s.start_line,
-                end_line=s.end_line,
+    # Build canonical base graph using production builder
+    base_ws = state.get("base_workspace")
+    base_graph: Optional[RepositoryGraph] = None
+    if base_ws:
+        try:
+            from app.ingestion.manifest import build_manifest
+            from app.graph.builder import build_repository_graph
+
+            base_manifest = await asyncio.to_thread(
+                build_manifest,
+                repo_dir=base_ws,
+                repository_url=state.get("repository_url", ""),
+                commit_hash=state.get("base_commit_sha", ""),
+                branch=state.get("base_ref"),
             )
-    except Exception as exc:
-        logger.warning(f"Manifest build for base graph: {str(exc)}")
+            base_graph = await asyncio.to_thread(
+                build_repository_graph,
+                manifest=base_manifest,
+            )
+        except Exception as exc:
+            logger.error(f"Canonical base graph build failed: {str(exc)}", exc_info=True)
+            raise RuntimeError(f"GRAPH_BUILD_FAILED: Canonical base graph construction failed: {str(exc)}") from exc
 
     report = impact_engine.compute_blast_radius(
         analysis_id=UUID(state["analysis_id"]),
@@ -182,10 +184,32 @@ async def run_verify_node(state: ChangeAnalysisState) -> Dict[str, Any]:
     blast_radius = state["blast_radius"]
     review_report = state["review_report"]
 
+    base_ws = state.get("base_workspace")
+    base_graph: Optional[RepositoryGraph] = None
+    if base_ws:
+        try:
+            from app.ingestion.manifest import build_manifest
+            from app.graph.builder import build_repository_graph
+
+            base_manifest = await asyncio.to_thread(
+                build_manifest,
+                repo_dir=base_ws,
+                repository_url=state.get("repository_url", ""),
+                commit_hash=state.get("base_commit_sha", ""),
+                branch=state.get("base_ref"),
+            )
+            base_graph = await asyncio.to_thread(
+                build_repository_graph,
+                manifest=base_manifest,
+            )
+        except Exception:
+            pass
+
     verified_report = verifier.verify_report(
         report=review_report,
         diff_result=diff_res,
         blast_radius=blast_radius,
+        base_graph=base_graph,
         base_workspace=state.get("base_workspace"),
         head_workspace=state.get("head_workspace"),
     )

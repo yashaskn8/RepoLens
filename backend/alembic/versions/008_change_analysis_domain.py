@@ -88,7 +88,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # 1. Revert workflow_events changes
+    # 1. Clean up Phase 6 change-analysis-only events before restoring scan_id NOT NULL
+    op.execute("DELETE FROM workflow_events WHERE scan_id IS NULL")
+
+    # Revert workflow_events changes
     with op.batch_alter_table("workflow_events", schema=None) as batch_op:
         batch_op.drop_index(batch_op.f("ix_workflow_events_change_analysis_id"))
         batch_op.drop_constraint("fk_workflow_events_change_analysis_id", type_="foreignkey")

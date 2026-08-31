@@ -180,6 +180,12 @@ async def create_change_analysis_from_pr(
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Failed to resolve GitHub PR: {str(exc)}")
 
+    if resolved_pr.is_fork:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="FORK_PULL_REQUEST_UNSUPPORTED: Pull requests from external forks are not supported in Phase 6. Only same-repository pull requests are supported.",
+        )
+
     analysis_id = str(uuid4())
 
     metadata = {
@@ -465,6 +471,8 @@ def get_change_analysis_telemetry_endpoint(
 async def get_change_analysis_events(
     analysis_id: UUID,
     request: Request,
+    last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
+    after_id: Optional[int] = Query(default=None),
     accept: Optional[str] = Header(None),
     db: Session = Depends(get_db),
 ):
@@ -476,10 +484,23 @@ async def get_change_analysis_events(
             detail=f"Change analysis '{analysis_id}' not found",
         )
 
+    # Parse and validate starting event offset
+    start_id = 0
+    if last_event_id is not None and str(last_event_id).strip():
+        try:
+            start_id = int(str(last_event_id).strip())
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid Last-Event-ID header value: '{last_event_id}'. Expected integer ID.",
+            )
+    elif after_id is not None:
+        start_id = max(0, after_id)
+
     # If client requests SSE stream
     if accept and "text/event-stream" in accept:
         async def event_generator() -> AsyncGenerator[str, None]:
-            last_event_id = 0
+            current_id = start_id
             while True:
                 if await request.is_disconnected():
                     break
@@ -487,11 +508,11 @@ async def get_change_analysis_events(
                 events = WorkflowEventService.list_after_id_for_change_analysis(
                     db=db,
                     change_analysis_id=str(analysis_id),
-                    after_id=last_event_id,
+                    after_id=current_id,
                 )
 
                 for ev in events:
-                    last_event_id = max(last_event_id, ev.id)
+                    current_id = max(current_id, ev.id)
                     ev_data = {
                         "id": str(ev.id),
                         "event_type": ev.event_type,
@@ -513,7 +534,14 @@ async def get_change_analysis_events(
         return StreamingResponse(event_generator(), media_type="text/event-stream")
 
     # Otherwise return JSON list of events
-    events = WorkflowEventService.list_for_change_analysis(db=db, change_analysis_id=str(analysis_id))
+    if start_id > 0:
+        events = WorkflowEventService.list_after_id_for_change_analysis(
+            db=db,
+            change_analysis_id=str(analysis_id),
+            after_id=start_id,
+        )
+    else:
+        events = WorkflowEventService.list_for_change_analysis(db=db, change_analysis_id=str(analysis_id))
     return [
         WorkflowEventResponse(
             id=ev.id,

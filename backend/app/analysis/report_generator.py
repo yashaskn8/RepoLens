@@ -193,7 +193,7 @@ def _render_markdown_report(
     lines.append("| :--- | :--- | :--- |")
     lines.append("| **Tree-sitter AST Parser** | ✅ Available | Deterministic Structural Facts |")
     lines.append("| **Repository Graph Traversal** | ✅ Available | Bounded Blast Radius Traversal |")
-    lines.append("| **Static Security Scanners** | ✅ Available | Semgrep / OSV-Scanner |")
+    lines.append("| **Static Security Scanners** | ℹ️ Not Executed | Dedicated Scan Phase Only |")
     lines.append("| **Change Review Agent** | ✅ Available | Bounded Context Reasoning |")
     lines.append("| **Runtime Sandbox / Dynamic Testing** | ❌ Not Executed | Static Evidence Only |")
     lines.append("")
@@ -234,7 +234,8 @@ def generate_change_analysis_report(model: ChangeAnalysisModel) -> ChangeAnalysi
             affected_symbol=imp.affected_symbol,
             evidence_payload=imp.evidence_payload or {},
             confidence=imp.confidence,
-                  created_at=imp.created_at or datetime.now(timezone.utc),
+            verification_status=ImpactVerificationStatus(imp.verification_status),
+            created_at=imp.created_at or datetime.now(timezone.utc),
         )
         for imp in (model.impacts or [])
     ]
@@ -281,12 +282,13 @@ def generate_change_analysis_report(model: ChangeAnalysisModel) -> ChangeAnalysi
         duration_seconds=duration_sec,
     )
 
+    is_llm_fallback = bool(meta.get("review_report", {}).get("model_metadata", {}).get("is_fallback", False))
     tool_avail = {
         "tree_sitter_ast": True,
         "repository_graph": True,
-        "semgrep_scanner": True,
-        "osv_scanner": True,
-        "llm_reviewer": bool(meta.get("review_report")),
+        "semgrep_scanner": False,
+        "osv_scanner": False,
+        "llm_reviewer": bool(meta.get("review_report") and not is_llm_fallback),
         "runtime_sandbox": False,
     }
 

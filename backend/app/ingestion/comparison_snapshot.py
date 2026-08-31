@@ -127,7 +127,11 @@ def validate_workspace_safety(
             dir_full = os.path.join(root, d)
             if os.path.islink(dir_full):
                 target = os.path.realpath(dir_full)
-                if not target.startswith(real_workspace_root):
+                try:
+                    is_inside = os.path.commonpath([real_workspace_root, target]) == real_workspace_root
+                except (ValueError, OSError):
+                    is_inside = False
+                if not is_inside:
                     raise SymlinkEscapeError(f"Directory symlink '{d}' escapes workspace boundary to '{target}'")
             if os.path.isdir(os.path.join(dir_full, ".git")):
                 raise SubmoduleExecutionError(f"Active git submodule detected at '{d}'. Submodules are strictly disallowed.")
@@ -138,7 +142,11 @@ def validate_workspace_safety(
             # Check symlink safety
             if os.path.islink(file_path):
                 target = os.path.realpath(file_path)
-                if not target.startswith(real_workspace_root):
+                try:
+                    is_inside = os.path.commonpath([real_workspace_root, target]) == real_workspace_root
+                except (ValueError, OSError):
+                    is_inside = False
+                if not is_inside:
                     raise SymlinkEscapeError(f"Symlink '{file}' escapes workspace boundary to '{target}'")
                 continue
 

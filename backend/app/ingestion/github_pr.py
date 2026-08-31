@@ -159,10 +159,16 @@ class GitHubPRResolver:
         base_info = data.get("base", {})
         head_info = data.get("head", {})
 
-        base_branch = str(base_info.get("ref") or "main")
+        base_branch_raw = base_info.get("ref")
+        if not base_branch_raw or not str(base_branch_raw).strip():
+            raise GitHubPRAPIError(f"Missing or empty base branch ref in GitHub PR #{pr_number} response")
+        base_branch = str(base_branch_raw).strip()
         base_sha = str(base_info.get("sha") or "").strip().lower()
 
-        head_branch = str(head_info.get("ref") or "")
+        head_branch_raw = head_info.get("ref")
+        if not head_branch_raw or not str(head_branch_raw).strip():
+            raise GitHubPRAPIError(f"Missing or empty head branch ref in GitHub PR #{pr_number} response")
+        head_branch = str(head_branch_raw).strip()
         head_sha = str(head_info.get("sha") or "").strip().lower()
 
         title = str(data.get("title") or f"Pull Request #{pr_number}")

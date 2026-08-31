@@ -91,8 +91,20 @@ async def execute_background_change_analysis(
             analysis_model.status = ChangeAnalysisStatus.DIFFING.value
             db.commit()
 
-            # Compile LangGraph workflow
-            graph = build_change_analysis_graph()
+            # Restore cached outputs from persisted metadata if resuming
+            initial_meta = dict(analysis_model.model_metadata or {})
+            diff_res_cached = None
+            blast_radius_cached = None
+            if "diff_result" in initial_meta:
+                try:
+                    diff_res_cached = StructuralDiffResult.model_validate(initial_meta["diff_result"])
+                except Exception:
+                    pass
+            if "blast_radius" in initial_meta:
+                try:
+                    blast_radius_cached = BlastRadiusReport.model_validate(initial_meta["blast_radius"])
+                except Exception:
+                    pass
 
             initial_state = {
                 "analysis_id": analysis_id,
@@ -103,10 +115,17 @@ async def execute_background_change_analysis(
                 "head_ref": analysis_model.head_ref,
                 "base_workspace": base_ws,
                 "head_workspace": head_ws,
+                "diff_result": diff_res_cached,
+                "blast_radius": blast_radius_cached,
                 "completed_nodes": ["acquire"],
             }
 
-            final_state = await graph.ainvoke(initial_state)
+            # Compile and execute durable LangGraph workflow
+            from app.agents.checkpointer import get_sqlite_checkpointer
+            async with get_sqlite_checkpointer(db_path=checkpoint_db_path) as checkpointer:
+                graph = build_change_analysis_graph(checkpointer=checkpointer)
+                config = {"configurable": {"thread_id": f"change-analysis:{analysis_id}"}}
+                final_state = await graph.ainvoke(initial_state, config=config)
 
             # Extract results from final state
             diff_res: Optional[StructuralDiffResult] = final_state.get("diff_result")
@@ -117,6 +136,8 @@ async def execute_background_change_analysis(
             if diff_res:
                 analysis_model.changed_files_count = len(diff_res.changed_files)
                 analysis_model.changed_symbols_count = len(diff_res.changed_symbols)
+                db.commit()
+
                 WorkflowEventService.emit(
                     db=db,
                     event=WorkflowEventCreate(
@@ -133,7 +154,7 @@ async def execute_background_change_analysis(
                 analysis_model.impacted_symbols_count = blast_radius.total_impacts
                 analysis_model.risk_level = blast_radius.overall_risk_level.value
 
-                # Delete old impacts if resuming/retrying
+                # Delete old impacts if resuming/retrying to avoid duplicates
                 db.query(ChangeImpactModel).filter(ChangeImpactModel.analysis_id == analysis_id).delete()
 
                 for imp in blast_radius.impacts:
@@ -154,6 +175,8 @@ async def execute_background_change_analysis(
                         created_at=imp.created_at,
                     )
                     db.add(imp_row)
+
+                db.commit()
 
                 WorkflowEventService.emit(
                     db=db,
@@ -183,7 +206,6 @@ async def execute_background_change_analysis(
                     analysis_model.risk_level = review_rep.overall_risk_level.value
             analysis_model.model_metadata = meta
 
-
             # 6. Mark COMPLETED
             analysis_model.status = ChangeAnalysisStatus.COMPLETED.value
             analysis_model.completed_at = _utc_now()
@@ -204,13 +226,15 @@ async def execute_background_change_analysis(
             )
 
     except Exception as exc:
-        logger.error(f"Change intelligence analysis {analysis_id} failed: {str(exc)}", exc_info=True)
+        from app.security.redaction import redact_secrets
+        safe_msg = redact_secrets(str(exc))
+        logger.error(f"Change intelligence analysis {analysis_id} failed: {safe_msg}", exc_info=True)
         try:
             analysis_model = db.query(ChangeAnalysisModel).filter(ChangeAnalysisModel.id == analysis_id).first()
             if analysis_model:
                 analysis_model.status = ChangeAnalysisStatus.FAILED.value
                 analysis_model.failure_code = "ANALYSIS_FAILED"
-                analysis_model.failure_message = str(exc)[:500]
+                analysis_model.failure_message = safe_msg[:500]
                 analysis_model.completed_at = _utc_now()
                 db.commit()
 
@@ -219,8 +243,8 @@ async def execute_background_change_analysis(
                     event=WorkflowEventCreate(
                         event_type=WorkflowEventType.CHANGE_ANALYSIS_FAILED,
                         change_analysis_id=UUID(analysis_id),
-                        message=f"Change analysis failed: {str(exc)[:200]}",
-                        metadata_payload={"error": str(exc)},
+                        message=f"Change analysis failed: {safe_msg[:200]}",
+                        metadata_payload={"error": safe_msg[:500]},
                     ),
                 )
         except Exception as db_err:

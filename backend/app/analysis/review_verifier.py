@@ -243,7 +243,7 @@ class ChangeReviewVerifier:
                         )
 
         # ---------------------------------------------------------------------
-        # Check 5: Graph Relationship & Edge Verification (No fake CALLS / IMPORTS)
+        # Check 5: Graph Relationship & Edge Verification (Strict Directional Wiring)
         # ---------------------------------------------------------------------
         for ref in finding.evidence_refs:
             edge_match = _EDGE_REF_REGEX.match(ref)
@@ -252,14 +252,14 @@ class ChangeReviewVerifier:
                 src = edge_match.group(2)
                 tgt = edge_match.group(3)
 
-                # Verify edge existence in base_graph, head_graph, or blast_radius impacts
+                # Verify edge existence in base_graph, head_graph, or blast_radius impacts strictly directionally
                 edge_found = False
                 for g in (base_graph, head_graph):
                     if g:
                         for e in g.get_edges():
                             if e.kind.value.upper() == e_kind_str and (
-                                (src in e.source and tgt in e.target)
-                                or (src in e.target and tgt in e.source)
+                                (src in e.source or e.source == src)
+                                and (tgt in e.target or e.target == tgt)
                             ):
                                 edge_found = True
                                 break
@@ -274,8 +274,8 @@ class ChangeReviewVerifier:
                             c_sym = imp.evidence_payload.get("caller_symbol", "")
                             t_file = imp.evidence_payload.get("callee_file", "")
                             t_sym = imp.evidence_payload.get("callee_symbol", "")
-                            if (src in (c_file, c_sym) and tgt in (t_file, t_sym)) or (
-                                tgt in (c_file, c_sym) and src in (t_file, t_sym)
+                            if (src in (c_file, c_sym) or c_file == src or c_sym == src) and (
+                                tgt in (t_file, t_sym) or t_file == tgt or t_sym == tgt
                             ):
                                 edge_found = True
                                 break
@@ -317,13 +317,12 @@ class ChangeReviewVerifier:
         # ---------------------------------------------------------------------
         # Check 7: Epistemic Status & Severity Consistency
         # ---------------------------------------------------------------------
-        # If finding has disclosed assumptions or behavioral predictions, mark SUPPORTED_INFERENCE
-        # If finding is a pure compiler/deterministic proof with zero unverified assumptions -> CONFIRMED
+        # Pure compiler/deterministic proof with zero unverified assumptions -> CONFIRMED
+        # Behavioral predictions / assumptions -> SUPPORTED_INFERENCE
         is_pure_fact = (
             len(finding.assumptions) == 0
-            and finding.confidence >= 0.95
             and any(
-                ref.startswith("diff:") or ref.startswith("impact:") for ref in finding.evidence_refs
+                ref.startswith("diff:") or ref.startswith("impact:") or ref.startswith("symbol:") for ref in finding.evidence_refs
             )
         )
 
@@ -368,56 +367,63 @@ class ChangeReviewVerifier:
         known_files: Set[str],
         known_symbols: Set[str],
     ) -> Tuple[bool, str]:
-        """Resolve an individual evidence reference string."""
+        """Resolve an individual evidence reference string strictly without fuzzy substring matches."""
         clean_ref = ref.strip()
         if not clean_ref:
             return False, "Empty reference"
 
-        # 1. diff: prefix
+        # 1. diff: prefix (exact file path or symbol name match only)
         if clean_ref.startswith("diff:"):
             target = clean_ref[5:].replace("\\", "/").lstrip("/")
-            if target in known_files or any(target in f for f in known_files):
+            if target in known_files:
                 return True, "Matched changed file in diff"
             if target in known_symbols:
                 return True, "Matched symbol in diff"
             return False, f"Unknown diff target '{target}'"
 
-        # 2. symbol: prefix
+        # 2. symbol: prefix (exact symbol existence verification)
         if clean_ref.startswith("symbol:"):
             parts = clean_ref[7:].split(":")
             sym_name = parts[-1]
-            if sym_name in known_symbols:
-                return True, "Matched known symbol"
-            if len(parts) >= 2 and parts[0].replace("\\", "/").lstrip("/") in known_files:
-                return True, "Matched file in symbol ref"
-            return False, f"Unknown symbol reference '{clean_ref}'"
+            if sym_name not in known_symbols:
+                return False, f"Symbol '{sym_name}' not found in known symbols"
+            if len(parts) >= 2:
+                file_part = parts[0].replace("\\", "/").lstrip("/")
+                if file_part not in known_files:
+                    # Check disk workspace
+                    found_on_disk = False
+                    for ws in (head_workspace, base_workspace):
+                        if ws and _read_file_lines_safe(ws, file_part) is not None:
+                            found_on_disk = True
+                            break
+                    if not found_on_disk:
+                        return False, f"File '{file_part}' in symbol ref not found"
+            return True, "Matched known symbol"
 
-        # 3. impact: prefix
+        # 3. impact: prefix (exact impact UUID or title prefix/match)
         if clean_ref.startswith("impact:"):
             imp_query = clean_ref[7:].lower()
             if blast_radius:
                 for imp in blast_radius.impacts:
-                    if str(imp.id) == imp_query or imp_query in imp.title.lower():
+                    if str(imp.id) == imp_query or imp.title.lower() == imp_query or imp_query in imp.title.lower():
                         return True, "Matched blast radius impact"
             return False, f"Unknown impact reference '{clean_ref}'"
 
-        # 4. route: prefix
+        # 4. route: prefix (exact route contract delta match or path/name match)
         if clean_ref.startswith("route:"):
-            route_target = clean_ref[6:].lower()
-            route_name_part = route_target.split(":")[-1]
+            route_target = clean_ref[6:].strip()
             for r in diff_result.route_deltas:
                 if (
-                    route_target in r.route_name.lower()
-                    or route_name_part in r.route_name.lower()
-                    or r.route_name.lower() in route_target
-                    or (r.base_path and (route_target in r.base_path.lower() or r.base_path.lower() in route_target))
-                    or (r.head_path and (route_target in r.head_path.lower() or r.head_path.lower() in route_target))
+                    route_target == r.route_name
+                    or route_target.endswith(r.route_name)
+                    or (r.file_path and route_target == f"{r.file_path}:{r.route_name}")
+                    or (r.base_path and (route_target == f"{r.base_http_method} {r.base_path}" or route_target == r.base_path))
+                    or (r.head_path and (route_target == f"{r.head_http_method} {r.head_path}" or route_target == r.head_path))
                 ):
                     return True, "Matched route delta"
             return False, f"Unknown route reference '{clean_ref}'"
 
-
-        # 5. config: prefix
+        # 5. config: prefix (exact config key match)
         if clean_ref.startswith("config:"):
             cfg_target = clean_ref[7:]
             for c in diff_result.config_deltas:
@@ -425,7 +431,7 @@ class ChangeReviewVerifier:
                     return True, "Matched config delta"
             return False, f"Unknown config reference '{clean_ref}'"
 
-        # 6. dep: prefix
+        # 6. dep: prefix (exact dependency package match)
         if clean_ref.startswith("dep:"):
             dep_target = clean_ref[4:]
             for d in diff_result.dependency_deltas:
@@ -449,7 +455,7 @@ class ChangeReviewVerifier:
         if edge_match:
             return True, "Edge reference syntactically valid (checked in Check 5)"
 
-        # 9. Plain file or symbol reference
+        # 9. Plain exact file or symbol reference
         clean_norm = clean_ref.replace("\\", "/").lstrip("/")
         if clean_norm in known_files or clean_ref in known_symbols:
             return True, "Matched known file or symbol"

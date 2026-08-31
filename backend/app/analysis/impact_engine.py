@@ -550,9 +550,10 @@ class ChangeImpactEngine:
                     evidence_payload={
                         "file_path": config_delta.file_path,
                         "key": config_delta.key,
-                        "base_value": config_delta.base_value,
-                        "head_value": config_delta.head_value,
                         "change_type": config_delta.change_type,
+                        "base_present": config_delta.base_present,
+                        "head_present": config_delta.head_present,
+                        "value_changed": config_delta.value_changed,
                     },
                     confidence=1.0,
                     verification_status=ImpactVerificationStatus.FACT,
