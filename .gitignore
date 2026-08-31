@@ -55,9 +55,5 @@ yarn-error.log*
 
 # Scratch & Artifacts
 scratch/
-browser_overview.png
-current_ui.png
-
-# OS
-.DS_Store
-Thumbs.db
+*.png
+skills-lock.json

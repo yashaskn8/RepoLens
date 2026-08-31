@@ -1,38 +1,100 @@
+'use client';
+
 import React from 'react';
+import { Button } from './Button';
 
 export interface EmptyStateProps {
-  icon?: string | React.ReactNode;
-  title?: string;
-  description?: string | React.ReactNode;
-  action?: React.ReactNode;
+  icon?: React.ReactNode;
+  title: string;
+  description: string;
+  actionLabel?: string;
+  onAction?: () => void;
+  actionIcon?: React.ReactNode;
+  secondaryActionLabel?: string;
+  onSecondaryAction?: () => void;
   className?: string;
 }
 
-export const EmptyState: React.FC<EmptyStateProps> = ({
-  icon = '🔍',
+export function EmptyState({
+  icon,
   title,
   description,
-  action,
+  actionLabel,
+  onAction,
+  actionIcon,
+  secondaryActionLabel,
+  onSecondaryAction,
   className = '',
-}) => {
+}: EmptyStateProps) {
   return (
-    <div className={`empty-state ${className}`}>
+    <div
+      className={`glass-panel ${className}`}
+      style={{
+        padding: '3rem 2rem',
+        textAlign: 'center',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}
+    >
       {icon && (
-        <div className="empty-state-icon" aria-hidden="true">
+        <div
+          style={{
+            width: '3.5rem',
+            height: '3.5rem',
+            borderRadius: 'var(--radius-lg)',
+            background: 'rgba(99, 102, 241, 0.1)',
+            border: '1px solid var(--border-glass)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: 'var(--accent-primary)',
+            marginBottom: '1.25rem',
+          }}
+        >
           {icon}
         </div>
       )}
-      {title && (
-        <h4 className="text-base font-semibold text-slate-200 mb-1">
-          {title}
-        </h4>
-      )}
-      {description && (
-        <div className="text-xs text-slate-400 max-w-md mx-auto leading-relaxed">
-          {description}
+
+      <h3
+        style={{
+          fontSize: '1.125rem',
+          fontWeight: 700,
+          fontFamily: 'var(--font-display)',
+          color: 'var(--text-primary)',
+          marginBottom: '0.4rem',
+        }}
+      >
+        {title}
+      </h3>
+
+      <p
+        style={{
+          fontSize: '0.875rem',
+          color: 'var(--text-secondary)',
+          maxWidth: '28rem',
+          marginBottom: actionLabel || secondaryActionLabel ? '1.5rem' : 0,
+          lineHeight: 1.5,
+        }}
+      >
+        {description}
+      </p>
+
+      {(actionLabel || secondaryActionLabel) && (
+        <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', justifyContent: 'center' }}>
+          {secondaryActionLabel && onSecondaryAction && (
+            <Button variant="secondary" size="md" onClick={onSecondaryAction}>
+              {secondaryActionLabel}
+            </Button>
+          )}
+          {actionLabel && onAction && (
+            <Button variant="primary" size="md" onClick={onAction} leftIcon={actionIcon}>
+              {actionLabel}
+            </Button>
+          )}
         </div>
       )}
-      {action && <div className="mt-4">{action}</div>}
     </div>
   );
-};
+}

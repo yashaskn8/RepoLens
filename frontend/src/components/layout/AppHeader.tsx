@@ -1,109 +1,211 @@
+'use client';
+
 import React from 'react';
+import Link from 'next/link';
 import { useAuth } from '@/context/AuthContext';
 import { HealthResponse } from '@/types/domain';
-import { WorkspaceMode } from './WorkspaceNav';
-import { ServiceStatus } from './ServiceStatus';
-import { RoleBadge } from './RoleBadge';
+import { StatusIndicator } from '@/components/ui/StatusIndicator';
+import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
+import {
+  Search,
+  Shield,
+  User,
+  LogOut,
+  LogIn,
+  Menu,
+  Sparkles,
+} from 'lucide-react';
 
 export interface AppHeaderProps {
-  health: HealthResponse | null;
+  health?: HealthResponse | null;
   onOpenAuthModal: () => void;
-  currentMode?: WorkspaceMode;
-  onModeChange?: (mode: WorkspaceMode) => void;
+  onToggleSidebar?: () => void;
+  title?: string;
+  breadcrumbs?: { label: string; href?: string }[];
 }
 
-export const AppHeader: React.FC<AppHeaderProps> = ({
+export function AppHeader({
   health,
   onOpenAuthModal,
-  currentMode = 'LANDING',
-  onModeChange,
-}) => {
-  const { user, isAuthenticated, logout } = useAuth();
+  onToggleSidebar,
+  title,
+  breadcrumbs = [],
+}: AppHeaderProps) {
+  const { user, isAuthenticated, isOperator, logout } = useAuth();
 
   return (
-    <header className="header" role="banner">
-      {/* Brand Icon & Title (Clickable) */}
-      <button
-        type="button"
-        className="brand text-left cursor-pointer bg-transparent border-0 p-0"
-        onClick={() => onModeChange?.('LANDING')}
-        title="RepoLens - Home"
-        aria-label="RepoLens Home"
-      >
-        <div className="brand-icon" aria-hidden="true">
-          RL
+    <header
+      className="glass-header"
+      style={{
+        height: '4rem',
+        padding: '0 1.5rem',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        position: 'sticky',
+        top: 0,
+        zIndex: 40,
+      }}
+    >
+      {/* Left: Mobile Toggle & Title/Breadcrumbs */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+        {onToggleSidebar && (
+          <button
+            type="button"
+            onClick={onToggleSidebar}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: 'var(--text-secondary)',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              padding: '0.4rem',
+            }}
+            className="md:hidden"
+            aria-label="Toggle navigation"
+          >
+            <Menu size={20} />
+          </button>
+        )}
+
+        {breadcrumbs.length > 0 ? (
+          <nav aria-label="Breadcrumb" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.875rem' }}>
+            {breadcrumbs.map((crumb, idx) => (
+              <React.Fragment key={idx}>
+                {idx > 0 && <span style={{ color: 'var(--text-muted)' }}>/</span>}
+                {crumb.href ? (
+                  <Link
+                    href={crumb.href}
+                    style={{ color: 'var(--text-secondary)', transition: 'color var(--transition-fast)' }}
+                    onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--text-primary)')}
+                    onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-secondary)')}
+                  >
+                    {crumb.label}
+                  </Link>
+                ) : (
+                  <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{crumb.label}</span>
+                )}
+              </React.Fragment>
+            ))}
+          </nav>
+        ) : (
+          <h1
+            style={{
+              fontSize: '1rem',
+              fontWeight: 600,
+              fontFamily: 'var(--font-display)',
+              color: 'var(--text-primary)',
+            }}
+          >
+            {title || 'RepoLens Workspace'}
+          </h1>
+        )}
+      </div>
+
+      {/* Right: Quick Search + Health Status + User / Operator Pill */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem' }}>
+        {/* Quick Command Trigger Button */}
+        <button
+          type="button"
+          onClick={() => {
+            const event = new KeyboardEvent('keydown', { key: 'k', metaKey: true, bubbles: true });
+            window.dispatchEvent(event);
+          }}
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '0.5rem',
+            padding: '0.35rem 0.75rem',
+            background: 'rgba(255, 255, 255, 0.04)',
+            border: '1px solid var(--border-glass)',
+            borderRadius: 'var(--radius-md)',
+            color: 'var(--text-muted)',
+            fontSize: '0.75rem',
+            fontFamily: 'var(--font-sans)',
+            cursor: 'pointer',
+            transition: 'all var(--transition-fast)',
+          }}
+          className="hidden md:inline-flex"
+        >
+          <Search size={13} />
+          <span>Quick Find...</span>
+          <span
+            style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: '0.65rem',
+              padding: '0.1rem 0.35rem',
+              borderRadius: 'var(--radius-xs)',
+              background: 'rgba(255, 255, 255, 0.08)',
+            }}
+          >
+            ⌘K
+          </span>
+        </button>
+
+        {/* Backend Health Pill */}
+        <div
+          style={{
+            padding: '0.25rem 0.65rem',
+            borderRadius: 'var(--radius-full)',
+            background: 'rgba(255, 255, 255, 0.03)',
+            border: '1px solid var(--border-subtle)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.4rem',
+          }}
+          className="hidden md:flex"
+        >
+          <StatusIndicator
+            status={health?.status === 'healthy' ? 'healthy' : health?.status === 'degraded' ? 'degraded' : 'running'}
+            size="sm"
+          />
+          <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>
+            {health?.database || 'engine:connected'}
+          </span>
         </div>
-        <div>
-          <div className="brand-title">RepoLens</div>
-          <div className="brand-subtitle">AI Code Intelligence &amp; Security</div>
-        </div>
-      </button>
 
-      {/* Primary Navigation Tabs */}
-      {onModeChange && (
-        <nav className="header-nav" aria-label="Main Navigation">
-          <button
-            type="button"
-            className={`header-nav-btn ${currentMode === 'LANDING' ? 'header-nav-btn-active' : ''}`}
-            onClick={() => onModeChange('LANDING')}
-            title="Platform Overview"
-          >
-            <span aria-hidden="true">🏠</span> Overview
-          </button>
-          <button
-            type="button"
-            className={`header-nav-btn ${currentMode === 'SCAN' ? 'header-nav-btn-active' : ''}`}
-            onClick={() => onModeChange('SCAN')}
-            title="Security & AST Scan"
-          >
-            <span aria-hidden="true">🛡️</span> Security Scan
-          </button>
-          <button
-            type="button"
-            className={`header-nav-btn ${currentMode === 'CHANGE_ANALYSIS' ? 'header-nav-btn-active' : ''}`}
-            onClick={() => onModeChange('CHANGE_ANALYSIS')}
-            title="PR Change Intelligence & Blast Radius"
-          >
-            <span aria-hidden="true">🔍</span> Change Intelligence
-          </button>
-          <button
-            type="button"
-            className={`header-nav-btn ${currentMode === 'ARCHITECTURE' ? 'header-nav-btn-active' : ''}`}
-            onClick={() => onModeChange('ARCHITECTURE')}
-            title="4-Stage Pipeline Architecture"
-          >
-            <span aria-hidden="true">🏗️</span> Architecture
-          </button>
-        </nav>
-      )}
-
-      {/* Status & Auth Area */}
-      <div className="flex items-center gap-3 flex-wrap">
-        <ServiceStatus health={health} />
-
-        {isAuthenticated ? (
-          <div className="flex items-center gap-2">
-            <span className="status-badge status-badge-user">
-              <span aria-hidden="true">👤</span>
-              <span className="truncate max-w-[180px]">{user?.email}</span>
-              <RoleBadge role={user?.role} />
-            </span>
-            <Button
-              variant="filter"
-              size="sm"
-              onClick={() => logout()}
-              aria-label="Sign Out"
+        {/* Auth / Role Indicator */}
+        {isAuthenticated && user ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <Link
+              href="/account"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.5rem',
+                padding: '0.3rem 0.65rem',
+                borderRadius: 'var(--radius-md)',
+                background: 'rgba(255, 255, 255, 0.04)',
+                border: '1px solid var(--border-glass)',
+                transition: 'border-color var(--transition-fast)',
+              }}
             >
-              Sign Out
+              <User size={14} style={{ color: isOperator ? 'var(--operator-text)' : 'var(--user-text)' }} />
+              <span style={{ fontSize: '0.8125rem', fontWeight: 500, color: 'var(--text-primary)' }}>
+                {user.email.split('@')[0]}
+              </span>
+              <Badge variant={isOperator ? 'operator' : 'user'} size="sm">
+                {user.role}
+              </Badge>
+            </Link>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={logout}
+              title="Sign Out"
+              style={{ padding: '0.4rem' }}
+            >
+              <LogOut size={15} />
             </Button>
           </div>
         ) : (
           <Button
-            variant="filter-active"
+            variant="secondary"
             size="sm"
             onClick={onOpenAuthModal}
-            aria-label="Sign In"
+            leftIcon={<LogIn size={14} />}
           >
             Sign In
           </Button>
@@ -111,5 +213,4 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
       </div>
     </header>
   );
-};
-
+}
