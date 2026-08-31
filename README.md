@@ -218,4 +218,4 @@ RepoLens enforces strict controls around external GitHub writes:
 
 ## Release Status
 
-RepoLens release version: **v1.0.0** (Phase 9 verification complete, reproducible CI pipeline and migration lifecycle verified).
+RepoLens release version: **v1.0.1** (Phase 9 verification complete, corrective release superseding v1.0.0 with documentation fixes).

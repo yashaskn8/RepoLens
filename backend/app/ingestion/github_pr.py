@@ -97,7 +97,7 @@ class GitHubPRResolver:
                 token=self._token,
                 settings=settings,
                 client=client,
-                user_agent="RepoLens-ChangeAnalysis/1.0.0",
+                user_agent="RepoLens-ChangeAnalysis/1.0.1",
             )
 
     def parse_pr_url(self, pr_url: str) -> Tuple[str, str, str, int]:

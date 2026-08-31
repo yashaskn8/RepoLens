@@ -1,7 +1,7 @@
 # RepoLens Architecture Specification
 
-> **Version**: 1.0.0 (Phase 9)  
-> **Status**: Release-Ready v1.0.0 Build  
+> **Version**: 1.0.1 (Phase 9)  
+> **Status**: Release-Ready v1.0.1 Build  
 > **Audience**: Systems Engineers, Architects, Technical Reviewers
 
 ---

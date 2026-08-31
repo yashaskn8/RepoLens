@@ -24,7 +24,7 @@ class MCPProtocolAdapter:
         self,
         repo_server: MCPRepositoryServer,
         server_name: str = "repolens-repository-server",
-        version: str = "1.0.0",
+        version: str = "1.0.1",
     ):
         self.repo_server = repo_server
         self.server_name = server_name
@@ -96,7 +96,7 @@ class MCPProtocolAdapter:
 def create_mcp_protocol_server(
     repo_server: MCPRepositoryServer,
     server_name: str = "repolens-repository-server",
-    version: str = "1.0.0",
+    version: str = "1.0.1",
 ) -> Server:
     """Convenience factory returning the configured official MCP Server instance."""
     adapter = MCPProtocolAdapter(repo_server=repo_server, server_name=server_name, version=version)

@@ -21,7 +21,7 @@ def test_basic_health_endpoint(client: TestClient):
     data = resp.json()
     assert data["status"] in ("healthy", "degraded")
     assert data["service"] == "RepoLens"
-    assert data["version"] == "1.0.0"
+    assert data["version"] == "1.0.1"
     assert "database" in data
     assert "timestamp" in data
 

@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     """Application settings class supporting .env loading and environment overrides."""
 
     PROJECT_NAME: str = "RepoLens"
-    VERSION: str = "1.0.0"
+    VERSION: str = "1.0.1"
     API_V1_STR: str = "/api/v1"
     ENVIRONMENT: str = "development"
 

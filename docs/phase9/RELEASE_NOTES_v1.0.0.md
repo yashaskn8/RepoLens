@@ -1,5 +1,7 @@
 # RepoLens v1.0.0 Release Notes
 
+> **SUPERSEDED**: This release has been superseded by [v1.0.1](RELEASE_NOTES_v1.0.1.md). See [V1.0.0_CORRECTION_NOTICE.md](V1.0.0_CORRECTION_NOTICE.md) for details of corrections.
+
 **Release Date:** August 31, 2026  
 **Version:** `1.0.0`  
 **Target Tag:** `v1.0.0`  
@@ -36,14 +38,14 @@ RepoLens combines deterministic static analysis, Tree-sitter AST parsing, and La
 - **Branch Creation & Delivery Guards**: Verified deliveries require explicit authorization, pre-flight safety checks, and full audit logging in the `deliveries` table.
 
 ### 5. Multi-User Security & Access Control
-- **Role-Based Access Control (RBAC)**: Fine-grained permissions across `ANONYMOUS`, `USER`, `OPERATOR`, and `ADMIN` roles.
+- **Role-Based Access Control (RBAC)**: Access levels for `ANONYMOUS` (unauthenticated), `USER`, and `OPERATOR`.
 - **Timing-Safe Authentication**: Argon2id password hashing, constant-time session token verification, and fail-closed authentication middleware.
 - **Modern Cookie & CSRF Security**: Session tokens stored exclusively in `HttpOnly`, `SameSite=Lax` cookies; double-submit cookie CSRF validation on all state-changing endpoints.
 - **Tenant Isolation**: Scans and change analyses are partitioned by owner user ID.
 
 ### 6. Operational Telemetry & Model Context Protocol (MCP)
 - **MCP Server Adapter**: Native support for Model Context Protocol tools and resources, allowing external AI assistants to interact with RepoLens capabilities.
-- **Observability**: Structured JSON logging, Prometheus-compatible metrics registry, and immutable `workflow_events` audit logging.
+- **Observability**: Standard Python logging, in-memory metrics registry, and append-only `workflow_events` audit logging.
 
 ---
 

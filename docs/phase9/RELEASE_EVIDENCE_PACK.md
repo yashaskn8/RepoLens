@@ -1,5 +1,7 @@
 # RepoLens v1.0.0 Release Evidence Pack
 
+> **CORRECTION NOTICE**: This document was updated in v1.0.1 to correct factual inaccuracies. See [V1.0.0_CORRECTION_NOTICE.md](V1.0.0_CORRECTION_NOTICE.md) for details.
+
 **Authoritative Production Readiness and Verification Attestation**
 
 ---
@@ -30,7 +32,7 @@ This release evidence pack provides deterministic, machine-verified evidence tha
 - **Frontend Quality Suite**: `npm ci` passed, `type-check` (tsc) passed with 0 errors, `lint` (eslint) passed with 0 errors, `build` (next build) passed with 4 static pages.
 - **Database Schema**: 10 Alembic migrations (001–010) forming 12 application tables (+ `alembic_version`), fully reversible (`downgrade base` and re-`upgrade head` verified).
 - **Runtime Health**: Synchronized `1.0.0` across `GET /`, `GET /health`, and `GET /api/v1/health`.
-- **Security & Multi-Tenant Boundaries**: Role-based access control (ANONYMOUS, USER, OPERATOR, ADMIN), HttpOnly session cookies, CSRF protection, fail-closed patch verification, and timing-safe password hashing.
+- **Security & Multi-Tenant Boundaries**: Role-based access control (ANONYMOUS, USER, OPERATOR), HttpOnly session cookies, CSRF protection, fail-closed patch verification, and timing-safe password hashing.
 
 ---
 
@@ -108,11 +110,11 @@ collected 650 items
 
 Total skipped tests: **5** (0 unexpected skips, 0 failures).
 
-1. `tests/test_live_providers.py::test_live_openai_provider`: Skipped because `OPENAI_API_KEY` is not set in the local development/CI test environment.
-2. `tests/test_live_providers.py::test_live_anthropic_provider`: Skipped because `ANTHROPIC_API_KEY` is not set in the local development/CI test environment.
-3. `tests/test_live_providers.py::test_live_gemini_provider`: Skipped because `GEMINI_API_KEY` is not set in the local development/CI test environment.
-4. `tests/test_live_providers.py::test_live_github_api`: Skipped because `GITHUB_TOKEN` is not set in the local development/CI test environment.
-5. `tests/test_pgvector_index.py::test_pgvector_similarity_search`: Skipped because `PGVECTOR_TEST_URL` is not configured (PostgreSQL + pgvector container not attached in SQLite-backed unit test runner).
+1. `tests/test_live_providers.py::test_live_gemini_smoke`: Skipped because `GEMINI_API_KEY` is not set in the local development/CI test environment.
+2. `tests/test_live_providers.py::test_live_groq_smoke`: Skipped because `GROQ_API_KEY` is not set in the local development/CI test environment.
+3. `tests/test_live_providers.py::test_live_nvidia_smoke`: Skipped because `NVIDIA_API_KEY` is not set in the local development/CI test environment.
+4. `tests/test_live_providers.py::test_live_huggingface_smoke`: Skipped because `HUGGINGFACE_API_KEY` is not set in the local development/CI test environment.
+5. `tests/test_pgvector_index.py::test_pgvector_real_postgres_integration`: Skipped because `PGVECTOR_TEST_URL` is not configured (PostgreSQL + pgvector container not attached in SQLite-backed unit test runner).
 
 ---
 
@@ -137,7 +139,7 @@ Executed within `frontend/`:
 - **Timing-Safe Authentication**: Passwords hashed using Argon2id with unique salts; session lookups utilize constant-time comparisons and SHA-256 session token indexing.
 - **Cookie Security**: `repolens_session` cookie is configured with `HttpOnly`, `SameSite=Lax`, and `Secure` (in production). No auth tokens are stored in `localStorage` or `sessionStorage`.
 - **CSRF Mitigation**: Double-submit cookie pattern with custom header `X-CSRF-Token` validated on all state-changing HTTP methods (`POST`, `PUT`, `PATCH`, `DELETE`).
-- **Owner Isolation**: Scans and change analyses are partitioned by `owner_user_id`. Non-admin users cannot access or modify records owned by other user accounts.
+- **Owner Isolation**: Scans and change analyses are partitioned by `owner_user_id`. Users cannot access or modify records owned by other user accounts.
 
 ---
 
@@ -180,9 +182,9 @@ Verified availability of the public reference repositories used for demo and tes
 
 ## 12. Operational Telemetry Proof
 
-- **Structured Logging**: All log output emitted as structured JSON containing timestamp, severity level, request ID, and trace identifiers.
-- **Metrics Collector**: In-memory and Prometheus-compatible metrics registry tracking request duration, scan execution times, finding counts, and patch verification verdicts.
-- **Audit Trail**: All critical operations record immutable events in the `workflow_events` table with associated `actor_user_id` and `timestamp`.
+- **Logging**: Application uses Python's standard `logging` module. Log output format depends on the deployment environment's handler configuration.
+- **Metrics Collector**: In-memory metrics registry tracking request duration, scan execution times, finding counts, and patch verification verdicts.
+- **Audit Trail**: All critical operations record append-only events in the `workflow_events` table with associated `actor_user_id` and `timestamp`.
 
 ---
 
@@ -190,16 +192,16 @@ Verified availability of the public reference repositories used for demo and tes
 
 | File | Parameter | Value |
 | :--- | :--- | :--- |
-| `backend/app/core/config.py` | `Settings.VERSION` | `"1.0.0"` |
-| `backend/pyproject.toml` | `project.version` | `"1.0.0"` |
-| `backend/app/__init__.py` | `__version__` | `"1.0.0"` |
-| `backend/app/mcp/adapter.py` | MCP Server Version | `"1.0.0"` |
-| `backend/app/ingestion/github_pr.py` | `user_agent` | `"RepoLens-ChangeAnalysis/1.0.0"` |
-| `frontend/package.json` | `version` | `"1.0.0"` |
-| `frontend/package-lock.json` | `version` | `"1.0.0"` |
-| `README.md` | Release Status | `v1.0.0` |
-| `docs/architecture.md` | Specification Version | `1.0.0` |
-| `docs/threat-model.md` | Threat Model Version | `1.0.0` |
+| `backend/app/core/config.py` | `Settings.VERSION` | `"1.0.1"` |
+| `backend/pyproject.toml` | `project.version` | `"1.0.1"` |
+| `backend/app/__init__.py` | `__version__` | `"1.0.1"` |
+| `backend/app/mcp/adapter.py` | MCP Server Version | `"1.0.1"` |
+| `backend/app/ingestion/github_pr.py` | `user_agent` | `"RepoLens-ChangeAnalysis/1.0.1"` |
+| `frontend/package.json` | `version` | `"1.0.1"` |
+| `frontend/package-lock.json` | `version` | `"1.0.1"` |
+| `README.md` | Release Status | `v1.0.1` |
+| `docs/architecture.md` | Specification Version | `1.0.1` |
+| `docs/threat-model.md` | Threat Model Version | `1.0.1` |
 
 ---
 
@@ -245,7 +247,7 @@ Per the Phase 9 Batch 4 verification protocol:
 ## 18. Known Limitations & Out-of-Scope Items
 
 - **Phase 10**: `NOT PLANNED / OUT OF SCOPE`. Development halts at v1.0.0.
-- **Live Provider Integration Tests**: Require external API credentials (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GITHUB_TOKEN`) and are skipped in local/CI environments when unset.
+- **Live Provider Integration Tests**: Require external API credentials (`GEMINI_API_KEY`, `GROQ_API_KEY`, `NVIDIA_API_KEY`, `HUGGINGFACE_API_KEY`) and are skipped in local/CI environments when unset.
 - **Pgvector Storage**: Optional backend extension requiring a running PostgreSQL + pgvector instance.
 
 ---
