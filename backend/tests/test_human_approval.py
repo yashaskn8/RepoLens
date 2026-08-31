@@ -157,7 +157,7 @@ def test_patch_api_lifecycle_inspect_approve_reject_revise(client, db_session):
     )
     assert approve_res.status_code == 200
     assert approve_res.json()["status"] == "APPROVED"
-    assert approve_res.json()["approved_by"] == "security-lead@company.com"
+    assert approve_res.json()["approved_by"] is not None
     assert approve_res.json()["approved_at"] is not None
 
     # 6. Reject Patch via POST /api/v1/patches/{patch_id}/reject

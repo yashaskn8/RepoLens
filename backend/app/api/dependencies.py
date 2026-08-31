@@ -112,13 +112,23 @@ def verify_csrf(
     origin = request.headers.get("Origin") or request.headers.get("Referer")
     if origin:
         parsed = urlparse(origin)
+        if not parsed.scheme or not parsed.netloc or parsed.scheme not in ("http", "https"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"error_code": "CSRF_ORIGIN_INVALID", "message": "Invalid origin or referer header"},
+            )
         origin_base = f"{parsed.scheme}://{parsed.netloc}"
         allowed_origins = settings.CORS_ORIGINS if isinstance(settings.CORS_ORIGINS, list) else [settings.CORS_ORIGINS]
-        # In development/test, allow localhost/127.0.0.1/testserver matches
-        allowed_origins_set = set(allowed_origins) | {"http://testserver", "http://localhost", "http://127.0.0.1"}
-        if origin_base not in allowed_origins_set and "*" not in allowed_origins:
-            # Check if host alone matches
-            if parsed.netloc not in ("localhost:3000", "127.0.0.1:3000", "testserver", "localhost", "127.0.0.1"):
+
+        if settings.is_production:
+            if origin_base not in allowed_origins:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail={"error_code": "CSRF_ORIGIN_INVALID", "message": "Cross-origin request rejected in production"},
+                )
+        else:
+            dev_allowed = set(allowed_origins) | {"http://testserver", "http://localhost", "http://127.0.0.1", "http://localhost:3000", "http://127.0.0.1:3000"}
+            if origin_base not in dev_allowed and "*" not in allowed_origins:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail={"error_code": "CSRF_ORIGIN_INVALID", "message": "Cross-origin request rejected"},

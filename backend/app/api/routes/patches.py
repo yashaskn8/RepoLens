@@ -112,7 +112,7 @@ async def approve_patch(
             config,
             {
                 "patch_status": PatchStatus.APPROVED.value,
-                "approved_by": payload.approved_by,
+                "approved_by": current_user.id,
                 "approved_at": approved_at_iso,
                 "user_feedback": payload.notes or patch_model.user_feedback,
             },
@@ -121,7 +121,7 @@ async def approve_patch(
         await workflow_app.ainvoke(None, config=config)
 
     patch_model.status = PatchStatus.APPROVED.value
-    patch_model.approved_by = payload.approved_by
+    patch_model.approved_by = current_user.id
     patch_model.approved_at = approved_at
     if payload.notes:
         patch_model.user_feedback = payload.notes
@@ -135,11 +135,11 @@ async def approve_patch(
             scan_id=UUID(str(patch_model.scan_id)),
             finding_id=UUID(str(patch_model.finding_id)),
             patch_id=UUID(str(patch_model.id)),
-            actor_user_id=get_user_id(current_user),
+            actor_user_id=current_user.id,
             thread_id=thread_id,
             stage="human_review",
-            message=f"Patch approved by {payload.approved_by}",
-            metadata_payload={"approved_by": payload.approved_by, "notes": payload.notes},
+            message=f"Patch approved by user {current_user.id}",
+            metadata_payload={"approved_by": current_user.id, "notes": payload.notes},
         ),
         critical=True,
     )
@@ -150,11 +150,11 @@ async def approve_patch(
             scan_id=UUID(str(patch_model.scan_id)),
             finding_id=UUID(str(patch_model.finding_id)),
             patch_id=UUID(str(patch_model.id)),
-            actor_user_id=get_user_id(current_user),
+            actor_user_id=current_user.id,
             thread_id=thread_id,
             stage="human_review",
             message="Patch transitioned to APPROVED status",
-            metadata_payload={"approved_by": payload.approved_by},
+            metadata_payload={"approved_by": current_user.id},
         ),
         critical=True,
     )

@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 import httpx
 
 from app.core.config import Settings, get_settings
+from app.delivery.github_client import GitHubAPIError, GitHubHttpTransport
 from app.schemas.change_analysis import ResolvedPullRequest, _normalize_and_validate_github_pr_url
 
 logger = logging.getLogger(__name__)
@@ -77,19 +78,27 @@ class GitHubPRTimeoutError(GitHubPRError):
 
 
 class GitHubPRResolver:
-    """Canonical read-only GitHub Pull Request metadata resolver."""
+    """Canonical read-only GitHub Pull Request metadata resolver composing GitHubHttpTransport."""
 
     def __init__(
         self,
         token: Optional[str] = None,
         settings: Optional[Settings] = None,
         client: Optional[httpx.AsyncClient] = None,
+        transport: Optional[GitHubHttpTransport] = None,
     ):
-        # Confused-deputy defense: Public PR reads are credential-free by default
+        # Confused-deputy defense: Public PR reads are credential-free by default (token="")
         # and MUST NOT fall back to server ambient GITHUB_TOKEN.
         self._token = token if token is not None else ""
-        self._client = client
-        self._timeout = httpx.Timeout(20.0, connect=10.0)
+        if transport is not None:
+            self.transport = transport
+        else:
+            self.transport = GitHubHttpTransport(
+                token=self._token,
+                settings=settings,
+                client=client,
+                user_agent="RepoLens-ChangeAnalysis/0.1.0",
+            )
 
     def parse_pr_url(self, pr_url: str) -> Tuple[str, str, str, int]:
         """Validate and parse a GitHub PR URL into (canonical_url, owner, repo, pr_number)."""
@@ -104,87 +113,104 @@ class GitHubPRResolver:
         Guarantees strictly read-only GET operation and resolves immutable SHAs.
         """
         canonical_pr_url, owner, repo, pr_number = self.parse_pr_url(pr_url)
-        api_endpoint = f"{GITHUB_API_BASE_URL}/repos/{owner}/{repo}/pulls/{pr_number}"
-
-        headers = {
-            "Accept": "application/vnd.github.v3+json",
-            "User-Agent": "RepoLens-ChangeAnalysis/0.1.0",
-        }
-        if self._token and len(self._token.strip()) > 0:
-            headers["Authorization"] = f"Bearer {self._token.strip()}"
+        path = f"repos/{owner}/{repo}/pulls/{pr_number}"
 
         try:
-            if self._client:
-                response = await self._client.get(api_endpoint, headers=headers, timeout=self._timeout)
+            data = await self.transport.request(method="GET", path=path, is_write=False)
+        except GitHubAPIError as exc:
+            status_code = exc.status_code
+            msg = exc.message
+            if status_code == 404:
+                raise GitHubPRNotFoundError(
+                    f"Pull request #{pr_number} on '{owner}/{repo}' not found, or repository is private."
+                ) from exc
+            elif status_code in (401, 403):
+                if "rate limit" in msg.lower():
+                    raise GitHubPRRateLimitError(f"GitHub API rate limit exceeded: {msg}") from exc
+                raise GitHubPRForbiddenError(f"Access to GitHub PR #{pr_number} on '{owner}/{repo}' forbidden: {msg}") from exc
+            elif status_code == 429:
+                raise GitHubPRRateLimitError("GitHub API rate limit exceeded") from exc
+            elif status_code == 504:
+                raise GitHubPRTimeoutError(f"GitHub API request timed out while resolving pull request #{pr_number} on {owner}/{repo}") from exc
+            elif status_code and status_code >= 500:
+                raise GitHubPRAPIError(
+                    f"GitHub API server error ({status_code}) while resolving PR #{pr_number} on '{owner}/{repo}'",
+                    status_code=status_code,
+                ) from exc
             else:
-                async with httpx.AsyncClient(timeout=self._timeout) as client:
-                    response = await client.get(api_endpoint, headers=headers)
-
-        except (httpx.TimeoutException, TimeoutError) as exc:
-            logger.warning(f"GitHub PR API timeout for {owner}/{repo}#{pr_number}: {str(exc)}")
-            raise GitHubPRTimeoutError(f"GitHub API request timed out while resolving pull request #{pr_number} on {owner}/{repo}")
+                raise GitHubPRAPIError(f"GitHub API error: {msg}", status_code=status_code or 502) from exc
         except Exception as exc:
             logger.error(f"Network error resolving GitHub PR {owner}/{repo}#{pr_number}: {str(exc)}")
-            raise GitHubPRAPIError(f"Network error communicating with GitHub API: {str(exc)}")
+            raise GitHubPRAPIError(f"Network error communicating with GitHub API: {str(exc)}") from exc
 
-        # Handle HTTP error statuses
-        status_code = response.status_code
-        if status_code == 404:
-            raise GitHubPRNotFoundError(
-                f"Pull request #{pr_number} on '{owner}/{repo}' not found, or repository is private."
-            )
-        elif status_code in (401, 403):
-            err_msg = self._extract_error_message(response)
-            if "rate limit" in err_msg.lower():
-                raise GitHubPRRateLimitError(f"GitHub API rate limit exceeded: {err_msg}")
-            raise GitHubPRForbiddenError(f"Access to GitHub PR #{pr_number} on '{owner}/{repo}' forbidden: {err_msg}")
-        elif status_code == 429:
-            retry_after = response.headers.get("retry-after")
-            sec = float(retry_after) if retry_after and retry_after.isdigit() else None
-            raise GitHubPRRateLimitError(f"GitHub API rate limit exceeded", retry_after=sec)
-        elif status_code >= 500:
-            raise GitHubPRAPIError(
-                f"GitHub API server error ({status_code}) while resolving PR #{pr_number} on '{owner}/{repo}'",
-                status_code=status_code,
-            )
-        elif status_code != 200:
-            err_msg = self._extract_error_message(response)
-            raise GitHubPRAPIError(f"GitHub API error ({status_code}): {err_msg}", status_code=status_code)
+        if not isinstance(data, dict):
+            raise GitHubPRAPIError(f"Malformed non-dictionary response returned by GitHub API for PR #{pr_number}")
 
-        try:
-            data = response.json()
-        except Exception as exc:
-            raise GitHubPRAPIError(f"Malformed JSON returned by GitHub API: {str(exc)}")
+        # 1. State validation (strict, no default "open")
+        raw_state = data.get("state")
+        if not raw_state or not str(raw_state).strip():
+            raise GitHubPRAPIError(f"Missing state in GitHub PR #{pr_number} response")
+        state = str(raw_state).strip().lower()
+        if state not in ("open", "closed"):
+            raise GitHubPRAPIError(f"Invalid state '{state}' in GitHub PR #{pr_number} response")
 
-        # Extract and validate required immutable fields
-        base_info = data.get("base", {})
-        head_info = data.get("head", {})
+        # 2. Base and head info
+        base_info = data.get("base")
+        head_info = data.get("head")
+        if not base_info or not isinstance(base_info, dict):
+            raise GitHubPRAPIError(f"Missing base metadata in GitHub PR #{pr_number} response")
+        if not head_info or not isinstance(head_info, dict):
+            raise GitHubPRAPIError(f"Missing head metadata in GitHub PR #{pr_number} response")
 
+        # Base and head repo dictionaries
+        base_repo = base_info.get("repo")
+        head_repo = head_info.get("repo")
+        if not base_repo or not isinstance(base_repo, dict):
+            raise GitHubPRAPIError(f"Missing base repository metadata in GitHub PR #{pr_number} response")
+        if not head_repo or not isinstance(head_repo, dict):
+            raise GitHubPRAPIError(f"Missing head repository metadata in GitHub PR #{pr_number} response")
+
+        base_full_name = str(base_repo.get("full_name") or "").strip().lower()
+        if not base_full_name and base_repo.get("html_url"):
+            base_full_name = str(base_repo.get("html_url")).replace("https://github.com/", "").strip("/").lower()
+
+        head_full_name = str(head_repo.get("full_name") or "").strip().lower()
+        if not head_full_name and head_repo.get("html_url"):
+            head_full_name = str(head_repo.get("html_url")).replace("https://github.com/", "").strip("/").lower()
+
+        if not base_full_name:
+            raise GitHubPRAPIError(f"Missing base repository full_name in GitHub PR #{pr_number} response")
+        if not head_full_name:
+            raise GitHubPRAPIError(f"Missing head repository full_name in GitHub PR #{pr_number} response")
+
+        expected_base = f"{owner}/{repo}".lower()
+        if base_full_name != expected_base:
+            raise GitHubPRAPIError(f"Base repository full_name '{base_full_name}' does not match requested '{expected_base}'")
+
+        is_fork = (head_full_name != base_full_name) or bool(head_repo.get("fork", False))
+        head_repo_url = head_repo.get("html_url")
+
+        # 3. Branch refs
         base_branch_raw = base_info.get("ref")
         if not base_branch_raw or not str(base_branch_raw).strip():
             raise GitHubPRAPIError(f"Missing or empty base branch ref in GitHub PR #{pr_number} response")
         base_branch = str(base_branch_raw).strip()
-        base_sha = str(base_info.get("sha") or "").strip().lower()
 
         head_branch_raw = head_info.get("ref")
         if not head_branch_raw or not str(head_branch_raw).strip():
             raise GitHubPRAPIError(f"Missing or empty head branch ref in GitHub PR #{pr_number} response")
         head_branch = str(head_branch_raw).strip()
+
+        # 4. Commit SHAs
+        base_sha = str(base_info.get("sha") or "").strip().lower()
         head_sha = str(head_info.get("sha") or "").strip().lower()
+        if not re.match(r"^[0-9a-f]{40}$", base_sha):
+            raise GitHubPRAPIError(f"Invalid or missing base commit SHA in GitHub PR response: '{base_sha}'")
+        if not re.match(r"^[0-9a-f]{40}$", head_sha):
+            raise GitHubPRAPIError(f"Invalid or missing head commit SHA in GitHub PR response: '{head_sha}'")
 
         title = str(data.get("title") or f"Pull Request #{pr_number}")
-        state = str(data.get("state") or "open")
-
-        head_repo = head_info.get("repo")
-        head_repo_url = head_repo.get("html_url") if head_repo else None
-        is_fork = bool(head_repo and head_repo.get("fork", False))
-
         canonical_repo_url = f"https://github.com/{owner}/{repo}"
-
-        if not re.match(r"^[0-9a-fA-F]{40}$", base_sha):
-            raise GitHubPRAPIError(f"Invalid or missing base commit SHA in GitHub PR response: '{base_sha}'")
-        if not re.match(r"^[0-9a-fA-F]{40}$", head_sha):
-            raise GitHubPRAPIError(f"Invalid or missing head commit SHA in GitHub PR response: '{head_sha}'")
 
         return ResolvedPullRequest(
             repository_url=canonical_repo_url,
@@ -200,13 +226,6 @@ class GitHubPRResolver:
             is_fork=is_fork,
             state=state,
         )
-
-    def _extract_error_message(self, response: httpx.Response) -> str:
-        try:
-            body = response.json()
-            return body.get("message") or response.text[:200]
-        except Exception:
-            return response.text[:200]
 
 
 _default_github_pr_resolver: Optional[GitHubPRResolver] = None

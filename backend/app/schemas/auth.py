@@ -54,9 +54,10 @@ class CurrentUser(BaseModel):
 
 
 def get_user_id(current_user: Any) -> Optional[str]:
-    """Extract authenticated user ID if a valid CurrentUser is present, or None."""
+    """Extract authenticated user ID if a valid CurrentUser or UserModel is present, or None."""
     if isinstance(current_user, CurrentUser):
         return current_user.id
-    if hasattr(current_user, "id") and isinstance(current_user.id, str) and not current_user.id.startswith("<"):
-        return current_user.id
+    if current_user is not None and getattr(current_user, "__class__", None) is not None:
+        if current_user.__class__.__name__ == "UserModel" and hasattr(current_user, "id") and isinstance(current_user.id, str):
+            return current_user.id
     return None

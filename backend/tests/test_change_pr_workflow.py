@@ -70,11 +70,16 @@ def mock_pr_payload() -> Dict[str, Any]:
         "base": {
             "ref": "main",
             "sha": "1111111111111111111111111111111111111111",
+            "repo": {
+                "full_name": "fastapi/fastapi",
+                "html_url": "https://github.com/fastapi/fastapi",
+            },
         },
         "head": {
             "ref": "feature/auth-refactor",
             "sha": "2222222222222222222222222222222222222222",
             "repo": {
+                "full_name": "fastapi/fastapi",
                 "html_url": "https://github.com/fastapi/fastapi",
                 "fork": False,
             },

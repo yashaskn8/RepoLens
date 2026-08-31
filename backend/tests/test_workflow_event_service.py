@@ -150,7 +150,8 @@ def test_approve_patch_emits_human_audit_event(client: TestClient, db_session: S
     assert "PATCH_APPROVED" in types
 
     human_evt = next(e for e in events if e.event_type == "HUMAN_APPROVED")
-    assert human_evt.metadata_payload.get("approved_by") == "security-lead"
+    assert human_evt.metadata_payload.get("approved_by") is not None
+    assert human_evt.actor_user_id is not None
     assert human_evt.metadata_payload.get("notes") == "LGTM verified"
 
 

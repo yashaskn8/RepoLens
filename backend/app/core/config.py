@@ -1,8 +1,9 @@
 """Application settings and configuration using Pydantic Settings."""
 
 from functools import lru_cache
-from typing import List, Optional, Union
-from pydantic import field_validator
+from typing import List, Literal, Optional, Union
+from urllib.parse import urlparse
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -95,7 +96,7 @@ class Settings(BaseSettings):
     AUTH_LOCKOUT_SECONDS: int = 900  # 15 minutes
     AUTH_COOKIE_NAME: str = "repolens_session"
     AUTH_COOKIE_SECURE: bool = False
-    AUTH_COOKIE_SAMESITE: str = "lax"
+    AUTH_COOKIE_SAMESITE: Literal["lax", "strict", "none"] = "lax"
     AUTH_COOKIE_DOMAIN: Optional[str] = None
 
     # CSRF Protection Settings (Phase 8)
@@ -130,6 +131,43 @@ class Settings(BaseSettings):
         elif isinstance(v, list):
             return v
         return ["localhost", "127.0.0.1", "testserver"]
+
+    @model_validator(mode="after")
+    def validate_production_and_cookie_invariants(self) -> "Settings":
+        """Enforce strict fail-closed production security and cookie invariants."""
+        if self.AUTH_COOKIE_SAMESITE not in ("lax", "strict", "none"):
+            raise ValueError(f"AUTH_COOKIE_SAMESITE must be one of 'lax', 'strict', 'none', got '{self.AUTH_COOKIE_SAMESITE}'")
+
+        if self.AUTH_COOKIE_SAMESITE == "none" and not self.AUTH_COOKIE_SECURE:
+            raise ValueError("When AUTH_COOKIE_SAMESITE is 'none', AUTH_COOKIE_SECURE must be True.")
+
+        if self.is_production:
+            if not self.AUTH_COOKIE_SECURE:
+                raise ValueError("CRITICAL CONFIGURATION ERROR: In production environment, AUTH_COOKIE_SECURE must be True.")
+
+            # CORS validation in production
+            cors = self.CORS_ORIGINS if isinstance(self.CORS_ORIGINS, list) else [self.CORS_ORIGINS]
+            if not cors:
+                raise ValueError("CRITICAL CONFIGURATION ERROR: In production environment, CORS_ORIGINS must not be empty.")
+            if "*" in cors:
+                raise ValueError("CRITICAL CONFIGURATION ERROR: Wildcard CORS origin ('*') is prohibited in production.")
+            for origin in cors:
+                parsed = urlparse(origin)
+                if not parsed.scheme or not parsed.netloc or parsed.scheme not in ("http", "https"):
+                    raise ValueError(f"Invalid CORS origin '{origin}': must be formatted as scheme://host[:port]")
+                if parsed.path and parsed.path != "/":
+                    raise ValueError(f"Invalid CORS origin '{origin}': origin must not contain paths")
+                if parsed.query or parsed.fragment:
+                    raise ValueError(f"Invalid CORS origin '{origin}': origin must not contain query parameters or fragments")
+
+            # Trusted hosts validation in production
+            hosts = self.TRUSTED_HOSTS if isinstance(self.TRUSTED_HOSTS, list) else [self.TRUSTED_HOSTS]
+            if not hosts:
+                raise ValueError("CRITICAL CONFIGURATION ERROR: In production environment, TRUSTED_HOSTS must not be empty.")
+            if "*" in hosts:
+                raise ValueError("CRITICAL CONFIGURATION ERROR: Wildcard Trusted Hosts ('*') is prohibited in production.")
+
+        return self
 
     @property
     def is_sqlite(self) -> bool:

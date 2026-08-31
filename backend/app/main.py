@@ -20,10 +20,12 @@ settings = get_settings()
 def _validate_production_configuration() -> None:
     """Validate critical security settings in production environments."""
     if settings.is_production:
-        if isinstance(settings.CORS_ORIGINS, list) and "*" in settings.CORS_ORIGINS:
-            raise RuntimeError("CRITICAL SECURITY ERROR: Wildcard CORS origin ('*') is prohibited in production.")
-        if isinstance(settings.TRUSTED_HOSTS, list) and "*" in settings.TRUSTED_HOSTS:
-            raise RuntimeError("CRITICAL SECURITY ERROR: Wildcard Trusted Hosts ('*') is prohibited in production.")
+        if not settings.AUTH_COOKIE_SECURE:
+            raise RuntimeError("CRITICAL SECURITY ERROR: In production environment, AUTH_COOKIE_SECURE must be True.")
+        if not settings.CORS_ORIGINS or (isinstance(settings.CORS_ORIGINS, list) and "*" in settings.CORS_ORIGINS):
+            raise RuntimeError("CRITICAL SECURITY ERROR: Wildcard or empty CORS_ORIGINS is prohibited in production.")
+        if not settings.TRUSTED_HOSTS or (isinstance(settings.TRUSTED_HOSTS, list) and "*" in settings.TRUSTED_HOSTS):
+            raise RuntimeError("CRITICAL SECURITY ERROR: Wildcard or empty TRUSTED_HOSTS is prohibited in production.")
 
 
 _validate_production_configuration()
@@ -32,12 +34,11 @@ _validate_production_configuration()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifecycle events handler: startup recovery and graceful shutdown."""
-    # 1. Startup: discover and dispatch unfinished scans without blocking startup
-    from app.core.database import Base, SessionLocal, engine
+    # 1. Startup: discover and dispatch unfinished scans without modifying schema (schema owned by Alembic)
+    from app.core.database import SessionLocal
     import app.models
     from app.services.scan_recovery import ScanDispatcher, ScanRecoveryService
 
-    Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
         recovered = ScanRecoveryService.recover_unfinished_scans(db)

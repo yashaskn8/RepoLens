@@ -55,32 +55,42 @@ def create_or_elevate_operator(
     return user
 
 
-def main():
+def main(input_func=input, getpass_func=getpass.getpass, db_factory=SessionLocal):
     parser = argparse.ArgumentParser(description="Create or elevate a RepoLens user with OPERATOR role.")
     parser.add_argument("--email", "-e", required=False, help="Operator email address")
-    parser.add_argument("--password", "-p", required=False, help="Operator password (min 12 chars)")
     args = parser.parse_args()
 
     email = args.email
     if not email:
-        email = input("Enter operator email: ").strip()
+        email = input_func("Enter operator email: ").strip()
 
     if not email or "@" not in email:
         print("Error: Valid email address is required.", file=sys.stderr)
         sys.exit(1)
 
-    password = args.password
-    if not password:
-        password = getpass.getpass("Enter operator password (min 12 chars): ")
-
-    if len(password) < 12:
-        print("Error: Password must be at least 12 characters.", file=sys.stderr)
-        sys.exit(1)
-
-    db = SessionLocal()
+    normalized_email = email.strip().lower()
+    db = db_factory()
     try:
-        user = create_or_elevate_operator(db, email=email, password=password)
-        print(f"Successfully configured user '{user.email}' with OPERATOR role (ID: {user.id}).")
+        existing_user = db.query(UserModel).filter(UserModel.email == normalized_email).first()
+        if existing_user:
+            print(f"User '{existing_user.email}' already exists with role '{existing_user.role}'.")
+            confirm = input_func("Elevate this existing USER to OPERATOR? [y/N]: ").strip().lower()
+            if confirm not in ("y", "yes"):
+                print("Elevation cancelled.", file=sys.stderr)
+                sys.exit(1)
+
+            user = create_or_elevate_operator(db, email=normalized_email)
+            print(f"Successfully elevated user '{user.email}' to OPERATOR role (ID: {user.id}).")
+            return
+
+        # New user creation requires password
+        password = getpass_func("Enter operator password (min 12 chars): ")
+        if len(password) < 12:
+            print("Error: Password must be at least 12 characters.", file=sys.stderr)
+            sys.exit(1)
+
+        user = create_or_elevate_operator(db, email=normalized_email, password=password)
+        print(f"Successfully created user '{user.email}' with OPERATOR role (ID: {user.id}).")
     except Exception as exc:
         db.rollback()
         print(f"Error creating operator: {str(exc)}", file=sys.stderr)

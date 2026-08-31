@@ -84,14 +84,27 @@ class GitHubHttpTransport:
         for attempt in range(1, max_attempts + 1):
             try:
                 if self._client is not None:
-                    response = await self._client.request(
-                        method=method,
-                        url=url,
-                        headers=headers,
-                        json=json_data,
-                        params=params,
-                        timeout=self._timeout,
-                    )
+                    if hasattr(self._client, "request"):
+                        response = await self._client.request(
+                            method=method,
+                            url=url,
+                            headers=headers,
+                            json=json_data,
+                            params=params,
+                            timeout=self._timeout,
+                        )
+                    else:
+                        method_lower = method.lower()
+                        client_fn = getattr(self._client, method_lower, None)
+                        if client_fn is not None:
+                            kwargs = {"headers": headers, "timeout": self._timeout}
+                            if params is not None:
+                                kwargs["params"] = params
+                            if json_data is not None and method_lower in ("post", "put", "patch"):
+                                kwargs["json"] = json_data
+                            response = await client_fn(url, **kwargs)
+                        else:
+                            raise RuntimeError(f"Client object does not support method '{method}' or 'request'")
                 else:
                     async with httpx.AsyncClient(timeout=self._timeout) as client:
                         response = await client.request(

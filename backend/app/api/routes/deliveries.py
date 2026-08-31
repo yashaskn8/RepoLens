@@ -59,7 +59,11 @@ async def deliver_patch(
 ):
     """Explicit operator action to deliver an already-approved remediation patch to GitHub."""
     get_owned_patch_or_404(db, patch_id, current_user)
-    return await service.deliver_patch(db=db, patch_id=patch_id, payload=payload)
+    authenticated_payload = DeliveryRequest(
+        requested_by=current_user.id,
+        notes=payload.notes if payload else None,
+    )
+    return await service.deliver_patch(db=db, patch_id=patch_id, payload=authenticated_payload)
 
 
 @router.get(
