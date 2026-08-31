@@ -2,8 +2,9 @@
 
 **Audit Date**: 2026-08-31  
 **Authoritative Baseline SHA**: `02ab889aa890e8fcdc10f65d42fc341bb82d871c`  
+**Verified Release SHA**: `f960d6bac7ce3eb1b49088b4a7c2cee4ab99f836`  
 **Phase**: Phase 9 — Batch 2 of 4 (CI + Release Engineering + Migration Proof + Operational Hardening)  
-**Status**: VERIFIED LOCALLY — AWAITING REMOTE GITHUB ACTIONS OBSERVATION
+**Status**: **REMOTE CI OBSERVED PASS** (GitHub Actions Run `#37` / `33416283963` — `success`)
 
 ---
 
@@ -78,14 +79,14 @@ The GitHub Actions release verification pipeline defined in `.github/workflows/c
 
 ## 4. Test Topology & Execution Metrics
 
-### Backend Test Suite
+### Backend Test Suite (Local & CI)
 - **Command**: `python -m pytest tests -q`
 - **Total Collected**: `650`
 - **Passed**: `645`
 - **Skipped**: `5` (PGVector integration tests requiring local PostgreSQL)
 - **Failed**: `0`
 - **Warnings**: `80` (Non-fatal third-party warnings: starlette multipart deprecation, alembic path separator config, testclient cookie deprecation, engine savepoint)
-- **Execution Duration**: `68.71s`
+- **Execution Duration**: `63.72s`
 
 ### Phase 5–8 Regression Verification
 - **Command**: `python -m pytest tests/test_phase5* tests/test_phase6* tests/test_phase7* tests/test_phase8* -q`
@@ -98,7 +99,26 @@ The GitHub Actions release verification pipeline defined in `.github/workflows/c
 
 ---
 
-## 5. Security & Isolation Verification
+## 5. Remote GitHub Actions Verification Evidence
+
+| Metric | Recorded Value |
+|---|---|
+| **Workflow Name** | `CI` |
+| **Trigger Event** | `push` |
+| **Branch** | `main` |
+| **Commit SHA** | `f960d6bac7ce3eb1b49088b4a7c2cee4ab99f836` |
+| **Run ID** | `33416283963` |
+| **Run Number** | `37` |
+| **Run URL** | `https://github.com/yashaskn8/RepoLens/actions/runs/33416283963` |
+| **Overall Status** | `completed` |
+| **Overall Conclusion** | **`success`** |
+| **Backend Job** | `Backend Quality, Migrations & Tests (Python 3.12)` $\to$ `success` (1m 0s) |
+| **Frontend Job** | `Frontend Typecheck, Lint & Build (Node 20)` $\to$ `success` (48s) |
+| **Verification Status** | **REMOTE CI OBSERVED PASS** |
+
+---
+
+## 6. Security & Isolation Verification
 
 1. **CI Permissions**: Read-only (`contents: read`).
 2. **Secret Independence**: All default test suites run with mocked LLM providers and GitHub clients; zero live API keys or tokens are required.
@@ -107,7 +127,7 @@ The GitHub Actions release verification pipeline defined in `.github/workflows/c
 
 ---
 
-## 6. Items Deferred to Batch 3
+## 7. Items Deferred to Batch 3
 
 The following non-blocking documentation and presentation items are explicitly scheduled for Batch 3:
 1. **`README.md` Refresh**: Update header, test counts (645 passed), and migration range (001–010).
