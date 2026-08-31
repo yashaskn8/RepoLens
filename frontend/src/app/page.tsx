@@ -31,6 +31,11 @@ import {
   ShieldAlert,
   GitPullRequest,
   Check,
+  Cpu,
+  Boxes,
+  Code2,
+  FileDiff,
+  Radio,
 } from 'lucide-react';
 
 export default function LandingPage() {
@@ -64,7 +69,7 @@ export default function LandingPage() {
 
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', backgroundColor: 'var(--bg-base)' }}>
-      {/* Navigation */}
+      {/* Navigation Header */}
       <LandingNav onOpenAuthModal={() => setIsAuthModalOpen(true)} />
 
       {/* Auth Modal */}
@@ -72,555 +77,518 @@ export default function LandingPage() {
 
       <main style={{ flex: 1 }}>
         {/* ========================================================================= */}
-        {/* HERO SECTION                                                             */}
+        {/* HERO SECTION — 2-Column Split Composition                                 */}
         {/* ========================================================================= */}
         <section
           style={{
             position: 'relative',
-            padding: '5rem 1.5rem 4rem 1.5rem',
-            maxWidth: '75rem',
+            padding: '4.5rem 1.5rem 3.5rem 1.5rem',
+            maxWidth: '84rem',
             margin: '0 auto',
-            textAlign: 'center',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
           }}
         >
-          {/* Subtle Ambient Top Glow */}
+          {/* Ambient Glows */}
           <div
             style={{
               position: 'absolute',
-              top: '10%',
-              left: '50%',
-              transform: 'translateX(-50%)',
-              width: '40rem',
+              top: '5%',
+              left: '20%',
+              width: '35rem',
+              height: '25rem',
+              background: 'radial-gradient(circle, rgba(99, 102, 241, 0.16) 0%, transparent 70%)',
+              filter: 'blur(80px)',
+              pointerEvents: 'none',
+              zIndex: 0,
+            }}
+          />
+          <div
+            style={{
+              position: 'absolute',
+              top: '20%',
+              right: '15%',
+              width: '30rem',
               height: '20rem',
-              background: 'radial-gradient(circle, rgba(99, 102, 241, 0.18) 0%, rgba(56, 189, 248, 0.08) 50%, transparent 80%)',
-              filter: 'blur(60px)',
+              background: 'radial-gradient(circle, rgba(56, 189, 248, 0.12) 0%, transparent 70%)',
+              filter: 'blur(70px)',
               pointerEvents: 'none',
               zIndex: 0,
             }}
           />
 
-          {/* Badge */}
-          <div style={{ position: 'relative', zIndex: 1, marginBottom: '1.25rem' }}>
-            <Badge variant="cyan" size="md" icon={<Sparkles size={13} />}>
-              Evidence-First Repository Intelligence
-            </Badge>
-          </div>
-
-          {/* Hero Headline */}
-          <h1
-            style={{
-              position: 'relative',
-              zIndex: 1,
-              fontSize: 'clamp(2.4rem, 5vw, 4.25rem)',
-              fontWeight: 900,
-              fontFamily: 'var(--font-display)',
-              letterSpacing: '-0.035em',
-              lineHeight: 1.12,
-              color: '#ffffff',
-              maxWidth: '56rem',
-              marginBottom: '1.5rem',
-            }}
-          >
-            Deterministic Code Graphs.{' '}
-            <span className="gradient-text">Zero-Hallucination</span> Findings.
-          </h1>
-
-          {/* Subtitle */}
-          <p
-            style={{
-              position: 'relative',
-              zIndex: 1,
-              fontSize: 'clamp(1rem, 2vw, 1.25rem)',
-              color: 'var(--text-secondary)',
-              maxWidth: '44rem',
-              lineHeight: 1.6,
-              marginBottom: '2.5rem',
-            }}
-          >
-            RepoLens traces full cross-layer contracts from frontend components to database schemas,
-            validating AI reasoning with deterministic AST evidence before proposing human-authorized fixes.
-          </p>
-
-          {/* Live Repository Quick Scanner Box */}
           <div
-            className="glass-panel"
             style={{
               position: 'relative',
-              zIndex: 2,
-              width: '100%',
-              maxWidth: '48rem',
-              padding: '1.5rem',
-              background: 'rgba(10, 15, 30, 0.85)',
-              border: '1px solid var(--border-glass-hover)',
-              boxShadow: '0 20px 50px rgba(0, 0, 0, 0.6), 0 0 30px rgba(99, 102, 241, 0.15)',
-              marginBottom: '1.5rem',
+              zIndex: 1,
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))',
+              gap: '3rem',
+              alignItems: 'center',
             }}
           >
-            <form onSubmit={handleStartScan} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-              <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
-                <div style={{ flex: '1 1 20rem', position: 'relative', display: 'flex', alignItems: 'center' }}>
-                  <Terminal size={16} style={{ position: 'absolute', left: '0.9rem', color: 'var(--text-muted)' }} />
+            {/* Left Column: Headlines & Scan Launcher Form */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}>
+                <Badge variant="cyan" size="md" icon={<Sparkles size={13} />}>
+                  Deterministic Codebase Intelligence
+                </Badge>
+                {health?.status === 'healthy' && (
+                  <Badge variant="success" size="sm">
+                    Engine Live
+                  </Badge>
+                )}
+              </div>
+
+              <h1
+                style={{
+                  fontSize: 'clamp(2.25rem, 4vw, 3.75rem)',
+                  fontWeight: 900,
+                  fontFamily: 'var(--font-display)',
+                  letterSpacing: '-0.035em',
+                  lineHeight: 1.12,
+                  color: '#ffffff',
+                }}
+              >
+                Inspect Codebases with{' '}
+                <span className="gradient-text">Zero Untrusted Execution</span>
+              </h1>
+
+              <p
+                style={{
+                  fontSize: '1.0625rem',
+                  color: 'var(--text-secondary)',
+                  lineHeight: 1.6,
+                  maxWidth: '38rem',
+                }}
+              >
+                RepoLens reconstructs cross-layer AST dependency graphs between frontend client calls, backend API routes, and database schemas — validating candidate security fixes with 12-point AST verification.
+              </p>
+
+              {/* Interactive Repository Scanner Form */}
+              <div
+                className="glass-panel"
+                style={{
+                  padding: '1.25rem',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '0.85rem',
+                  border: '1px solid var(--border-glass-hover)',
+                  boxShadow: '0 8px 32px rgba(0, 0, 0, 0.4), var(--shadow-inner-glow)',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <span style={{ fontSize: '0.8125rem', fontWeight: 600, color: 'var(--text-light)', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                    <Search size={14} style={{ color: 'var(--accent-cyan)' }} />
+                    Quick Git Repository Inspector
+                  </span>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                    Ephemeral shallow clone
+                  </span>
+                </div>
+
+                <form onSubmit={handleStartScan} style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                   <input
-                    type="text"
-                    required
+                    type="url"
                     value={repoInput}
                     onChange={(e) => setRepoInput(e.target.value)}
                     placeholder="https://github.com/owner/repository"
                     style={{
-                      width: '100%',
-                      height: '3rem',
-                      paddingLeft: '2.6rem',
-                      paddingRight: '1rem',
-                      borderRadius: 'var(--radius-md)',
-                      backgroundColor: 'rgba(5, 8, 18, 0.9)',
-                      border: '1px solid var(--border-glass)',
-                      color: '#ffffff',
-                      fontSize: '0.9375rem',
+                      flex: '1 1 240px',
+                      height: '2.75rem',
+                      padding: '0 1rem',
+                      fontSize: '0.875rem',
                       fontFamily: 'var(--font-mono)',
+                      color: 'var(--text-primary)',
+                      backgroundColor: 'var(--bg-input)',
+                      border: '1px solid var(--border-glass)',
+                      borderRadius: 'var(--radius-md)',
                       outline: 'none',
                     }}
+                    className="glass-input"
+                    required
                   />
-                </div>
-
-                <div style={{ flex: '0 0 8.5rem', position: 'relative', display: 'flex', alignItems: 'center' }}>
-                  <GitBranch size={15} style={{ position: 'absolute', left: '0.9rem', color: 'var(--text-muted)' }} />
                   <input
                     type="text"
                     value={branchInput}
                     onChange={(e) => setBranchInput(e.target.value)}
                     placeholder="main"
                     style={{
-                      width: '100%',
-                      height: '3rem',
-                      paddingLeft: '2.4rem',
-                      paddingRight: '0.75rem',
-                      borderRadius: 'var(--radius-md)',
-                      backgroundColor: 'rgba(5, 8, 18, 0.9)',
-                      border: '1px solid var(--border-glass)',
-                      color: '#ffffff',
+                      width: '5.5rem',
+                      height: '2.75rem',
+                      padding: '0 0.75rem',
                       fontSize: '0.875rem',
                       fontFamily: 'var(--font-mono)',
+                      color: 'var(--text-primary)',
+                      backgroundColor: 'var(--bg-input)',
+                      border: '1px solid var(--border-glass)',
+                      borderRadius: 'var(--radius-md)',
                       outline: 'none',
+                      textAlign: 'center',
                     }}
+                    className="glass-input"
                   />
+                  <Button type="submit" variant="glow" size="lg" rightIcon={<ArrowRight size={16} />}>
+                    Launch AST Scan
+                  </Button>
+                </form>
+
+                {/* Preset Fast-Launch Pills */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', paddingTop: '0.25rem' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Presets:</span>
+                  {PRESETS.map((preset) => (
+                    <button
+                      key={preset.label}
+                      type="button"
+                      onClick={() => {
+                        setRepoInput(preset.url);
+                        setBranchInput(preset.branch);
+                      }}
+                      style={{
+                        background: 'rgba(255, 255, 255, 0.05)',
+                        border: '1px solid var(--border-subtle)',
+                        borderRadius: 'var(--radius-sm)',
+                        padding: '0.2rem 0.6rem',
+                        fontSize: '0.75rem',
+                        color: 'var(--text-secondary)',
+                        cursor: 'pointer',
+                        transition: 'all var(--transition-fast)',
+                      }}
+                      className="interactive-btn"
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
                 </div>
-
-                <Button
-                  type="submit"
-                  variant="glow"
-                  size="lg"
-                  rightIcon={<ArrowRight size={16} />}
-                  style={{ height: '3rem', padding: '0 1.75rem' }}
-                >
-                  Inspect Repo
-                </Button>
               </div>
 
-              {/* Preset Selector */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-                <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Quick Presets:</span>
-                {PRESETS.map((preset) => (
-                  <button
-                    key={preset.label}
-                    type="button"
-                    onClick={() => {
-                      setRepoInput(preset.url);
-                      setBranchInput(preset.branch);
-                    }}
-                    style={{
-                      background: 'rgba(255, 255, 255, 0.05)',
-                      border: '1px solid var(--border-subtle)',
-                      borderRadius: 'var(--radius-full)',
-                      padding: '0.2rem 0.65rem',
-                      color: 'var(--text-secondary)',
-                      fontSize: '0.75rem',
-                      cursor: 'pointer',
-                      transition: 'all var(--transition-fast)',
-                    }}
-                  >
-                    {preset.label}
-                  </button>
-                ))}
+              {/* Trust Indicators */}
+              <div style={{ display: 'flex', gap: '1.75rem', flexWrap: 'wrap', fontSize: '0.8125rem', color: 'var(--text-muted)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                  <CheckCircle2 size={15} style={{ color: 'var(--success-text)' }} />
+                  <span>Tree-sitter AST Graph</span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                  <CheckCircle2 size={15} style={{ color: 'var(--accent-cyan)' }} />
+                  <span>Human-in-the-Loop Patch Gate</span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                  <CheckCircle2 size={15} style={{ color: 'var(--accent-purple)' }} />
+                  <span>Strict IDOR Tenant Isolation</span>
+                </div>
               </div>
-            </form>
-          </div>
+            </div>
 
-          {/* Trust Guarantees */}
-          <div
-            style={{
-              position: 'relative',
-              zIndex: 1,
-              display: 'flex',
-              alignItems: 'center',
-              gap: '1.75rem',
-              flexWrap: 'wrap',
-              justifyContent: 'center',
-              fontSize: '0.8125rem',
-              color: 'var(--text-muted)',
-            }}
-          >
-            <span style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-              <ShieldCheck size={15} style={{ color: 'var(--success-text)' }} /> Read-Only Sandbox Execution
-            </span>
-            <span style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-              <Lock size={15} style={{ color: 'var(--accent-cyan)' }} /> Strict Human Authorization Gates
-            </span>
-            <span style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-              <Zap size={15} style={{ color: 'var(--accent-purple)' }} /> Zero Unverified Hallucinations
-            </span>
-          </div>
-        </section>
-
-        {/* ========================================================================= */}
-        {/* INTERACTIVE ARCHITECTURE GRAPH SECTION                                   */}
-        {/* ========================================================================= */}
-        <section
-          id="architecture"
-          style={{
-            padding: '3rem 1.5rem 5rem 1.5rem',
-            maxWidth: '75rem',
-            margin: '0 auto',
-          }}
-        >
-          <div style={{ textAlign: 'center', marginBottom: '2.5rem' }}>
-            <Badge variant="purple" size="sm" style={{ marginBottom: '0.75rem' }}>
-              Deep Cross-Layer Tracing
-            </Badge>
-            <h2
+            {/* Right Column: Live Terminal / Architecture Graph Preview */}
+            <div
+              className="glass-panel"
               style={{
-                fontSize: 'clamp(1.75rem, 3.5vw, 2.5rem)',
-                fontWeight: 800,
-                fontFamily: 'var(--font-display)',
-                letterSpacing: '-0.025em',
-                color: '#ffffff',
-                marginBottom: '0.75rem',
+                borderRadius: 'var(--radius-xl)',
+                border: '1px solid var(--border-glass)',
+                overflow: 'hidden',
+                boxShadow: 'var(--shadow-xl), 0 0 35px rgba(99, 102, 241, 0.12)',
               }}
             >
-              See Every Connection from Client to Database
-            </h2>
-            <p style={{ fontSize: '1rem', color: 'var(--text-secondary)', maxWidth: '38rem', margin: '0 auto' }}>
-              RepoLens constructs a live AST graph mapping UI components, network calls, server routes,
-              Pydantic schemas, and SQLAlchemy models.
-            </p>
-          </div>
+              {/* Terminal Window Header */}
+              <div
+                style={{
+                  padding: '0.75rem 1rem',
+                  borderBottom: '1px solid var(--border-subtle)',
+                  background: 'rgba(5, 7, 14, 0.9)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+                  <div style={{ width: '0.65rem', height: '0.65rem', borderRadius: '50%', background: '#ef4444' }} />
+                  <div style={{ width: '0.65rem', height: '0.65rem', borderRadius: '50%', background: '#f59e0b' }} />
+                  <div style={{ width: '0.65rem', height: '0.65rem', borderRadius: '50%', background: '#10b981' }} />
+                  <span style={{ fontSize: '0.75rem', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', marginLeft: '0.5rem' }}>
+                    repolens graph --cross-layer --trace
+                  </span>
+                </div>
+                <Badge variant="cyan" size="sm">
+                  LIVE INTERACTIVE
+                </Badge>
+              </div>
 
-          {/* Interactive Graph Component */}
-          <ArchitectureGraph />
+              {/* Interactive Graph Box */}
+              <div style={{ padding: '1rem', background: 'rgba(4, 7, 17, 0.85)' }}>
+                <ArchitectureGraph />
+              </div>
+            </div>
+          </div>
         </section>
 
         {/* ========================================================================= */}
-        {/* EVIDENCE-FIRST WORKFLOW PIPELINE                                          */}
+        {/* 7-STEP EVIDENCE PIPELINE                                                  */}
         {/* ========================================================================= */}
         <section
-          id="pipeline"
           style={{
-            padding: '4rem 1.5rem 5rem 1.5rem',
-            maxWidth: '75rem',
+            padding: '3rem 1.5rem',
+            maxWidth: '84rem',
             margin: '0 auto',
-            borderTop: '1px solid var(--border-subtle)',
           }}
         >
-          <div style={{ textAlign: 'center', marginBottom: '3.5rem' }}>
-            <Badge variant="cyan" size="sm" style={{ marginBottom: '0.75rem' }}>
-              Deterministic Execution Flow
+          <div style={{ textAlign: 'center', marginBottom: '2rem' }}>
+            <Badge variant="purple" size="sm">
+              DETERMINISTIC VERIFICATION
             </Badge>
             <h2
               style={{
-                fontSize: 'clamp(1.75rem, 3.5vw, 2.5rem)',
+                fontSize: '1.875rem',
                 fontWeight: 800,
                 fontFamily: 'var(--font-display)',
-                letterSpacing: '-0.025em',
+                marginTop: '0.5rem',
                 color: '#ffffff',
-                marginBottom: '0.75rem',
               }}
             >
               The 7-Step Evidence-First Pipeline
             </h2>
-            <p style={{ fontSize: '1rem', color: 'var(--text-secondary)', maxWidth: '38rem', margin: '0 auto' }}>
-              How RepoLens turns complex codebases into verifiable, actionable engineering intelligence.
+            <p style={{ fontSize: '0.9375rem', color: 'var(--text-secondary)', marginTop: '0.35rem' }}>
+              Specialist agents operate only on verified machine evidence — rejecting unsupported claims.
             </p>
           </div>
 
-          {/* 7-Step Visual Pipeline Cards */}
           <div
             style={{
               display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
-              gap: '1rem',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))',
+              gap: '0.75rem',
             }}
           >
             {[
-              {
-                step: '01',
-                title: 'Clone & AST Parse',
-                desc: 'Sandboxed Git clone followed by parser extraction of symbols, routes, and frameworks.',
-                tag: 'Deterministic',
-              },
-              {
-                step: '02',
-                title: 'Static Tool Scan',
-                desc: 'Semgrep, Bandit, and custom AST rules execute concurrently with timeout guarantees.',
-                tag: 'Multi-Tool',
-              },
-              {
-                step: '03',
-                title: 'Evidence Graph',
-                desc: 'Constructs cross-layer relationships and traces contract dependencies across stack layers.',
-                tag: 'Graph AST',
-              },
-              {
-                step: '04',
-                title: 'Agentic Verification',
-                desc: 'LLM reasons ONLY over extracted AST evidence. Rejects unproven or hallucinated findings.',
-                tag: 'Zero-Hallucination',
-              },
-              {
-                step: '05',
-                title: 'Targeted Fix Plan',
-                desc: 'Produces isolated, syntactically valid patches scoped strictly to the affected line range.',
-                tag: 'Patch Proposal',
-              },
-              {
-                step: '06',
-                title: 'Human Review Gate',
-                desc: 'Operators inspect proposed diffs and can approve, reject, or request iterative revision.',
-                tag: 'HITL Gate',
-              },
-              {
-                step: '07',
-                title: 'Safe Git Delivery',
-                desc: 'Optionally opens PR on GitHub with cryptographic digest confirmation. Never writes silently.',
-                tag: 'Operator Only',
-              },
-            ].map((item) => (
-              <Card
-                key={item.step}
-                variant="interactive"
+              { num: '01', title: 'Passive Clone', desc: 'Ephemeral sandbox' },
+              { num: '02', title: 'AST Graph', desc: 'Tree-sitter parse' },
+              { num: '03', title: 'Static Analyzers', desc: 'Semgrep + OSV' },
+              { num: '04', title: 'Evidence Gate', desc: 'Citation verification' },
+              { num: '05', title: 'Patch Proposal', desc: '12-point AST check' },
+              { num: '06', title: 'HITL Review', desc: 'Operator authority' },
+              { num: '07', title: 'Safe Delivery', desc: 'Isolated branch PR' },
+            ].map((step, idx) => (
+              <div
+                key={step.num}
+                className="glass-panel"
                 style={{
-                  padding: '1.25rem',
+                  padding: '1rem 0.85rem',
                   display: 'flex',
                   flexDirection: 'column',
-                  justifyContent: 'space-between',
-                  gap: '0.75rem',
+                  gap: '0.35rem',
+                  border: idx === 3 ? '1px solid var(--border-glass-hover)' : '1px solid var(--border-subtle)',
+                  background: idx === 3 ? 'rgba(99, 102, 241, 0.12)' : 'rgba(11, 16, 32, 0.6)',
                 }}
               >
-                <div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
-                    <span
-                      style={{
-                        fontSize: '1.25rem',
-                        fontWeight: 800,
-                        fontFamily: 'var(--font-mono)',
-                        color: 'var(--accent-cyan)',
-                      }}
-                    >
-                      {item.step}
-                    </span>
-                    <Badge variant="default" size="sm">
-                      {item.tag}
-                    </Badge>
-                  </div>
-                  <h4 style={{ fontSize: '1rem', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '0.35rem' }}>
-                    {item.title}
-                  </h4>
-                  <p style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-                    {item.desc}
-                  </p>
-                </div>
-              </Card>
+                <span
+                  style={{
+                    fontSize: '0.75rem',
+                    fontFamily: 'var(--font-mono)',
+                    fontWeight: 700,
+                    color: idx === 3 ? 'var(--accent-cyan)' : 'var(--accent-primary)',
+                  }}
+                >
+                  STEP {step.num}
+                </span>
+                <span style={{ fontSize: '0.875rem', fontWeight: 700, color: '#ffffff' }}>
+                  {step.title}
+                </span>
+                <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                  {step.desc}
+                </span>
+              </div>
             ))}
           </div>
         </section>
 
         {/* ========================================================================= */}
-        {/* CORE DIFFERENTIATION BENTO GRID                                          */}
+        {/* ASYMMETRIC BENTO GRID — Core Capabilities                                 */}
         {/* ========================================================================= */}
         <section
-          id="safety"
           style={{
-            padding: '4rem 1.5rem 5rem 1.5rem',
-            maxWidth: '75rem',
+            padding: '3rem 1.5rem 5rem 1.5rem',
+            maxWidth: '84rem',
             margin: '0 auto',
-            borderTop: '1px solid var(--border-subtle)',
           }}
         >
-          <div style={{ textAlign: 'center', marginBottom: '3.5rem' }}>
-            <Badge variant="purple" size="sm" style={{ marginBottom: '0.75rem' }}>
-              Architectural Defense
+          <div style={{ textAlign: 'center', marginBottom: '2.5rem' }}>
+            <Badge variant="cyan" size="sm">
+              ARCHITECTURAL PILLARS
             </Badge>
             <h2
               style={{
-                fontSize: 'clamp(1.75rem, 3.5vw, 2.5rem)',
+                fontSize: '1.875rem',
                 fontWeight: 800,
                 fontFamily: 'var(--font-display)',
-                letterSpacing: '-0.025em',
+                marginTop: '0.5rem',
                 color: '#ffffff',
-                marginBottom: '0.75rem',
               }}
             >
-              Built for Serious Engineering Teams
+              Why Developers Choose RepoLens
             </h2>
           </div>
 
           <div
             style={{
               display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
-              gap: '1.5rem',
+              gridTemplateColumns: 'repeat(12, 1fr)',
+              gap: '1.25rem',
             }}
           >
-            {/* Bento Card 1 */}
-            <Card variant="bento" glow="indigo" style={{ padding: '2rem' }}>
-              <div
-                style={{
-                  width: '2.5rem',
-                  height: '2.5rem',
-                  borderRadius: 'var(--radius-md)',
-                  background: 'rgba(99, 102, 241, 0.15)',
-                  border: '1px solid var(--border-glass-hover)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  color: 'var(--accent-primary)',
-                  marginBottom: '1.25rem',
-                }}
-              >
-                <Layers size={20} />
-              </div>
-              <h3 style={{ fontSize: '1.25rem', fontWeight: 700, color: '#ffffff', marginBottom: '0.5rem' }}>
-                Full-Stack Contract Intelligence
-              </h3>
-              <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
-                Detect breaking API changes before they reach staging. When a backend model or route parameter
-                changes, RepoLens traces all affected frontend fetch calls and UI components automatically.
-              </p>
-            </Card>
-
-            {/* Bento Card 2 */}
-            <Card variant="bento" glow="cyan" style={{ padding: '2rem' }}>
-              <div
-                style={{
-                  width: '2.5rem',
-                  height: '2.5rem',
-                  borderRadius: 'var(--radius-md)',
-                  background: 'rgba(56, 189, 248, 0.15)',
-                  border: '1px solid var(--border-glass-hover)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  color: 'var(--accent-cyan)',
-                  marginBottom: '1.25rem',
-                }}
-              >
-                <Lock size={20} />
-              </div>
-              <h3 style={{ fontSize: '1.25rem', fontWeight: 700, color: '#ffffff', marginBottom: '0.5rem' }}>
-                Role-Based Safety & Permissions
-              </h3>
-              <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
-                Clear distinction between <strong style={{ color: '#ffffff' }}>USER</strong> (read & research) and{' '}
-                <strong style={{ color: '#ffffff' }}>OPERATOR</strong> (patch approval and PR publication) roles.
-                GitHub write access is never assumed and strictly requires cryptographic digest matching.
-              </p>
-            </Card>
-
-            {/* Bento Card 3 */}
-            <Card variant="bento" glow="purple" style={{ padding: '2rem' }}>
-              <div
-                style={{
-                  width: '2.5rem',
-                  height: '2.5rem',
-                  borderRadius: 'var(--radius-md)',
-                  background: 'rgba(168, 85, 247, 0.15)',
-                  border: '1px solid var(--border-glass-hover)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  color: 'var(--accent-purple)',
-                  marginBottom: '1.25rem',
-                }}
-              >
-                <GitPullRequest size={20} />
-              </div>
-              <h3 style={{ fontSize: '1.25rem', fontWeight: 700, color: '#ffffff', marginBottom: '0.5rem' }}>
-                PR Blast Radius & Impact Analysis
-              </h3>
-              <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
-                Analyze pull requests in real time. RepoLens computes transitive impact graphs, config deltas,
-                and route mutations, delivering high-confidence review findings directly to reviewers.
-              </p>
-            </Card>
-          </div>
-        </section>
-
-        {/* ========================================================================= */}
-        {/* FINAL CTA SECTION                                                        */}
-        {/* ========================================================================= */}
-        <section
-          style={{
-            padding: '5rem 1.5rem 6rem 1.5rem',
-            maxWidth: '65rem',
-            margin: '0 auto',
-            textAlign: 'center',
-          }}
-        >
-          <div
-            className="glass-panel"
-            style={{
-              padding: '4rem 2rem',
-              background: 'radial-gradient(circle at 50% 0%, rgba(99, 102, 241, 0.22) 0%, rgba(8, 12, 24, 0.95) 75%)',
-              border: '1px solid var(--border-glass-hover)',
-              boxShadow: '0 25px 60px rgba(0, 0, 0, 0.7), 0 0 35px rgba(99, 102, 241, 0.25)',
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-            }}
-          >
-            <h2
+            {/* Bento Card 1 (Span 7): Cross-Layer Contract Intelligence */}
+            <div
+              className="glass-panel"
               style={{
-                fontSize: 'clamp(2rem, 4vw, 3rem)',
-                fontWeight: 900,
-                fontFamily: 'var(--font-display)',
-                letterSpacing: '-0.03em',
-                color: '#ffffff',
-                marginBottom: '1rem',
+                gridColumn: 'span 7',
+                padding: '2rem',
+                display: 'flex',
+                flexDirection: 'column',
+                justifyContent: 'space-between',
+                background: 'linear-gradient(135deg, rgba(99, 102, 241, 0.1) 0%, rgba(11, 16, 32, 0.8) 100%)',
+                border: '1px solid var(--border-glass-hover)',
               }}
             >
-              Start Inspecting Your Repository Now
-            </h2>
-            <p
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}>
+                  <Code2 size={22} style={{ color: 'var(--accent-cyan)' }} />
+                  <span style={{ fontSize: '0.8125rem', fontWeight: 600, color: 'var(--accent-cyan)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                    Static Contract Reconstruction
+                  </span>
+                </div>
+                <h3 style={{ fontSize: '1.35rem', fontWeight: 800, fontFamily: 'var(--font-display)', color: '#ffffff', marginBottom: '0.65rem' }}>
+                  Cross-Layer Frontend-to-Backend Contract Matching
+                </h3>
+                <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+                  While traditional linters analyze single files in isolation, RepoLens connects client API calls in TypeScript to backend route decorators and Pydantic schemas in Python, flagging breaking changes across repo boundaries.
+                </p>
+              </div>
+
+              <div
+                style={{
+                  marginTop: '1.5rem',
+                  padding: '1rem',
+                  borderRadius: 'var(--radius-md)',
+                  background: 'rgba(4, 7, 17, 0.8)',
+                  border: '1px solid var(--border-subtle)',
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: '0.8125rem',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '0.4rem',
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)' }}>
+                  <span>TSX: fetch(&quot;/api/v1/scans&quot;)</span>
+                  <span style={{ color: 'var(--success-text)' }}>MATCHED</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)' }}>
+                  <span>FastAPI: @router.post(&quot;/scans&quot;)</span>
+                  <span style={{ color: 'var(--accent-cyan)' }}>ScanCreateSchema</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)' }}>
+                  <span>SQLAlchemy: models.Scan</span>
+                  <span style={{ color: 'var(--accent-purple)' }}>PostgreSQL</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Bento Card 2 (Span 5): Pull Request Blast Radius */}
+            <div
+              className="glass-panel"
               style={{
-                fontSize: '1.0625rem',
-                color: 'var(--text-secondary)',
-                maxWidth: '36rem',
-                lineHeight: 1.6,
-                marginBottom: '2rem',
+                gridColumn: 'span 5',
+                padding: '2rem',
+                display: 'flex',
+                flexDirection: 'column',
+                justifyContent: 'space-between',
               }}
             >
-              Scan local or remote repositories with full AST evidence graphs, zero setup, and zero data leakage.
-            </p>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}>
+                  <GitPullRequest size={22} style={{ color: 'var(--high-text)' }} />
+                  <span style={{ fontSize: '0.8125rem', fontWeight: 600, color: 'var(--high-text)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                    Change Intelligence
+                  </span>
+                </div>
+                <h3 style={{ fontSize: '1.35rem', fontWeight: 800, fontFamily: 'var(--font-display)', color: '#ffffff', marginBottom: '0.65rem' }}>
+                  Dual-Revision AST Blast Radius
+                </h3>
+                <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+                  Analyzes dual-revision AST diffs across commit ranges or public GitHub PRs, deterministically computing upstream caller blast radius with NetworkX graph traversal.
+                </p>
+              </div>
 
-            <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', justifyContent: 'center' }}>
-              <Link href="/scan">
-                <Button variant="glow" size="lg" rightIcon={<ArrowRight size={16} />}>
-                  Launch Repository Scan
-                </Button>
-              </Link>
-              <Link href="/change-analysis">
-                <Button variant="secondary" size="lg" leftIcon={<GitPullRequest size={16} />}>
-                  Analyze Pull Request
-                </Button>
-              </Link>
+              <div style={{ marginTop: '1.5rem' }}>
+                <Link href="/change-analysis">
+                  <Button variant="secondary" size="md" rightIcon={<ChevronRight size={14} />}>
+                    Try PR Diff Analyzer
+                  </Button>
+                </Link>
+              </div>
+            </div>
+
+            {/* Bento Card 3 (Span 4): Zero Execution Sandbox */}
+            <div
+              className="glass-panel"
+              style={{
+                gridColumn: 'span 4',
+                padding: '1.75rem',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '0.75rem',
+              }}
+            >
+              <Lock size={20} style={{ color: 'var(--success-text)' }} />
+              <h3 style={{ fontSize: '1.125rem', fontWeight: 700, fontFamily: 'var(--font-display)', color: '#ffffff' }}>
+                Hostile Repository Confinement
+              </h3>
+              <p style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', lineHeight: 1.55 }}>
+                RepoLens never executes repository test suites, never executes arbitrary scripts or Makefiles, and never imports untrusted modules during analysis.
+              </p>
+            </div>
+
+            {/* Bento Card 4 (Span 4): Guarded Remediation Authority */}
+            <div
+              className="glass-panel"
+              style={{
+                gridColumn: 'span 4',
+                padding: '1.75rem',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '0.75rem',
+              }}
+            >
+              <ShieldAlert size={20} style={{ color: 'var(--accent-purple)' }} />
+              <h3 style={{ fontSize: '1.125rem', fontWeight: 700, fontFamily: 'var(--font-display)', color: '#ffffff' }}>
+                Human Approval Gate
+              </h3>
+              <p style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', lineHeight: 1.55 }}>
+                Candidate patches are generated with 12-check AST verification and require explicit human operator approval before optional GitHub delivery.
+              </p>
+            </div>
+
+            {/* Bento Card 5 (Span 4): Multi-Tenant IDOR Defense */}
+            <div
+              className="glass-panel"
+              style={{
+                gridColumn: 'span 4',
+                padding: '1.75rem',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '0.75rem',
+              }}
+            >
+              <Boxes size={20} style={{ color: 'var(--accent-cyan)' }} />
+              <h3 style={{ fontSize: '1.125rem', fontWeight: 700, fontFamily: 'var(--font-display)', color: '#ffffff' }}>
+                Multi-Tenant Isolation
+              </h3>
+              <p style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', lineHeight: 1.55 }}>
+                All database queries enforce strict user scoping (user_id == current_user.id). Attempting to access another tenant&apos;s artifacts returns 404 Not Found.
+              </p>
             </div>
           </div>
         </section>
       </main>
 
       {/* Footer */}
-      <LandingFooter health={health} />
+      <LandingFooter />
     </div>
   );
 }

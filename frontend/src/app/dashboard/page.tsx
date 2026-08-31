@@ -7,7 +7,6 @@ import { AppShell } from '@/components/layout/AppShell';
 import { StatCard, Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
-import { StatusIndicator } from '@/components/ui/StatusIndicator';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { useAuth } from '@/context/AuthContext';
@@ -28,6 +27,10 @@ import {
   CheckCircle2,
   AlertTriangle,
   FileCode,
+  Lock,
+  Activity,
+  Cpu,
+  ShieldCheck,
 } from 'lucide-react';
 
 export default function DashboardPage() {
@@ -49,7 +52,6 @@ export default function DashboardPage() {
         if (healthRes.status === 'fulfilled') setHealth(healthRes.value);
         if (changesRes.status === 'fulfilled') setChangeAnalyses(changesRes.value || []);
 
-        // Load any saved scans from session / local storage if available
         if (typeof window !== 'undefined') {
           const savedScans = localStorage.getItem('repolens_recent_scans');
           if (savedScans) {
@@ -70,8 +72,10 @@ export default function DashboardPage() {
 
   return (
     <AppShell breadcrumbs={[{ label: 'Dashboard' }]} title="Product Overview">
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
-        {/* Top Welcome / System Status Banner */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '1.75rem' }}>
+        {/* ========================================================================= */}
+        {/* HERO COCKPIT BANNER                                                       */}
+        {/* ========================================================================= */}
         <div
           className="glass-panel"
           style={{
@@ -81,17 +85,19 @@ export default function DashboardPage() {
             alignItems: 'center',
             flexWrap: 'wrap',
             gap: '1.5rem',
-            background: 'linear-gradient(135deg, rgba(99, 102, 241, 0.12) 0%, rgba(13, 19, 36, 0.8) 100%)',
+            background: 'linear-gradient(135deg, rgba(99, 102, 241, 0.12) 0%, rgba(56, 189, 248, 0.04) 50%, rgba(13, 19, 36, 0.85) 100%)',
             border: '1px solid var(--border-glass-hover)',
+            boxShadow: '0 8px 32px rgba(0, 0, 0, 0.35), var(--shadow-inner-glow)',
           }}
         >
           <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', marginBottom: '0.4rem' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', marginBottom: '0.35rem' }}>
               <h2
                 style={{
                   fontSize: '1.5rem',
                   fontWeight: 800,
                   fontFamily: 'var(--font-display)',
+                  letterSpacing: '-0.02em',
                   color: '#ffffff',
                 }}
               >
@@ -100,9 +106,14 @@ export default function DashboardPage() {
               <Badge variant={isOperator ? 'operator' : 'user'} size="sm">
                 {isOperator ? 'OPERATOR MODE' : 'USER MODE'}
               </Badge>
+              {health?.status === 'healthy' && (
+                <Badge variant="success" size="sm" icon={<Activity size={12} />}>
+                  Engine Online
+                </Badge>
+              )}
             </div>
             <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>
-              Deterministic AST graphs, cross-layer contract tracing, and human-authorized remediation workspace.
+              Deterministic AST dependency graphs, cross-layer contract tracing, and human-authorized remediation workspace.
             </p>
           </div>
 
@@ -120,7 +131,9 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* 4 Stat Cards */}
+        {/* ========================================================================= */}
+        {/* 4 ASYMMETRIC METRIC BLOCKS                                                */}
+        {/* ========================================================================= */}
         <div
           style={{
             display: 'grid',
@@ -131,8 +144,8 @@ export default function DashboardPage() {
           <StatCard
             label="AST Graph Engine"
             value="Active"
-            subtext="FastAPI + Semgrep + AST Engine"
-            icon={<Server size={18} />}
+            subtext="FastAPI + Semgrep + Tree-sitter"
+            icon={<Cpu size={18} />}
             badge={
               <Badge variant={health?.status === 'healthy' ? 'success' : 'warning'} size="sm">
                 {health?.status || 'Online'}
@@ -140,9 +153,9 @@ export default function DashboardPage() {
             }
           />
           <StatCard
-            label="Recent PR Analyses"
+            label="PR Blast Radius Reports"
             value={changeAnalyses.length}
-            subtext="Cross-layer impact reports"
+            subtext="Cross-layer impact analyses"
             icon={<GitPullRequest size={18} />}
             glow="cyan"
             onClick={() => router.push('/change-analysis')}
@@ -151,8 +164,9 @@ export default function DashboardPage() {
             label="Verified Evidence"
             value="100%"
             subtext="Strict AST citations required"
-            icon={<CheckCircle2 size={18} />}
+            icon={<ShieldCheck size={18} />}
             badge={<Badge variant="cyan" size="sm">Zero Hallucinations</Badge>}
+            onClick={() => router.push('/findings')}
           />
           <StatCard
             label="Remediation Gates"
@@ -164,21 +178,31 @@ export default function DashboardPage() {
           />
         </div>
 
-        {/* 2-Column Split: Recent Change Analyses & Recent Scans */}
+        {/* ========================================================================= */}
+        {/* 2-COLUMN SPLIT COCKPIT                                                    */}
+        {/* ========================================================================= */}
         <div
           style={{
             display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(400px, 1fr))',
+            gridTemplateColumns: 'minmax(0, 1.4fr) minmax(0, 1fr)',
             gap: '1.5rem',
           }}
         >
-          {/* Left Column: Recent Change Analyses */}
-          <Card style={{ display: 'flex', flexDirection: 'column', gap: '1rem', padding: '1.5rem' }}>
+          {/* Left Column: Recent Change Analyses Workspace */}
+          <div
+            className="glass-panel"
+            style={{
+              padding: '1.5rem',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '1.25rem',
+            }}
+          >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <GitPullRequest size={18} style={{ color: 'var(--accent-cyan)' }} />
                 <h3 style={{ fontSize: '1.125rem', fontWeight: 700, fontFamily: 'var(--font-display)', color: '#ffffff' }}>
-                  Recent Change Analyses
+                  Pull Request & Blast Radius Intelligence
                 </h3>
               </div>
               <Link href="/change-analysis" style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
@@ -188,9 +212,9 @@ export default function DashboardPage() {
 
             {isLoading ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                <Skeleton height="3.5rem" />
-                <Skeleton height="3.5rem" />
-                <Skeleton height="3.5rem" />
+                <Skeleton height="4rem" />
+                <Skeleton height="4rem" />
+                <Skeleton height="4rem" />
               </div>
             ) : changeAnalyses.length === 0 ? (
               <EmptyState
@@ -210,7 +234,7 @@ export default function DashboardPage() {
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'space-between',
-                      padding: '0.85rem 1rem',
+                      padding: '1rem 1.15rem',
                       borderRadius: 'var(--radius-md)',
                       backgroundColor: 'rgba(5, 8, 18, 0.7)',
                       border: '1px solid var(--border-subtle)',
@@ -219,8 +243,8 @@ export default function DashboardPage() {
                     className="glass-panel-interactive"
                   >
                     <div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.2rem' }}>
-                        <span style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-primary)' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
+                        <span style={{ fontSize: '0.875rem', fontWeight: 600, color: '#ffffff' }}>
                           {analysis.repository_owner}/{analysis.repository_name}
                         </span>
                         <Badge variant="default" size="sm">
@@ -228,7 +252,7 @@ export default function DashboardPage() {
                         </Badge>
                       </div>
                       <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
-                        {analysis.base_commit_sha?.slice(0, 7)} → {analysis.head_commit_sha?.slice(0, 7)}
+                        {analysis.base_commit_sha?.slice(0, 7)} → {analysis.head_commit_sha?.slice(0, 7)} ({analysis.changed_files_count || 0} files)
                       </div>
                     </div>
 
@@ -246,7 +270,7 @@ export default function DashboardPage() {
                           }
                           size="sm"
                         >
-                          {analysis.risk_level}
+                          {analysis.risk_level} RISK
                         </Badge>
                       )}
                       <ChevronRight size={15} style={{ color: 'var(--text-muted)' }} />
@@ -255,71 +279,63 @@ export default function DashboardPage() {
                 ))}
               </div>
             )}
-          </Card>
+          </div>
 
-          {/* Right Column: Repository Scan Workspace Launcher */}
-          <Card style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', padding: '1.5rem' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          {/* Right Column: Repository Scan & Security Cockpit */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+            {/* Quick Launcher Card */}
+            <div
+              className="glass-panel"
+              style={{
+                padding: '1.5rem',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '1rem',
+              }}
+            >
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <ScanIcon size={18} style={{ color: 'var(--accent-primary)' }} />
                 <h3 style={{ fontSize: '1.125rem', fontWeight: 700, fontFamily: 'var(--font-display)', color: '#ffffff' }}>
-                  Repository Intelligence Launcher
+                  Repository AST Scanner
                 </h3>
               </div>
-              <Link href="/scan" style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
-                Scan Workspace <ChevronRight size={14} />
-              </Link>
-            </div>
 
-            <div
-              style={{
-                padding: '1.25rem',
-                borderRadius: 'var(--radius-md)',
-                background: 'rgba(5, 8, 18, 0.8)',
-                border: '1px solid var(--border-glass)',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '0.75rem',
-              }}
-            >
-              <div style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-                Inspect Any Git Repository
-              </div>
-              <p style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-                Run full-stack AST extraction, discover cross-layer call relationships, and review verified security findings.
+              <p style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', lineHeight: 1.55 }}>
+                Tree-sitter syntactic analysis and cross-layer call graph construction across frontend and backend boundaries.
               </p>
-              <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem', flexWrap: 'wrap' }}>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                 <Button
                   variant="secondary"
                   size="sm"
                   onClick={() => router.push('/scan?repo=https://github.com/yashaskn8/RepoLens&branch=main')}
+                  style={{ justifyContent: 'flex-start' }}
                 >
-                  Scan RepoLens
+                  Scan RepoLens Repository (Self-Scan)
                 </Button>
                 <Button
                   variant="secondary"
                   size="sm"
                   onClick={() => router.push('/scan?repo=https://github.com/tiangolo/fastapi&branch=master')}
+                  style={{ justifyContent: 'flex-start' }}
                 >
-                  Scan FastAPI
-                </Button>
-                <Button
-                  variant="glow"
-                  size="sm"
-                  onClick={() => router.push('/scan')}
-                  rightIcon={<ArrowRight size={14} />}
-                >
-                  Custom URL
+                  Scan FastAPI Microservice
                 </Button>
               </div>
+
+              <Link href="/scan">
+                <Button variant="glow" size="md" rightIcon={<ArrowRight size={14} />} style={{ width: '100%' }}>
+                  Open Scan Workspace
+                </Button>
+              </Link>
             </div>
 
-            {/* Quick Links Card */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+            {/* Quick Investigation Links */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.85rem' }}>
               <Link
                 href="/findings"
                 style={{
-                  padding: '1rem',
+                  padding: '1.15rem',
                   borderRadius: 'var(--radius-md)',
                   background: 'rgba(255, 255, 255, 0.03)',
                   border: '1px solid var(--border-subtle)',
@@ -329,15 +345,15 @@ export default function DashboardPage() {
                 }}
                 className="glass-panel-interactive"
               >
-                <ShieldAlert size={18} style={{ color: 'var(--high-text)' }} />
-                <span style={{ fontSize: '0.875rem', fontWeight: 600, color: '#ffffff' }}>Findings</span>
-                <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Explore all rules</span>
+                <ShieldAlert size={20} style={{ color: 'var(--high-text)' }} />
+                <span style={{ fontSize: '0.875rem', fontWeight: 700, color: '#ffffff' }}>Findings Explorer</span>
+                <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Verified rules & AST evidence</span>
               </Link>
 
               <Link
                 href="/remediation"
                 style={{
-                  padding: '1rem',
+                  padding: '1.15rem',
                   borderRadius: 'var(--radius-md)',
                   background: 'rgba(255, 255, 255, 0.03)',
                   border: '1px solid var(--border-subtle)',
@@ -347,12 +363,12 @@ export default function DashboardPage() {
                 }}
                 className="glass-panel-interactive"
               >
-                <Wrench size={18} style={{ color: 'var(--accent-purple)' }} />
-                <span style={{ fontSize: '0.875rem', fontWeight: 600, color: '#ffffff' }}>Remediation</span>
-                <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>7-step HITL flow</span>
+                <Wrench size={20} style={{ color: 'var(--accent-purple)' }} />
+                <span style={{ fontSize: '0.875rem', fontWeight: 700, color: '#ffffff' }}>7-Step Remediation</span>
+                <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Human-in-the-loop patches</span>
               </Link>
             </div>
-          </Card>
+          </div>
         </div>
       </div>
     </AppShell>
