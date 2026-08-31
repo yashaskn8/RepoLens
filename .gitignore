@@ -53,6 +53,11 @@ yarn-error.log*
 *.swp
 *.swo
 
+# Scratch & Artifacts
+scratch/
+browser_overview.png
+current_ui.png
+
 # OS
 .DS_Store
 Thumbs.db

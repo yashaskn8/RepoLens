@@ -10,7 +10,7 @@ Verifies:
 - Atomic counter increments and transactional rollback.
 """
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
@@ -73,7 +73,7 @@ def test_api_quota_enforcement_returns_429(client: TestClient, db_session: Sessi
     headers = {"X-CSRF-Token": csrf_cookie}
 
     # Pre-populate quota to limit (20) in DB directly
-    today = date.today()
+    today = datetime.now(timezone.utc).date()
     counter = UsageCounterModel(
         user_id=user_id,
         bucket_date=today,

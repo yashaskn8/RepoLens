@@ -1,6 +1,0 @@
-{
-  "plugins": [
-    { "path": "plugins/superpowers" },
-    { "path": "plugins/agent-skills" }
-  ]
-}
