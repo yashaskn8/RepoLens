@@ -31,6 +31,10 @@ def _build_event_model(event: WorkflowEventCreate) -> WorkflowEventModel:
     if not change_analysis_id and event.metadata_payload and "change_analysis_id" in event.metadata_payload:
         change_analysis_id = str(event.metadata_payload["change_analysis_id"])
 
+    pr_review_publication_id = str(event.pr_review_publication_id) if event.pr_review_publication_id else None
+    if not pr_review_publication_id and event.metadata_payload and "pr_review_publication_id" in event.metadata_payload:
+        pr_review_publication_id = str(event.metadata_payload["pr_review_publication_id"])
+
     return WorkflowEventModel(
         event_type=event.event_type.value if hasattr(event.event_type, "value") else str(event.event_type),
         scan_id=str(event.scan_id) if event.scan_id else None,
@@ -38,6 +42,7 @@ def _build_event_model(event: WorkflowEventCreate) -> WorkflowEventModel:
         finding_id=str(event.finding_id) if event.finding_id else None,
         patch_id=str(event.patch_id) if event.patch_id else None,
         delivery_id=delivery_id,
+        pr_review_publication_id=pr_review_publication_id,
         thread_id=event.thread_id,
         commit_sha=event.commit_sha,
         stage=event.stage,

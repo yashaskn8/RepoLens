@@ -5,6 +5,7 @@ from app.models.change_analysis import ChangeAnalysisModel, ChangeImpactModel
 from app.models.delivery import DeliveryModel
 from app.models.finding import EvidenceModel, FindingModel
 from app.models.patch import PatchModel
+from app.models.review_publication import PullRequestReviewPublicationModel
 from app.models.scan import ScanModel
 from app.models.workflow_event import WorkflowEventModel
 
@@ -18,5 +19,6 @@ __all__ = [
     "DeliveryModel",
     "ChangeAnalysisModel",
     "ChangeImpactModel",
+    "PullRequestReviewPublicationModel",
 ]
 

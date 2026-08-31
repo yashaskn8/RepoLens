@@ -52,6 +52,13 @@ class WorkflowEventType(str, Enum):
     CHANGE_ANALYSIS_COMPLETED = "CHANGE_ANALYSIS_COMPLETED"
     CHANGE_ANALYSIS_FAILED = "CHANGE_ANALYSIS_FAILED"
 
+    PR_REVIEW_PREVIEW_READY = "PR_REVIEW_PREVIEW_READY"
+    PR_REVIEW_APPROVED = "PR_REVIEW_APPROVED"
+    PR_REVIEW_PUBLISH_STARTED = "PR_REVIEW_PUBLISH_STARTED"
+    PR_REVIEW_PUBLISHED = "PR_REVIEW_PUBLISHED"
+    PR_REVIEW_BLOCKED = "PR_REVIEW_BLOCKED"
+    PR_REVIEW_FAILED = "PR_REVIEW_FAILED"
+
     WORKFLOW_ERROR = "WORKFLOW_ERROR"
 
 
@@ -64,6 +71,7 @@ class WorkflowEventBase(BaseModel):
     finding_id: Optional[UUID] = Field(default=None, description="Optional finding ID if event pertains to a specific finding")
     patch_id: Optional[UUID] = Field(default=None, description="Optional patch ID if event pertains to a specific patch proposal")
     delivery_id: Optional[UUID] = Field(default=None, description="Optional delivery ID if event pertains to a pull request delivery")
+    pr_review_publication_id: Optional[UUID] = Field(default=None, description="Optional PR review publication ID if event pertains to review publication")
     thread_id: Optional[str] = Field(default=None, description="Optional LangGraph durable thread identifier")
     commit_sha: Optional[str] = Field(default=None, description="Exact commit SHA being operated upon")
     stage: Optional[str] = Field(default=None, description="Pipeline stage name (e.g. ingestion, analysis, remediation, delivery)")

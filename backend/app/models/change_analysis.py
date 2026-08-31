@@ -55,6 +55,13 @@ class ChangeAnalysisModel(Base):
         "WorkflowEventModel",
         back_populates="change_analysis",
     )
+    review_publication = relationship(
+        "PullRequestReviewPublicationModel",
+        back_populates="analysis",
+        uselist=False,
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
 
 class ChangeImpactModel(Base):

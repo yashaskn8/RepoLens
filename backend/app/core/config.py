@@ -84,6 +84,11 @@ class Settings(BaseSettings):
     GITHUB_TOKEN: str = ""
     GITHUB_DELIVERY_ENABLED: bool = False
 
+    # Safe GitHub PR Review Publication Settings (Phase 7)
+    GITHUB_PR_REVIEW_WRITE_ENABLED: bool = False
+    MAX_REVIEW_INLINE_COMMENTS: int = 20
+    MAX_REVIEW_BODY_CHARS: int = 50_000
+
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
