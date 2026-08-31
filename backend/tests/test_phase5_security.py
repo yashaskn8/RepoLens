@@ -32,6 +32,7 @@ from app.models.finding import EvidenceModel, FindingModel
 from app.models.patch import PatchModel
 from app.models.scan import ScanModel
 from app.models.workflow_event import WorkflowEventModel
+from app.schemas.auth import CurrentUser
 from app.schemas.enums import DeliveryStatus, FindingStatus, PatchStatus, ScanStatus, Severity
 from app.schemas.delivery import DeliveryRequest
 from app.services.workflow_event_service import WorkflowEventService
@@ -129,6 +130,7 @@ def base_entities(db_session: Session):
         status=ScanStatus.COMPLETED.value,
         branch="main",
         commit_hash=scanned_sha,
+        owner_user_id="phase5-sec-user",
     )
     db_session.add(scan)
 
@@ -1048,6 +1050,7 @@ async def test_initial_patch_generation_persists_exact_fix_plan_snapshot(db_sess
         status=ScanStatus.COMPLETED.value,
         branch="main",
         commit_hash="1111111111111111111111111111111111111111",
+        owner_user_id="phase5-sec-user",
     )
     db_session.add(scan)
 
@@ -1149,7 +1152,8 @@ async def test_initial_patch_generation_persists_exact_fix_plan_snapshot(db_sess
         mock_create_plan.return_value = mock_plan
         mock_exec_wf.return_value = mock_wf_result
 
-        result = await request_patch_generation(finding_id=UUID(finding_id), db=db_session)
+        user_ctx = CurrentUser(id=scan.owner_user_id, email="sec@example.com", role="USER", is_active=True, session_id="s1")
+        result = await request_patch_generation(finding_id=UUID(finding_id), current_user=user_ctx, db=db_session)
         assert result.machine_verdict == "PASSED"
 
         # Verify persisted PatchModel in database
@@ -1257,7 +1261,8 @@ async def test_revision_child_persists_exact_revised_fix_plan_snapshot(db_sessio
         mock_exec_wf.return_value = mock_wf_result
 
         req = PatchReviseRequest(user_feedback="please add chroot checks")
-        res = await request_patch_revision(patch_id=patch.id, payload=req, db=db_session)
+        user_ctx = CurrentUser(id=scan.owner_user_id, email="sec@example.com", role="USER", is_active=True, session_id="s1")
+        res = await request_patch_revision(patch_id=patch.id, payload=req, current_user=user_ctx, db=db_session)
 
         assert res.id == str(child_prop_id)
         assert res.revision_number == 1
@@ -1354,8 +1359,9 @@ async def test_initial_patch_generation_proposal_plan_id_mismatch_blocks_persist
         mock_create_plan.return_value = mock_plan
         mock_exec_wf.return_value = mock_wf_result
 
+        user_ctx = CurrentUser(id=scan.owner_user_id, email="sec@example.com", role="USER", is_active=True, session_id="s1")
         with pytest.raises(HTTPException) as exc_info:
-            await request_patch_generation(finding_id=UUID(finding_id), db=db_session)
+            await request_patch_generation(finding_id=UUID(finding_id), current_user=user_ctx, db=db_session)
         assert exc_info.value.status_code == 422
         assert "PATCH_PLAN_PROVENANCE_MISMATCH" in exc_info.value.detail
 
@@ -1447,8 +1453,9 @@ async def test_initial_patch_generation_proposal_finding_id_mismatch_blocks_pers
         mock_create_plan.return_value = mock_plan
         mock_exec_wf.return_value = mock_wf_result
 
+        user_ctx = CurrentUser(id=scan.owner_user_id, email="sec@example.com", role="USER", is_active=True, session_id="s1")
         with pytest.raises(HTTPException) as exc_info:
-            await request_patch_generation(finding_id=UUID(finding_id), db=db_session)
+            await request_patch_generation(finding_id=UUID(finding_id), current_user=user_ctx, db=db_session)
         assert exc_info.value.status_code == 422
         assert "PATCH_PLAN_PROVENANCE_MISMATCH" in exc_info.value.detail
 
@@ -1542,8 +1549,9 @@ async def test_revision_patch_proposal_plan_id_mismatch_blocks_persistence(db_se
         mock_exec_wf.return_value = mock_wf_result
 
         req = PatchReviseRequest(user_feedback="please add chroot checks")
+        user_ctx = CurrentUser(id=scan.owner_user_id, email="sec@example.com", role="USER", is_active=True, session_id="s1")
         with pytest.raises(HTTPException) as exc_info:
-            await request_patch_revision(patch_id=patch.id, payload=req, db=db_session)
+            await request_patch_revision(patch_id=patch.id, payload=req, current_user=user_ctx, db=db_session)
         assert exc_info.value.status_code == 422
         assert "PATCH_PLAN_PROVENANCE_MISMATCH" in exc_info.value.detail
 

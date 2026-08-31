@@ -110,7 +110,7 @@ class Settings(BaseSettings):
 
     # Production Hardening & Network Controls (Phase 8)
     TRUSTED_HOSTS: Union[List[str], str] = ["localhost", "127.0.0.1", "testserver"]
-    ENABLE_API_DOCS: bool = True
+    ENABLE_API_DOCS: Optional[bool] = None
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
@@ -135,6 +135,9 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_production_and_cookie_invariants(self) -> "Settings":
         """Enforce strict fail-closed production security and cookie invariants."""
+        if self.ENABLE_API_DOCS is None:
+            self.ENABLE_API_DOCS = not self.is_production
+
         if self.AUTH_COOKIE_SAMESITE not in ("lax", "strict", "none"):
             raise ValueError(f"AUTH_COOKIE_SAMESITE must be one of 'lax', 'strict', 'none', got '{self.AUTH_COOKIE_SAMESITE}'")
 

@@ -177,6 +177,32 @@ def test_docs_disabled_in_production(monkeypatch):
     assert client.get("/redoc").status_code == 404
 
 
+def test_production_and_dev_enable_api_docs_defaults():
+    """Verify ENABLE_API_DOCS defaults to False in production and True in dev."""
+    prod_s = Settings(
+        ENVIRONMENT="production",
+        AUTH_COOKIE_SECURE=True,
+        CORS_ORIGINS=["https://app.example.com"],
+        TRUSTED_HOSTS=["app.example.com"],
+    )
+    assert prod_s.ENABLE_API_DOCS is False
+
+    dev_s = Settings(
+        ENVIRONMENT="development",
+    )
+    assert dev_s.ENABLE_API_DOCS is True
+
+    # Explicit override in production is preserved if configured
+    prod_custom = Settings(
+        ENVIRONMENT="production",
+        AUTH_COOKIE_SECURE=True,
+        CORS_ORIGINS=["https://app.example.com"],
+        TRUSTED_HOSTS=["app.example.com"],
+        ENABLE_API_DOCS=True,
+    )
+    assert prod_custom.ENABLE_API_DOCS is True
+
+
 # =========================================================================
 # 2. Schema Lifecycle: Base.metadata.create_all not invoked on startup
 # =========================================================================
@@ -469,6 +495,65 @@ async def test_confused_deputy_public_pr_outbound_request_has_no_authorization_h
     
     assert "Authorization" not in headers, "Authorization header must be absent when token=''"
     assert "ghp_PRIVILEGED" not in str(headers), "Server GITHUB_TOKEN must not leak into headers"
+
+
+@pytest.mark.asyncio
+async def test_e2e_from_pr_route_confused_deputy_outbound_request_strips_token(monkeypatch):
+    """Full E2E route test: POST /api/v1/change-analyses/from-pr executes through real resolver
+    and sends outbound HTTP request WITHOUT Authorization header, even when server GITHUB_TOKEN is set.
+    """
+    privileged_token = "ghp_PRIVILEGED_SERVER_AMBIENT_TOKEN_SECRET123"
+    custom_settings = Settings(
+        GITHUB_TOKEN=privileged_token,
+        ENVIRONMENT="development",
+    )
+    monkeypatch.setattr("app.core.config.get_settings", lambda: custom_settings)
+
+    captured_requests: List[httpx.Request] = []
+
+    def mock_transport_handler(request: httpx.Request) -> httpx.Response:
+        captured_requests.append(request)
+        if "pulls/42" in str(request.url):
+            return httpx.Response(
+                200,
+                json={
+                    "title": "PR 42",
+                    "state": "open",
+                    "base": {
+                        "ref": "main",
+                        "sha": "1111111111111111111111111111111111111111",
+                        "repo": {"full_name": "owner/repo"},
+                    },
+                    "head": {
+                        "ref": "feat",
+                        "sha": "2222222222222222222222222222222222222222",
+                        "repo": {"full_name": "owner/repo"},
+                    },
+                },
+            )
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    mock_async_client = httpx.AsyncClient(transport=httpx.MockTransport(mock_transport_handler))
+    e2e_resolver = GitHubPRResolver(settings=custom_settings, client=mock_async_client)
+    monkeypatch.setattr("app.api.routes.change_analysis.get_github_pr_resolver", lambda: e2e_resolver)
+
+    user_info = _create_user_client(email="pr_tester@example.com")
+    client = user_info["client"]
+
+    response = client.post(
+        "/api/v1/change-analyses/from-pr",
+        json={"pr_url": "https://github.com/owner/repo/pull/42"},
+        headers={"X-CSRF-Token": user_info["csrf_token"]},
+    )
+
+    assert response.status_code == status.HTTP_202_ACCEPTED
+    assert len(captured_requests) == 1
+    sent_request = captured_requests[0]
+
+    # Verify headers sent to GitHub API
+    assert "authorization" not in sent_request.headers
+    assert "Authorization" not in sent_request.headers
+    assert privileged_token not in str(sent_request.headers)
 
 
 # =========================================================================

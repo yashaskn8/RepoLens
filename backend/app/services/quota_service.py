@@ -15,7 +15,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
-from app.models.user import UsageCounterModel
+from app.models.user import UsageCounterModel, UserModel
+from app.schemas.auth import CurrentUser
 from app.schemas.enums import UsageOperation
 
 logger = logging.getLogger(__name__)
@@ -39,19 +40,19 @@ def _resolve_user_id(user_or_id: Any) -> str:
     """Extract string user ID from string, CurrentUser, UserModel, or return empty string."""
     if user_or_id is None:
         return ""
-    if getattr(getattr(user_or_id, "__class__", None), "__name__", "") == "Depends":
-        return "__fastapi_depends_direct_test_invocation__"
-    if isinstance(user_or_id, str):
-        return user_or_id.strip()
-    if hasattr(user_or_id, "id") and isinstance(getattr(user_or_id, "id"), (str, UUID)):
-        return str(user_or_id.id).strip()
+    if isinstance(user_or_id, CurrentUser):
+        return user_or_id.id.strip() if user_or_id.id else ""
+    if isinstance(user_or_id, UserModel):
+        return str(user_or_id.id).strip() if user_or_id.id else ""
+    if isinstance(user_or_id, (str, UUID)):
+        return str(user_or_id).strip()
     return ""
 
 
 def get_usage_count(db: Session, user_id: Any, operation: str) -> int:
     """Return the current day's usage count for the given user and operation."""
     resolved_user_id = _resolve_user_id(user_id)
-    if not resolved_user_id or resolved_user_id == "__fastapi_depends_direct_test_invocation__":
+    if not resolved_user_id:
         return 0
     today = _today_utc()
     counter = db.query(UsageCounterModel).filter(
@@ -74,8 +75,6 @@ def check_and_increment_quota(
     Fails closed on missing or invalid user_id.
     """
     resolved_user_id = _resolve_user_id(user_id)
-    if resolved_user_id == "__fastapi_depends_direct_test_invocation__":
-        return 1
     if not resolved_user_id or resolved_user_id.startswith("<") or resolved_user_id == "default-test-user":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

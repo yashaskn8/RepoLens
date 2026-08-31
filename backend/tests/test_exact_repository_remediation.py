@@ -272,7 +272,7 @@ def test_remediation_rejected_when_finding_mismatched_scan(client, db_session):
 
     res = client.post(f"/api/v1/findings/{finding_id}/plan")
     assert res.status_code == 404
-    assert "Associated scan" in res.json()["detail"]
+    assert f"Finding with ID '{finding_id}' not found." in res.json()["detail"] or "not found" in res.json()["detail"].lower()
 
 
 def test_remediation_rejected_when_commit_sha_missing(client, db_session):

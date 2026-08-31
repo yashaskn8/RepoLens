@@ -563,10 +563,17 @@ async def test_e2e_h_fork_pr_typed_rejection():
     mock_client = MockAsyncClient(status_code=200, json_data=mock_pr_response)
     resolver = GitHubPRResolver(client=mock_client)
 
+    from app.schemas.auth import CurrentUser
+    test_user = CurrentUser(id="phase6-tester-id", email="p6@example.com", role="USER", is_active=True, session_id="s1")
+
     db = TestingSessionLocal()
     with patch("app.api.routes.change_analysis.get_github_pr_resolver", return_value=resolver):
         with pytest.raises(HTTPException) as exc_info:
-            await create_change_analysis_from_pr(payload=ChangeAnalysisPRRequest(pr_url=pr_url), db=db)
+            await create_change_analysis_from_pr(
+                payload=ChangeAnalysisPRRequest(pr_url=pr_url),
+                current_user=test_user,
+                db=db,
+            )
 
         assert exc_info.value.status_code == 422
         assert "FORK_PULL_REQUEST_UNSUPPORTED" in exc_info.value.detail
