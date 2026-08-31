@@ -4,6 +4,7 @@ import React, { useEffect, useState } from 'react';
 import { Finding, Scan, ScanTelemetry } from '@/types/domain';
 import { fetchScan, fetchScanFindings, fetchScanTelemetry, startScan } from '@/lib/api';
 import { WorkspaceMode } from '@/components/layout/WorkspaceNav';
+import { useAuth } from '@/context/AuthContext';
 import { RepositoryScanForm } from './RepositoryScanForm';
 import { ScanStatusPanel } from './ScanStatusPanel';
 import { ScanOverview } from './ScanOverview';
@@ -15,13 +16,16 @@ export interface RepositoryScanWorkspaceProps {
   initialRepoUrl?: string;
   initialBranch?: string;
   onNavigate?: (mode: WorkspaceMode) => void;
+  onOpenAuthModal?: () => void;
 }
 
 export function RepositoryScanWorkspace({
   initialRepoUrl,
   initialBranch,
   onNavigate,
+  onOpenAuthModal,
 }: RepositoryScanWorkspaceProps) {
+  const { isAuthenticated, login } = useAuth();
   const [repoUrl, setRepoUrl] = useState<string>(
     initialRepoUrl || 'https://github.com/yashaskn8/RepoLens'
   );
@@ -66,12 +70,57 @@ export function RepositoryScanWorkspace({
     return () => clearInterval(interval);
   }, [activeScan]);
 
+  const handleQuickDemoLogin = async () => {
+    setErrorMsg(null);
+    setIsSubmitting(true);
+    try {
+      await login('demo@repolens.io', 'RepoLensDemo2026!');
+      // Automatically trigger scan after login
+      const scan = await startScan({
+        repository_url: repoUrl.trim(),
+        branch: branch.trim() || 'main',
+      });
+      setActiveScan(scan);
+    } catch (err: unknown) {
+      if (err instanceof Error) {
+        setErrorMsg(err.message);
+      } else {
+        setErrorMsg('Quick demo login & scan failed.');
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
 
   const handleStartScan = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!repoUrl.trim()) return;
 
     setErrorMsg(null);
+
+    // If user is unauthenticated, auto-login with demo account or open auth modal
+    if (!isAuthenticated) {
+      setIsSubmitting(true);
+      try {
+        await login('demo@repolens.io', 'RepoLensDemo2026!');
+        const scan = await startScan({
+          repository_url: repoUrl.trim(),
+          branch: branch.trim() || 'main',
+        });
+        setActiveScan(scan);
+      } catch {
+        // If auto-login fails, prompt auth modal
+        if (onOpenAuthModal) {
+          onOpenAuthModal();
+        } else {
+          setErrorMsg('Authentication required. Please sign in or register.');
+        }
+      } finally {
+        setIsSubmitting(false);
+      }
+      return;
+    }
+
     setIsSubmitting(true);
     setFindings([]);
     setTelemetry(null);
@@ -148,6 +197,9 @@ export function RepositoryScanWorkspace({
         isSubmitting={isSubmitting}
         isScanRunning={isScanRunning}
         errorMsg={errorMsg}
+        isAuthenticated={isAuthenticated}
+        onOpenAuthModal={onOpenAuthModal}
+        onQuickDemoLogin={handleQuickDemoLogin}
       />
 
       {/* Active Scan Progress & Metadata */}
@@ -179,4 +231,3 @@ export function RepositoryScanWorkspace({
     </div>
   );
 }
-

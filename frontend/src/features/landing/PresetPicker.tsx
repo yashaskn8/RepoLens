@@ -49,23 +49,25 @@ export interface PresetPickerProps {
 export const PresetPicker: React.FC<PresetPickerProps> = ({ onSelect, disabled = false }) => {
   return (
     <div className="preset-bar" role="group" aria-label="Sample repositories quick selection">
-      <span className="text-xs text-slate-400 font-medium mr-1 flex items-center gap-1">
-        <span aria-hidden="true">💡</span> Quick Presets:
+      <span className="preset-label">
+        <span className="preset-label-icon" aria-hidden="true">⚡</span> Quick Launch:
       </span>
-      {SAMPLE_REPOSITORIES.map((repo) => (
-        <button
-          key={repo.url}
-          type="button"
-          disabled={disabled}
-          onClick={() => onSelect(repo.url, repo.branch)}
-          className="preset-chip"
-          title={`Load ${repo.name} (${repo.tag})`}
-        >
-          <span aria-hidden="true">{repo.icon}</span>
-          <span>{repo.name}</span>
-          <span className="text-[10px] text-slate-500 font-mono">({repo.branch})</span>
-        </button>
-      ))}
+      <div className="preset-chips-container">
+        {SAMPLE_REPOSITORIES.map((repo) => (
+          <button
+            key={repo.url}
+            type="button"
+            disabled={disabled}
+            onClick={() => onSelect(repo.url, repo.branch)}
+            className="preset-chip"
+            title={`Load ${repo.name} (${repo.tag})`}
+          >
+            <span className="preset-icon" aria-hidden="true">{repo.icon}</span>
+            <span className="preset-name">{repo.name}</span>
+            <span className="preset-branch">{repo.branch}</span>
+          </button>
+        ))}
+      </div>
     </div>
   );
 };

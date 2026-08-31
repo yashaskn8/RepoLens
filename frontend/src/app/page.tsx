@@ -75,13 +75,17 @@ export default function HomePage() {
               initialRepoUrl={selectedRepoUrl}
               initialBranch={selectedBranch}
               onNavigate={handleNavigate}
+              onOpenAuthModal={() => setIsAuthModalOpen(true)}
             />
           </div>
         )}
 
         {appMode === 'CHANGE_ANALYSIS' && (
           <div className="page-view-enter">
-            <ChangeAnalysisExperience onNavigate={handleNavigate} />
+            <ChangeAnalysisExperience
+              onNavigate={handleNavigate}
+              onOpenAuthModal={() => setIsAuthModalOpen(true)}
+            />
           </div>
         )}
 

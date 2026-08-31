@@ -41,12 +41,15 @@ import { ChangeReviewPanel } from '@/features/review/ChangeReviewPanel';
 import { ReviewReportPanel } from '@/features/review/ReviewReportPanel';
 import { ReviewPublicationPanel } from '@/features/review/ReviewPublicationPanel';
 import { WorkspaceMode } from '@/components/layout/WorkspaceNav';
+import { useAuth } from '@/context/AuthContext';
 
 export interface ChangeAnalysisWorkspaceProps {
   onNavigate?: (mode: WorkspaceMode) => void;
+  onOpenAuthModal?: () => void;
 }
 
-export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceProps = {}) {
+export function ChangeAnalysisWorkspace({ onNavigate, onOpenAuthModal }: ChangeAnalysisWorkspaceProps = {}) {
+  const { isAuthenticated, login } = useAuth();
   // Input form state
   const [inputMode, setInputMode] = useState<'PR' | 'EXACT'>('PR');
   const [prUrl, setPrUrl] = useState<string>('https://github.com/fastapi/fastapi/pull/1234');
@@ -168,6 +171,22 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
   const handleStartAnalysis = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
+
+    if (!isAuthenticated) {
+      setIsSubmitting(true);
+      try {
+        await login('demo@repolens.io', 'RepoLensDemo2026!');
+      } catch {
+        if (onOpenAuthModal) {
+          onOpenAuthModal();
+        } else {
+          setErrorMsg('Authentication required. Please sign in or register.');
+        }
+        setIsSubmitting(false);
+        return;
+      }
+    }
+
     setIsSubmitting(true);
     setReport(null);
     setImpacts([]);
