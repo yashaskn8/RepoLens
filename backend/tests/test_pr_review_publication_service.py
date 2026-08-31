@@ -40,8 +40,9 @@ def db_session():
 
 def _create_mock_pr_analysis(db_session, status="COMPLETED", is_fork=False):
     """Helper creating a test ChangeAnalysisModel with canonical Phase 6 top-level PR metadata."""
+    analysis_id = str(uuid4())
     analysis = ChangeAnalysisModel(
-        id=str(uuid4()),
+        id=analysis_id,
         repository_url="https://github.com/octocat/Hello-World",
         repository_owner="octocat",
         repository_name="Hello-World",
@@ -55,6 +56,13 @@ def _create_mock_pr_analysis(db_session, status="COMPLETED", is_fork=False):
             "head_repo_url": "https://github.com/octocat/Hello-World",
             "is_fork": is_fork,
             "pr_state": "open",
+            "review_report": {
+                "analysis_id": analysis_id,
+                "summary": "Verified PR Review Summary",
+                "overall_risk": "LOW",
+                "findings": [],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            },
         },
     )
     db_session.add(analysis)

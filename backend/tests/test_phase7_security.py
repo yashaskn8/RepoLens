@@ -230,11 +230,21 @@ async def test_security_failure_message_redaction():
     Session = sessionmaker(bind=engine)
     db = Session()
 
+    analysis_id = str(uuid4())
     analysis = ChangeAnalysisModel(
-        id=str(uuid4()), repository_url="https://github.com/o/r",
+        id=analysis_id, repository_url="https://github.com/o/r",
         repository_owner="o", repository_name="r",
         base_commit_sha="a" * 40, head_commit_sha="b" * 40, status="COMPLETED",
-        model_metadata={"pr_number": 1, "is_fork": False},
+        model_metadata={
+            "pr_number": 1,
+            "is_fork": False,
+            "review_report": {
+                "analysis_id": analysis_id,
+                "summary": "Verified PR Review",
+                "overall_risk": "LOW",
+                "findings": [],
+            },
+        },
     )
     db.add(analysis)
     db.commit()

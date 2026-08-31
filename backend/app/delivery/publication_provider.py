@@ -1,6 +1,6 @@
 """Provider abstraction for safe GitHub Pull Request Review publication.
 
-Reuses canonical Phase 5 GitHub infrastructure:
+Reuses canonical shared GitHubHttpTransport infrastructure:
 - Fixed trusted origin (https://api.github.com) rejecting SSRF and arbitrary host injection.
 - Secure token handling with zero persistence and log redaction.
 - Standard GitHub API version headers.
@@ -17,6 +17,7 @@ import httpx
 
 from app.core.config import Settings, get_settings
 from app.delivery.diff_mapper import GitHubDiffFile
+from app.delivery.github_client import GITHUB_API_BASE_URL, GitHubHttpTransport
 from app.schemas.change_analysis import ResolvedPullRequest
 from app.schemas.review_publication import (
     GitHubAuthFailedError,
@@ -34,9 +35,6 @@ from app.schemas.review_publication import (
 from app.security.redaction import redact_secrets
 
 logger = logging.getLogger(__name__)
-
-# Fixed trusted GitHub API origin
-GITHUB_API_BASE_URL = "https://api.github.com"
 
 
 class PullRequestReviewPublicationProvider(ABC):
@@ -79,7 +77,11 @@ class PullRequestReviewPublicationProvider(ABC):
 
 
 class GitHubReviewPublicationProvider(PullRequestReviewPublicationProvider):
-    """Concrete implementation communicating with GitHub REST API for review publication."""
+    """Concrete implementation communicating with GitHub REST API for review publication.
+
+    Delegates all HTTP transport to canonical GitHubHttpTransport, adding
+    domain-specific error mapping for publication operations.
+    """
 
     def __init__(
         self,
@@ -96,12 +98,16 @@ class GitHubReviewPublicationProvider(PullRequestReviewPublicationProvider):
             if write_enabled is not None
             else getattr(app_settings, "GITHUB_PR_REVIEW_WRITE_ENABLED", False)
         )
-        cleaned_url = (base_url or GITHUB_API_BASE_URL).rstrip("/")
-        if cleaned_url != GITHUB_API_BASE_URL:
-            raise ValueError(f"Untrusted API origin '{base_url}'. Only '{GITHUB_API_BASE_URL}' is supported.")
-        self.base_url = GITHUB_API_BASE_URL
+        self.transport = GitHubHttpTransport(
+            token=self._token,
+            base_url=base_url,
+            user_agent="RepoLens-ReviewPublication-Engine/1.0",
+            settings=app_settings,
+            client=client,
+        )
+        self.base_url = self.transport.base_url
         self._client = client
-        self._timeout = httpx.Timeout(30.0, connect=15.0)
+        self._timeout = self.transport._timeout
 
     @property
     def write_enabled(self) -> bool:
@@ -110,14 +116,7 @@ class GitHubReviewPublicationProvider(PullRequestReviewPublicationProvider):
 
     def _get_headers(self) -> Dict[str, str]:
         """Build safe HTTP headers without leaking tokens in logs."""
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "RepoLens-ReviewPublication-Engine/1.0",
-        }
-        if self._token and len(self._token.strip()) > 0:
-            headers["Authorization"] = f"Bearer {self._token.strip()}"
-        return headers
+        return self.transport.get_headers()
 
     def _redact_error(self, message: str) -> str:
         """Redact tokens and secrets from error messages."""
@@ -131,75 +130,52 @@ class GitHubReviewPublicationProvider(PullRequestReviewPublicationProvider):
         params: Optional[Dict[str, Any]] = None,
         is_write: bool = False,
     ) -> Any:
-        """Execute HTTP request to GitHub API with bounded read retries and ZERO write retries."""
-        url = f"{self.base_url}/{path.lstrip('/')}"
-        headers = self._get_headers()
-        max_attempts = 1 if is_write else 3
+        """Execute HTTP request to GitHub API with domain-specific error mapping.
 
-        for attempt in range(1, max_attempts + 1):
-            try:
-                if self._client is not None:
-                    response = await self._client.request(
-                        method=method,
-                        url=url,
-                        headers=headers,
-                        json=json_data,
-                        params=params,
-                        timeout=self._timeout,
-                    )
-                else:
-                    async with httpx.AsyncClient(timeout=self._timeout) as client:
-                        response = await client.request(
-                            method=method,
-                            url=url,
-                            headers=headers,
-                            json=json_data,
-                            params=params,
-                        )
+        Delegates transport to GitHubHttpTransport, then maps GitHubAPIError
+        to publication-specific exceptions for proper HTTP status propagation.
+        """
+        from app.delivery.schemas import GitHubAPIError
 
-            except (httpx.TimeoutException, TimeoutError) as exc:
-                if is_write:
-                    # Outcome uncertain: GitHub may or may not have received and processed write
-                    raise GitHubReviewStateUncertainError(
-                        f"Network timeout during write operation on {path}. Outcome uncertain; reconciliation required."
-                    )
-                if attempt == max_attempts:
-                    raise GitHubReviewCreateFailedError(f"GitHub API read timeout on {path}")
-                await asyncio.sleep(0.5 * (2 ** (attempt - 1)))
-                continue
+        try:
+            return await self.transport.request(
+                method=method,
+                path=path,
+                json_data=json_data,
+                params=params,
+                is_write=is_write,
+            )
+        except GitHubAPIError as exc:
+            # Map transport errors to publication-domain exceptions
+            status = exc.status_code
+            err_msg = self._redact_error(str(exc))
 
-            except Exception as exc:
-                err_clean = self._redact_error(str(exc))
-                if is_write:
-                    raise GitHubReviewStateUncertainError(
-                        f"Network exception during write operation on {path}: {err_clean}. Outcome uncertain; reconciliation required."
-                    )
-                if attempt == max_attempts:
-                    raise GitHubReviewCreateFailedError(f"Network error communicating with GitHub API: {err_clean}")
-                await asyncio.sleep(0.5 * (2 ** (attempt - 1)))
-                continue
-
-            # Handle HTTP status codes
-            status = response.status_code
-            if status in (200, 201):
-                return response.json()
-            elif status == 404:
-                raise PRNotFoundError(f"Resource not found on GitHub: {path}")
+            if status == 404:
+                raise PRNotFoundError(f"Resource not found on GitHub: {path}") from exc
             elif status in (401, 403):
-                err_msg = self._redact_error(response.text)
                 if "rate limit" in err_msg.lower():
-                    raise GitHubRateLimitedError(f"GitHub API rate limit exceeded: {err_msg}")
-                raise GitHubAuthFailedError(f"GitHub authentication or authorization failed: {err_msg}")
+                    raise GitHubRateLimitedError(f"GitHub API rate limit exceeded: {err_msg}") from exc
+                raise GitHubAuthFailedError(f"GitHub authentication or authorization failed: {err_msg}") from exc
             elif status == 429:
-                raise GitHubRateLimitedError("GitHub API rate limit exceeded")
+                raise GitHubRateLimitedError("GitHub API rate limit exceeded") from exc
+            elif status in (504, 502) and is_write:
+                # Outcome uncertain for write operations on timeout/network errors
+                raise GitHubReviewStateUncertainError(
+                    f"Network error during write operation on {path}. Outcome uncertain; reconciliation required."
+                ) from exc
             else:
-                err_msg = self._redact_error(response.text)
                 raise GitHubReviewCreateFailedError(
                     f"GitHub API returned error ({status}) on {path}: {err_msg}"
-                )
+                ) from exc
 
     async def get_current_pull_request(self, owner: str, repo: str, pr_number: int) -> ResolvedPullRequest:
-        """Fetch current pull request state and immutable commit SHAs from GitHub."""
+        """Fetch current pull request state and immutable commit SHAs from GitHub.
+
+        Fail-closed validation:
+        - base.repo.full_name and head.repo.full_name MUST be present and match expected owner/repo.
+        - Explicit state from GitHub response (no default 'open').
+        - base.ref, head.ref, base.sha, head.sha all validated.
+        """
         data = await self._request("GET", f"/repos/{owner}/{repo}/pulls/{pr_number}", is_write=False)
         head_data = data.get("head") if isinstance(data.get("head"), dict) else {}
         base_data = data.get("base") if isinstance(data.get("base"), dict) else {}
@@ -224,11 +200,36 @@ class GitHubReviewPublicationProvider(PullRequestReviewPublicationProvider):
         if not head_sha or not isinstance(head_sha, str) or len(head_sha) != 40 or not all(c in "0123456789abcdefABCDEF" for c in head_sha):
             raise GitHubPRMetadataInvalidError(f"GitHub PR response missing valid 40-char head.sha on PR #{pr_number}")
 
-        is_fork = False
-        head_repo = head_data.get("repo")
+        # FIX 6: Fail-closed validation of base.repo.full_name and head.repo.full_name
+        expected_full_name = f"{owner}/{repo}"
         base_repo = base_data.get("repo")
-        if head_repo and base_repo:
-            is_fork = head_repo.get("full_name") != base_repo.get("full_name")
+        if not isinstance(base_repo, dict) or not base_repo.get("full_name"):
+            raise GitHubPRMetadataInvalidError(
+                f"GitHub PR response missing base.repo.full_name on PR #{pr_number}"
+            )
+        base_repo_full_name = str(base_repo["full_name"])
+        if base_repo_full_name != expected_full_name:
+            raise GitHubPRMetadataInvalidError(
+                f"GitHub PR base.repo.full_name '{base_repo_full_name}' does not match expected '{expected_full_name}' on PR #{pr_number}"
+            )
+
+        head_repo = head_data.get("repo")
+        if not isinstance(head_repo, dict) or not head_repo.get("full_name"):
+            raise GitHubPRMetadataInvalidError(
+                f"GitHub PR response missing head.repo.full_name on PR #{pr_number}"
+            )
+        head_repo_full_name = str(head_repo["full_name"])
+
+        # Determine is_fork by comparing full_name (no default False assumption)
+        is_fork = head_repo_full_name != base_repo_full_name
+
+        # FIX 6: Fail-closed explicit state — no default 'open'
+        raw_state = data.get("state")
+        if not raw_state or not isinstance(raw_state, str) or raw_state.strip() not in ("open", "closed"):
+            raise GitHubPRMetadataInvalidError(
+                f"GitHub PR response missing or invalid explicit state on PR #{pr_number} (got '{raw_state}')"
+            )
+        pr_state = "merged" if data.get("merged") else raw_state.strip()
 
         return ResolvedPullRequest(
             repository_url=f"https://github.com/{owner}/{repo}",
@@ -241,7 +242,7 @@ class GitHubReviewPublicationProvider(PullRequestReviewPublicationProvider):
             head_branch=head_ref.strip(),
             head_commit_sha=head_sha.lower(),
             is_fork=is_fork,
-            state="merged" if data.get("merged") else data.get("state", "open"),
+            state=pr_state,
         )
 
     async def get_pull_request_diff_files(self, owner: str, repo: str, pr_number: int) -> List[GitHubDiffFile]:
@@ -279,7 +280,11 @@ class GitHubReviewPublicationProvider(PullRequestReviewPublicationProvider):
         body: str,
         comments: Optional[List[InlineReviewComment]] = None,
     ) -> Dict[str, Any]:
-        """Submit a COMMENT review to GitHub (strictly event='COMMENT', no approvals or request_changes)."""
+        """Submit a COMMENT review to GitHub (strictly event='COMMENT', no approvals or request_changes).
+
+        FIX 10: Validates response contains a valid positive integer 'id' before returning.
+        Missing or malformed 'id' raises GitHubReviewCreateFailedError to trigger reconciliation.
+        """
         if not self.write_enabled:
             raise GitHubReviewWriteDisabledError()
 
@@ -308,6 +313,19 @@ class GitHubReviewPublicationProvider(PullRequestReviewPublicationProvider):
             json_data=payload,
             is_write=True,
         )
+
+        # FIX 10: Validate response contains valid positive integer ID
+        review_id = data.get("id") if isinstance(data, dict) else None
+        if not isinstance(review_id, int) or review_id <= 0:
+            logger.error(
+                f"GitHub create-review response missing valid positive integer 'id' "
+                f"(got {type(review_id).__name__}: {review_id}). Treating as uncertain write."
+            )
+            raise GitHubReviewStateUncertainError(
+                f"GitHub create-review response missing valid 'id' field on PR #{pr_number}. "
+                f"Review may have been created; reconciliation required."
+            )
+
         return data
 
     async def list_pull_request_reviews(

@@ -19,8 +19,9 @@ from app.schemas.review_publication import ReviewPublicationStatus
 
 def _create_test_analysis(db, status="COMPLETED", is_fork=False):
     """Create ChangeAnalysisModel with canonical Phase 6 top-level metadata."""
+    analysis_id = str(uuid4())
     analysis = ChangeAnalysisModel(
-        id=str(uuid4()),
+        id=analysis_id,
         repository_url="https://github.com/octocat/Hello-World",
         repository_owner="octocat",
         repository_name="Hello-World",
@@ -34,6 +35,12 @@ def _create_test_analysis(db, status="COMPLETED", is_fork=False):
             "head_repo_url": "https://github.com/octocat/Hello-World",
             "is_fork": is_fork,
             "pr_state": "open",
+            "review_report": {
+                "analysis_id": analysis_id,
+                "summary": "Verified PR Review",
+                "overall_risk": "LOW",
+                "findings": [],
+            },
         },
     )
     db.add(analysis)

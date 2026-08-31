@@ -31,6 +31,7 @@ from app.models.review_publication import PullRequestReviewPublicationModel
 from app.schemas.change_analysis import ChangeReviewFinding, ChangeReviewReport, ChangeReviewVerdict, ResolvedPullRequest
 from app.schemas.enums import ChangeImpactType, ChangeRiskLevel, ImpactVerificationStatus, Severity
 from app.schemas.review_publication import (
+    GitHubAuthFailedError,
     GitHubPRMetadataInvalidError,
     PRBaseDriftError,
     PRHeadDriftError,
@@ -74,7 +75,7 @@ def _seed_completed_pr_analysis(
                 "reasoning_summary": "Direct parameter interpolation detected in raw SQL query.",
                 "affected_files": ["app/db.py"],
                 "affected_symbols": ["execute_query"],
-                "evidence_refs": ["app/db.py:45"],
+                "evidence_refs": ["line:app/db.py:45"],
                 "confidence": 0.95,
                 "verdict": "CONFIRMED",
                 "suggested_fix": "Use parameterized query variables.",
@@ -404,32 +405,37 @@ async def test_e2e_e_crash_after_external_success_reconciliation(fresh_db_engine
     digest = pub.preview_digest
     await service1.approve_preview(analysis_id, expected_preview_digest=digest)
 
-    # Patch session1.commit to fail on Step 4 (after GitHub write)
+    # Patch session1.commit to simulate database failure on post-write commit
     original_commit = session1.commit
     commit_call_count = 0
 
     def faulty_commit():
         nonlocal commit_call_count
         commit_call_count += 1
-        # Fail on the commit that sets PUBLISHED (after atomic PUBLISHING transition)
+        # Step 2 commit (APPROVED -> PUBLISHING) succeeds (count == 1)
+        # Step 4 commit (PUBLISHED + audit event) fails (count >= 2)
         if commit_call_count >= 2:
             raise RuntimeError("Simulated database crash during post-write commit")
         return original_commit()
 
     session1.commit = faulty_commit
 
-    # Publish attempt raises RuntimeError due to DB crash
+    # Publish attempt raises RuntimeError due to DB crash; rollback-first handles cleanup
     with pytest.raises(RuntimeError, match="Simulated database crash"):
         await service1.publish_review(analysis_id, expected_preview_digest=digest)
 
     # Verify GitHub POST was executed once
     assert mock_provider.create_comment_review.call_count == 1
 
-    # Close session1 to simulate process crash
     session1.close()
 
     # ── Recovery in Fresh Session ──────────────────────────────────────
     session2 = Session()
+
+    # Verify database state after rollback is PUBLISHING (the pre-write committed state)
+    persisted_pub = session2.query(PullRequestReviewPublicationModel).filter_by(analysis_id=str(analysis_id)).first()
+    assert persisted_pub is not None
+    assert persisted_pub.status == ReviewPublicationStatus.PUBLISHING.value
 
     # In fresh session, mock list_reviews returning the review created during the crashed run
     mock_provider.list_pull_request_reviews = AsyncMock(
@@ -456,15 +462,15 @@ async def test_e2e_e_crash_after_external_success_reconciliation(fresh_db_engine
     session2.close()
 
 
-# ── E2E F: Concurrent Publish Ownership ───────────────────────────────
+# ── E2E F: Multi-Session Concurrent Publish Ownership ─────────────────
 
 @pytest.mark.asyncio
 async def test_e2e_f_concurrent_publish_ownership(fresh_db_engine):
-    """Verify concurrent publish operations execute exactly one GitHub POST."""
+    """Verify multi-session concurrent publish operations execute exactly one GitHub POST."""
     Session = sessionmaker(bind=fresh_db_engine)
-    session = Session()
+    init_session = Session()
 
-    analysis = _seed_completed_pr_analysis(session)
+    analysis = _seed_completed_pr_analysis(init_session)
     analysis_id = UUID(analysis.id)
 
     mock_provider = MagicMock()
@@ -492,26 +498,34 @@ async def test_e2e_f_concurrent_publish_ownership(fresh_db_engine):
 
     mock_provider.create_comment_review = AsyncMock(side_effect=slow_create_comment_review)
 
-    service = ReviewPublicationService(db=session, provider=mock_provider)
-    pub = await service.generate_preview(analysis_id)
+    init_service = ReviewPublicationService(db=init_session, provider=mock_provider)
+    pub = await init_service.generate_preview(analysis_id)
     digest = pub.preview_digest
-    await service.approve_preview(analysis_id, expected_preview_digest=digest)
+    await init_service.approve_preview(analysis_id, expected_preview_digest=digest)
+    init_session.close()
 
-    # Launch two concurrent publish tasks
+    # Launch two independent sessions with distinct connections
+    session_a = Session()
+    session_b = Session()
+
+    service_a = ReviewPublicationService(db=session_a, provider=mock_provider)
+    service_b = ReviewPublicationService(db=session_b, provider=mock_provider)
+
     results = await asyncio.gather(
-        service.publish_review(analysis_id, expected_preview_digest=digest),
-        service.publish_review(analysis_id, expected_preview_digest=digest),
+        service_a.publish_review(analysis_id, expected_preview_digest=digest),
+        service_b.publish_review(analysis_id, expected_preview_digest=digest),
         return_exceptions=True,
     )
 
     # Exactly one write made to GitHub
     assert mock_provider.create_comment_review.call_count == 1
 
-    # At least one returned PUBLISHED or handled idempotency
+    # At least one succeeded with PUBLISHED status
     successes = [r for r in results if isinstance(r, PullRequestReviewPublicationModel) and r.status == "PUBLISHED"]
     assert len(successes) >= 1
 
-    session.close()
+    session_a.close()
+    session_b.close()
 
 
 # ── E2E G: Inline Preview Parity & Unmappable Finding ─────────────────
@@ -652,7 +666,7 @@ async def test_e2e_i_service_exception_secret_redaction(fresh_db_engine):
 
     raw_secret_token = "ghp_PHASE7_SUPER_SECRET_TOKEN_99999"
     mock_provider.create_comment_review = AsyncMock(
-        side_effect=RuntimeError(f"HTTP 401 Unauthorized: Authorization: Bearer {raw_secret_token}")
+        side_effect=GitHubAuthFailedError(f"HTTP 401 Unauthorized: Authorization: Bearer {raw_secret_token}")
     )
     mock_provider.list_pull_request_reviews = AsyncMock(return_value=[])
 
@@ -661,12 +675,13 @@ async def test_e2e_i_service_exception_secret_redaction(fresh_db_engine):
     digest = pub.preview_digest
     await service.approve_preview(analysis_id, expected_preview_digest=digest)
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(GitHubAuthFailedError):
         await service.publish_review(analysis_id, expected_preview_digest=digest)
 
     session.refresh(pub)
     assert pub.status == "FAILED"
     assert raw_secret_token not in (pub.failure_message or ""), "Token MUST NOT be persisted in failure_message"
+    assert "[REDACTED]" in (pub.failure_message or "")
 
     session.close()
 

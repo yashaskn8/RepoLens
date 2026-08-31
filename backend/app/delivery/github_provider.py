@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from app.core.config import Settings, get_settings
+from app.delivery.github_client import GITHUB_API_BASE_URL, GitHubHttpTransport
 from app.delivery.provider import RepositoryDeliveryProvider
 from app.delivery.schemas import (
     GitCommitInfo,
@@ -16,9 +17,6 @@ from app.delivery.schemas import (
 from app.security.redaction import redact_secrets
 
 logger = logging.getLogger(__name__)
-
-# Fixed trusted GitHub API origin (rejects SSRF / arbitrary host injection)
-GITHUB_API_BASE_URL = "https://api.github.com"
 
 
 class GitHubDeliveryProvider(RepositoryDeliveryProvider):
@@ -39,17 +37,21 @@ class GitHubDeliveryProvider(RepositoryDeliveryProvider):
             if delivery_enabled is not None
             else getattr(app_settings, "GITHUB_DELIVERY_ENABLED", False)
         )
-        cleaned_url = (base_url or GITHUB_API_BASE_URL).rstrip("/")
-        if cleaned_url != GITHUB_API_BASE_URL:
-            raise ValueError(f"Untrusted API origin '{base_url}'. Only '{GITHUB_API_BASE_URL}' is supported.")
-        self.base_url = GITHUB_API_BASE_URL
+        self.transport = GitHubHttpTransport(
+            token=self._token,
+            base_url=base_url,
+            user_agent="RepoLens-Delivery-Engine/1.0",
+            settings=app_settings,
+            client=client,
+        )
+        self.base_url = self.transport.base_url
         self._client = client
-        self._timeout = httpx.Timeout(30.0, connect=15.0)
+        self._timeout = self.transport._timeout
 
     @property
     def credentials_configured(self) -> bool:
         """Return True if GitHub credentials are non-empty."""
-        return bool(self._token and len(self._token.strip()) > 0)
+        return self.transport.has_credentials
 
     @property
     def delivery_enabled(self) -> bool:
@@ -63,14 +65,7 @@ class GitHubDeliveryProvider(RepositoryDeliveryProvider):
 
     def _get_headers(self) -> Dict[str, str]:
         """Build safe HTTP headers for GitHub API requests without exposing tokens in logs."""
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "RepoLens-Delivery-Engine/1.0",
-        }
-        if self._token:
-            headers["Authorization"] = f"Bearer {self._token.strip()}"
-        return headers
+        return self.transport.get_headers()
 
     async def _request(
         self,
@@ -81,74 +76,13 @@ class GitHubDeliveryProvider(RepositoryDeliveryProvider):
         is_write: bool = False,
     ) -> Dict[str, Any]:
         """Execute an HTTP request to the GitHub API with bounded retries on reads and no blind retries on writes."""
-        url = f"{self.base_url}/{path.lstrip('/')}"
-        headers = self._get_headers()
-        max_attempts = 1 if is_write else 3
-
-        for attempt in range(1, max_attempts + 1):
-            try:
-                if self._client is not None:
-                    response = await self._client.request(
-                        method=method,
-                        url=url,
-                        headers=headers,
-                        json=json_data,
-                        params=params,
-                        timeout=self._timeout,
-                    )
-                else:
-                    async with httpx.AsyncClient(timeout=self._timeout) as client:
-                        response = await client.request(
-                            method=method,
-                            url=url,
-                            headers=headers,
-                            json=json_data,
-                            params=params,
-                        )
-
-                # Check if rate limited or server error on read operations
-                if not is_write and attempt < max_attempts and response.status_code in (429, 500, 502, 503, 504):
-                    retry_after = response.headers.get("Retry-After")
-                    delay = float(retry_after) if retry_after and retry_after.isdigit() else (0.5 * (2 ** (attempt - 1)))
-                    logger.warning(f"GitHub API {method} {path} returned {response.status_code}. Retrying in {delay}s (attempt {attempt}/{max_attempts})")
-                    await asyncio.sleep(min(delay, 5.0))
-                    continue
-
-                if response.is_error:
-                    # Bounded, redacted error parsing
-                    raw_text = response.text[:512] if response.text else ""
-                    safe_msg = redact_secrets(raw_text)
-                    try:
-                        resp_data = response.json() if response.content else {}
-                        if isinstance(resp_data, dict) and "message" in resp_data:
-                            safe_msg = redact_secrets(str(resp_data["message"]))[:512]
-                    except Exception:
-                        resp_data = {}
-
-                    raise GitHubAPIError(
-                        message=f"GitHub API error ({response.status_code}): {safe_msg}",
-                        status_code=response.status_code,
-                        response_data=resp_data if isinstance(resp_data, dict) else {},
-                    )
-
-                if response.status_code == 204:
-                    return {}
-                return response.json()
-
-            except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                if not is_write and attempt < max_attempts:
-                    delay = 0.5 * (2 ** (attempt - 1))
-                    logger.warning(f"GitHub API network exception on {method} {path}: {exc}. Retrying in {delay}s...")
-                    await asyncio.sleep(delay)
-                    continue
-                safe_exc_msg = redact_secrets(str(exc))[:256]
-                raise GitHubAPIError(
-                    message=f"GitHub API connection failure: {safe_exc_msg}",
-                    status_code=503,
-                    safe_code="GITHUB_NETWORK_ERROR",
-                )
-
-        raise GitHubAPIError("GitHub API request failed after retries", status_code=500)
+        return await self.transport.request(
+            method=method,
+            path=path,
+            json_data=json_data,
+            params=params,
+            is_write=is_write,
+        )
 
     async def get_branch_head(self, owner: str, repo: str, branch: str) -> str:
         """Resolve current commit SHA at the head of a remote branch."""

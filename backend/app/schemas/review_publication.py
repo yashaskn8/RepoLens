@@ -211,6 +211,16 @@ class GitHubPRMetadataInvalidError(ReviewPublicationError):
         super().__init__(message, error_code="GITHUB_PR_METADATA_INVALID", status_code=502)
 
 
+class VerifiedReviewNotAvailableError(ReviewPublicationError):
+    def __init__(self, message: str = "Verified Phase 6 change review is not available for this analysis"):
+        super().__init__(message, error_code="VERIFIED_REVIEW_NOT_AVAILABLE", status_code=400)
+
+
+class VerifiedReviewInvalidError(ReviewPublicationError):
+    def __init__(self, message: str = "Verified Phase 6 change review report is malformed or invalid"):
+        super().__init__(message, error_code="VERIFIED_REVIEW_INVALID", status_code=400)
+
+
 class ReconciliationFailedError(ReviewPublicationError):
     def __init__(self, message: str = "Failed to reconcile pull request review status from GitHub"):
         super().__init__(message, error_code="RECONCILIATION_FAILED", status_code=502)

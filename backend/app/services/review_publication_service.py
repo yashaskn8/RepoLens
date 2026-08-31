@@ -28,6 +28,7 @@ from app.models.review_publication import PullRequestReviewPublicationModel
 from app.schemas.review_publication import (
     AnalysisNotCompletedError,
     ForkPRUnsupportedError,
+    GitHubAuthFailedError,
     GitHubReviewStateUncertainError,
     GitHubReviewWriteDisabledError,
     InlineReviewComment,
@@ -41,6 +42,8 @@ from app.schemas.review_publication import (
     PublicationNotApprovedError,
     ReviewPublicationError,
     ReviewPublicationStatus,
+    VerifiedReviewInvalidError,
+    VerifiedReviewNotAvailableError,
 )
 from app.schemas.workflow_event import WorkflowEventCreate, WorkflowEventType
 from app.security.redaction import redact_secrets
@@ -151,15 +154,19 @@ class ReviewPublicationService:
             pr_number=pr_number,
         )
 
-        # 5. Extract verified review report
+        # 5. FIX 7: Validate Phase 6 verified review report is available and parseable
         meta = analysis.model_metadata or {}
         review_report_dict = meta.get("review_report")
-        review_report = None
-        if review_report_dict:
-            try:
-                review_report = ChangeReviewReport.model_validate(review_report_dict)
-            except Exception as e:
-                logger.warning(f"Could not parse review_report from analysis metadata: {e}")
+        if not review_report_dict:
+            raise VerifiedReviewNotAvailableError(
+                f"ChangeAnalysis '{analysis_id}' does not contain a Phase 6 verified review_report in model_metadata"
+            )
+        try:
+            review_report = ChangeReviewReport.model_validate(review_report_dict)
+        except Exception as e:
+            raise VerifiedReviewInvalidError(
+                f"Phase 6 review_report in analysis metadata is malformed: {redact_secrets(str(e))[:256]}"
+            )
 
         # 6. Render deterministic review publication
         rendered = self.renderer.render_publication(
@@ -170,7 +177,7 @@ class ReviewPublicationService:
             diff_files=diff_files,
         )
 
-        # 7. Upsert publication model
+        # 7. Upsert publication model with state-machine enforcement
         pub = self.db.query(PullRequestReviewPublicationModel).filter_by(analysis_id=str(analysis_id)).first()
         if not pub:
             pub = PullRequestReviewPublicationModel(
@@ -189,33 +196,54 @@ class ReviewPublicationService:
             )
             self.db.add(pub)
         else:
-            if pub.status != ReviewPublicationStatus.PUBLISHED.value:
-                pub.repository_owner = analysis.repository_owner
-                pub.repository_name = analysis.repository_name
-                pub.pr_number = pr_number
-                pub.base_commit_sha = analysis.base_commit_sha
-                pub.head_commit_sha = analysis.head_commit_sha
-                pub.preview_body = rendered.preview_body
-                pub.preview_digest = rendered.preview_digest
-                pub.inline_comments_payload = [c.model_dump() for c in rendered.inline_comments]
-                pub.is_truncated = rendered.is_truncated
-                pub.truncation_reason = rendered.truncation_reason
-                # Regenerating preview resets approval
-                pub.status = ReviewPublicationStatus.PREVIEW_READY.value
-                pub.approved_at = None
-                pub.failure_code = None
-                pub.failure_message = None
+            # FIX 1: PUBLISHING is uncertain-write; reconcile instead of blind reset
+            if pub.status == ReviewPublicationStatus.PUBLISHING.value:
+                reconciled = await self.reconcile_publication(pub)
+                if reconciled.status == ReviewPublicationStatus.PUBLISHED.value:
+                    return reconciled
+                raise GitHubReviewStateUncertainError(
+                    f"Publication '{pub.id}' is in PUBLISHING state. "
+                    f"Reconciliation did not find a matching review on GitHub. "
+                    f"Cannot regenerate preview until state is resolved."
+                )
 
-        self.db.commit()
-        self.db.refresh(pub)
+            # FIX 1: PUBLISHED is idempotent return
+            if pub.status == ReviewPublicationStatus.PUBLISHED.value:
+                return pub
 
-        # 8. Emit audit event
+            # FIX 2: BLOCKED is immutable — drift already occurred
+            if pub.status == ReviewPublicationStatus.BLOCKED.value:
+                raise ReviewPublicationError(
+                    f"Publication '{pub.id}' is BLOCKED due to immutable drift "
+                    f"(failure_code: {pub.failure_code}). Cannot regenerate preview.",
+                    error_code="PUBLICATION_BLOCKED",
+                    status_code=409,
+                )
+
+            # Safe to regenerate: PREVIEW_READY, APPROVED, FAILED
+            pub.repository_owner = analysis.repository_owner
+            pub.repository_name = analysis.repository_name
+            pub.pr_number = pr_number
+            pub.base_commit_sha = analysis.base_commit_sha
+            pub.head_commit_sha = analysis.head_commit_sha
+            pub.preview_body = rendered.preview_body
+            pub.preview_digest = rendered.preview_digest
+            pub.inline_comments_payload = [c.model_dump() for c in rendered.inline_comments]
+            pub.is_truncated = rendered.is_truncated
+            pub.truncation_reason = rendered.truncation_reason
+            # Regenerating preview resets approval
+            pub.status = ReviewPublicationStatus.PREVIEW_READY.value
+            pub.approved_at = None
+            pub.failure_code = None
+            pub.failure_message = None
+
+        # FIX 3: Emit audit event BEFORE commit for atomicity
         self.event_service.emit_critical(
             self.db,
             WorkflowEventCreate(
                 event_type=WorkflowEventType.PR_REVIEW_PREVIEW_READY,
                 change_analysis_id=analysis_id,
-                pr_review_publication_id=UUID(pub.id),
+                pr_review_publication_id=UUID(pub.id) if pub.id else None,
                 commit_sha=analysis.head_commit_sha,
                 message=f"Review publication preview generated for PR #{pr_number}",
                 metadata_payload={
@@ -225,6 +253,9 @@ class ReviewPublicationService:
                 },
             ),
         )
+
+        self.db.commit()
+        self.db.refresh(pub)
 
         return pub
 
@@ -247,9 +278,8 @@ class ReviewPublicationService:
 
         pub.status = ReviewPublicationStatus.APPROVED.value
         pub.approved_at = _utc_now()
-        self.db.commit()
-        self.db.refresh(pub)
 
+        # FIX 3: Emit audit event BEFORE commit for atomicity
         self.event_service.emit_critical(
             self.db,
             WorkflowEventCreate(
@@ -261,6 +291,9 @@ class ReviewPublicationService:
                 metadata_payload={"preview_digest": pub.preview_digest},
             ),
         )
+
+        self.db.commit()
+        self.db.refresh(pub)
 
         return pub
 
@@ -296,40 +329,49 @@ class ReviewPublicationService:
             pr_number=pub.pr_number,
         )
 
+        # FIX 3: Block drift checks emit audit event atomically with BLOCKED status
+        drift_error = None
+        drift_failure_code = None
+        drift_failure_message = None
+
         if current_pr.is_fork:
-            pub.status = ReviewPublicationStatus.BLOCKED.value
-            pub.failure_code = "FORK_PR_UNSUPPORTED"
-            pub.failure_message = "Pull request originates from a fork repository"
-            self.db.commit()
-            raise ForkPRUnsupportedError("Pull request originates from a fork repository")
+            drift_failure_code = "FORK_PR_UNSUPPORTED"
+            drift_failure_message = "Pull request originates from a fork repository"
+            drift_error = ForkPRUnsupportedError(drift_failure_message)
+        elif current_pr.state == "merged":
+            drift_failure_code = "PR_MERGED"
+            drift_failure_message = f"Pull request #{pub.pr_number} has already been merged"
+            drift_error = PRMergedError(drift_failure_message)
+        elif current_pr.state != "open":
+            drift_failure_code = "PR_CLOSED"
+            drift_failure_message = f"Pull request #{pub.pr_number} is closed"
+            drift_error = PRClosedError(drift_failure_message)
+        elif current_pr.base_commit_sha != pub.base_commit_sha:
+            drift_failure_code = "PR_BASE_DRIFT"
+            drift_failure_message = f"Base commit SHA drifted (analyzed: {pub.base_commit_sha}, current PR: {current_pr.base_commit_sha})"
+            drift_error = PRBaseDriftError("Base commit SHA has drifted")
+        elif current_pr.head_commit_sha != pub.head_commit_sha:
+            drift_failure_code = "PR_HEAD_DRIFT"
+            drift_failure_message = f"Head commit SHA drifted (analyzed: {pub.head_commit_sha}, current PR: {current_pr.head_commit_sha})"
+            drift_error = PRHeadDriftError("Head commit SHA has drifted")
 
-        if current_pr.state == "merged":
+        if drift_error is not None:
             pub.status = ReviewPublicationStatus.BLOCKED.value
-            pub.failure_code = "PR_MERGED"
-            pub.failure_message = f"Pull request #{pub.pr_number} has already been merged"
+            pub.failure_code = drift_failure_code
+            pub.failure_message = drift_failure_message
+            self.event_service.emit_critical(
+                self.db,
+                WorkflowEventCreate(
+                    event_type=WorkflowEventType.PR_REVIEW_BLOCKED,
+                    change_analysis_id=analysis_id,
+                    pr_review_publication_id=UUID(pub.id),
+                    commit_sha=pub.head_commit_sha,
+                    message=f"Review publication blocked: {drift_failure_message}",
+                    metadata_payload={"failure_code": drift_failure_code},
+                ),
+            )
             self.db.commit()
-            raise PRMergedError(f"Pull request #{pub.pr_number} has already been merged")
-
-        if current_pr.state != "open":
-            pub.status = ReviewPublicationStatus.BLOCKED.value
-            pub.failure_code = "PR_CLOSED"
-            pub.failure_message = f"Pull request #{pub.pr_number} is closed"
-            self.db.commit()
-            raise PRClosedError(f"Pull request #{pub.pr_number} is closed")
-
-        if current_pr.base_commit_sha != pub.base_commit_sha:
-            pub.status = ReviewPublicationStatus.BLOCKED.value
-            pub.failure_code = "PR_BASE_DRIFT"
-            pub.failure_message = f"Base commit SHA drifted (analyzed: {pub.base_commit_sha}, current PR: {current_pr.base_commit_sha})"
-            self.db.commit()
-            raise PRBaseDriftError("Base commit SHA has drifted")
-
-        if current_pr.head_commit_sha != pub.head_commit_sha:
-            pub.status = ReviewPublicationStatus.BLOCKED.value
-            pub.failure_code = "PR_HEAD_DRIFT"
-            pub.failure_message = f"Head commit SHA drifted (analyzed: {pub.head_commit_sha}, current PR: {current_pr.head_commit_sha})"
-            self.db.commit()
-            raise PRHeadDriftError("Head commit SHA has drifted")
+            raise drift_error
 
         # Step 2: Atomic transition APPROVED -> PUBLISHING
         updated = self.db.query(PullRequestReviewPublicationModel).filter(
@@ -339,7 +381,6 @@ class ReviewPublicationService:
             PullRequestReviewPublicationModel.status: ReviewPublicationStatus.PUBLISHING.value,
             PullRequestReviewPublicationModel.updated_at: _utc_now(),
         })
-        self.db.commit()
 
         if updated == 0:
             self.db.refresh(pub)
@@ -347,6 +388,7 @@ class ReviewPublicationService:
                 return pub
             raise ReviewPublicationError("Concurrent publish operation in progress", error_code="CONCURRENT_PUBLISH_IN_PROGRESS", status_code=409)
 
+        # FIX 3: Emit audit event BEFORE commit for atomicity with PUBLISHING transition
         self.event_service.emit_critical(
             self.db,
             WorkflowEventCreate(
@@ -357,6 +399,8 @@ class ReviewPublicationService:
                 message=f"Starting review publication to GitHub PR #{pub.pr_number}",
             ),
         )
+
+        self.db.commit()
 
         # Step 3: Execute single GitHub create-review POST
         inline_comments = [
@@ -374,18 +418,37 @@ class ReviewPublicationService:
             )
         except Exception as external_exc:
             safe_ext_err = redact_secrets(str(external_exc))[:500]
-            logger.warning(f"External write threw exception: {safe_ext_err}. Attempting reconciliation...")
+            # Definite pre-write rejection (no external write occurred)
+            if isinstance(external_exc, (GitHubReviewWriteDisabledError, GitHubAuthFailedError)):
+                pub.status = ReviewPublicationStatus.FAILED.value
+                pub.failure_code = getattr(external_exc, "error_code", "GITHUB_REVIEW_CREATE_FAILED")
+                pub.failure_message = safe_ext_err
+                self.event_service.emit_critical(
+                    self.db,
+                    WorkflowEventCreate(
+                        event_type=WorkflowEventType.PR_REVIEW_FAILED,
+                        change_analysis_id=analysis_id,
+                        pr_review_publication_id=UUID(pub.id),
+                        commit_sha=pub.head_commit_sha,
+                        message=f"Review publication failed before write: {safe_ext_err}",
+                        metadata_payload={"failure_code": pub.failure_code},
+                    ),
+                )
+                self.db.commit()
+                raise
+
+            logger.warning(f"External write threw exception or uncertain outcome: {safe_ext_err}. Attempting reconciliation...")
             reconciled = await self.reconcile_publication(pub)
             if reconciled.status == ReviewPublicationStatus.PUBLISHED.value:
                 return reconciled
 
-            pub.status = ReviewPublicationStatus.FAILED.value
-            pub.failure_code = "GITHUB_REVIEW_CREATE_FAILED"
-            pub.failure_message = safe_ext_err
-            self.db.commit()
-            raise
+            # FIX 1: Uncertain write outcome: status remains PUBLISHING (never FAILED).
+            raise GitHubReviewStateUncertainError(
+                f"External GitHub review creation resulted in an uncertain state ({safe_ext_err}). "
+                f"Reconciliation did not find the review on GitHub. Publication status remains PUBLISHING."
+            ) from external_exc
 
-        # Step 4: Persist PUBLISHED state
+        # Step 4: Persist PUBLISHED state + audit event atomically
         github_review_id = res.get("id")
         github_review_url = f"https://github.com/{pub.repository_owner}/{pub.repository_name}/pull/{pub.pr_number}#pullrequestreview-{github_review_id}"
 
@@ -394,6 +457,23 @@ class ReviewPublicationService:
             pub.github_review_id = github_review_id
             pub.github_review_url = github_review_url
             pub.published_at = _utc_now()
+
+            # FIX 3: Emit completion event atomically in same transaction before commit
+            self.event_service.emit_critical(
+                self.db,
+                WorkflowEventCreate(
+                    event_type=WorkflowEventType.PR_REVIEW_PUBLISHED,
+                    change_analysis_id=analysis_id,
+                    pr_review_publication_id=UUID(pub.id),
+                    commit_sha=pub.head_commit_sha,
+                    message=f"Review published to GitHub PR #{pub.pr_number}",
+                    metadata_payload={
+                        "github_review_id": github_review_id,
+                        "github_review_url": github_review_url,
+                        "inline_comments_count": len(inline_comments),
+                    },
+                ),
+            )
             self.db.commit()
             self.db.refresh(pub)
         except Exception as db_exc:
@@ -402,23 +482,6 @@ class ReviewPublicationService:
             safe_db_err = redact_secrets(str(db_exc))[:500]
             logger.error(f"Database commit failed after successful GitHub review creation: {safe_db_err}")
             raise
-
-        # Step 5: Emit completion event
-        self.event_service.emit_critical(
-            self.db,
-            WorkflowEventCreate(
-                event_type=WorkflowEventType.PR_REVIEW_PUBLISHED,
-                change_analysis_id=analysis_id,
-                pr_review_publication_id=UUID(pub.id),
-                commit_sha=pub.head_commit_sha,
-                message=f"Review published to GitHub PR #{pub.pr_number}",
-                metadata_payload={
-                    "github_review_id": github_review_id,
-                    "github_review_url": github_review_url,
-                    "inline_comments_count": len(inline_comments),
-                },
-            ),
-        )
 
         return pub
 
@@ -454,6 +517,23 @@ class ReviewPublicationService:
                 pub.github_review_url = github_review_url
                 pub.reconciliation_occurred = True
                 pub.published_at = _utc_now()
+
+                # Emit audit event for reconciled publication atomically
+                self.event_service.emit_critical(
+                    self.db,
+                    WorkflowEventCreate(
+                        event_type=WorkflowEventType.PR_REVIEW_PUBLISHED,
+                        change_analysis_id=UUID(pub.analysis_id),
+                        pr_review_publication_id=UUID(pub.id),
+                        commit_sha=pub.head_commit_sha,
+                        message=f"Review reconciled and published to GitHub PR #{pub.pr_number}",
+                        metadata_payload={
+                            "github_review_id": github_review_id,
+                            "github_review_url": github_review_url,
+                            "reconciliation_occurred": True,
+                        },
+                    ),
+                )
                 self.db.commit()
                 self.db.refresh(pub)
                 logger.info(f"Successfully reconciled publication {pub.id} to review {github_review_id}")
