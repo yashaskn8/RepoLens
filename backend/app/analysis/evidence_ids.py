@@ -57,3 +57,34 @@ def make_line_evidence_id(file_path: str, start_line: int, end_line: Optional[in
     if end_line is not None and end_line != start_line:
         return f"line:{normalize_path(file_path)}:{start_line}-{end_line}"
     return f"line:{normalize_path(file_path)}:{start_line}"
+
+
+def make_schema_delta_evidence_id(
+    file_path: str,
+    model_name: str,
+    field_name: str,
+    change_type: str,
+) -> str:
+    """Construct exact schema delta evidence ID:
+    schema-delta:<normalized_file>:<model>:<field>:<change_type>
+    """
+    return f"schema-delta:{normalize_path(file_path)}:{model_name}:{field_name}:{change_type}"
+
+
+def make_route_delta_evidence_id(
+    file_path: str,
+    base_method: Optional[str],
+    base_path: Optional[str],
+    head_method: Optional[str],
+    head_path: Optional[str],
+) -> str:
+    """Construct exact route delta evidence ID:
+    route-delta:<normalized_file>:<BASE_METHOD>:<BASE_PATH>-><HEAD_METHOD>:<HEAD_PATH>
+    (Uses NONE for missing sides)
+    """
+    b_m = base_method.upper() if base_method else "NONE"
+    b_p = base_path if base_path else "NONE"
+    h_m = head_method.upper() if head_method else "NONE"
+    h_p = head_path if head_path else "NONE"
+    return f"route-delta:{normalize_path(file_path)}:{b_m}:{b_p}->{h_m}:{h_p}"
+

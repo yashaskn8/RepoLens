@@ -48,6 +48,7 @@ yarn-error.log*
 .vscode/
 .idea/
 .claude/
+.serena/
 *.swp
 *.swo
 

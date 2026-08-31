@@ -190,12 +190,13 @@ def test_create_vector_index_factory_truthfulness():
         create_vector_index(db_url="sqlite:///./repolens.db", enable_pgvector=True)
 
     # 3. Explicit enable_pgvector on PostgreSQL with missing driver raises clear RuntimeError
-    with pytest.raises(RuntimeError, match="PostgreSQL database driver is not installed|Failed to initialize PostgreSQL engine"):
-        create_vector_index(
-            db_url="postgresql://user:pass@localhost:5432/db",
-            dimensions=1024,
-            enable_pgvector=True,
-        )
+    with patch.dict("sys.modules", {"psycopg2": None, "psycopg": None, "asyncpg": None}):
+        with pytest.raises(RuntimeError, match="PostgreSQL database driver is not installed|Failed to initialize PostgreSQL engine"):
+            create_vector_index(
+                db_url="postgresql://user:pass@localhost:5432/db",
+                dimensions=1024,
+                enable_pgvector=True,
+            )
 
     # 4. Explicit enable_pgvector with supplied mock engine creates PgVectorIndex truthfully
     mock_engine = MagicMock(spec=Engine)

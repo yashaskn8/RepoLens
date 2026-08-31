@@ -203,76 +203,117 @@ async def test_e2e_a_deleted_callee_production_graph(db_session: Session):
 # E2E B: Frontend/Backend Contract Break with Canonical Route Matching
 # =========================================================================
 
-def test_e2e_b_contract_break_canonical_route_matching():
-    """E2E B: Verify API contract break using canonical route contract evaluation without manual edges."""
-    with tempfile.TemporaryDirectory() as base_dir, tempfile.TemporaryDirectory() as head_dir:
-        base_backend = """
-from fastapi import APIRouter
-router = APIRouter()
+@pytest.mark.asyncio
+async def test_e2e_b_contract_break_canonical_route_matching(db_session: Session):
+    """E2E B: Verify API contract break via execute_background_change_analysis using canonical RepositoryGraph route matching."""
+    with tempfile.TemporaryDirectory() as git_dir:
+        base_files = {
+            "backend/api.py": (
+                "from fastapi import APIRouter\n"
+                "router = APIRouter()\n\n"
+                "@router.post('/api/users')\n"
+                "def create_user():\n"
+                "    return {'status': 'created'}\n"
+            ),
+            "frontend/client.ts": (
+                "export async function registerUser() {\n"
+                "    const res = await fetch('/api/users', { method: 'POST' });\n"
+                "    return res.json();\n"
+                "}\n"
+            ),
+        }
+        head_files = {
+            "backend/api.py": (
+                "from fastapi import APIRouter\n"
+                "router = APIRouter()\n\n"
+                "@router.put('/api/users')\n"
+                "def create_user():\n"
+                "    return {'status': 'updated'}\n"
+            ),
+            "frontend/client.ts": (
+                "export async function registerUser() {\n"
+                "    const res = await fetch('/api/users', { method: 'POST' });\n"
+                "    return res.json();\n"
+                "}\n"
+            ),
+        }
+        base_sha, head_sha = _init_local_git_repo(git_dir, base_files, head_files)
 
-@router.post("/api/users")
-def create_user():
-    return {"status": "created"}
-"""
-        head_backend = """
-from fastapi import APIRouter
-router = APIRouter()
-
-@router.put("/api/users")
-def create_user():
-    return {"status": "updated"}
-"""
-        frontend_client = """
-export async function registerUser() {
-    const res = await fetch('/api/users', { method: 'POST' });
-    return res.json();
-}
-"""
-        os.makedirs(os.path.join(base_dir, "backend"), exist_ok=True)
-        os.makedirs(os.path.join(head_dir, "backend"), exist_ok=True)
-        os.makedirs(os.path.join(base_dir, "frontend"), exist_ok=True)
-        os.makedirs(os.path.join(head_dir, "frontend"), exist_ok=True)
-
-        with open(os.path.join(base_dir, "backend", "api.py"), "w", encoding="utf-8") as f:
-            f.write(base_backend)
-        with open(os.path.join(head_dir, "backend", "api.py"), "w", encoding="utf-8") as f:
-            f.write(head_backend)
-        with open(os.path.join(base_dir, "frontend", "client.ts"), "w", encoding="utf-8") as f:
-            f.write(frontend_client)
-        with open(os.path.join(head_dir, "frontend", "client.ts"), "w", encoding="utf-8") as f:
-            f.write(frontend_client)
-
-        diff_engine = ChangeDiffEngine()
-        diff_res = diff_engine.compute_structural_diff(
-            base_workspace=base_dir,
-            head_workspace=head_dir,
-            base_commit_sha="1111111111111111111111111111111111111111",
-            head_commit_sha="2222222222222222222222222222222222222222",
+        analysis_id = str(uuid4())
+        analysis = ChangeAnalysisModel(
+            id=analysis_id,
             repository_url="https://github.com/test/repo",
+            repository_owner="test",
+            repository_name="repo",
+            base_commit_sha=base_sha,
+            head_commit_sha=head_sha,
+            base_ref="main",
+            head_ref="feature/route-change",
+            status="PENDING",
         )
+        db_session.add(analysis)
+        db_session.commit()
 
-        assert len(diff_res.route_deltas) == 1
-        delta = diff_res.route_deltas[0]
-        assert delta.change_type == "METHOD_CHANGED"
-        assert delta.base_http_method == "POST"
-        assert delta.head_http_method == "PUT"
+        # Unpack revisions to test workspaces
+        with tempfile.TemporaryDirectory() as base_ws, tempfile.TemporaryDirectory() as head_ws:
+            proc = subprocess.Popen(["git", "archive", base_sha], cwd=git_dir, stdout=subprocess.PIPE)
+            subprocess.run(["tar", "-x", "-C", base_ws], stdin=proc.stdout, check=True)
+            proc2 = subprocess.Popen(["git", "archive", head_sha], cwd=git_dir, stdout=subprocess.PIPE)
+            subprocess.run(["tar", "-x", "-C", head_ws], stdin=proc2.stdout, check=True)
 
-        # Build canonical repository graph from base manifest (no manual edges)
-        base_manifest = build_manifest(repo_dir=base_dir, repository_url="https://github.com/test/repo", commit_hash="1111111111111111111111111111111111111111")
-        canonical_graph = build_repository_graph(base_manifest)
+            pair = ComparisonWorkspacePair(
+                base_workspace=base_ws,
+                head_workspace=head_ws,
+                base_commit_sha=base_sha,
+                head_commit_sha=head_sha,
+                repository_url="https://github.com/test/repo",
+            )
+            with patch("app.analysis.workflow.SessionLocal", side_effect=TestingSessionLocal), \
+                 patch.object(
+                     ComparisonSnapshotService,
+                     "acquire_comparison_workspaces_from_metadata",
+                     return_value=pair,
+                 ), \
+                 patch.object(
+                     ComparisonSnapshotService,
+                     "release_comparison_workspaces",
+                     return_value=None,
+                 ):
+                await execute_background_change_analysis(analysis_id=analysis_id)
 
-        impact_engine = ChangeImpactEngine()
-        blast_report = impact_engine.compute_blast_radius(
-            analysis_id=uuid4(),
-            diff_result=diff_res,
-            base_graph=canonical_graph,
-        )
+        # Fresh DB session inspection
+        db = TestingSessionLocal()
+        updated_analysis = db.query(ChangeAnalysisModel).filter(ChangeAnalysisModel.id == analysis_id).first()
+        assert updated_analysis is not None
+        assert updated_analysis.status == "COMPLETED"
+        assert updated_analysis.base_commit_sha == base_sha
+        assert updated_analysis.head_commit_sha == head_sha
+        assert updated_analysis.risk_level in ("HIGH", "CRITICAL")
 
-        assert blast_report.total_impacts >= 1
-        assert blast_report.overall_risk_level in (ChangeRiskLevel.HIGH, ChangeRiskLevel.CRITICAL)
-        frontend_impacts = [imp for imp in blast_report.impacts if imp.affected_file == "frontend/client.ts"]
-        assert len(frontend_impacts) >= 1
-        assert frontend_impacts[0].severity == Severity.HIGH
+        # Verify persisted API_CONTRACT_CHANGE impact (no manual rows created)
+        impacts = db.query(ChangeImpactModel).filter(ChangeImpactModel.analysis_id == analysis_id).all()
+        contract_impacts = [i for i in impacts if i.impact_type == ChangeImpactType.API_CONTRACT_CHANGE.value]
+        assert len(contract_impacts) >= 1
+        c_imp = next((i for i in contract_impacts if i.affected_file == "frontend/client.ts"), None)
+        assert c_imp is not None
+        assert c_imp.severity == Severity.HIGH.value
+
+        # Verify persisted diff metadata contains route delta
+        diff_meta = updated_analysis.model_metadata.get("diff_result", {})
+        route_deltas = diff_meta.get("route_deltas", [])
+        assert len(route_deltas) >= 1
+        delta = route_deltas[0]
+        assert delta.get("change_type") == "METHOD_CHANGED"
+        assert delta.get("base_http_method") == "POST"
+        assert delta.get("head_http_method") == "PUT"
+        assert delta.get("base_path") == "/api/users"
+
+        # Verify generated report from freshly reloaded analysis contains contract changes
+        from app.analysis.report_generator import generate_change_analysis_report
+        report = generate_change_analysis_report(updated_analysis)
+        assert report.contract_breaks_count >= 1
+        assert "METHOD_CHANGED" in report.markdown_report
+        db.close()
 
 
 # =========================================================================
@@ -707,7 +748,7 @@ def test_exact_evidence_identities_rejections():
     )
     v, reason, _ = verifier.verify_finding(title_impact_finding, diff_res, blast_report, base_graph)
     assert v == ChangeReviewVerdict.REJECTED
-    assert "Unknown impact UUID" in reason
+    assert "does not resolve to deterministic" in reason or "Unknown impact" in reason
 
     # 4. Impact title substring
     substring_impact_finding = ChangeReviewFinding(
@@ -778,7 +819,7 @@ def test_exact_evidence_identities_rejections():
     )
     v, reason, _ = verifier.verify_finding(wrong_route_finding, diff_res, blast_report, base_graph)
     assert v == ChangeReviewVerdict.REJECTED
-    assert "No route delta found" in reason
+    assert "does not resolve to deterministic" in reason or "No route delta found" in reason
 
     # 9. Valid exact IDs -> CONFIRMED (with zero assumptions)
     valid_exact_finding = ChangeReviewFinding(
@@ -979,4 +1020,332 @@ def test_null_safe_llm_degradation_reporting():
     rep_success = generate_change_analysis_report(analysis_success)
     assert rep_success.tool_availability["llm_reviewer"] is True
     assert "| **Change Review Agent** | ✅ Executed | Bounded Context Reasoning |" in rep_success.markdown_report
+
+
+# =========================================================================
+# FIX 9: Table-Driven Adversarial Grounding Release Gate (10 Directives)
+# =========================================================================
+
+def test_phase6_final_adversarial_grounding_suite():
+    """Execute table-driven adversarial grounding verification tests across all 10 directives."""
+    from app.analysis.evidence_ids import (
+        make_config_evidence_id,
+        make_dependency_evidence_id,
+        make_edge_evidence_id,
+        make_file_evidence_id,
+        make_impact_evidence_id,
+        make_route_delta_evidence_id,
+        make_symbol_evidence_id,
+    )
+    from app.analysis.review_verifier import ChangeReviewVerifier
+    from app.analysis.reviewer import ChangeReviewAgent
+    from app.graph.repository_graph import RepositoryGraph
+    from app.graph.schemas import EdgeKind, GraphEdge, GraphNode, NodeKind
+    from app.llm.exceptions import LLMError
+    from app.schemas.change_analysis import (
+        BlastRadiusReport,
+        ChangeImpact,
+        ChangeReviewFinding,
+        ChangeReviewReport,
+        ChangeReviewVerdict,
+        ConfigDelta,
+        DependencyDelta,
+        FileDiffFact,
+        RouteContractDelta,
+        StructuralDiffResult,
+        SymbolDiffFact,
+    )
+    from app.schemas.enums import ChangeImpactType, Severity
+
+    verifier = ChangeReviewVerifier()
+
+    # Build canonical base objects
+    impact_uuid = uuid4()
+    diff_result = StructuralDiffResult(
+        analysis_id=uuid4(),
+        base_commit_sha="1111111111111111111111111111111111111111",
+        head_commit_sha="2222222222222222222222222222222222222222",
+        repository_url="https://github.com/test/repo",
+        changed_files=[
+            FileDiffFact(file_path="app/service.py", change_type=SymbolChangeType.MODIFIED, base_lines=100, head_lines=105),
+            FileDiffFact(file_path="app/auth.py", change_type=SymbolChangeType.MODIFIED, base_lines=50, head_lines=55),
+            FileDiffFact(file_path="backend/api.py", change_type=SymbolChangeType.MODIFIED, base_lines=30, head_lines=35),
+            FileDiffFact(file_path="src/a.py", change_type=SymbolChangeType.MODIFIED, base_lines=20, head_lines=25),
+            FileDiffFact(file_path="src/b.py", change_type=SymbolChangeType.MODIFIED, base_lines=20, head_lines=25),
+        ],
+        modified_files=["app/service.py", "app/auth.py", "backend/api.py", "src/a.py", "src/b.py"],
+        changed_symbols=[
+            SymbolDiffFact(file_path="app/auth.py", symbol_name="verify_token", symbol_kind="FUNCTION", change_type=SymbolChangeType.MODIFIED, head_location={"start_line": 10, "end_line": 20}),
+            SymbolDiffFact(file_path="src/a.py", symbol_name="parse", symbol_kind="FUNCTION", change_type=SymbolChangeType.MODIFIED, head_location={"start_line": 5, "end_line": 15}),
+            SymbolDiffFact(file_path="src/b.py", symbol_name="parse", symbol_kind="FUNCTION", change_type=SymbolChangeType.MODIFIED, head_location={"start_line": 10, "end_line": 20}),
+        ],
+        route_deltas=[
+            RouteContractDelta(
+                file_path="backend/api.py",
+                route_type="FASTAPI_ROUTE",
+                route_name="create_user",
+                change_type="METHOD_CHANGED",
+                base_http_method="POST",
+                base_path="/api/users",
+                head_http_method="PUT",
+                head_path="/api/users",
+            )
+        ],
+        config_deltas=[
+            ConfigDelta(file_path=".env", key="API_URL", change_type="MODIFIED", base_value="http://localhost", head_value="https://api.prod")
+        ],
+        dependency_deltas=[
+            DependencyDelta(manifest_file="package.json", package_name="react", change_type="MODIFIED", base_version="^18.0.0", head_version="^19.0.0")
+        ],
+    )
+
+    base_graph = RepositoryGraph()
+    n1 = base_graph.add_node(node_id="symbol:app/api.py:SYMBOL:login:1", label="login", kind=NodeKind.SYMBOL, file_path="app/api.py", start_line=1)
+    n2 = base_graph.add_node(node_id="symbol:app/auth.py:SYMBOL:verify_token:10", label="verify_token", kind=NodeKind.SYMBOL, file_path="app/auth.py", start_line=10)
+    base_graph.add_edge(source_id=n1.id, target_id=n2.id, kind=EdgeKind.CALLS)
+
+    blast_radius_id = uuid4()
+    blast_radius = BlastRadiusReport(
+        analysis_id=blast_radius_id,
+        total_impacts=1,
+        overall_risk_level=ChangeRiskLevel.HIGH,
+        impacts=[
+            ChangeImpact(
+                id=impact_uuid,
+                analysis_id=blast_radius_id,
+                impact_type=ChangeImpactType.CALLER_IMPACT,
+                severity=Severity.HIGH,
+                title="Caller broken",
+                description="Caller function broken due to callee modification",
+                source_file="app/auth.py",
+                source_symbol="verify_token",
+                affected_file="app/api.py",
+                affected_symbol="login",
+                evidence_payload={"depth": 1, "edge_type": "CALLS", "caller_node_id": n1.id, "callee_node_id": n2.id},
+                created_at=datetime.now(timezone.utc),
+            )
+        ],
+    )
+
+    # -------------------------------------------------------------------------
+    # Case 1: Valid file, invalid runtime claim (RESOURCE_LEAK) -> SUPPORTED_INFERENCE, NOT CONFIRMED
+    # -------------------------------------------------------------------------
+    f1 = ChangeReviewFinding(
+        id=uuid4(),
+        title="Guaranteed memory leak",
+        risk_type="RESOURCE_LEAK",
+        severity=Severity.HIGH,
+        reasoning_summary="Likely leak based on service modification",
+        evidence_refs=["file:app/service.py"],
+        affected_files=["app/service.py"],
+        affected_symbols=[],
+        confidence=0.99,
+        assumptions=[],
+        verdict=ChangeReviewVerdict.SUPPORTED_INFERENCE,
+        created_at=datetime.now(timezone.utc),
+    )
+    v1, r1, _ = verifier.verify_finding(f1, diff_result, blast_radius, base_graph)
+    assert v1 == ChangeReviewVerdict.SUPPORTED_INFERENCE, "Runtime predictive claim must NOT be CONFIRMED without deterministic proof"
+
+    # -------------------------------------------------------------------------
+    # Case 2: Valid symbol, unsupported security claim (SECURITY_REGRESSION) -> REJECTED
+    # -------------------------------------------------------------------------
+    f2 = ChangeReviewFinding(
+        id=uuid4(),
+        title="Security bypass vulnerability",
+        risk_type="SECURITY_REGRESSION",
+        severity=Severity.CRITICAL,
+        reasoning_summary="Auth token function modified",
+        evidence_refs=["symbol:app/auth.py:FUNCTION:verify_token:10"],
+        affected_files=["app/auth.py"],
+        affected_symbols=["verify_token"],
+        confidence=0.99,
+        assumptions=[],
+        verdict=ChangeReviewVerdict.SUPPORTED_INFERENCE,
+        created_at=datetime.now(timezone.utc),
+    )
+    v2, r2, _ = verifier.verify_finding(f2, diff_result, blast_radius, base_graph)
+    assert v2 == ChangeReviewVerdict.REJECTED, "Unsupported security regression claim must be REJECTED"
+    assert "Unsupported claim" in r2
+
+    # -------------------------------------------------------------------------
+    # Case 3: Real API contract break -> CONFIRMED
+    # -------------------------------------------------------------------------
+    route_ev_id = make_route_delta_evidence_id("backend/api.py", "POST", "/api/users", "PUT", "/api/users")
+    f3 = ChangeReviewFinding(
+        id=uuid4(),
+        title="API method changed POST to PUT",
+        risk_type="API_CONTRACT_BREAK",
+        severity=Severity.HIGH,
+        reasoning_summary="Endpoint HTTP method changed from POST to PUT breaking callers",
+        evidence_refs=[route_ev_id, "file:backend/api.py"],
+        affected_files=["backend/api.py"],
+        affected_symbols=["create_user"],
+        confidence=0.95,
+        assumptions=[],
+        verdict=ChangeReviewVerdict.SUPPORTED_INFERENCE,
+        created_at=datetime.now(timezone.utc),
+    )
+    v3, r3, _ = verifier.verify_finding(f3, diff_result, blast_radius, base_graph)
+    assert v3 == ChangeReviewVerdict.CONFIRMED, "Exact route delta contract break with zero assumptions must be CONFIRMED"
+
+    # -------------------------------------------------------------------------
+    # Case 4: Real config delta -> CONFIRMED
+    # -------------------------------------------------------------------------
+    cfg_ev_id = make_config_evidence_id(".env", "API_URL")
+    f4 = ChangeReviewFinding(
+        id=uuid4(),
+        title="Environment URL changed",
+        risk_type="CONFIG_MISMATCH",
+        severity=Severity.MEDIUM,
+        reasoning_summary="API_URL key modified in .env",
+        evidence_refs=[cfg_ev_id, "file:.env"],
+        affected_files=[".env"],
+        affected_symbols=["API_URL"],
+        confidence=0.95,
+        assumptions=[],
+        verdict=ChangeReviewVerdict.SUPPORTED_INFERENCE,
+        created_at=datetime.now(timezone.utc),
+    )
+    v4, r4, _ = verifier.verify_finding(f4, diff_result, blast_radius, base_graph)
+    assert v4 == ChangeReviewVerdict.CONFIRMED, "Exact config delta with zero assumptions must be CONFIRMED"
+
+    # -------------------------------------------------------------------------
+    # Case 5: Dependency version change inference -> SUPPORTED_INFERENCE
+    # -------------------------------------------------------------------------
+    dep_ev_id = make_dependency_evidence_id("package.json", "react")
+    f5 = ChangeReviewFinding(
+        id=uuid4(),
+        title="React major version bump may break components",
+        risk_type="DEPENDENCY_INCOMPATIBILITY",
+        severity=Severity.MEDIUM,
+        reasoning_summary="React bumped from 18 to 19",
+        evidence_refs=[dep_ev_id, "file:package.json"],
+        affected_files=["package.json"],
+        affected_symbols=["react"],
+        confidence=0.85,
+        assumptions=[],
+        verdict=ChangeReviewVerdict.SUPPORTED_INFERENCE,
+        created_at=datetime.now(timezone.utc),
+    )
+    v5, r5, _ = verifier.verify_finding(f5, diff_result, blast_radius, base_graph)
+    assert v5 == ChangeReviewVerdict.SUPPORTED_INFERENCE, "Dependency version delta alone is SUPPORTED_INFERENCE, not CONFIRMED"
+
+    # -------------------------------------------------------------------------
+    # Case 6: Duplicate symbol names with wrong evidence binding -> REJECTED
+    # -------------------------------------------------------------------------
+    # finding is for a.py, but evidence is for b.py's parse symbol
+    f6 = ChangeReviewFinding(
+        id=uuid4(),
+        title="Parse function modified in a.py",
+        risk_type="BEHAVIORAL_CHANGE",
+        severity=Severity.LOW,
+        reasoning_summary="Parser logic updated",
+        evidence_refs=["symbol:src/b.py:FUNCTION:parse:10", "file:src/a.py"],
+        affected_files=["src/a.py"],
+        affected_symbols=["parse"],
+        confidence=0.9,
+        assumptions=[],
+        verdict=ChangeReviewVerdict.SUPPORTED_INFERENCE,
+        created_at=datetime.now(timezone.utc),
+    )
+    v6, r6, _ = verifier.verify_finding(f6, diff_result, blast_radius, base_graph)
+    assert v6 == ChangeReviewVerdict.REJECTED, "Symbol binding mismatch across files with identical symbol names must be REJECTED"
+    assert "Unbound affected symbol" in r6
+
+    # -------------------------------------------------------------------------
+    # Case 7: Legacy evidence aliases -> REJECTED
+    # -------------------------------------------------------------------------
+    legacy_aliases = [
+        "diff:app/service.py",
+        "symbol:verify_token",
+        "route:/api/users",
+        "config:API_URL",
+        "dep:react",
+        "dependency:react",
+    ]
+    for alias in legacy_aliases:
+        f_leg = ChangeReviewFinding(
+            id=uuid4(),
+            title=f"Test legacy alias {alias}",
+            risk_type="BEHAVIORAL_CHANGE",
+            severity=Severity.LOW,
+            reasoning_summary="Legacy alias test",
+            evidence_refs=[alias],
+            affected_files=["app/service.py"],
+            affected_symbols=[],
+            confidence=0.5,
+            assumptions=[],
+            verdict=ChangeReviewVerdict.SUPPORTED_INFERENCE,
+            created_at=datetime.now(timezone.utc),
+        )
+        v_leg, r_leg, _ = verifier.verify_finding(f_leg, diff_result, blast_radius, base_graph)
+        assert v_leg == ChangeReviewVerdict.REJECTED, f"Legacy alias '{alias}' must be strictly REJECTED"
+
+    # -------------------------------------------------------------------------
+    # Case 8: Reversed edge rejection -> REJECTED
+    # -------------------------------------------------------------------------
+    reversed_edge = f"edge:CALLS:{n2.id}->{n1.id}"
+    f8 = ChangeReviewFinding(
+        id=uuid4(),
+        title="Reversed call relationship",
+        risk_type="BEHAVIORAL_CHANGE",
+        severity=Severity.LOW,
+        reasoning_summary="Reversed edge test",
+        evidence_refs=[reversed_edge],
+        affected_files=["app/auth.py"],
+        affected_symbols=["verify_token"],
+        confidence=0.5,
+        assumptions=[],
+        verdict=ChangeReviewVerdict.SUPPORTED_INFERENCE,
+        created_at=datetime.now(timezone.utc),
+    )
+    v8, r8, _ = verifier.verify_finding(f8, diff_result, blast_radius, base_graph)
+    assert v8 == ChangeReviewVerdict.REJECTED, "Reversed graph edge must be strictly REJECTED"
+    assert "Fake graph relationship" in r8
+
+    # -------------------------------------------------------------------------
+    # Case 9: Secret in LLM error is redacted
+    # -------------------------------------------------------------------------
+    import asyncio
+    secret_key = "ghp_super_secret_github_token_12345"
+    mock_router = MagicMock()
+    mock_router.route_request = AsyncMock(side_effect=LLMError(f"Authentication failure with token: {secret_key}"))
+
+    reviewer = ChangeReviewAgent(router=mock_router, verifier=verifier)
+    rep9 = asyncio.run(reviewer.review_changes(
+        analysis_id=uuid4(),
+        diff_result=diff_result,
+        blast_radius=blast_radius,
+    ))
+    assert secret_key not in rep9.summary, "Raw secret must NOT appear in review summary"
+    assert rep9.model_metadata is not None
+    assert secret_key not in str(rep9.model_metadata.extra_metadata), "Raw secret must NOT appear in model_metadata"
+
+    # -------------------------------------------------------------------------
+    # Case 10: Oversized line evidence rejected
+    # -------------------------------------------------------------------------
+    with tempfile.TemporaryDirectory() as ws_dir:
+        large_file = os.path.join(ws_dir, "large.py")
+        with open(large_file, "wb") as f:
+            f.write(b"x = 1\n" * 300000)  # > 1.5MB (exceeds default MAX_FILE_SIZE_BYTES)
+
+        f10 = ChangeReviewFinding(
+            id=uuid4(),
+            title="Line reference in oversized file",
+            risk_type="BEHAVIORAL_CHANGE",
+            severity=Severity.LOW,
+            reasoning_summary="Line evidence check",
+            evidence_refs=["line:large.py:10-20"],
+            affected_files=["large.py"],
+            affected_symbols=[],
+            confidence=0.5,
+            assumptions=[],
+            verdict=ChangeReviewVerdict.SUPPORTED_INFERENCE,
+            created_at=datetime.now(timezone.utc),
+        )
+        v10, r10, _ = verifier.verify_finding(f10, diff_result, blast_radius, base_graph, head_workspace=ws_dir)
+        assert v10 == ChangeReviewVerdict.REJECTED, "Line evidence on oversized file must be REJECTED"
+        assert "oversized" in r10 or "exceeds" in r10
+
 

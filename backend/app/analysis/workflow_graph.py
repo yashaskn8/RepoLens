@@ -102,6 +102,46 @@ async def run_diff_node(state: ChangeAnalysisState) -> Dict[str, Any]:
     }
 
 
+from app.security.redaction import redact_secrets
+
+
+async def build_canonical_phase6_graph(
+    workspace_path: Optional[str],
+    repository_url: str,
+    commit_sha: str,
+    branch_ref: Optional[str] = None,
+) -> Optional[RepositoryGraph]:
+    """Canonical fail-closed graph builder shared across impact, review, and verify nodes.
+
+    Guarantees:
+    - Never persists graph objects to durable LangGraph state (ephemeral and reconstructable).
+    - Redacts any sensitive data before logging on failure.
+    - Fails closed with typed RuntimeError.
+    """
+    if not workspace_path:
+        return None
+    try:
+        from app.ingestion.manifest import build_manifest
+        from app.graph.builder import build_repository_graph
+
+        manifest = await asyncio.to_thread(
+            build_manifest,
+            repo_dir=workspace_path,
+            repository_url=repository_url,
+            commit_hash=commit_sha,
+            branch=branch_ref,
+        )
+        graph = await asyncio.to_thread(
+            build_repository_graph,
+            manifest=manifest,
+        )
+        return graph
+    except Exception as exc:
+        safe_msg = redact_secrets(str(exc))
+        logger.error(f"Canonical phase6 graph build failed: {safe_msg}", exc_info=False)
+        raise RuntimeError(f"GRAPH_BUILD_FAILED: Canonical graph construction failed: {safe_msg}") from exc
+
+
 async def run_impact_node(state: ChangeAnalysisState) -> Dict[str, Any]:
     """Node 3: Graph-aware blast radius analysis using canonical RepositoryGraph."""
     completed = list(state.get("completed_nodes", []))
@@ -112,28 +152,12 @@ async def run_impact_node(state: ChangeAnalysisState) -> Dict[str, Any]:
     diff_res = state["diff_result"]
     impact_engine = get_impact_engine()
 
-    # Build canonical base graph using production builder
-    base_ws = state.get("base_workspace")
-    base_graph: Optional[RepositoryGraph] = None
-    if base_ws:
-        try:
-            from app.ingestion.manifest import build_manifest
-            from app.graph.builder import build_repository_graph
-
-            base_manifest = await asyncio.to_thread(
-                build_manifest,
-                repo_dir=base_ws,
-                repository_url=state.get("repository_url", ""),
-                commit_hash=state.get("base_commit_sha", ""),
-                branch=state.get("base_ref"),
-            )
-            base_graph = await asyncio.to_thread(
-                build_repository_graph,
-                manifest=base_manifest,
-            )
-        except Exception as exc:
-            logger.error(f"Canonical base graph build failed: {str(exc)}", exc_info=True)
-            raise RuntimeError(f"GRAPH_BUILD_FAILED: Canonical base graph construction failed: {str(exc)}") from exc
+    base_graph = await build_canonical_phase6_graph(
+        workspace_path=state.get("base_workspace"),
+        repository_url=state.get("repository_url", ""),
+        commit_sha=state.get("base_commit_sha", ""),
+        branch_ref=state.get("base_ref"),
+    )
 
     report = impact_engine.compute_blast_radius(
         analysis_id=UUID(state["analysis_id"]),
@@ -150,7 +174,7 @@ async def run_impact_node(state: ChangeAnalysisState) -> Dict[str, Any]:
 
 
 async def run_review_node(state: ChangeAnalysisState) -> Dict[str, Any]:
-    """Node 4: AI change reviewer with central LLMRouter."""
+    """Node 4: AI change reviewer with central LLMRouter and graph parity."""
     completed = list(state.get("completed_nodes", []))
     if state.get("review_report"):
         completed.append("review")
@@ -160,10 +184,18 @@ async def run_review_node(state: ChangeAnalysisState) -> Dict[str, Any]:
     diff_res = state["diff_result"]
     blast_radius = state["blast_radius"]
 
+    base_graph = await build_canonical_phase6_graph(
+        workspace_path=state.get("base_workspace"),
+        repository_url=state.get("repository_url", ""),
+        commit_sha=state.get("base_commit_sha", ""),
+        branch_ref=state.get("base_ref"),
+    )
+
     review_report = await reviewer.review_changes(
         analysis_id=UUID(state["analysis_id"]),
         diff_result=diff_res,
         blast_radius=blast_radius,
+        base_graph=base_graph,
         base_workspace=state.get("base_workspace"),
         head_workspace=state.get("head_workspace"),
     )
@@ -184,27 +216,12 @@ async def run_verify_node(state: ChangeAnalysisState) -> Dict[str, Any]:
     blast_radius = state["blast_radius"]
     review_report = state["review_report"]
 
-    base_ws = state.get("base_workspace")
-    base_graph: Optional[RepositoryGraph] = None
-    if base_ws:
-        try:
-            from app.ingestion.manifest import build_manifest
-            from app.graph.builder import build_repository_graph
-
-            base_manifest = await asyncio.to_thread(
-                build_manifest,
-                repo_dir=base_ws,
-                repository_url=state.get("repository_url", ""),
-                commit_hash=state.get("base_commit_sha", ""),
-                branch=state.get("base_ref"),
-            )
-            base_graph = await asyncio.to_thread(
-                build_repository_graph,
-                manifest=base_manifest,
-            )
-        except Exception as exc:
-            logger.error(f"Canonical base graph build failed during verification: {str(exc)}", exc_info=True)
-            raise RuntimeError(f"GRAPH_BUILD_FAILED: Canonical base graph verification construction failed: {str(exc)}") from exc
+    base_graph = await build_canonical_phase6_graph(
+        workspace_path=state.get("base_workspace"),
+        repository_url=state.get("repository_url", ""),
+        commit_sha=state.get("base_commit_sha", ""),
+        branch_ref=state.get("base_ref"),
+    )
 
     verified_report = verifier.verify_report(
         report=review_report,
