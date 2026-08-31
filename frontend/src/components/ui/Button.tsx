@@ -48,7 +48,6 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
       fontWeight: 500,
       fontFamily: 'var(--font-sans)',
       borderRadius: 'var(--radius-md)',
-      transition: 'all var(--transition-fast)',
       cursor: disabled || isLoading ? 'not-allowed' : 'pointer',
       opacity: disabled ? 0.5 : 1,
       outline: 'none',
@@ -56,12 +55,14 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
       textDecoration: 'none',
       whiteSpace: 'nowrap',
       userSelect: 'none',
+      position: 'relative',
+      letterSpacing: '0.01em',
     };
 
     const sizeStyles: Record<ButtonSize, React.CSSProperties> = {
-      sm: { padding: '0.35rem 0.75rem', fontSize: '0.8125rem', height: '2rem' },
-      md: { padding: '0.5rem 1.1rem', fontSize: '0.875rem', height: '2.5rem' },
-      lg: { padding: '0.75rem 1.6rem', fontSize: '1rem', height: '3rem', borderRadius: 'var(--radius-lg)' },
+      sm: { padding: '0.375rem 0.85rem', fontSize: '0.8125rem', height: '2rem' },
+      md: { padding: '0.5rem 1.15rem', fontSize: '0.875rem', height: '2.5rem' },
+      lg: { padding: '0.75rem 1.65rem', fontSize: '0.9375rem', height: '2.875rem', borderRadius: 'var(--radius-lg)', fontWeight: 600 },
       icon: { padding: '0.5rem', width: '2.5rem', height: '2.5rem', borderRadius: 'var(--radius-md)' },
     };
 
@@ -71,23 +72,24 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
           return {
             background: 'var(--accent-gradient)',
             color: '#ffffff',
-            borderColor: 'rgba(255, 255, 255, 0.25)',
-            boxShadow: '0 0 20px rgba(99, 102, 241, 0.45)',
+            borderColor: 'rgba(255, 255, 255, 0.2)',
+            boxShadow: '0 0 18px rgba(99, 102, 241, 0.4), var(--shadow-inner-glow)',
+            fontWeight: 600,
           };
         case 'accent-cyan':
           return {
             background: 'var(--cyan-gradient)',
             color: '#040711',
             fontWeight: 600,
-            borderColor: 'rgba(255, 255, 255, 0.3)',
-            boxShadow: '0 0 20px rgba(56, 189, 248, 0.35)',
+            borderColor: 'rgba(255, 255, 255, 0.25)',
+            boxShadow: '0 0 18px rgba(56, 189, 248, 0.3), var(--shadow-inner-glow)',
           };
         case 'secondary':
           return {
             background: 'rgba(255, 255, 255, 0.06)',
             color: 'var(--text-primary)',
             borderColor: 'var(--border-glass)',
-            backdropFilter: 'blur(8px)',
+            boxShadow: 'var(--shadow-inner-glow)',
           };
         case 'outline':
           return {
@@ -103,9 +105,10 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
           };
         case 'danger':
           return {
-            background: 'rgba(239, 68, 68, 0.15)',
+            background: 'rgba(239, 68, 68, 0.12)',
             color: 'var(--error-text)',
             borderColor: 'var(--error-border)',
+            boxShadow: 'var(--shadow-inner-glow)',
           };
         case 'filter':
           return {
@@ -114,22 +117,25 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
             borderColor: 'var(--border-subtle)',
             fontSize: '0.75rem',
             padding: '0.3rem 0.65rem',
+            height: '1.75rem',
           };
         case 'filter-active':
           return {
-            background: 'rgba(99, 102, 241, 0.25)',
+            background: 'rgba(99, 102, 241, 0.2)',
             color: '#ffffff',
             borderColor: 'var(--border-glass-hover)',
             fontSize: '0.75rem',
             padding: '0.3rem 0.65rem',
-            boxShadow: '0 0 10px rgba(99, 102, 241, 0.3)',
+            height: '1.75rem',
+            boxShadow: '0 0 8px rgba(99, 102, 241, 0.25), var(--shadow-inner-glow)',
           };
         default:
           return {
             background: 'var(--accent-primary)',
             color: '#ffffff',
-            borderColor: 'rgba(255, 255, 255, 0.15)',
-            boxShadow: '0 2px 10px rgba(99, 102, 241, 0.35)',
+            borderColor: 'rgba(255, 255, 255, 0.12)',
+            boxShadow: '0 2px 10px rgba(99, 102, 241, 0.3), var(--shadow-inner-glow)',
+            fontWeight: 600,
           };
       }
     };

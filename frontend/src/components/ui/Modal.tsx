@@ -63,20 +63,20 @@ export function Modal({
     >
       {/* Backdrop */}
       <div
+        className="fade-in-backdrop"
         style={{
           position: 'fixed',
           inset: 0,
           backgroundColor: 'rgba(3, 5, 12, 0.82)',
           backdropFilter: 'blur(8px)',
           WebkitBackdropFilter: 'blur(8px)',
-          transition: 'opacity var(--transition-normal)',
         }}
         onClick={onClose}
       />
 
       {/* Dialog container */}
       <div
-        className="glass-modal page-enter"
+        className="glass-modal scale-in"
         style={{
           position: 'relative',
           width: '100%',
@@ -119,6 +119,7 @@ export function Modal({
           <button
             type="button"
             onClick={onClose}
+            className="interactive-btn"
             style={{
               background: 'rgba(255, 255, 255, 0.06)',
               border: '1px solid var(--border-glass)',
@@ -129,7 +130,6 @@ export function Modal({
               alignItems: 'center',
               justifyContent: 'center',
               padding: '0.4rem',
-              transition: 'all var(--transition-fast)',
             }}
             aria-label="Close dialog"
           >

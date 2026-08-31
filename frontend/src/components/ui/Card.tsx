@@ -38,11 +38,11 @@ export function Card({
   const getGlowStyle = (): React.CSSProperties => {
     switch (glow) {
       case 'indigo':
-        return { boxShadow: '0 0 30px rgba(99, 102, 241, 0.15)' };
+        return { boxShadow: '0 0 25px rgba(99, 102, 241, 0.12), var(--shadow-inner-glow)' };
       case 'cyan':
-        return { boxShadow: '0 0 30px rgba(56, 189, 248, 0.15)' };
+        return { boxShadow: '0 0 25px rgba(56, 189, 248, 0.12), var(--shadow-inner-glow)' };
       case 'purple':
-        return { boxShadow: '0 0 30px rgba(168, 85, 247, 0.15)' };
+        return { boxShadow: '0 0 25px rgba(168, 85, 247, 0.12), var(--shadow-inner-glow)' };
       default:
         return {};
     }
@@ -61,10 +61,10 @@ export function Card({
       {...props}
     >
       {(title || badge || action) && (
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.1rem' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
             {typeof title === 'string' ? (
-              <h3 style={{ fontSize: '1.125rem', fontWeight: 700, fontFamily: 'var(--font-display)', color: '#ffffff' }}>
+              <h3 style={{ fontSize: '1.0625rem', fontWeight: 700, fontFamily: 'var(--font-display)', color: '#ffffff', letterSpacing: '-0.01em' }}>
                 {title}
               </h3>
             ) : (
@@ -109,10 +109,10 @@ export function StatCard({
       glow={glow}
       className={className}
       onClick={onClick}
-      style={{ cursor: onClick ? 'pointer' : 'default' }}
+      style={{ cursor: onClick ? 'pointer' : 'default', padding: '1.25rem 1.35rem' }}
     >
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.75rem' }}>
-        <span style={{ fontSize: '0.8125rem', fontWeight: 500, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.65rem' }}>
+        <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
           {label}
         </span>
         {icon && (
@@ -122,8 +122,8 @@ export function StatCard({
         )}
       </div>
 
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.75rem', marginBottom: subtext ? '0.35rem' : 0 }}>
-        <div style={{ fontSize: '1.875rem', fontWeight: 700, fontFamily: 'var(--font-display)', color: 'var(--text-primary)', lineHeight: 1.1 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.65rem', marginBottom: subtext ? '0.35rem' : 0 }}>
+        <div style={{ fontSize: '1.875rem', fontWeight: 800, fontFamily: 'var(--font-display)', color: 'var(--text-primary)', lineHeight: 1.1, letterSpacing: '-0.02em' }}>
           {value}
         </div>
         {badge}

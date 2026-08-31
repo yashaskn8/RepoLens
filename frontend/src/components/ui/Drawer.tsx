@@ -61,33 +61,33 @@ export function Drawer({
     >
       {/* Backdrop */}
       <div
+        className="fade-in-backdrop"
         style={{
           position: 'fixed',
           inset: 0,
-          backgroundColor: 'rgba(3, 5, 12, 0.75)',
-          backdropFilter: 'blur(6px)',
-          WebkitBackdropFilter: 'blur(6px)',
-          transition: 'opacity var(--transition-normal)',
+          backgroundColor: 'rgba(3, 5, 12, 0.78)',
+          backdropFilter: 'blur(8px)',
+          WebkitBackdropFilter: 'blur(8px)',
         }}
         onClick={onClose}
       />
 
       {/* Drawer Body */}
       <div
+        className="slide-in-right"
         style={{
           position: 'relative',
           width: '100%',
           maxWidth: getWidth(),
           height: '100%',
           background: 'rgba(9, 13, 26, 0.96)',
-          backdropFilter: 'blur(24px)',
-          WebkitBackdropFilter: 'blur(24px)',
+          backdropFilter: 'blur(28px)',
+          WebkitBackdropFilter: 'blur(28px)',
           borderLeft: '1px solid var(--border-glass)',
           display: 'flex',
           flexDirection: 'column',
           zIndex: 61,
-          boxShadow: '-10px 0 40px rgba(0, 0, 0, 0.6)',
-          animation: 'fadeIn 0.25s cubic-bezier(0.16, 1, 0.3, 1)',
+          boxShadow: '-12px 0 48px rgba(0, 0, 0, 0.7)',
         }}
       >
         {/* Drawer Header */}
@@ -109,6 +109,7 @@ export function Drawer({
                   fontWeight: 700,
                   fontFamily: 'var(--font-display)',
                   color: 'var(--text-primary)',
+                  letterSpacing: '-0.01em',
                 }}
               >
                 {title}
@@ -125,6 +126,7 @@ export function Drawer({
           <button
             type="button"
             onClick={onClose}
+            className="interactive-btn"
             style={{
               background: 'rgba(255, 255, 255, 0.05)',
               border: '1px solid var(--border-glass)',
