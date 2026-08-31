@@ -57,6 +57,8 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
       userSelect: 'none',
       position: 'relative',
       letterSpacing: '0.01em',
+      backdropFilter: 'blur(12px)',
+      WebkitBackdropFilter: 'blur(12px)',
     };
 
     const sizeStyles: Record<ButtonSize, React.CSSProperties> = {
@@ -72,8 +74,9 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
           return {
             background: 'var(--accent-gradient)',
             color: '#ffffff',
-            borderColor: 'rgba(255, 255, 255, 0.2)',
-            boxShadow: '0 0 18px rgba(99, 102, 241, 0.4), var(--shadow-inner-glow)',
+            borderColor: 'rgba(255, 255, 255, 0.28)',
+            borderTopColor: 'rgba(255, 255, 255, 0.45)',
+            boxShadow: '0 0 20px rgba(99, 102, 241, 0.45), var(--shadow-inner-glow)',
             fontWeight: 600,
           };
         case 'accent-cyan':
@@ -81,21 +84,24 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
             background: 'var(--cyan-gradient)',
             color: '#040711',
             fontWeight: 600,
-            borderColor: 'rgba(255, 255, 255, 0.25)',
-            boxShadow: '0 0 18px rgba(56, 189, 248, 0.3), var(--shadow-inner-glow)',
+            borderColor: 'rgba(255, 255, 255, 0.35)',
+            borderTopColor: 'rgba(255, 255, 255, 0.5)',
+            boxShadow: '0 0 20px rgba(56, 189, 248, 0.35), var(--shadow-inner-glow)',
           };
         case 'secondary':
           return {
-            background: 'rgba(255, 255, 255, 0.06)',
+            background: 'linear-gradient(135deg, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0.02) 100%), rgba(14, 20, 42, 0.65)',
             color: 'var(--text-primary)',
             borderColor: 'var(--border-glass)',
-            boxShadow: 'var(--shadow-inner-glow)',
+            borderTopColor: 'var(--border-glass-top)',
+            boxShadow: 'var(--shadow-inner-glow), 0 4px 12px rgba(0, 0, 0, 0.2)',
           };
         case 'outline':
           return {
             background: 'transparent',
             color: 'var(--text-light)',
             borderColor: 'var(--border-glass)',
+            borderTopColor: 'rgba(255, 255, 255, 0.2)',
           };
         case 'ghost':
           return {
@@ -105,10 +111,11 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
           };
         case 'danger':
           return {
-            background: 'rgba(239, 68, 68, 0.12)',
+            background: 'linear-gradient(135deg, rgba(239, 68, 68, 0.18) 0%, rgba(239, 68, 68, 0.08) 100%)',
             color: 'var(--error-text)',
             borderColor: 'var(--error-border)',
-            boxShadow: 'var(--shadow-inner-glow)',
+            borderTopColor: 'rgba(239, 68, 68, 0.5)',
+            boxShadow: 'var(--shadow-inner-glow), 0 0 12px rgba(239, 68, 68, 0.2)',
           };
         case 'filter':
           return {
@@ -121,20 +128,22 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
           };
         case 'filter-active':
           return {
-            background: 'rgba(99, 102, 241, 0.2)',
+            background: 'rgba(99, 102, 241, 0.22)',
             color: '#ffffff',
             borderColor: 'var(--border-glass-hover)',
+            borderTopColor: 'rgba(99, 102, 241, 0.6)',
             fontSize: '0.75rem',
             padding: '0.3rem 0.65rem',
             height: '1.75rem',
-            boxShadow: '0 0 8px rgba(99, 102, 241, 0.25), var(--shadow-inner-glow)',
+            boxShadow: '0 0 10px rgba(99, 102, 241, 0.3), var(--shadow-inner-glow)',
           };
         default:
           return {
             background: 'var(--accent-primary)',
             color: '#ffffff',
-            borderColor: 'rgba(255, 255, 255, 0.12)',
-            boxShadow: '0 2px 10px rgba(99, 102, 241, 0.3), var(--shadow-inner-glow)',
+            borderColor: 'rgba(255, 255, 255, 0.18)',
+            borderTopColor: 'rgba(255, 255, 255, 0.35)',
+            boxShadow: '0 2px 12px rgba(99, 102, 241, 0.35), var(--shadow-inner-glow)',
             fontWeight: 600,
           };
       }

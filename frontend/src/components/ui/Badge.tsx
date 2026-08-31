@@ -44,39 +44,39 @@ export function Badge({
   const rawVariant = severity || variant || 'default';
   const normVariant = typeof rawVariant === 'string' ? rawVariant.toLowerCase() : 'default';
 
-  const getVariantStyles = (): { bg: string; border: string; text: string } => {
+  const getVariantStyles = (): { bg: string; border: string; text: string; glow?: string } => {
     switch (normVariant) {
       case 'critical':
-        return { bg: 'var(--critical-bg)', border: 'var(--critical-border)', text: 'var(--critical-text)' };
+        return { bg: 'var(--critical-bg)', border: 'var(--critical-border)', text: 'var(--critical-text)', glow: '0 0 10px rgba(239, 68, 68, 0.25)' };
       case 'high':
-        return { bg: 'var(--high-bg)', border: 'var(--high-border)', text: 'var(--high-text)' };
+        return { bg: 'var(--high-bg)', border: 'var(--high-border)', text: 'var(--high-text)', glow: '0 0 10px rgba(249, 115, 22, 0.25)' };
       case 'medium':
         return { bg: 'var(--medium-bg)', border: 'var(--medium-border)', text: 'var(--medium-text)' };
       case 'low':
       case 'info':
         return { bg: 'var(--low-bg)', border: 'var(--low-border)', text: 'var(--low-text)' };
       case 'success':
-        return { bg: 'var(--success-bg)', border: 'var(--success-border)', text: 'var(--success-text)' };
+        return { bg: 'var(--success-bg)', border: 'var(--success-border)', text: 'var(--success-text)', glow: '0 0 10px rgba(16, 185, 129, 0.25)' };
       case 'warning':
         return { bg: 'var(--warning-bg)', border: 'var(--warning-border)', text: 'var(--warning-text)' };
       case 'error':
         return { bg: 'var(--error-bg)', border: 'var(--error-border)', text: 'var(--error-text)' };
       case 'operator':
-        return { bg: 'var(--operator-bg)', border: 'var(--operator-border)', text: 'var(--operator-text)' };
+        return { bg: 'var(--operator-bg)', border: 'var(--operator-border)', text: 'var(--operator-text)', glow: '0 0 12px rgba(168, 85, 247, 0.3)' };
       case 'user':
         return { bg: 'var(--user-bg)', border: 'var(--user-border)', text: 'var(--user-text)' };
       case 'cyan':
-        return { bg: 'rgba(56, 189, 248, 0.12)', border: 'rgba(56, 189, 248, 0.35)', text: '#38bdf8' };
+        return { bg: 'rgba(56, 189, 248, 0.14)', border: 'rgba(56, 189, 248, 0.45)', text: '#38bdf8', glow: '0 0 10px rgba(56, 189, 248, 0.25)' };
       case 'purple':
-        return { bg: 'rgba(168, 85, 247, 0.12)', border: 'rgba(168, 85, 247, 0.35)', text: '#c084fc' };
+        return { bg: 'rgba(168, 85, 247, 0.14)', border: 'rgba(168, 85, 247, 0.45)', text: '#c084fc', glow: '0 0 10px rgba(168, 85, 247, 0.25)' };
       case 'tag':
-        return { bg: 'rgba(255, 255, 255, 0.06)', border: 'rgba(255, 255, 255, 0.12)', text: 'var(--text-light)' };
+        return { bg: 'rgba(255, 255, 255, 0.05)', border: 'rgba(255, 255, 255, 0.14)', text: 'var(--text-light)' };
       default:
-        return { bg: 'var(--badge-bg)', border: 'var(--badge-border)', text: 'var(--badge-text)' };
+        return { bg: 'rgba(99, 102, 241, 0.12)', border: 'rgba(99, 102, 241, 0.35)', text: 'var(--accent-cyan)' };
     }
   };
 
-  const { bg, border, text } = getVariantStyles();
+  const { bg, border, text, glow } = getVariantStyles();
 
   return (
     <span
@@ -85,7 +85,7 @@ export function Badge({
         display: 'inline-flex',
         alignItems: 'center',
         gap: '0.35rem',
-        padding: size === 'sm' ? '0.15rem 0.5rem' : '0.25rem 0.65rem',
+        padding: size === 'sm' ? '0.15rem 0.55rem' : '0.25rem 0.75rem',
         fontSize: size === 'sm' ? '0.7rem' : '0.75rem',
         fontWeight: 600,
         fontFamily: 'var(--font-mono)',
@@ -97,6 +97,9 @@ export function Badge({
         color: text,
         letterSpacing: '0.02em',
         lineHeight: 1.2,
+        backdropFilter: 'blur(8px)',
+        WebkitBackdropFilter: 'blur(8px)',
+        boxShadow: glow ? `${glow}, var(--shadow-inner-glow)` : 'var(--shadow-inner-glow)',
         ...style,
       }}
       className={className}
