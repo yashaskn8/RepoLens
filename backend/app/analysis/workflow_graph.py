@@ -202,8 +202,9 @@ async def run_verify_node(state: ChangeAnalysisState) -> Dict[str, Any]:
                 build_repository_graph,
                 manifest=base_manifest,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.error(f"Canonical base graph build failed during verification: {str(exc)}", exc_info=True)
+            raise RuntimeError(f"GRAPH_BUILD_FAILED: Canonical base graph verification construction failed: {str(exc)}") from exc
 
     verified_report = verifier.verify_report(
         report=review_report,

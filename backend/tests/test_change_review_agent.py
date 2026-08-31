@@ -179,7 +179,7 @@ def test_valid_grounded_finding(base_sample_diff, base_sample_blast_radius, base
         risk_type="API_CONTRACT_BREAK",
         severity=Severity.HIGH,
         reasoning_summary="The login endpoint in app/api/auth.py relies on verify_token in auth.py, which was deleted in head.",
-        evidence_refs=["diff:app/services/auth.py", "symbol:verify_token", "impact:Direct caller 'login_endpoint'"],
+        evidence_refs=["file:app/services/auth.py", "symbol:app/services/auth.py:FUNCTION:verify_token:10", f"impact:{base_sample_blast_radius.impacts[0].id}"],
         affected_files=["app/api/auth.py", "app/services/auth.py"],
         affected_symbols=["login_endpoint", "verify_token"],
         confidence=0.98,

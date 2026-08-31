@@ -167,6 +167,28 @@ class ChangeDiffEngine:
                 files_map[rel_path] = abs_path
         return files_map
 
+    def _compute_file_sha256_bounded(self, abs_path: str, max_size: int) -> Optional[str]:
+        """Compute streaming SHA-256 hash only if os.stat proves file size <= max_size.
+
+        Returns None (skips the file) when the file exceeds max_size,
+        guaranteeing that large files are never read into memory during
+        rename detection.
+        """
+        try:
+            st = os.stat(abs_path)
+            if st.st_size > max_size:
+                return None
+            h = hashlib.sha256()
+            with open(abs_path, "rb") as f:
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk:
+                        break
+                    h.update(chunk)
+            return h.hexdigest()
+        except OSError:
+            return None
+
     def compute_structural_diff(
         self,
         base_workspace: str,
@@ -187,33 +209,29 @@ class ChangeDiffEngine:
         potentially_deleted = base_rel_set - head_rel_set
         common_rel_paths = base_rel_set & head_rel_set
 
-        # 2. Detect renames via exact content or strong similarity matching
+        # 2. Detect renames via bounded streaming content hashing (memory-safe)
+        #    os.stat size check BEFORE reading; streaming SHA-256 instead of full byte buffers
         renamed_pairs: List[Tuple[str, str]] = []
         added_files: Set[str] = set(potentially_added)
         deleted_files: Set[str] = set(potentially_deleted)
+        max_file_size = getattr(self.settings, "MAX_FILE_SIZE_BYTES", 1048576)
 
-        deleted_file_contents: Dict[str, bytes] = {}
+        deleted_file_hashes: Dict[str, str] = {}
         for del_path in list(deleted_files):
-            try:
-                with open(base_files[del_path], "rb") as f:
-                    deleted_file_contents[del_path] = f.read()
-            except OSError:
-                pass
+            h = self._compute_file_sha256_bounded(base_files[del_path], max_file_size)
+            if h is not None:
+                deleted_file_hashes[del_path] = h
 
         for add_path in list(added_files):
-            try:
-                with open(head_files[add_path], "rb") as f:
-                    add_content = f.read()
-                # Find matching deleted file
-                for del_path, del_content in list(deleted_file_contents.items()):
-                    if del_content and add_content == del_content:
+            add_hash = self._compute_file_sha256_bounded(head_files[add_path], max_file_size)
+            if add_hash is not None:
+                for del_path, del_hash in list(deleted_file_hashes.items()):
+                    if add_hash == del_hash:
                         renamed_pairs.append((del_path, add_path))
                         added_files.remove(add_path)
                         deleted_files.remove(del_path)
-                        del deleted_file_contents[del_path]
+                        del deleted_file_hashes[del_path]
                         break
-            except OSError:
-                pass
 
         # 3. Classify file facts and line-level diffs
         changed_files: List[FileDiffFact] = []

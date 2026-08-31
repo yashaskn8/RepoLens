@@ -68,6 +68,9 @@ def _render_markdown_report(
     review_findings: List[ChangeReviewFinding],
     risk_explanation: str,
     duration_seconds: Optional[float],
+    llm_status: str = "AVAILABLE",
+    is_llm_fallback: bool = False,
+    has_review_data: bool = False,
 ) -> str:
     """Render deterministic, rich GitHub Flavored Markdown Change Analysis Report."""
     meta = analysis.model_metadata or {}
@@ -194,7 +197,19 @@ def _render_markdown_report(
     lines.append("| **Tree-sitter AST Parser** | ✅ Available | Deterministic Structural Facts |")
     lines.append("| **Repository Graph Traversal** | ✅ Available | Bounded Blast Radius Traversal |")
     lines.append("| **Static Security Scanners** | ℹ️ Not Executed | Dedicated Scan Phase Only |")
-    lines.append("| **Change Review Agent** | ✅ Available | Bounded Context Reasoning |")
+
+    if not has_review_data:
+        agent_row = "| **Change Review Agent** | ℹ️ Not Executed | Static Only |"
+    elif not is_llm_fallback and llm_status == "SUCCESS":
+        agent_row = "| **Change Review Agent** | ✅ Executed | Bounded Context Reasoning |"
+    elif llm_status == "UNAVAILABLE":
+        agent_row = "| **Change Review Agent** | ⚠️ Unavailable — deterministic-only result | Fallback Mode |"
+    elif llm_status == "FAILED":
+        agent_row = "| **Change Review Agent** | ❌ Failed — deterministic fallback | Fallback Mode |"
+    else:
+        agent_row = "| **Change Review Agent** | ⚠️ Unavailable — deterministic-only result | Fallback Mode |"
+
+    lines.append(agent_row)
     lines.append("| **Runtime Sandbox / Dynamic Testing** | ❌ Not Executed | Static Evidence Only |")
     lines.append("")
     lines.append("### Limitations & Grounding Constraints")
@@ -240,8 +255,18 @@ def generate_change_analysis_report(model: ChangeAnalysisModel) -> ChangeAnalysi
         for imp in (model.impacts or [])
     ]
 
-    # Map review findings
-    review_data = meta.get("review_report") or {}
+    # Map review findings and extract model metadata null-safely
+    raw_review = meta.get("review_report")
+    review_data = raw_review if isinstance(raw_review, dict) else {}
+    raw_meta = review_data.get("model_metadata")
+    if isinstance(raw_meta, dict):
+        extra = raw_meta.get("extra_metadata") if isinstance(raw_meta.get("extra_metadata"), dict) else {}
+        is_llm_fallback = bool(raw_meta.get("is_fallback") or extra.get("is_fallback", False))
+        llm_status = str(raw_meta.get("execution_status") or extra.get("execution_status") or ("SUCCESS" if raw_review and not is_llm_fallback else "UNAVAILABLE")).upper()
+    else:
+        is_llm_fallback = False
+        llm_status = "SUCCESS" if raw_review else "UNAVAILABLE"
+
     review_findings: List[ChangeReviewFinding] = []
     for rf in review_data.get("findings", []):
         try:
@@ -280,15 +305,17 @@ def generate_change_analysis_report(model: ChangeAnalysisModel) -> ChangeAnalysi
         review_findings=review_findings,
         risk_explanation=risk_expl,
         duration_seconds=duration_sec,
+        llm_status=llm_status,
+        is_llm_fallback=is_llm_fallback,
+        has_review_data=bool(raw_review),
     )
 
-    is_llm_fallback = bool(meta.get("review_report", {}).get("model_metadata", {}).get("is_fallback", False))
     tool_avail = {
         "tree_sitter_ast": True,
         "repository_graph": True,
         "semgrep_scanner": False,
         "osv_scanner": False,
-        "llm_reviewer": bool(meta.get("review_report") and not is_llm_fallback),
+        "llm_reviewer": bool(raw_review and not is_llm_fallback and llm_status == "SUCCESS"),
         "runtime_sandbox": False,
     }
 

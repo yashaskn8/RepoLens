@@ -13,21 +13,36 @@ from app.ingestion.schemas import ParsedCall, ParsedSymbol, SymbolKind
 
 
 def compute_symbol_body_fingerprint(node: Optional[Node], source_bytes: bytes) -> str:
-    """Compute deterministic, line-shift-independent structural body fingerprint."""
+    """Compute deterministic, line-shift-independent structural body fingerprint using AST tokens."""
     if node is None:
         return ""
     body_node = node.child_by_field_name("body")
     target_node = body_node if body_node is not None else node
-    raw_text = _node_text(target_node, source_bytes)
-    lines = []
-    for line in raw_text.splitlines():
-        # Strip Python and JS comments for semantic stability
-        stripped = re.sub(r"#.*$", "", line)
-        stripped = re.sub(r"//.*$", "", stripped)
-        stripped = stripped.strip()
-        if stripped:
-            lines.append(stripped)
-    normalized = "\n".join(lines)
+
+    tokens: List[str] = []
+
+    def collect_tokens(curr: Node):
+        # Skip AST comment nodes structurally
+        if curr.type in ("comment", "line_comment", "block_comment"):
+            return
+
+        # If leaf node (no children), extract token text
+        if curr.child_count == 0:
+            text = _node_text(curr, source_bytes).strip()
+            if text:
+                tokens.append(text)
+            return
+
+        for child in curr.children:
+            collect_tokens(child)
+
+    collect_tokens(target_node)
+
+    if not tokens:
+        normalized = _node_text(target_node, source_bytes).strip()
+    else:
+        normalized = " ".join(tokens)
+
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
 
 
@@ -349,7 +364,7 @@ def _extract_python_symbols_and_calls(
                     end_line=end_l,
                     start_column=node.start_point[1],
                     end_column=node.end_point[1],
-                    details={"superclasses": superclasses, "fields": fields},
+                    details={"superclasses": superclasses, "fields": fields, "body_fingerprint": fp},
                 )
             )
 

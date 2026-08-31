@@ -15,6 +15,7 @@ import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 from uuid import UUID
 
+from app.analysis.evidence_ids import normalize_path
 from app.graph.repository_graph import RepositoryGraph
 from app.graph.schemas import EdgeKind, NodeKind
 from app.schemas.change_analysis import (
@@ -71,83 +72,102 @@ class ChangeReviewVerifier:
         Returns:
             (verdict, verification_reason, justified_severity)
         """
-        # Build index of known files
+        # Build index of known files (exact normalized paths)
         known_files: Set[str] = set()
         for f in diff_result.changed_files:
-            known_files.add(f.file_path.replace("\\", "/").lstrip("/"))
+            known_files.add(normalize_path(f.file_path))
             if f.old_path:
-                known_files.add(f.old_path.replace("\\", "/").lstrip("/"))
+                known_files.add(normalize_path(f.old_path))
         for f in diff_result.added_files + diff_result.deleted_files + diff_result.modified_files:
-            known_files.add(f.replace("\\", "/").lstrip("/"))
+            known_files.add(normalize_path(f))
         for ren in diff_result.renamed_files:
             for r in ren:
-                known_files.add(r.replace("\\", "/").lstrip("/"))
+                known_files.add(normalize_path(r))
         for delta in diff_result.dependency_deltas:
-            known_files.add(delta.manifest_file.replace("\\", "/").lstrip("/"))
+            known_files.add(normalize_path(delta.manifest_file))
         for delta in diff_result.config_deltas:
-            known_files.add(delta.file_path.replace("\\", "/").lstrip("/"))
+            known_files.add(normalize_path(delta.file_path))
         for delta in diff_result.route_deltas:
-            known_files.add(delta.file_path.replace("\\", "/").lstrip("/"))
+            known_files.add(normalize_path(delta.file_path))
         for delta in diff_result.schema_deltas:
-            known_files.add(delta.file_path.replace("\\", "/").lstrip("/"))
+            known_files.add(normalize_path(delta.file_path))
 
         # Ingest graph files if available
         for g in (base_graph, head_graph):
             if g:
                 for n in g.get_nodes():
                     if n.file_path:
-                        known_files.add(n.file_path.replace("\\", "/").lstrip("/"))
+                        known_files.add(normalize_path(n.file_path))
 
         # Ingest blast radius files
         if blast_radius:
             for imp in blast_radius.impacts:
                 if imp.source_file:
-                    known_files.add(imp.source_file.replace("\\", "/").lstrip("/"))
+                    known_files.add(normalize_path(imp.source_file))
                 if imp.affected_file:
-                    known_files.add(imp.affected_file.replace("\\", "/").lstrip("/"))
+                    known_files.add(normalize_path(imp.affected_file))
 
-        # Build index of known symbols
+        # Build index of known exact symbols and structured identities
         known_symbols: Set[str] = set()
+        known_exact_symbol_ids: Set[str] = set()
+
         for s in (
             diff_result.changed_symbols
             + diff_result.added_symbols
             + diff_result.deleted_symbols
             + diff_result.modified_symbols
         ):
+            norm_f = normalize_path(s.file_path)
             known_symbols.add(s.symbol_name)
+            known_exact_symbol_ids.add(f"{norm_f}:{s.symbol_name}")
+            known_exact_symbol_ids.add(f"{norm_f}:{s.symbol_kind}:{s.symbol_name}")
+            start_l = s.head_location.get("start_line") if s.head_location else (s.base_location.get("start_line") if s.base_location else 1)
+            known_exact_symbol_ids.add(f"symbol:{norm_f}:{s.symbol_kind}:{s.symbol_name}:{start_l}")
+            known_exact_symbol_ids.add(f"{norm_f}:{s.symbol_kind}:{s.symbol_name}:{start_l}")
+
         for delta in diff_result.dependency_deltas:
             known_symbols.add(delta.package_name)
+            known_exact_symbol_ids.add(f"{normalize_path(delta.manifest_file)}:{delta.package_name}")
         for delta in diff_result.config_deltas:
             known_symbols.add(delta.key)
+            known_exact_symbol_ids.add(f"{normalize_path(delta.file_path)}:{delta.key}")
         for delta in diff_result.route_deltas:
             known_symbols.add(delta.route_name)
-            if delta.base_path:
-                known_symbols.add(delta.base_path)
-            if delta.head_path:
-                known_symbols.add(delta.head_path)
+            known_exact_symbol_ids.add(f"{normalize_path(delta.file_path)}:{delta.route_name}")
         for delta in diff_result.schema_deltas:
             known_symbols.add(delta.model_name)
             known_symbols.add(delta.field_name)
+            known_exact_symbol_ids.add(f"{normalize_path(delta.file_path)}:{delta.model_name}")
 
         # Ingest graph symbols
         for g in (base_graph, head_graph):
             if g:
                 for n in g.get_nodes():
                     known_symbols.add(n.label)
+                    known_exact_symbol_ids.add(n.id)
+                    if n.file_path:
+                        norm_f = normalize_path(n.file_path)
+                        known_exact_symbol_ids.add(f"{norm_f}:{n.label}")
+                        known_exact_symbol_ids.add(f"symbol:{norm_f}:{n.kind.value}:{n.label}:{n.start_line}")
+                        known_exact_symbol_ids.add(f"{norm_f}:{n.kind.value}:{n.label}:{n.start_line}")
 
         # Ingest blast radius symbols
         if blast_radius:
             for imp in blast_radius.impacts:
                 if imp.source_symbol:
                     known_symbols.add(imp.source_symbol)
+                    if imp.source_file:
+                        known_exact_symbol_ids.add(f"{normalize_path(imp.source_file)}:{imp.source_symbol}")
                 if imp.affected_symbol:
                     known_symbols.add(imp.affected_symbol)
+                    if imp.affected_file:
+                        known_exact_symbol_ids.add(f"{normalize_path(imp.affected_file)}:{imp.affected_symbol}")
 
         # ---------------------------------------------------------------------
-        # Check 1: File Existence Verification
+        # Check 1: File Existence Verification (Exact Path Equality)
         # ---------------------------------------------------------------------
         for file_path in finding.affected_files:
-            clean_f = file_path.replace("\\", "/").lstrip("/")
+            clean_f = normalize_path(file_path)
             if clean_f not in known_files:
                 # Check real workspace if provided
                 found_on_disk = False
@@ -195,6 +215,7 @@ class ChangeReviewVerifier:
                 head_workspace=head_workspace,
                 known_files=known_files,
                 known_symbols=known_symbols,
+                known_exact_symbol_ids=known_exact_symbol_ids,
             )
             if not resolved[0]:
                 return (
@@ -209,7 +230,7 @@ class ChangeReviewVerifier:
         for ref in finding.evidence_refs:
             match = _LINE_REF_REGEX.match(ref)
             if match:
-                f_path = match.group(1).replace("\\", "/").lstrip("/")
+                f_path = normalize_path(match.group(1))
                 start_l = int(match.group(2))
                 end_l = int(match.group(3)) if match.group(3) else start_l
 
@@ -243,7 +264,7 @@ class ChangeReviewVerifier:
                         )
 
         # ---------------------------------------------------------------------
-        # Check 5: Graph Relationship & Edge Verification (Strict Directional Wiring)
+        # Check 5: Graph Relationship & Edge Verification (Strict Exact Directional Wiring)
         # ---------------------------------------------------------------------
         for ref in finding.evidence_refs:
             edge_match = _EDGE_REF_REGEX.match(ref)
@@ -252,15 +273,12 @@ class ChangeReviewVerifier:
                 src = edge_match.group(2)
                 tgt = edge_match.group(3)
 
-                # Verify edge existence in base_graph, head_graph, or blast_radius impacts strictly directionally
+                # Verify edge existence in base_graph, head_graph, or blast_radius strictly with exact equality
                 edge_found = False
                 for g in (base_graph, head_graph):
                     if g:
                         for e in g.get_edges():
-                            if e.kind.value.upper() == e_kind_str and (
-                                (src in e.source or e.source == src)
-                                and (tgt in e.target or e.target == tgt)
-                            ):
+                            if e.kind.value.upper() == e_kind_str and e.source == src and e.target == tgt:
                                 edge_found = True
                                 break
                     if edge_found:
@@ -270,13 +288,11 @@ class ChangeReviewVerifier:
                     for imp in blast_radius.impacts:
                         imp_edge = imp.evidence_payload.get("edge_type", "").upper()
                         if imp_edge == e_kind_str:
-                            c_file = imp.evidence_payload.get("caller_file", "")
+                            c_node = imp.evidence_payload.get("caller_node_id", "")
+                            t_node = imp.evidence_payload.get("callee_node_id", "")
                             c_sym = imp.evidence_payload.get("caller_symbol", "")
-                            t_file = imp.evidence_payload.get("callee_file", "")
                             t_sym = imp.evidence_payload.get("callee_symbol", "")
-                            if (src in (c_file, c_sym) or c_file == src or c_sym == src) and (
-                                tgt in (t_file, t_sym) or t_file == tgt or t_sym == tgt
-                            ):
+                            if (src in (c_node, c_sym) and src) and (tgt in (t_node, t_sym) and tgt):
                                 edge_found = True
                                 break
 
@@ -317,12 +333,19 @@ class ChangeReviewVerifier:
         # ---------------------------------------------------------------------
         # Check 7: Epistemic Status & Severity Consistency
         # ---------------------------------------------------------------------
-        # Pure compiler/deterministic proof with zero unverified assumptions -> CONFIRMED
-        # Behavioral predictions / assumptions -> SUPPORTED_INFERENCE
+        # CONFIRMED strictly requires zero assumptions and direct deterministic facts.
+        # Confidence score NEVER influences or promotes a finding to CONFIRMED.
         is_pure_fact = (
             len(finding.assumptions) == 0
             and any(
-                ref.startswith("diff:") or ref.startswith("impact:") or ref.startswith("symbol:") for ref in finding.evidence_refs
+                ref.startswith("diff:")
+                or ref.startswith("impact:")
+                or ref.startswith("symbol:")
+                or ref.startswith("route:")
+                or ref.startswith("file:")
+                or ref.startswith("config:")
+                or ref.startswith("dependency:")
+                for ref in finding.evidence_refs
             )
         )
 
@@ -366,83 +389,142 @@ class ChangeReviewVerifier:
         head_workspace: Optional[str],
         known_files: Set[str],
         known_symbols: Set[str],
+        known_exact_symbol_ids: Set[str],
     ) -> Tuple[bool, str]:
         """Resolve an individual evidence reference string strictly without fuzzy substring matches."""
         clean_ref = ref.strip()
         if not clean_ref:
             return False, "Empty reference"
 
-        # 1. diff: prefix (exact file path or symbol name match only)
+        # 1. file: or diff: prefix (exact normalized file path match only)
+        if clean_ref.startswith("file:"):
+            target = normalize_path(clean_ref[5:])
+            if target in known_files:
+                return True, "Matched file in known files"
+            for ws in (head_workspace, base_workspace):
+                if ws and _read_file_lines_safe(ws, target) is not None:
+                    known_files.add(target)
+                    return True, "Matched file on disk"
+            return False, f"Unknown file reference '{target}'"
+
         if clean_ref.startswith("diff:"):
-            target = clean_ref[5:].replace("\\", "/").lstrip("/")
+            target = normalize_path(clean_ref[5:])
             if target in known_files:
                 return True, "Matched changed file in diff"
-            if target in known_symbols:
+            if clean_ref[5:] in known_symbols:
                 return True, "Matched symbol in diff"
             return False, f"Unknown diff target '{target}'"
 
         # 2. symbol: prefix (exact symbol existence verification)
         if clean_ref.startswith("symbol:"):
-            parts = clean_ref[7:].split(":")
-            sym_name = parts[-1]
-            if sym_name not in known_symbols:
-                return False, f"Symbol '{sym_name}' not found in known symbols"
-            if len(parts) >= 2:
-                file_part = parts[0].replace("\\", "/").lstrip("/")
-                if file_part not in known_files:
-                    # Check disk workspace
-                    found_on_disk = False
-                    for ws in (head_workspace, base_workspace):
-                        if ws and _read_file_lines_safe(ws, file_part) is not None:
-                            found_on_disk = True
-                            break
-                    if not found_on_disk:
-                        return False, f"File '{file_part}' in symbol ref not found"
-            return True, "Matched known symbol"
+            target = clean_ref[7:]
+            if clean_ref in known_exact_symbol_ids or target in known_exact_symbol_ids:
+                return True, "Matched exact symbol ID"
 
-        # 3. impact: prefix (exact impact UUID or title prefix/match)
+            parts = target.split(":")
+            if len(parts) == 4:
+                # symbol:<file_path>:<kind>:<name>:<start_line>
+                file_part = normalize_path(parts[0])
+                kind_part = parts[1]
+                name_part = parts[2]
+                try:
+                    start_l = int(parts[3])
+                except ValueError:
+                    return False, f"Invalid start_line in symbol ref: '{parts[3]}'"
+
+                exact_id = f"symbol:{file_part}:{kind_part}:{name_part}:{start_l}"
+                if exact_id in known_exact_symbol_ids or f"{file_part}:{kind_part}:{name_part}:{start_l}" in known_exact_symbol_ids:
+                    return True, "Matched exact symbol tuple"
+
+                # Check graph nodes
+                for g in (base_graph, head_graph):
+                    if g:
+                        for n in g.get_nodes():
+                            if (
+                                normalize_path(n.file_path or "") == file_part
+                                and n.label == name_part
+                                and (n.start_line is None or n.start_line == start_l)
+                            ):
+                                return True, "Matched graph node"
+                return False, f"Exact symbol '{target}' not found in diff or graph"
+
+            elif len(parts) == 2:
+                file_part = normalize_path(parts[0])
+                name_part = parts[1]
+                if f"{file_part}:{name_part}" in known_exact_symbol_ids:
+                    return True, "Matched file:symbol pair"
+                if file_part in known_files and name_part in known_symbols:
+                    # Check graph or disk
+                    for g in (base_graph, head_graph):
+                        if g:
+                            for n in g.get_nodes():
+                                if normalize_path(n.file_path or "") == file_part and n.label == name_part:
+                                    return True, "Matched file:symbol in graph"
+                return False, f"Symbol '{name_part}' not found in file '{file_part}'"
+
+            elif len(parts) == 1:
+                sym_name = parts[0]
+                if sym_name in known_symbols:
+                    return True, "Matched known symbol"
+                return False, f"Symbol '{sym_name}' not found in known symbols"
+
+            return False, f"Malformed symbol reference '{clean_ref}'"
+
+        # 3. impact: prefix (exact UUID only)
         if clean_ref.startswith("impact:"):
-            imp_query = clean_ref[7:].lower()
+            imp_query = clean_ref[7:].strip().lower()
             if blast_radius:
                 for imp in blast_radius.impacts:
-                    if str(imp.id) == imp_query or imp.title.lower() == imp_query or imp_query in imp.title.lower():
-                        return True, "Matched blast radius impact"
-            return False, f"Unknown impact reference '{clean_ref}'"
+                    if str(imp.id).lower() == imp_query:
+                        return True, "Matched blast radius impact UUID"
+            return False, f"Unknown impact UUID '{clean_ref}'"
 
-        # 4. route: prefix (exact route contract delta match or path/name match)
+        # 4. route: prefix (exact route contract delta match or route method:path)
         if clean_ref.startswith("route:"):
             route_target = clean_ref[6:].strip()
+            # If formatted as route:METHOD:path or route:METHOD path
+            method_path_match = re.match(r"^([A-Z]+)[:\s]+(/.*)$", route_target, re.IGNORECASE)
+            if method_path_match:
+                req_method = method_path_match.group(1).upper()
+                req_path = method_path_match.group(2)
+                for r in diff_result.route_deltas:
+                    if (
+                        (r.base_http_method == req_method and r.base_path == req_path)
+                        or (r.head_http_method == req_method and r.head_path == req_path)
+                    ):
+                        return True, "Matched exact route method and path"
+                return False, f"No route delta found for {req_method} {req_path}"
+
             for r in diff_result.route_deltas:
                 if (
                     route_target == r.route_name
-                    or route_target.endswith(r.route_name)
-                    or (r.file_path and route_target == f"{r.file_path}:{r.route_name}")
+                    or (r.file_path and route_target == f"{normalize_path(r.file_path)}:{r.route_name}")
                     or (r.base_path and (route_target == f"{r.base_http_method} {r.base_path}" or route_target == r.base_path))
                     or (r.head_path and (route_target == f"{r.head_http_method} {r.head_path}" or route_target == r.head_path))
                 ):
                     return True, "Matched route delta"
             return False, f"Unknown route reference '{clean_ref}'"
 
-        # 5. config: prefix (exact config key match)
+        # 5. config: prefix (exact config key or path:key match)
         if clean_ref.startswith("config:"):
-            cfg_target = clean_ref[7:]
+            cfg_target = clean_ref[7:].strip()
             for c in diff_result.config_deltas:
-                if c.key == cfg_target:
+                if c.key == cfg_target or f"{normalize_path(c.file_path)}:{c.key}" == cfg_target:
                     return True, "Matched config delta"
             return False, f"Unknown config reference '{clean_ref}'"
 
-        # 6. dep: prefix (exact dependency package match)
-        if clean_ref.startswith("dep:"):
-            dep_target = clean_ref[4:]
+        # 6. dep: or dependency: prefix (exact dependency package match)
+        if clean_ref.startswith("dep:") or clean_ref.startswith("dependency:"):
+            dep_target = clean_ref.split(":", 1)[1].strip()
             for d in diff_result.dependency_deltas:
-                if d.package_name == dep_target:
+                if d.package_name == dep_target or f"{normalize_path(d.manifest_file)}:{d.package_name}" == dep_target:
                     return True, "Matched dependency delta"
             return False, f"Unknown dependency reference '{clean_ref}'"
 
         # 7. Line reference (line:file:start-end or file:line)
         line_match = _LINE_REF_REGEX.match(clean_ref)
         if line_match:
-            f_path = line_match.group(1).replace("\\", "/").lstrip("/")
+            f_path = normalize_path(line_match.group(1))
             if f_path in known_files:
                 return True, "Matched line in known file"
             for ws in (head_workspace, base_workspace):
@@ -456,11 +538,11 @@ class ChangeReviewVerifier:
             return True, "Edge reference syntactically valid (checked in Check 5)"
 
         # 9. Plain exact file or symbol reference
-        clean_norm = clean_ref.replace("\\", "/").lstrip("/")
-        if clean_norm in known_files or clean_ref in known_symbols:
-            return True, "Matched known file or symbol"
+        clean_norm = normalize_path(clean_ref)
+        if clean_norm in known_files or clean_ref in known_symbols or clean_ref in known_exact_symbol_ids:
+            return True, "Matched exact known file or symbol"
 
-        return False, f"Reference '{clean_ref}' does not match any known entity"
+        return False, f"Unresolvable evidence reference '{clean_ref}'"
 
     def verify_report(
         self,

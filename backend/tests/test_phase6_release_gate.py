@@ -586,3 +586,397 @@ def test_alembic_phase6_migration_cycle_with_null_scan_events():
         engine3.dispose()
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# =========================================================================
+# Micro-Closure 1: Exact Typed Evidence Grounding & Rejection Tests
+# =========================================================================
+
+def test_exact_evidence_identities_rejections():
+    """Verify that ChangeReviewVerifier rejects non-exact, fuzzy, or reversed evidence references."""
+    from app.analysis.review_verifier import ChangeReviewVerifier
+    from app.schemas.change_analysis import (
+        BlastRadiusReport,
+        ChangeImpact,
+        ChangeReviewFinding,
+        ChangeReviewVerdict,
+        RouteContractDelta,
+        StructuralDiffResult,
+        SymbolDiffFact,
+    )
+    from app.graph.repository_graph import RepositoryGraph
+    from app.graph.schemas import EdgeKind, NodeKind
+
+    # Setup base graph with A -> B CALLS edge
+    base_graph = RepositoryGraph()
+    base_graph.add_node("symbol:app/auth.py:FUNCTION:caller_fn:10", NodeKind.SYMBOL, "caller_fn", file_path="app/auth.py", start_line=10, end_line=20)
+    base_graph.add_node("symbol:app/auth.py:FUNCTION:callee_fn:30", NodeKind.SYMBOL, "callee_fn", file_path="app/auth.py", start_line=30, end_line=40)
+    base_graph.add_edge("symbol:app/auth.py:FUNCTION:caller_fn:10", "symbol:app/auth.py:FUNCTION:callee_fn:30", EdgeKind.CALLS)
+
+    diff_res = StructuralDiffResult(
+        base_commit_sha="1111111111111111111111111111111111111111",
+        head_commit_sha="2222222222222222222222222222222222222222",
+        repository_url="https://github.com/fastapi/fastapi",
+        route_deltas=[
+            RouteContractDelta(
+                file_path="app/api.py",
+                route_type="FASTAPI_ROUTE",
+                route_name="login",
+                base_path="/api/login",
+                head_path="/api/login",
+                base_http_method="POST",
+                head_http_method="PUT",
+                change_type="METHOD_CHANGED",
+                details="Method updated",
+            )
+        ],
+        changed_symbols=[
+            SymbolDiffFact(
+                file_path="app/auth.py",
+                symbol_name="callee_fn",
+                symbol_kind="FUNCTION",
+                change_type="MODIFIED",
+                base_location={"start_line": 30, "end_line": 40},
+                head_location={"start_line": 30, "end_line": 40},
+            )
+        ],
+    )
+
+    impact_id = uuid4()
+    blast_report = BlastRadiusReport(
+        analysis_id=uuid4(),
+        impacts=[
+            ChangeImpact(
+                id=impact_id,
+                analysis_id=uuid4(),
+                impact_type=ChangeImpactType.CALLER_IMPACT,
+                severity=Severity.HIGH,
+                title="Direct caller 'caller_fn' impacted by modified 'callee_fn'",
+                description="Caller broken",
+                source_file="app/auth.py",
+                source_symbol="callee_fn",
+                affected_file="app/auth.py",
+                affected_symbol="caller_fn",
+                created_at=datetime.now(timezone.utc),
+            )
+        ],
+        total_impacts=1,
+    )
+
+    verifier = ChangeReviewVerifier()
+
+    # 1. Reversed edge direction: callee -> caller (A calls B, but ref claims B calls A)
+    reversed_finding = ChangeReviewFinding(
+        title="Reversed call edge claim",
+        risk_type="REGRESSION_RISK",
+        severity=Severity.HIGH,
+        reasoning_summary="Reversed edge test",
+        evidence_refs=["edge:CALLS:symbol:app/auth.py:FUNCTION:callee_fn:30->symbol:app/auth.py:FUNCTION:caller_fn:10"],
+        affected_files=["app/auth.py"],
+        affected_symbols=["caller_fn"],
+        assumptions=[],
+    )
+    v, reason, _ = verifier.verify_finding(reversed_finding, diff_res, blast_report, base_graph)
+    assert v == ChangeReviewVerdict.REJECTED
+    assert "Fake graph relationship" in reason
+
+    # 2. Substring edge match (node IDs merely contained as substring)
+    substring_edge_finding = ChangeReviewFinding(
+        title="Substring edge claim",
+        risk_type="REGRESSION_RISK",
+        severity=Severity.HIGH,
+        reasoning_summary="Substring edge test",
+        evidence_refs=["edge:CALLS:caller_fn->callee_fn"],
+        affected_files=["app/auth.py"],
+        affected_symbols=["caller_fn"],
+        assumptions=[],
+    )
+    v, reason, _ = verifier.verify_finding(substring_edge_finding, diff_res, blast_report, base_graph)
+    assert v == ChangeReviewVerdict.REJECTED
+
+    # 3. Impact title instead of UUID
+    title_impact_finding = ChangeReviewFinding(
+        title="Title impact claim",
+        risk_type="REGRESSION_RISK",
+        severity=Severity.HIGH,
+        reasoning_summary="Title impact test",
+        evidence_refs=["impact:Direct caller 'caller_fn' impacted by modified 'callee_fn'"],
+        affected_files=["app/auth.py"],
+        affected_symbols=["caller_fn"],
+        assumptions=[],
+    )
+    v, reason, _ = verifier.verify_finding(title_impact_finding, diff_res, blast_report, base_graph)
+    assert v == ChangeReviewVerdict.REJECTED
+    assert "Unknown impact UUID" in reason
+
+    # 4. Impact title substring
+    substring_impact_finding = ChangeReviewFinding(
+        title="Substring impact claim",
+        risk_type="REGRESSION_RISK",
+        severity=Severity.HIGH,
+        reasoning_summary="Substring impact test",
+        evidence_refs=["impact:caller_fn"],
+        affected_files=["app/auth.py"],
+        affected_symbols=["caller_fn"],
+        assumptions=[],
+    )
+    v, reason, _ = verifier.verify_finding(substring_impact_finding, diff_res, blast_report, base_graph)
+    assert v == ChangeReviewVerdict.REJECTED
+
+    # 5. Non-existent symbol in real file
+    fake_sym_finding = ChangeReviewFinding(
+        title="Fake symbol in real file",
+        risk_type="REGRESSION_RISK",
+        severity=Severity.HIGH,
+        reasoning_summary="Fake symbol test",
+        evidence_refs=["symbol:app/auth.py:FUNCTION:non_existent_fn:99"],
+        affected_files=["app/auth.py"],
+        affected_symbols=["caller_fn"],
+        assumptions=[],
+    )
+    v, reason, _ = verifier.verify_finding(fake_sym_finding, diff_res, blast_report, base_graph)
+    assert v == ChangeReviewVerdict.REJECTED
+
+    # 6. Symbol in wrong file
+    wrong_file_sym_finding = ChangeReviewFinding(
+        title="Symbol in wrong file",
+        risk_type="REGRESSION_RISK",
+        severity=Severity.HIGH,
+        reasoning_summary="Wrong file test",
+        evidence_refs=["symbol:app/wrong_file.py:FUNCTION:caller_fn:10"],
+        affected_files=["app/auth.py"],
+        affected_symbols=["caller_fn"],
+        assumptions=[],
+    )
+    v, reason, _ = verifier.verify_finding(wrong_file_sym_finding, diff_res, blast_report, base_graph)
+    assert v == ChangeReviewVerdict.REJECTED
+
+    # 7. Symbol with wrong start line
+    wrong_line_sym_finding = ChangeReviewFinding(
+        title="Symbol with wrong line",
+        risk_type="REGRESSION_RISK",
+        severity=Severity.HIGH,
+        reasoning_summary="Wrong line test",
+        evidence_refs=["symbol:app/auth.py:FUNCTION:caller_fn:999"],
+        affected_files=["app/auth.py"],
+        affected_symbols=["caller_fn"],
+        assumptions=[],
+    )
+    v, reason, _ = verifier.verify_finding(wrong_line_sym_finding, diff_res, blast_report, base_graph)
+    assert v == ChangeReviewVerdict.REJECTED
+
+    # 8. Route with wrong HTTP method
+    wrong_route_finding = ChangeReviewFinding(
+        title="Route with wrong method",
+        risk_type="API_CONTRACT_BREAK",
+        severity=Severity.HIGH,
+        reasoning_summary="Wrong method test",
+        evidence_refs=["route:DELETE:/api/login"],
+        affected_files=["app/api.py"],
+        affected_symbols=["login"],
+        assumptions=[],
+    )
+    v, reason, _ = verifier.verify_finding(wrong_route_finding, diff_res, blast_report, base_graph)
+    assert v == ChangeReviewVerdict.REJECTED
+    assert "No route delta found" in reason
+
+    # 9. Valid exact IDs -> CONFIRMED (with zero assumptions)
+    valid_exact_finding = ChangeReviewFinding(
+        title="Valid exact route contract break",
+        risk_type="API_CONTRACT_BREAK",
+        severity=Severity.HIGH,
+        reasoning_summary="Valid exact test",
+        evidence_refs=[
+            "file:app/api.py",
+            f"impact:{impact_id}",
+            "route:POST:/api/login",
+            "symbol:app/auth.py:FUNCTION:caller_fn:10",
+            "edge:CALLS:symbol:app/auth.py:FUNCTION:caller_fn:10->symbol:app/auth.py:FUNCTION:callee_fn:30",
+        ],
+        affected_files=["app/api.py", "app/auth.py"],
+        affected_symbols=["caller_fn", "login"],
+        confidence=0.5,  # Confidence must not affect CONFIRMED
+        assumptions=[],
+    )
+    v, reason, _ = verifier.verify_finding(valid_exact_finding, diff_res, blast_report, base_graph)
+    assert v == ChangeReviewVerdict.CONFIRMED
+
+
+# =========================================================================
+# Micro-Closure 2: AST-Aware Symbol Body Fingerprint Semantics
+# =========================================================================
+
+def test_ast_aware_symbol_body_fingerprint_semantics():
+    """Verify AST-aware symbol body fingerprinting handles string literals, comments, whitespace, and body edits."""
+    from app.ingestion.parser import parse_file
+    from app.ingestion.schemas import SymbolKind
+
+    # Case A: return x + 1 vs return x + 2 -> DIFFERENT
+    py_a1 = "def calc(x):\n    return x + 1\n"
+    py_a2 = "def calc(x):\n    return x + 2\n"
+    res_a1 = parse_file("a.py", "python", py_a1.encode("utf-8"))
+    res_a2 = parse_file("a.py", "python", py_a2.encode("utf-8"))
+    fp_a1 = res_a1[0].details["body_fingerprint"]
+    fp_a2 = res_a2[0].details["body_fingerprint"]
+    assert fp_a1 != fp_a2
+
+    # Case B: 20 comments inserted above function -> SAME
+    py_b1 = "def greet(name):\n    return f'hello {name}'\n"
+    py_b2 = "\n".join([f"# Comment line {i}" for i in range(20)]) + "\ndef greet(name):\n    return f'hello {name}'\n"
+    res_b1 = parse_file("b.py", "python", py_b1.encode("utf-8"))
+    res_b2 = parse_file("b.py", "python", py_b2.encode("utf-8"))
+    fp_b1 = res_b1[0].details["body_fingerprint"]
+    fp_b2 = res_b2[0].details["body_fingerprint"]
+    assert fp_b1 == fp_b2
+
+    # Case C: comment-only change inside function -> SAME
+    py_c1 = "def process():\n    # old comment\n    x = 10\n    return x\n"
+    py_c2 = "def process():\n    # completely rewritten comment\n    x = 10\n    return x\n"
+    res_c1 = parse_file("c.py", "python", py_c1.encode("utf-8"))
+    res_c2 = parse_file("c.py", "python", py_c2.encode("utf-8"))
+    fp_c1 = res_c1[0].details["body_fingerprint"]
+    fp_c2 = res_c2[0].details["body_fingerprint"]
+    assert fp_c1 == fp_c2
+
+    # Case D: "#not-a-comment" vs "#changed-string" inside Python string -> DIFFERENT
+    py_d1 = 'def get_tag():\n    return "#not-a-comment"\n'
+    py_d2 = 'def get_tag():\n    return "#changed-string"\n'
+    res_d1 = parse_file("d.py", "python", py_d1.encode("utf-8"))
+    res_d2 = parse_file("d.py", "python", py_d2.encode("utf-8"))
+    fp_d1 = res_d1[0].details["body_fingerprint"]
+    fp_d2 = res_d2[0].details["body_fingerprint"]
+    assert fp_d1 != fp_d2
+
+    # Case E: "https://old.com" vs "https://new.com" inside JS/TS string -> DIFFERENT
+    ts_e1 = 'export function getUrl(): string {\n    return "https://old.example.com";\n}\n'
+    ts_e2 = 'export function getUrl(): string {\n    return "https://new.example.com";\n}\n'
+    res_e1 = parse_file("e.ts", "typescript", ts_e1.encode("utf-8"))
+    res_e2 = parse_file("e.ts", "typescript", ts_e2.encode("utf-8"))
+    fp_e1 = res_e1[0].details["body_fingerprint"]
+    fp_e2 = res_e2[0].details["body_fingerprint"]
+    assert fp_e1 != fp_e2
+
+    # Case F: whitespace-only formatting change inside function -> SAME
+    py_f1 = "def format_fn():\n    a = 1\n    b = 2\n    return a + b\n"
+    py_f2 = "def format_fn():\n\n    a   =   1\n\n    b   =   2\n\n    return a + b\n"
+    res_f1 = parse_file("f.py", "python", py_f1.encode("utf-8"))
+    res_f2 = parse_file("f.py", "python", py_f2.encode("utf-8"))
+    fp_f1 = res_f1[0].details["body_fingerprint"]
+    fp_f2 = res_f2[0].details["body_fingerprint"]
+    assert fp_f1 == fp_f2
+
+
+# =========================================================================
+# Micro-Closure 3: Large-File Rename Detection Memory Safety
+# =========================================================================
+
+def test_large_file_rename_memory_safety():
+    """Verify that files exceeding MAX_FILE_SIZE_BYTES are never read into memory during rename detection."""
+    from app.analysis.diff_engine import ChangeDiffEngine
+
+    diff_engine = ChangeDiffEngine()
+    max_size = 1000  # 1 KB limit for testing
+
+    with tempfile.TemporaryDirectory() as base_dir, tempfile.TemporaryDirectory() as head_dir:
+        # Create a 5 KB file in base and head
+        large_content = b"X" * 5000
+        old_file = os.path.join(base_dir, "large_old.bin")
+        new_file = os.path.join(head_dir, "large_new.bin")
+
+        with open(old_file, "wb") as f:
+            f.write(large_content)
+        with open(new_file, "wb") as f:
+            f.write(large_content)
+
+        # Ensure bounded hasher returns None without full reading
+        assert diff_engine._compute_file_sha256_bounded(old_file, max_size) is None
+        assert diff_engine._compute_file_sha256_bounded(new_file, max_size) is None
+
+        # Verify structural diff skips rename and reports both as added/deleted with EXCEEDS_MAX_FILE_SIZE
+        diff_engine.settings.MAX_FILE_SIZE_BYTES = max_size
+        diff_res = diff_engine.compute_structural_diff(
+            base_workspace=base_dir,
+            head_workspace=head_dir,
+            base_commit_sha="1111111111111111111111111111111111111111",
+            head_commit_sha="2222222222222222222222222222222222222222",
+            repository_url="https://github.com/test/repo",
+        )
+
+        assert len(diff_res.renamed_files) == 0
+        assert "large_old.bin" in diff_res.deleted_files
+        assert "large_new.bin" in diff_res.added_files
+        added_fact = next(f for f in diff_res.changed_files if f.file_path == "large_new.bin")
+        assert added_fact.skipped_reason == "EXCEEDS_MAX_FILE_SIZE"
+
+
+# =========================================================================
+# Micro-Closure 4: Null-Safe & Truthful LLM Degradation Reporting
+# =========================================================================
+
+def test_null_safe_llm_degradation_reporting():
+    """Verify that report generation is null-safe for all model_metadata permutations and displays truthful Markdown tool availability."""
+    from app.analysis.report_generator import generate_change_analysis_report
+
+    # 1. model_metadata is None
+    analysis_none = ChangeAnalysisModel(
+        id=str(uuid4()),
+        repository_url="https://github.com/test/repo",
+        repository_owner="test",
+        repository_name="repo",
+        base_commit_sha="1111111111111111111111111111111111111111",
+        head_commit_sha="2222222222222222222222222222222222222222",
+        status="COMPLETED",
+        model_metadata=None,
+    )
+    rep_none = generate_change_analysis_report(analysis_none)
+    assert rep_none.tool_availability["llm_reviewer"] is False
+    assert "| **Change Review Agent** | ℹ️ Not Executed | Static Only |" in rep_none.markdown_report
+
+    # 2. LLM Unavailable fallback
+    analysis_unavail = ChangeAnalysisModel(
+        id=str(uuid4()),
+        repository_url="https://github.com/test/repo",
+        repository_owner="test",
+        repository_name="repo",
+        base_commit_sha="1111111111111111111111111111111111111111",
+        head_commit_sha="2222222222222222222222222222222222222222",
+        status="COMPLETED",
+        model_metadata={
+            "review_report": {
+                "summary": "Fallback summary",
+                "findings": [],
+                "model_metadata": {
+                    "execution_status": "UNAVAILABLE",
+                    "is_fallback": True,
+                },
+            }
+        },
+    )
+    rep_unavail = generate_change_analysis_report(analysis_unavail)
+    assert rep_unavail.tool_availability["llm_reviewer"] is False
+    assert "| **Change Review Agent** | ⚠️ Unavailable — deterministic-only result | Fallback Mode |" in rep_unavail.markdown_report
+
+    # 3. LLM Success
+    analysis_success = ChangeAnalysisModel(
+        id=str(uuid4()),
+        repository_url="https://github.com/test/repo",
+        repository_owner="test",
+        repository_name="repo",
+        base_commit_sha="1111111111111111111111111111111111111111",
+        head_commit_sha="2222222222222222222222222222222222222222",
+        status="COMPLETED",
+        model_metadata={
+            "review_report": {
+                "summary": "AI review succeeded",
+                "findings": [],
+                "model_metadata": {
+                    "execution_status": "SUCCESS",
+                    "is_fallback": False,
+                },
+            }
+        },
+    )
+    rep_success = generate_change_analysis_report(analysis_success)
+    assert rep_success.tool_availability["llm_reviewer"] is True
+    assert "| **Change Review Agent** | ✅ Executed | Bounded Context Reasoning |" in rep_success.markdown_report
+
