@@ -1,11 +1,12 @@
 """API endpoints for patch inspection, human-in-the-loop approval, rejection, and revision."""
 
 from datetime import datetime, timezone
+import hashlib
 import logging
 from typing import List, Optional
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -13,6 +14,7 @@ from app.agents.checkpointer import get_sqlite_checkpointer
 from app.api.dependencies import get_current_user, verify_csrf
 from app.core.database import get_db
 from app.models.patch import PatchModel
+from app.governance.events import AuditLedger, DomainOutbox
 from app.patching.workflow_graph import RemediationState, build_remediation_graph
 from app.planning.schemas import FixPlan
 from app.schemas.auth import CurrentUser, get_user_id
@@ -62,6 +64,7 @@ def get_patches_by_scan_id(
 async def approve_patch(
     patch_id: str,
     payload: PatchReviewRequest,
+    request: Request,
     current_user: CurrentUser = Depends(get_current_user),
     _csrf: None = Depends(verify_csrf),
     db: Session = Depends(get_db),
@@ -143,6 +146,29 @@ async def approve_patch(
         ),
         critical=True,
     )
+    state_digest = hashlib.sha256(
+        f"{patch_model.id}:{patch_model.status}:{patch_model.approved_by}:{approved_at_iso}".encode("utf-8")
+    ).hexdigest()
+    AuditLedger.append(
+        db,
+        tenant_id=current_user.id,
+        actor_id=current_user.id,
+        request_id=getattr(request.state, "request_id", None),
+        event_type="HUMAN_PATCH_APPROVED",
+        resource_type="PATCH",
+        resource_id=str(patch_model.id),
+        state_digest=state_digest,
+        payload={"scan_id": str(patch_model.scan_id), "finding_id": str(patch_model.finding_id)},
+    )
+    DomainOutbox.append(
+        db,
+        tenant_id=current_user.id,
+        aggregate_type="PATCH",
+        aggregate_id=str(patch_model.id),
+        event_type="PATCH_APPROVED",
+        deduplication_key=f"patch:{patch_model.id}:approved",
+        payload={"approved_by": current_user.id},
+    )
     WorkflowEventService.emit(
         db=db,
         event=WorkflowEventCreate(
@@ -168,6 +194,7 @@ async def approve_patch(
 async def reject_patch(
     patch_id: str,
     payload: PatchRejectRequest,
+    request: Request,
     current_user: CurrentUser = Depends(get_current_user),
     _csrf: None = Depends(verify_csrf),
     db: Session = Depends(get_db),
@@ -234,6 +261,29 @@ async def reject_patch(
             metadata_payload={"reason": payload.reason},
         ),
         critical=True,
+    )
+    state_digest = hashlib.sha256(
+        f"{patch_model.id}:{patch_model.status}:{patch_model.rejected_reason}".encode("utf-8")
+    ).hexdigest()
+    AuditLedger.append(
+        db,
+        tenant_id=current_user.id,
+        actor_id=current_user.id,
+        request_id=getattr(request.state, "request_id", None),
+        event_type="HUMAN_PATCH_REJECTED",
+        resource_type="PATCH",
+        resource_id=str(patch_model.id),
+        state_digest=state_digest,
+        payload={"scan_id": str(patch_model.scan_id), "finding_id": str(patch_model.finding_id)},
+    )
+    DomainOutbox.append(
+        db,
+        tenant_id=current_user.id,
+        aggregate_type="PATCH",
+        aggregate_id=str(patch_model.id),
+        event_type="PATCH_REJECTED",
+        deduplication_key=f"patch:{patch_model.id}:rejected",
+        payload={"rejected_by": current_user.id},
     )
     WorkflowEventService.emit(
         db=db,

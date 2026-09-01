@@ -4,7 +4,8 @@ import json
 from typing import Any, Dict
 from app.agents.state import AnalysisState
 from app.llm.router import get_llm_router
-from app.llm.types import LLMMessage, LLMRequest, TaskPolicy
+from app.llm.types import LLMMessage, LLMRequest, ModelCapability, TaskPolicy
+from app.llm.workflow_contracts import lineage_for_scan
 
 
 async def run_repository_mapper(state: AnalysisState) -> Dict[str, Any]:
@@ -34,6 +35,13 @@ async def run_repository_mapper(state: AnalysisState) -> Dict[str, Any]:
                 LLMMessage(role="user", content=prompt),
             ],
             task_policy=TaskPolicy.LIGHTWEIGHT_CLASSIFICATION,
+            capability=ModelCapability.CLASSIFICATION,
+            lineage=lineage_for_scan(
+                str(state.get("scan_id", "")),
+                prompt_template_version="repository-mapper/1.0",
+                output_schema_version=None,
+                evidence={"manifest": manifest_summary, "languages": languages, "frameworks": frameworks},
+            ),
             temperature=0.0,
             max_tokens=150,
         )

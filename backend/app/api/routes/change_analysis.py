@@ -14,7 +14,13 @@ from sqlalchemy.orm import Session
 
 from app.analysis.workflow import execute_background_change_analysis
 from app.api.dependencies import get_current_user, verify_csrf
+from app.api.idempotency import idempotency_identity
+from app.core.config import get_settings
 from app.core.database import get_db
+from app.execution.application import NewWorkPaused, WorkSubmissionService, deterministic_resource_id
+from app.execution.dispatcher import DurableWorkDispatcher
+from app.execution.errors import IdempotencyConflict
+from app.execution.types import RequestBudget, ResourceProfile, WorkKind
 from app.ingestion.github_pr import (
     GitHubPRForbiddenError,
     GitHubPRNotFoundError,
@@ -47,6 +53,33 @@ from app.services.workflow_event_service import WorkflowEventService
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/change-analyses", tags=["Change Analyses"])
+
+
+def _change_request_budget() -> RequestBudget:
+    settings = get_settings()
+    return RequestBudget(
+        max_wall_clock_seconds=settings.MAX_SCAN_DURATION_SECONDS,
+        max_analyzer_seconds=settings.MAX_SCAN_DURATION_SECONDS,
+        max_ai_calls=6,
+        max_input_tokens=250_000,
+        max_output_tokens=50_000,
+        max_escalation_tier=2,
+        max_retrieval_context_tokens=125_000,
+    )
+
+
+def _raise_submission_error(exc: Exception) -> None:
+    if isinstance(exc, NewWorkPaused):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error_code": "NEW_JOBS_PAUSED", "message": str(exc)},
+        ) from exc
+    if isinstance(exc, IdempotencyConflict):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error_code": "IDEMPOTENCY_CONFLICT", "message": str(exc)},
+        ) from exc
+    raise exc
 
 
 def _extract_repo_owner_name(repo_url: str) -> tuple[str, str]:
@@ -114,16 +147,66 @@ def _serialize_analysis(model: ChangeAnalysisModel) -> ChangeAnalysisResponse:
 )
 async def create_change_analysis(
     payload: ChangeAnalysisRequest,
+    request: Request,
+    response: Response,
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
     current_user: CurrentUser = Depends(get_current_user),
     _csrf: None = Depends(verify_csrf),
     db: Session = Depends(get_db),
 ) -> ChangeAnalysisResponse:
     """Initiate asynchronous change intelligence analysis between two exact commit SHAs."""
-    # 1. Quota check & increment
-    check_and_increment_quota(db, current_user.id, UsageOperation.CHANGE_ANALYSIS_CREATE.value)
-
     owner, repo = _extract_repo_owner_name(payload.repository_url)
-    analysis_id = str(uuid4())
+    external_identity = idempotency_identity(
+        "change-analysis-create",
+        idempotency_key,
+        maximum=get_settings().IDEMPOTENCY_KEY_MAX_LENGTH,
+    )
+    analysis_id = (
+        deterministic_resource_id(current_user.id, "change-analysis", external_identity)
+        if external_identity
+        else str(uuid4())
+    )
+    request_payload = {
+        "repository_url": payload.repository_url,
+        "base_ref": payload.base_ref,
+        "base_commit_sha": payload.base_commit_sha,
+        "head_ref": payload.head_ref,
+        "head_commit_sha": payload.head_commit_sha,
+    }
+    submission_service = WorkSubmissionService()
+    if external_identity:
+        existing_work = submission_service.find_by_external_identity(
+            db,
+            tenant_id=current_user.id,
+            work_kind=WorkKind.CHANGE_ANALYSIS,
+            identity=external_identity,
+        )
+        if existing_work is not None:
+            try:
+                submission = submission_service.submit(
+                    db,
+                    tenant_id=current_user.id,
+                    actor_id=current_user.id,
+                    request_id=getattr(request.state, "request_id", str(uuid4())),
+                    work_kind=WorkKind.CHANGE_ANALYSIS,
+                    resource_type="CHANGE_ANALYSIS",
+                    resource_id=analysis_id,
+                    request_payload=request_payload,
+                    idempotency_key=external_identity,
+                    external_idempotency_key=external_identity,
+                    resource_profile=ResourceProfile.CHANGE_ANALYSIS,
+                    budget=_change_request_budget(),
+                    allow_when_paused=True,
+                )
+            except (NewWorkPaused, IdempotencyConflict) as exc:
+                _raise_submission_error(exc)
+            existing = get_owned_change_analysis_or_404(db, existing_work.resource_id, current_user)
+            db.commit()
+            response.headers["Location"] = f"/api/v1/jobs/{submission.result.work_item_id}"
+            response.headers["Idempotency-Replayed"] = "true"
+            return _serialize_analysis(existing)
+
+    check_and_increment_quota(db, current_user.id, UsageOperation.CHANGE_ANALYSIS_CREATE.value)
 
     analysis_model = ChangeAnalysisModel(
         id=analysis_id,
@@ -139,10 +222,26 @@ async def create_change_analysis(
         model_metadata={},
     )
     db.add(analysis_model)
-    db.commit()
-    db.refresh(analysis_model)
+    try:
+        submission = submission_service.submit(
+            db,
+            tenant_id=current_user.id,
+            actor_id=current_user.id,
+            request_id=getattr(request.state, "request_id", str(uuid4())),
+            work_kind=WorkKind.CHANGE_ANALYSIS,
+            resource_type="CHANGE_ANALYSIS",
+            resource_id=analysis_id,
+            request_payload=request_payload,
+            idempotency_key=external_identity or f"change-analysis:{analysis_id}",
+            external_idempotency_key=external_identity,
+            resource_profile=ResourceProfile.CHANGE_ANALYSIS,
+            budget=_change_request_budget(),
+        )
+    except (NewWorkPaused, IdempotencyConflict) as exc:
+        db.rollback()
+        _raise_submission_error(exc)
 
-    WorkflowEventService.emit(
+    WorkflowEventService.emit_critical(
         db=db,
         event=WorkflowEventCreate(
             event_type=WorkflowEventType.CHANGE_ANALYSIS_REQUESTED,
@@ -156,9 +255,11 @@ async def create_change_analysis(
             },
         ),
     )
-
-    # Launch background durable workflow task
-    asyncio.create_task(execute_background_change_analysis(analysis_id=analysis_id))
+    db.commit()
+    db.refresh(analysis_model)
+    DurableWorkDispatcher.nudge()
+    response.headers["Location"] = f"/api/v1/jobs/{submission.result.work_item_id}"
+    response.headers["Idempotency-Replayed"] = "false"
 
     return _serialize_analysis(analysis_model)
 
@@ -171,12 +272,58 @@ async def create_change_analysis(
 )
 async def create_change_analysis_from_pr(
     payload: ChangeAnalysisPRRequest,
+    request: Request,
+    response: Response,
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
     current_user: CurrentUser = Depends(get_current_user),
     _csrf: None = Depends(verify_csrf),
     db: Session = Depends(get_db),
 ) -> ChangeAnalysisResponse:
     """Resolve public GitHub PR metadata, persist immutable base/head commit SHAs, and start asynchronous analysis."""
-    # 1. Quota check & increment
+    external_identity = idempotency_identity(
+        "change-analysis-from-pr",
+        idempotency_key,
+        maximum=get_settings().IDEMPOTENCY_KEY_MAX_LENGTH,
+    )
+    analysis_id = (
+        deterministic_resource_id(current_user.id, "change-analysis-pr", external_identity)
+        if external_identity
+        else str(uuid4())
+    )
+    request_payload = {"pr_url": payload.pr_url}
+    submission_service = WorkSubmissionService()
+    if external_identity:
+        existing_work = submission_service.find_by_external_identity(
+            db,
+            tenant_id=current_user.id,
+            work_kind=WorkKind.CHANGE_ANALYSIS,
+            identity=external_identity,
+        )
+        if existing_work is not None:
+            try:
+                submission = submission_service.submit(
+                    db,
+                    tenant_id=current_user.id,
+                    actor_id=current_user.id,
+                    request_id=getattr(request.state, "request_id", str(uuid4())),
+                    work_kind=WorkKind.CHANGE_ANALYSIS,
+                    resource_type="CHANGE_ANALYSIS",
+                    resource_id=analysis_id,
+                    request_payload=request_payload,
+                    idempotency_key=external_identity,
+                    external_idempotency_key=external_identity,
+                    resource_profile=ResourceProfile.CHANGE_ANALYSIS,
+                    budget=_change_request_budget(),
+                    allow_when_paused=True,
+                )
+            except (NewWorkPaused, IdempotencyConflict) as exc:
+                _raise_submission_error(exc)
+            existing = get_owned_change_analysis_or_404(db, existing_work.resource_id, current_user)
+            db.commit()
+            response.headers["Location"] = f"/api/v1/jobs/{submission.result.work_item_id}"
+            response.headers["Idempotency-Replayed"] = "true"
+            return _serialize_analysis(existing)
+
     check_and_increment_quota(db, current_user.id, UsageOperation.CHANGE_ANALYSIS_CREATE.value)
 
     resolver = get_github_pr_resolver()
@@ -194,16 +341,21 @@ async def create_change_analysis_from_pr(
         )
     except GitHubPRTimeoutError as exc:
         raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=exc.message)
-    except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Failed to resolve GitHub PR: {str(exc)}")
+    except Exception:
+        logger.exception("Unexpected GitHub pull-request resolution failure")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={
+                "error_code": "REPOSITORY_UNAVAILABLE",
+                "message": "The pull request could not be resolved from GitHub.",
+            },
+        )
 
     if resolved_pr.is_fork:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="FORK_PULL_REQUEST_UNSUPPORTED: Pull requests from external forks are not supported in Phase 6. Only same-repository pull requests are supported.",
         )
-
-    analysis_id = str(uuid4())
 
     metadata = {
         "pr_url": payload.pr_url,
@@ -228,10 +380,26 @@ async def create_change_analysis_from_pr(
         model_metadata=metadata,
     )
     db.add(analysis_model)
-    db.commit()
-    db.refresh(analysis_model)
+    try:
+        submission = submission_service.submit(
+            db,
+            tenant_id=current_user.id,
+            actor_id=current_user.id,
+            request_id=getattr(request.state, "request_id", str(uuid4())),
+            work_kind=WorkKind.CHANGE_ANALYSIS,
+            resource_type="CHANGE_ANALYSIS",
+            resource_id=analysis_id,
+            request_payload=request_payload,
+            idempotency_key=external_identity or f"change-analysis:{analysis_id}",
+            external_idempotency_key=external_identity,
+            resource_profile=ResourceProfile.CHANGE_ANALYSIS,
+            budget=_change_request_budget(),
+        )
+    except (NewWorkPaused, IdempotencyConflict) as exc:
+        db.rollback()
+        _raise_submission_error(exc)
 
-    WorkflowEventService.emit(
+    WorkflowEventService.emit_critical(
         db=db,
         event=WorkflowEventCreate(
             event_type=WorkflowEventType.CHANGE_ANALYSIS_REQUESTED,
@@ -241,9 +409,11 @@ async def create_change_analysis_from_pr(
             metadata_payload=metadata,
         ),
     )
-
-    # Launch background durable workflow task
-    asyncio.create_task(execute_background_change_analysis(analysis_id=analysis_id))
+    db.commit()
+    db.refresh(analysis_model)
+    DurableWorkDispatcher.nudge()
+    response.headers["Location"] = f"/api/v1/jobs/{submission.result.work_item_id}"
+    response.headers["Idempotency-Replayed"] = "false"
 
     return _serialize_analysis(analysis_model)
 
@@ -550,4 +720,3 @@ async def get_change_analysis_events(
         )
         for ev in events
     ]
-

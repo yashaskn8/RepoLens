@@ -9,7 +9,8 @@ from app.agents.helpers import extract_json_block
 from app.context.schemas import ContextBundle
 from app.ingestion.schemas import RepositoryManifest
 from app.llm.router import get_llm_router
-from app.llm.types import LLMMessage, LLMRequest, TaskPolicy
+from app.llm.types import LLMMessage, LLMRequest, ModelCapability, TaskPolicy
+from app.llm.workflow_contracts import OBJECT_OUTPUT_SCHEMA, lineage_for_finding
 from app.patching.schemas import PatchProposal
 from app.patching.validator import parse_diff_files, validate_patch_proposal
 from app.planning.schemas import FixPlan
@@ -105,6 +106,14 @@ class PatchGeneratorAgent:
         request = LLMRequest(
             messages=messages,
             task_policy=TaskPolicy.PATCH_GENERATION,
+            capability=ModelCapability.PATCH_GENERATION,
+            output_schema=OBJECT_OUTPUT_SCHEMA,
+            lineage=lineage_for_finding(
+                str(finding.id),
+                prompt_template_version="patch-generator/1.0",
+                output_schema_version="patch-proposal/1.0",
+                evidence={"finding_id": str(finding.id), "fix_plan_id": str(fix_plan.id)},
+            ),
             temperature=0.0,
             json_mode=True,
         )

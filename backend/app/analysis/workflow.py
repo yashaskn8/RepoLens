@@ -16,6 +16,7 @@ from app.analysis.workflow_graph import build_change_analysis_graph
 from app.core.database import SessionLocal
 from app.ingestion.comparison_snapshot import get_comparison_snapshot_service
 from app.models.change_analysis import ChangeAnalysisModel, ChangeImpactModel
+from app.governance.taxonomy import FailureCode, safe_failure
 from app.schemas.change_analysis import (
     BlastRadiusReport,
     ChangeAnalysisStatus,
@@ -226,15 +227,19 @@ async def execute_background_change_analysis(
             )
 
     except Exception as exc:
-        from app.security.redaction import redact_secrets
-        safe_msg = redact_secrets(str(exc))
-        logger.error(f"Change intelligence analysis {analysis_id} failed: {safe_msg}", exc_info=True)
+        failure = safe_failure(exc, default=FailureCode.INTERNAL_INVARIANT_VIOLATION)
+        logger.error(
+            "Change intelligence analysis %s failed (%s)",
+            analysis_id,
+            failure.code.value,
+            exc_info=True,
+        )
         try:
             analysis_model = db.query(ChangeAnalysisModel).filter(ChangeAnalysisModel.id == analysis_id).first()
             if analysis_model:
                 analysis_model.status = ChangeAnalysisStatus.FAILED.value
-                analysis_model.failure_code = "ANALYSIS_FAILED"
-                analysis_model.failure_message = safe_msg[:500]
+                analysis_model.failure_code = failure.code.value
+                analysis_model.failure_message = failure.message
                 analysis_model.completed_at = _utc_now()
                 db.commit()
 
@@ -243,8 +248,8 @@ async def execute_background_change_analysis(
                     event=WorkflowEventCreate(
                         event_type=WorkflowEventType.CHANGE_ANALYSIS_FAILED,
                         change_analysis_id=UUID(analysis_id),
-                        message=f"Change analysis failed: {safe_msg[:200]}",
-                        metadata_payload={"error": safe_msg[:500]},
+                        message=f"Change analysis failed: {failure.message}",
+                        metadata_payload={"failure_code": failure.code.value},
                     ),
                 )
         except Exception as db_err:

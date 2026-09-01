@@ -10,7 +10,8 @@ from app.context.schemas import ContextBundle
 from app.graph.repository_graph import RepositoryGraph
 from app.ingestion.schemas import RepositoryManifest
 from app.llm.router import get_llm_router
-from app.llm.types import LLMMessage, LLMRequest, TaskPolicy
+from app.llm.types import LLMMessage, LLMRequest, ModelCapability, TaskPolicy
+from app.llm.workflow_contracts import OBJECT_OUTPUT_SCHEMA, lineage_for_finding
 from app.planning.schemas import (
     FixPlan,
     FixScope,
@@ -167,6 +168,25 @@ class FixPlannerAgent:
         request = LLMRequest(
             messages=messages,
             task_policy=TaskPolicy.FIX_PLANNING,
+            capability=ModelCapability.DEEP_REASONING,
+            output_schema=OBJECT_OUTPUT_SCHEMA,
+            lineage=lineage_for_finding(
+                str(finding.id),
+                prompt_template_version="fix-planner/1.0",
+                output_schema_version="fix-plan/1.0",
+                evidence={
+                    "finding_id": str(finding.id),
+                    "verification_verdict": str(finding.verification_verdict),
+                    "context_chunks": [
+                        {
+                            "file_path": chunk.chunk.file_path,
+                            "start_line": chunk.chunk.start_line,
+                            "end_line": chunk.chunk.end_line,
+                        }
+                        for chunk in context_bundle.relevant_chunks
+                    ],
+                },
+            ),
             temperature=0.0,
             json_mode=True,
         )

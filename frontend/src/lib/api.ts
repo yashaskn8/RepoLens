@@ -30,6 +30,7 @@ import {
   ReviewPublicationPublishResponse,
   Scan,
   ScanCreate,
+  ScanReportResource,
   ScanTelemetry,
   StructuralDiffResult,
   UserLoginRequest,
@@ -176,6 +177,47 @@ export async function fetchScan(scanId: string): Promise<Scan> {
   }
 
   return response.json();
+}
+
+export async function requestScanReport(scanId: string): Promise<ScanReportResource> {
+  const response = await apiFetch(`/api/v1/scans/${scanId}/reports`, { method: 'POST' });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail?.message || error.detail || `Report generation request failed (${response.status})`);
+  }
+  return response.json();
+}
+
+export async function fetchLatestScanReport(
+  scanId: string,
+  signal?: AbortSignal
+): Promise<ScanReportResource | null> {
+  const response = await apiFetch(`/api/v1/scans/${scanId}/reports/latest`, {
+    cache: 'no-store',
+    signal,
+  });
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`Failed to restore report status (${response.status})`);
+  return response.json();
+}
+
+export async function fetchReport(reportId: string, signal?: AbortSignal): Promise<ScanReportResource> {
+  const response = await apiFetch(`/api/v1/reports/${reportId}`, { cache: 'no-store', signal });
+  if (!response.ok) throw new Error(`Failed to fetch report status (${response.status})`);
+  return response.json();
+}
+
+export async function downloadReportPdf(reportId: string): Promise<Blob> {
+  const response = await apiFetch(`/api/v1/reports/${reportId}/download`, { cache: 'no-store' });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail?.message || error.detail || `Report download failed (${response.status})`);
+  }
+  const contentType = response.headers.get('content-type')?.toLowerCase() || '';
+  if (!contentType.startsWith('application/pdf')) {
+    throw new Error('The report server returned an unexpected file type.');
+  }
+  return response.blob();
 }
 
 export async function fetchScanFindings(scanId: string): Promise<Finding[]> {

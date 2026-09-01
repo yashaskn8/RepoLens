@@ -2,12 +2,14 @@
 
 import logging
 import random
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
+from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.llm.adapters import GeminiAdapter, GroqAdapter, HuggingFaceAdapter, NvidiaAdapter
 from app.llm.base import BaseLLMAdapter
 from app.llm.exceptions import LLMAllFallbacksFailedError, LLMError, LLMRateLimitError
 from app.llm.types import LLMProvider, LLMRequest, LLMResponse, TaskPolicy
+from app.llm.gateway import CapabilityAIGateway
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,7 @@ class LLMRouter:
     def __init__(
         self,
         adapters: Optional[Dict[LLMProvider, BaseLLMAdapter]] = None,
+        capability_gateway: Optional[CapabilityAIGateway] = None,
     ):
         self._adapters: Dict[LLMProvider, BaseLLMAdapter] = adapters or {
             LLMProvider.GEMINI: GeminiAdapter(),
@@ -50,6 +53,10 @@ class LLMRouter:
             LLMProvider.NVIDIA: NvidiaAdapter(),
             LLMProvider.HUGGINGFACE: HuggingFaceAdapter(),
         }
+        self._capability_gateway = capability_gateway or CapabilityAIGateway(
+            self._adapters,
+            max_retries=max(0, get_settings().LLM_MAX_RETRIES),
+        )
 
     def get_adapter(self, provider: LLMProvider) -> BaseLLMAdapter:
         """Retrieve registered adapter for a given provider."""
@@ -159,6 +166,11 @@ class LLMRouter:
         settings = get_settings()
         max_retries = max(0, settings.LLM_MAX_RETRIES)
 
+        # Capability requests use the governed cheap-first control plane. The
+        # task-policy path below remains for backward-compatible callers.
+        if request.capability is not None:
+            return await self._capability_gateway.generate(request)
+
         # 1. Direct explicit provider override
         if request.provider is not None:
             adapter = self.get_adapter(request.provider)
@@ -249,3 +261,72 @@ def get_llm_router() -> LLMRouter:
     if _default_router is None:
         _default_router = LLMRouter()
     return _default_router
+
+
+def configure_persistent_llm_router(
+    session_factory: Callable[[], Session],
+    *,
+    database_authoritative: bool,
+) -> LLMRouter:
+    """Install the runtime gateway with immutable execution records.
+
+    PostgreSQL owns shared circuit/quota state. SQLite intentionally keeps those
+    two fast-changing ledgers process-local because local mode permits one worker,
+    while AI execution lineage remains durable in both profiles.
+    """
+    from app.governance.policies import OperationalPolicy, OperationalPolicyService
+    from app.llm.execution import AIExecutionRecorder, CanonicalSQLAlchemyAIExecutionStore
+    from app.llm.gateway import AIRoutingLimits
+    from app.llm.health import ProviderHealthRegistry, SQLAlchemyProviderHealthRegistry
+    from app.llm.quota import LocalProviderQuotaLedger, SQLAlchemyProviderQuotaLedger
+    from app.llm.types import ModelCostTier
+
+    def resolve_policy(policy_snapshot_id: str | None) -> AIRoutingLimits:
+        from app.models.platform import OperationalPolicyModel
+
+        with session_factory() as db:
+            model = (
+                db.query(OperationalPolicyModel)
+                .filter(OperationalPolicyModel.id == policy_snapshot_id)
+                .first()
+                if policy_snapshot_id
+                else OperationalPolicyService.active(db)
+            )
+            policy = (
+                OperationalPolicy.model_validate(model.policy_payload)
+                if model is not None
+                else OperationalPolicy.from_settings()
+            )
+        provider_values = {
+            str(value).lower() for value in policy.disabled_providers
+        }
+        return AIRoutingLimits(
+            max_cost_tier=ModelCostTier[policy.max_model_cost_tier],
+            disabled_providers=frozenset(
+                provider for provider in LLMProvider if provider.value in provider_values
+            ),
+            disabled_models=frozenset(policy.disabled_models),
+        )
+
+    global _default_router
+    router = LLMRouter()
+    health = (
+        SQLAlchemyProviderHealthRegistry(session_factory)
+        if database_authoritative
+        else ProviderHealthRegistry()
+    )
+    quota = (
+        SQLAlchemyProviderQuotaLedger(session_factory)
+        if database_authoritative
+        else LocalProviderQuotaLedger()
+    )
+    router._capability_gateway = CapabilityAIGateway(
+        router._adapters,
+        health=health,
+        quota=quota,
+        recorder=AIExecutionRecorder(CanonicalSQLAlchemyAIExecutionStore(session_factory)),
+        policy_resolver=resolve_policy,
+        max_retries=max(0, get_settings().LLM_MAX_RETRIES),
+    )
+    _default_router = router
+    return router

@@ -15,6 +15,7 @@ from app.models.delivery import DeliveryModel
 from app.models.finding import FindingModel
 from app.models.patch import PatchModel
 from app.models.review_publication import PullRequestReviewPublicationModel
+from app.models.report import ReportModel
 from app.models.scan import ScanModel
 from app.schemas.auth import CurrentUser
 
@@ -51,6 +52,18 @@ def get_owned_scan_or_404(db: Session, scan_id: str, current_user: CurrentUser) 
     if scan is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Scan with ID '{scan_id}' not found.")
     return scan
+
+
+def get_owned_report_or_404(db: Session, report_id: str, current_user: CurrentUser) -> ReportModel:
+    """Return a report owned by current_user or a non-enumerating 404."""
+    user_id = _extract_user_id(current_user)
+    report = db.query(ReportModel).filter(
+        ReportModel.id == report_id,
+        ReportModel.owner_user_id == user_id,
+    ).first()
+    if report is None:
+        raise _NOT_FOUND
+    return report
 
 
 def get_owned_finding_or_404(db: Session, finding_id: str, current_user: CurrentUser) -> FindingModel:

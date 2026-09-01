@@ -55,5 +55,7 @@ yarn-error.log*
 
 # Scratch & Artifacts
 scratch/
+backend/artifacts/
+output/
 *.png
 skills-lock.json

@@ -15,6 +15,7 @@ import { EmptyState } from '@/components/ui/EmptyState';
 import { ArchitectureGraph } from '@/components/visualization/ArchitectureGraph';
 import { fetchScan, fetchScanFindings, fetchScanTelemetry } from '@/lib/api';
 import { useWorkflowStream } from '@/lib/useWorkflowStream';
+import { ScanReportAction } from '@/features/scan/ScanReportAction';
 import { Finding, Scan, ScanTelemetry, Severity } from '@/types/domain';
 import {
   Scan as ScanIcon,
@@ -159,6 +160,7 @@ export default function ScanDetailPage({ params }: ScanDetailPageProps) {
           </div>
 
           <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+            {scan && <ScanReportAction scanId={scan.id} scanStatus={scan.status} />}
             <Button
               variant="secondary"
               size="sm"

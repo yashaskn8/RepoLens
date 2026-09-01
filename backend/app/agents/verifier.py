@@ -8,7 +8,8 @@ from app.agents.helpers import extract_json_block
 from app.agents.state import AnalysisState
 from app.context.runtime import get_scan_context_engine
 from app.llm.router import get_llm_router
-from app.llm.types import LLMMessage, LLMProvider, LLMRequest, TaskPolicy
+from app.llm.types import LLMMessage, LLMProvider, LLMRequest, ModelCapability, TaskPolicy
+from app.llm.workflow_contracts import VERIFICATION_OUTPUT_SCHEMA, lineage_for_scan
 from app.schemas.enums import FindingStatus, Severity, VerificationVerdict
 from app.schemas.finding import Finding
 
@@ -34,6 +35,11 @@ def _select_verifier_policy(creator_provider: Optional[str]) -> TaskPolicy:
     elif "huggingface" in prov or "qwen" in prov:
         return TaskPolicy.VERIFICATION       # NVIDIA
     return TaskPolicy.VERIFICATION
+
+
+def _excluded_creator_provider(value: Optional[str]) -> List[LLMProvider]:
+    normalized = str(value or "").lower()
+    return [provider for provider in LLMProvider if provider.value in normalized]
 
 
 def _read_real_file_lines(repo_dir: str, rel_path: str) -> Optional[List[str]]:
@@ -246,6 +252,11 @@ async def run_verifier_agent(state: AnalysisState) -> Dict[str, Any]:
 
     # Primary policy from first candidate
     primary_policy = candidates_for_llm[0][2]
+    primary_creator_provider = (
+        candidates_for_llm[0][0].model_metadata.provider
+        if candidates_for_llm[0][0].model_metadata
+        else None
+    )
 
     try:
         router = get_llm_router()
@@ -255,6 +266,15 @@ async def run_verifier_agent(state: AnalysisState) -> Dict[str, Any]:
                 LLMMessage(role="user", content=user_prompt),
             ],
             task_policy=primary_policy,
+            capability=ModelCapability.VERIFICATION,
+            excluded_providers=_excluded_creator_provider(primary_creator_provider),
+            output_schema=VERIFICATION_OUTPUT_SCHEMA,
+            lineage=lineage_for_scan(
+                str(scan_id),
+                prompt_template_version="finding-verifier/1.0",
+                output_schema_version="finding-verification/1.0",
+                evidence=items_to_verify,
+            ),
             temperature=0.0,
             max_tokens=3000,
         )

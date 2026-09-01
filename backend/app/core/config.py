@@ -108,6 +108,46 @@ class Settings(BaseSettings):
     MAX_DAILY_CHANGE_ANALYSES_PER_USER: int = 50
     MAX_DAILY_PATCH_GENERATIONS_PER_USER: int = 50
 
+    # Immutable PDF report artifacts and bounded local report execution
+    REPORT_ARTIFACT_DIR: str = "./artifacts/reports"
+    REPORT_MAX_FINDINGS: int = 500
+    REPORT_MAX_DETAILED_FINDINGS: int = 50
+    REPORT_MAX_EVIDENCE_REFERENCES: int = 1000
+    REPORT_MAX_EVIDENCE_PER_FINDING: int = 5
+    REPORT_MAX_EXCERPT_CHARS: int = 4096
+    REPORT_MAX_EXCERPT_LINES: int = 40
+    REPORT_MAX_PDF_PAGES: int = 250
+    REPORT_MAX_PDF_BYTES: int = 26_214_400  # 25 MiB
+    REPORT_MAX_CONCURRENT_JOBS: int = 2
+    REPORT_MAX_ATTEMPTS: int = 3
+    REPORT_LEASE_SECONDS: int = 300
+    REPORT_RECOVERY_INTERVAL_SECONDS: int = 30
+
+    # Shared execution authority and resource governance
+    EXECUTION_LEASE_SECONDS: int = 300
+    EXECUTION_RECOVERY_INTERVAL_SECONDS: int = 30
+    EXECUTION_MAX_ATTEMPTS: int = 3
+    MAX_CONCURRENT_SCANS: int = 2
+    MAX_AI_CONCURRENCY: int = 4
+    MAX_LARGE_REPOSITORY_JOBS: int = 1
+    MAX_ACTIVE_JOBS_PER_USER: int = 3
+    MAX_OUTBOX_ATTEMPTS: int = 10
+
+    # Canonical artifact authority and lifecycle defaults
+    ARTIFACT_STORAGE_BACKEND: Literal["local", "blob"] = "local"
+    ARTIFACT_ROOT_DIR: str = "./artifacts/canonical"
+    ARTIFACT_BLOB_NAMESPACE: str = "repolens"
+    ARTIFACT_BLOB_CONTAINER: str = ""
+    ARTIFACT_RETENTION_DEFAULT_DAYS: int = 90
+    ARTIFACT_GC_BATCH_SIZE: int = 100
+    ARTIFACT_RECONCILIATION_INTERVAL_SECONDS: int = 60
+
+    # API compatibility and idempotency contract
+    API_CURRENT_VERSION: str = "1"
+    API_MINIMUM_SUPPORTED_VERSION: str = "1"
+    API_DEPRECATION_WINDOW_DAYS: int = 180
+    IDEMPOTENCY_KEY_MAX_LENGTH: int = 128
+
     # Production Hardening & Network Controls (Phase 8)
     TRUSTED_HOSTS: Union[List[str], str] = ["localhost", "127.0.0.1", "testserver"]
     ENABLE_API_DOCS: Optional[bool] = None

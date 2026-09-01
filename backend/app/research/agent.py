@@ -7,7 +7,8 @@ from uuid import UUID
 
 from app.agents.helpers import extract_json_block
 from app.llm.router import get_llm_router
-from app.llm.types import LLMMessage, LLMRequest, TaskPolicy
+from app.llm.types import LLMMessage, LLMRequest, ModelCapability, TaskPolicy
+from app.llm.workflow_contracts import OBJECT_OUTPUT_SCHEMA, lineage_for_finding
 from app.research.policy import rank_and_filter_evidences, sanitize_untrusted_web_text
 from app.research.schemas import (
     ResearchEvidence,
@@ -102,6 +103,14 @@ class ResearchAgent:
         request = LLMRequest(
             messages=messages,
             task_policy=TaskPolicy.RESEARCH,
+            capability=ModelCapability.RESEARCH,
+            output_schema=OBJECT_OUTPUT_SCHEMA,
+            lineage=lineage_for_finding(
+                str(query.finding_id or ""),
+                prompt_template_version="research-agent/1.0",
+                output_schema_version="research-result/1.0",
+                evidence=query.model_dump(mode="json"),
+            ),
             temperature=0.0,
             json_mode=True,
             extra_params={"enable_search_grounding": True},

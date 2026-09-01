@@ -8,6 +8,30 @@ export type FindingStatus = 'OPEN' | 'RESOLVED' | 'FALSE_POSITIVE' | 'SUPPRESSED
 
 export type ScanStatus = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED';
 
+export type ReportStatus = 'REQUESTED' | 'ASSEMBLING' | 'RENDERING' | 'READY' | 'FAILED';
+
+export interface ScanReportResource {
+  id: string;
+  scan_id: string;
+  report_type: string;
+  status: ReportStatus;
+  repository: string;
+  branch?: string | null;
+  commit_sha?: string | null;
+  report_schema_version: string;
+  renderer_version: string;
+  created_at: string;
+  generated_at?: string | null;
+  failure_code?: string | null;
+  failure_message?: string | null;
+  retryable: boolean;
+  content_digest?: string | null;
+  file_size_bytes?: number | null;
+  page_count?: number | null;
+  download_url?: string | null;
+  reused: boolean;
+}
+
 export type VerificationVerdict = 'CONFIRMED' | 'POSSIBLE' | 'REJECTED';
 
 export interface ModelExecutionMetadata {

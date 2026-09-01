@@ -8,7 +8,8 @@ from uuid import UUID
 from app.agents.helpers import extract_json_block
 from app.context.schemas import ContextBundle
 from app.llm.router import get_llm_router
-from app.llm.types import LLMMessage, LLMRequest, TaskPolicy
+from app.llm.types import LLMMessage, LLMRequest, ModelCapability, TaskPolicy
+from app.llm.workflow_contracts import OBJECT_OUTPUT_SCHEMA, lineage_for_finding
 from app.patching.schemas import (
     CriticVerdict,
     PatchCriticReport,
@@ -167,6 +168,18 @@ class PatchCriticAgent:
         request = LLMRequest(
             messages=messages,
             task_policy=TaskPolicy.PATCH_CRITIC,
+            capability=ModelCapability.VERIFICATION,
+            output_schema=OBJECT_OUTPUT_SCHEMA,
+            lineage=lineage_for_finding(
+                str(finding.id),
+                prompt_template_version="patch-critic/1.0",
+                output_schema_version="patch-critic/1.0",
+                evidence={
+                    "finding_id": str(finding.id),
+                    "patch_id": str(proposal.id),
+                    "verification_status": str(verification_result.status),
+                },
+            ),
             temperature=0.0,
             json_mode=True,
         )

@@ -2,6 +2,8 @@
 
 import asyncio
 from datetime import datetime, timezone
+import hashlib
+import json
 import logging
 import os
 import shutil
@@ -15,9 +17,26 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.agents.checkpointer import get_sqlite_checkpointer
 from app.agents.graph import run_analysis_workflow
 from app.analysis.service import get_intelligence_service
+from app.artifacts.scan_provenance import (
+    publish_analysis_artifacts,
+    publish_finding_provenance,
+    publish_repository_revision,
+)
 from app.api.dependencies import get_current_user, verify_csrf
+from app.api.idempotency import idempotency_identity
 from app.context.runtime import ScanIntelligenceRuntime
+from app.core.config import get_settings
 from app.core.database import SessionLocal, get_db
+from app.execution.application import (
+    NewWorkPaused,
+    WorkSubmissionService,
+    deterministic_resource_id,
+)
+from app.execution.dispatcher import DurableWorkDispatcher
+from app.execution.errors import IdempotencyConflict
+from app.execution.types import RequestBudget, ResourceProfile, WorkKind
+from app.governance.taxonomy import FailureCode as GovernanceFailureCode, safe_failure
+from app.governance.events import AuditLedger, DomainOutbox
 from app.ingestion.clone import (
     InvalidRepositoryURLError,
     clone_repository,
@@ -39,7 +58,6 @@ from app.security.redaction import redact_secrets
 from app.schemas.auth import get_user_id
 from app.services.authorization_service import get_owned_scan_or_404
 from app.services.quota_service import check_and_increment_quota
-from app.services.scan_recovery import ScanDispatcher
 from app.services.workflow_event_service import WorkflowEventService
 
 logger = logging.getLogger(__name__)
@@ -48,6 +66,46 @@ router = APIRouter(prefix="/scans", tags=["Scans"])
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _scan_request_budget() -> RequestBudget:
+    settings = get_settings()
+    return RequestBudget(
+        max_wall_clock_seconds=settings.MAX_SCAN_DURATION_SECONDS,
+        max_analyzer_seconds=settings.MAX_SCAN_DURATION_SECONDS,
+        max_ai_calls=12,
+        max_input_tokens=500_000,
+        max_output_tokens=100_000,
+        max_escalation_tier=2,
+        max_retrieval_context_tokens=250_000,
+    )
+
+
+def _scan_resource(db: Session, scan_model: ScanModel) -> Scan:
+    findings_count = db.query(FindingModel).filter(FindingModel.scan_id == scan_model.id).count()
+    metadata = scan_model.model_metadata if isinstance(scan_model.model_metadata, dict) else {}
+    model_metadata = (
+        ModelExecutionMetadata(model_name="RepoLens-MultiAgent", extra_metadata=metadata)
+        if metadata
+        else None
+    )
+    requested_branch = metadata.get("requested_branch")
+    resolved_branch = metadata.get("resolved_branch_or_ref")
+    return Scan(
+        id=UUID(scan_model.id),
+        repository_url=scan_model.repository_url,
+        branch=scan_model.branch,
+        requested_branch=requested_branch,
+        resolved_branch_or_ref=resolved_branch or scan_model.branch,
+        commit_hash=scan_model.commit_hash,
+        commit_sha=scan_model.commit_hash,
+        status=ScanStatus(scan_model.status),
+        findings_count=findings_count,
+        findings=[],
+        model_metadata=model_metadata,
+        created_at=scan_model.created_at,
+        completed_at=scan_model.completed_at,
+    )
 
 
 async def execute_background_scan(
@@ -109,6 +167,18 @@ async def execute_background_scan(
             scan_model.model_metadata = meta
             flag_modified(scan_model, "model_metadata")
             db.commit()
+
+        revision_artifact_id = publish_repository_revision(
+            db,
+            scan=scan_model,
+            commit_sha=commit_sha,
+            resolved_branch=resolved_branch or requested_branch,
+        )
+        revision_meta = dict(scan_model.model_metadata or {})
+        revision_meta["repository_revision_artifact_id"] = revision_artifact_id
+        scan_model.model_metadata = revision_meta
+        flag_modified(scan_model, "model_metadata")
+        db.commit()
 
         # 3. Run deterministic intelligence service (manifest + scanners)
         WorkflowEventService.emit(
@@ -192,6 +262,31 @@ async def execute_background_scan(
             meta["languages"] = evidence_store.manifest.languages
         if evidence_store.manifest.frameworks:
             meta["frameworks"] = [f.name for f in evidence_store.manifest.frameworks]
+        artifact_projection = publish_analysis_artifacts(
+            db,
+            scan=scan_model,
+            commit_sha=commit_sha,
+            revision_artifact_id=revision_artifact_id,
+            scanner_summary=scanner_summary,
+            manifest_summary={
+                "total_files": evidence_store.manifest.total_files,
+                "total_size_bytes": evidence_store.manifest.total_size_bytes,
+                "languages": evidence_store.manifest.languages,
+                "frameworks": [f.name for f in (evidence_store.manifest.frameworks or [])],
+                "analysis_scope": (
+                    evidence_store.manifest.analysis_scope.model_dump(mode="json")
+                    if evidence_store.manifest.analysis_scope
+                    else None
+                ),
+            },
+        )
+        meta.update(artifact_projection)
+        meta["artifact_lineage"] = [
+            artifact_projection["repository_revision_artifact_id"],
+            artifact_projection["analyzer_run_artifact_id"],
+            artifact_projection["coverage_artifact_id"],
+            *artifact_projection["scanner_artifact_ids"].values(),
+        ]
         scan_model.model_metadata = meta
         flag_modified(scan_model, "model_metadata")
         db.commit()
@@ -290,11 +385,32 @@ async def execute_background_scan(
             if str(f.id) in existing_finding_ids:
                 continue
 
+            provenance = publish_finding_provenance(
+                db,
+                scan=scan_model,
+                commit_sha=commit_sha,
+                revision_artifact_id=revision_artifact_id,
+                analyzer_artifact_id=artifact_projection["analyzer_run_artifact_id"],
+                finding=f,
+            )
+
             sev_val = f.severity.value if hasattr(f.severity, "value") else str(f.severity)
             stat_val = f.status.value if hasattr(f.status, "value") else str(f.status)
             verdict_val = None
             if f.verification_verdict is not None:
                 verdict_val = f.verification_verdict.value if hasattr(f.verification_verdict, "value") else str(f.verification_verdict)
+
+            finding_metadata = (
+                f.model_metadata.model_dump(mode="json")
+                if f.model_metadata and hasattr(f.model_metadata, "model_dump")
+                else (dict(f.model_metadata) if isinstance(f.model_metadata, dict) else {})
+            )
+            if "model_name" in finding_metadata:
+                extra_metadata = dict(finding_metadata.get("extra_metadata") or {})
+                extra_metadata["provenance"] = provenance
+                finding_metadata["extra_metadata"] = extra_metadata
+            else:
+                finding_metadata["provenance"] = provenance
 
             finding_model = FindingModel(
                 id=str(f.id),
@@ -311,7 +427,7 @@ async def execute_background_scan(
                 source_tool=getattr(f, "source_tool", None),
                 detector_id=getattr(f, "detector_id", None),
                 detector_kind=getattr(f, "detector_kind", None),
-                model_metadata=f.model_metadata.model_dump() if f.model_metadata and hasattr(f.model_metadata, "model_dump") else (f.model_metadata if isinstance(f.model_metadata, dict) else None),
+                model_metadata=finding_metadata,
             )
 
             for ev in f.evidences:
@@ -342,6 +458,44 @@ async def execute_background_scan(
                 finding_model.evidences.append(ev_model)
 
             db.add(finding_model)
+            finding_state_digest = hashlib.sha256(json.dumps(
+                {
+                    "finding_id": str(f.id),
+                    "scan_id": scan_id,
+                    "severity": sev_val,
+                    "status": stat_val,
+                    "verification_verdict": verdict_val,
+                    "finding_artifact_id": provenance["finding_artifact_id"],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()
+            AuditLedger.append(
+                db,
+                tenant_id=str(scan_model.owner_user_id or "legacy-local"),
+                actor_id=scan_model.owner_user_id,
+                event_type="FINDING_VALIDATED",
+                resource_type="FINDING",
+                resource_id=str(f.id),
+                state_digest=finding_state_digest,
+                payload={
+                    "scan_id": scan_id,
+                    "verification_verdict": verdict_val,
+                    "finding_artifact_id": provenance["finding_artifact_id"],
+                },
+            )
+            DomainOutbox.append(
+                db,
+                tenant_id=str(scan_model.owner_user_id or "legacy-local"),
+                aggregate_type="FINDING",
+                aggregate_id=str(f.id),
+                event_type="FINDING_VALIDATED",
+                deduplication_key=f"finding:{f.id}:validated",
+                payload={
+                    "scan_id": scan_id,
+                    "finding_artifact_id": provenance["finding_artifact_id"],
+                },
+            )
 
         # 8. Mark scan COMPLETED and preserve merged metadata
         scan_model.status = ScanStatus.COMPLETED.value
@@ -387,14 +541,16 @@ async def execute_background_scan(
         )
 
     except Exception as exc:
-        logger.error(f"Scan {scan_id} failed: {str(exc)}", exc_info=True)
+        failure = safe_failure(exc, default=GovernanceFailureCode.INTERNAL_INVARIANT_VIOLATION)
+        logger.error("Scan %s failed (%s)", scan_id, failure.code.value, exc_info=True)
         try:
             scan_model = db.query(ScanModel).filter(ScanModel.id == scan_id).first()
             if scan_model:
                 scan_model.status = ScanStatus.FAILED.value
                 scan_model.completed_at = _utc_now()
                 meta = dict(scan_model.model_metadata or {})
-                meta["error"] = str(exc)
+                meta["failure_code"] = failure.code.value
+                meta["failure_message"] = failure.message
                 scan_model.model_metadata = meta
                 flag_modified(scan_model, "model_metadata")
                 db.commit()
@@ -403,8 +559,8 @@ async def execute_background_scan(
                     event=WorkflowEventCreate(
                         event_type=WorkflowEventType.SCAN_FAILED,
                         scan_id=UUID(scan_id),
-                        message=f"Scan execution failed: {str(exc)}",
-                        metadata_payload={"error": str(exc)},
+                        message=f"Scan execution failed: {failure.message}",
+                        metadata_payload={"failure_code": failure.code.value},
                     ),
                 )
         except Exception:
@@ -419,15 +575,15 @@ async def execute_background_scan(
 @router.post("", response_model=Scan, status_code=status.HTTP_202_ACCEPTED)
 async def create_scan(
     payload: ScanCreate,
+    request: Request,
+    response: Response,
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
     current_user: CurrentUser = Depends(get_current_user),
     _csrf: None = Depends(verify_csrf),
     db: Session = Depends(get_db),
 ) -> Scan:
     """Initiate a new repository scan asynchronously, returning scan ID immediately."""
-    # 1. Quota check & increment
-    check_and_increment_quota(db, current_user.id, UsageOperation.SCAN_CREATE.value)
-
-    # 2. Validate GitHub URL strictly
+    # Validate before consuming quota or creating an idempotency identity.
     try:
         normalized_url = validate_github_url(payload.repository_url)
     except InvalidRepositoryURLError as exc:
@@ -436,9 +592,69 @@ async def create_scan(
             detail=f"Invalid repository URL: {str(exc)}",
         )
 
-    # 3. Create Scan record in DB with unconditional owner_user_id
     req_branch = payload.requested_branch if payload.requested_branch is not None else payload.branch
+    external_identity = idempotency_identity(
+        "scan-create",
+        idempotency_key,
+        maximum=get_settings().IDEMPOTENCY_KEY_MAX_LENGTH,
+    )
+    scan_id = (
+        deterministic_resource_id(current_user.id, "scan", external_identity)
+        if external_identity
+        else str(uuid4())
+    )
+    request_payload = {"repository_url": normalized_url, "branch": req_branch}
+    submission_service = WorkSubmissionService()
+
+    if external_identity:
+        existing_work = submission_service.find_by_external_identity(
+            db,
+            tenant_id=current_user.id,
+            work_kind=WorkKind.SCAN,
+            identity=external_identity,
+        )
+        if existing_work is not None:
+            try:
+                submission = submission_service.submit(
+                    db,
+                    tenant_id=current_user.id,
+                    actor_id=current_user.id,
+                    request_id=getattr(request.state, "request_id", str(uuid4())),
+                    work_kind=WorkKind.SCAN,
+                    resource_type="SCAN",
+                    resource_id=scan_id,
+                    request_payload=request_payload,
+                    idempotency_key=external_identity,
+                    external_idempotency_key=external_identity,
+                    resource_profile=ResourceProfile.SMALL_REPO_SCAN,
+                    budget=_scan_request_budget(),
+                    allow_when_paused=True,
+                )
+            except IdempotencyConflict as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={"error_code": "IDEMPOTENCY_CONFLICT", "message": str(exc)},
+                ) from exc
+            existing_scan = db.query(ScanModel).filter(
+                ScanModel.id == existing_work.resource_id,
+                ScanModel.owner_user_id == current_user.id,
+            ).first()
+            if existing_scan is None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "error_code": "IDEMPOTENCY_STATE_MISMATCH",
+                        "message": "The existing job no longer has a resolvable scan resource.",
+                    },
+                )
+            db.commit()
+            response.headers["Location"] = f"/api/v1/jobs/{submission.result.work_item_id}"
+            response.headers["Idempotency-Replayed"] = "true"
+            return _scan_resource(db, existing_scan)
+
+    check_and_increment_quota(db, current_user.id, UsageOperation.SCAN_CREATE.value)
     scan_model = ScanModel(
+        id=scan_id,
         repository_url=normalized_url,
         branch=req_branch,
         owner_user_id=get_user_id(current_user),
@@ -447,11 +663,35 @@ async def create_scan(
         model_metadata={"requested_branch": req_branch} if req_branch else {},
     )
     db.add(scan_model)
-    db.commit()
-    db.refresh(scan_model)
+    try:
+        submission = submission_service.submit(
+            db,
+            tenant_id=current_user.id,
+            actor_id=current_user.id,
+            request_id=getattr(request.state, "request_id", str(uuid4())),
+            work_kind=WorkKind.SCAN,
+            resource_type="SCAN",
+            resource_id=scan_id,
+            request_payload=request_payload,
+            idempotency_key=external_identity or f"scan:{scan_id}",
+            external_idempotency_key=external_identity,
+            resource_profile=ResourceProfile.SMALL_REPO_SCAN,
+            budget=_scan_request_budget(),
+        )
+    except NewWorkPaused as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error_code": "NEW_JOBS_PAUSED", "message": str(exc)},
+        ) from exc
+    except IdempotencyConflict as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error_code": "IDEMPOTENCY_CONFLICT", "message": str(exc)},
+        ) from exc
 
-    # Emit SCAN_CREATED event with actor attribution
-    WorkflowEventService.emit(
+    WorkflowEventService.emit_critical(
         db=db,
         event=WorkflowEventCreate(
             event_type=WorkflowEventType.SCAN_CREATED,
@@ -462,29 +702,12 @@ async def create_scan(
         ),
     )
     db.commit()
+    db.refresh(scan_model)
 
-    # 4. Launch background async execution via canonical dispatcher
-    ScanDispatcher.dispatch_scan(
-        scan_id=scan_model.id,
-        repo_url=normalized_url,
-        branch=req_branch,
-    )
-
-    # Truthful initial response: resolved branch and commit SHA remain null until resolved
-    return Scan(
-        id=UUID(scan_model.id),
-        repository_url=scan_model.repository_url,
-        branch=scan_model.branch,
-        requested_branch=req_branch,
-        resolved_branch_or_ref=None,
-        commit_hash=None,
-        commit_sha=None,
-        status=ScanStatus(scan_model.status),
-        findings_count=0,
-        findings=[],
-        created_at=scan_model.created_at,
-        completed_at=scan_model.completed_at,
-    )
+    DurableWorkDispatcher.nudge()
+    response.headers["Location"] = f"/api/v1/jobs/{submission.result.work_item_id}"
+    response.headers["Idempotency-Replayed"] = "false"
+    return _scan_resource(db, scan_model)
 
 
 @router.get("/{scan_id}", response_model=Scan)
@@ -496,34 +719,7 @@ def get_scan(
     """Retrieve scan status, metadata, and progress by ID."""
     scan_model = get_owned_scan_or_404(db, str(scan_id), current_user)
 
-    findings_count = db.query(FindingModel).filter(FindingModel.scan_id == str(scan_id)).count()
-
-    model_metadata = None
-    if scan_model.model_metadata and isinstance(scan_model.model_metadata, dict):
-        model_metadata = ModelExecutionMetadata(
-            model_name="RepoLens-MultiAgent",
-            extra_metadata=scan_model.model_metadata,
-        )
-
-    meta = scan_model.model_metadata or {}
-    req_branch = meta.get("requested_branch") if isinstance(meta, dict) else None
-    res_branch = meta.get("resolved_branch_or_ref") if isinstance(meta, dict) else None
-
-    return Scan(
-        id=UUID(scan_model.id),
-        repository_url=scan_model.repository_url,
-        branch=scan_model.branch,
-        requested_branch=req_branch,
-        resolved_branch_or_ref=res_branch or scan_model.branch,
-        commit_hash=scan_model.commit_hash,
-        commit_sha=scan_model.commit_hash,
-        status=ScanStatus(scan_model.status),
-        findings_count=findings_count,
-        findings=[],
-        model_metadata=model_metadata,
-        created_at=scan_model.created_at,
-        completed_at=scan_model.completed_at,
-    )
+    return _scan_resource(db, scan_model)
 
 
 @router.get("/{scan_id}/findings", response_model=List[Finding])
@@ -769,5 +965,3 @@ def get_scan_telemetry(
         )
 
     return telemetry
-
-

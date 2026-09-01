@@ -39,7 +39,8 @@ from app.analysis.review_verifier import ChangeReviewVerifier, get_review_verifi
 from app.graph.repository_graph import RepositoryGraph
 from app.llm.exceptions import LLMError
 from app.llm.router import LLMRouter, get_llm_router
-from app.llm.types import LLMMessage, LLMRequest, TaskPolicy
+from app.llm.types import LLMMessage, LLMRequest, ModelCapability, TaskPolicy
+from app.llm.workflow_contracts import OBJECT_OUTPUT_SCHEMA, lineage_for_change_analysis
 from app.schemas.change_analysis import (
     BlastRadiusReport,
     ChangeReviewFinding,
@@ -281,6 +282,14 @@ class ChangeReviewAgent:
                     LLMMessage(role="user", content=user_prompt),
                 ],
                 task_policy=TaskPolicy.CHANGE_REVIEW,
+                capability=ModelCapability.DEEP_REASONING,
+                output_schema=OBJECT_OUTPUT_SCHEMA,
+                lineage=lineage_for_change_analysis(
+                    str(analysis_id),
+                    prompt_template_version="change-reviewer/1.0",
+                    output_schema_version="change-review/1.0",
+                    evidence=bounded_context,
+                ),
                 temperature=0.0,
                 json_mode=True,
                 max_tokens=4000,

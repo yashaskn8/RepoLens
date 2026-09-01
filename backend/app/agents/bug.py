@@ -6,7 +6,8 @@ from app.agents.helpers import parse_llm_findings, safe_to_uuid
 from app.agents.state import AnalysisState
 from app.context.runtime import get_scan_context_engine
 from app.llm.router import get_llm_router
-from app.llm.types import LLMMessage, LLMRequest, TaskPolicy
+from app.llm.types import LLMMessage, LLMRequest, ModelCapability, TaskPolicy
+from app.llm.workflow_contracts import FINDINGS_OUTPUT_SCHEMA, lineage_for_scan
 
 
 async def run_bug_agent(state: AnalysisState) -> Dict[str, Any]:
@@ -72,6 +73,14 @@ async def run_bug_agent(state: AnalysisState) -> Dict[str, Any]:
                 LLMMessage(role="user", content=user_prompt),
             ],
             task_policy=TaskPolicy.BUG_REASONING,
+            capability=ModelCapability.CODE_REASONING,
+            output_schema=FINDINGS_OUTPUT_SCHEMA,
+            lineage=lineage_for_scan(
+                str(scan_id),
+                prompt_template_version="bug-agent/1.0",
+                output_schema_version="findings/1.0",
+                evidence={"manifest": manifest, "routes": routes},
+            ),
             temperature=0.1,
             max_tokens=2048,
         )

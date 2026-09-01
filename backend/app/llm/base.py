@@ -7,6 +7,7 @@ import httpx
 
 from app.llm.exceptions import (
     LLMAuthenticationError,
+    LLMContextLimitError,
     LLMError,
     LLMProviderUnavailableError,
     LLMRateLimitError,
@@ -58,6 +59,15 @@ class BaseLLMAdapter(ABC):
         elif status == 408 or status == 504:
             return LLMTimeoutError(
                 f"Gateway timeout for {self.provider.value}: {err_msg}",
+                provider=self.provider,
+                model=model,
+            )
+        elif status == 413 or (
+            status in (400, 422)
+            and any(marker in str(err_msg).lower() for marker in ("context length", "context window", "too many tokens"))
+        ):
+            return LLMContextLimitError(
+                f"Context limit exceeded for {self.provider.value}: {err_msg}",
                 provider=self.provider,
                 model=model,
             )

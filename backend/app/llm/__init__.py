@@ -10,18 +10,21 @@ from app.llm.exceptions import (
     LLMResponseValidationError,
     LLMTimeoutError,
 )
-from app.llm.router import LLMRouter, get_llm_router
+from app.llm.router import LLMRouter, configure_persistent_llm_router, get_llm_router
+from app.llm.gateway import CapabilityAIGateway
 from app.llm.types import (
     LLMMessage,
     LLMProvider,
     LLMRequest,
     LLMResponse,
     TaskPolicy,
+    ModelCapability,
 )
 
 __all__ = [
     "LLMProvider",
     "TaskPolicy",
+    "ModelCapability",
     "LLMMessage",
     "LLMRequest",
     "LLMResponse",
@@ -34,5 +37,7 @@ __all__ = [
     "LLMResponseValidationError",
     "LLMAllFallbacksFailedError",
     "LLMRouter",
+    "CapabilityAIGateway",
+    "configure_persistent_llm_router",
     "get_llm_router",
 ]
