@@ -144,6 +144,7 @@ class WorkSubmissionService:
                 request_digest=request_digest,
                 resource_profile=resource_profile,
                 budget=budget,
+                request_payload=dict(request_payload),
                 side_effect_class=side_effect_class,
                 external_idempotency_key=external_idempotency_key,
                 input_artifact_id=input_artifact_id,

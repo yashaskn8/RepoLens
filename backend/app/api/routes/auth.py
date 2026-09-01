@@ -24,6 +24,7 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 def register(
     payload: UserRegisterRequest,
+    request: Request,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> UserResponse:
@@ -33,7 +34,11 @@ def register(
     """
     auth_service = AuthService(db, settings)
     try:
-        user = auth_service.register_user(email=payload.email, password=payload.password)
+        user = auth_service.register_user(
+            email=payload.email,
+            password=payload.password,
+            request_id=getattr(request.state, "request_id", None),
+        )
     except DuplicateEmailError:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -52,6 +57,7 @@ def register(
 @router.post("/login", response_model=UserResponse)
 def login(
     payload: UserLoginRequest,
+    request: Request,
     response: Response,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
@@ -62,8 +68,9 @@ def login(
     """
     auth_service = AuthService(db, settings)
     try:
-        user = auth_service.authenticate_user(email=payload.email, password=payload.password)
-        raw_session_token, raw_csrf_token, session = auth_service.create_session(user)
+        request_id = getattr(request.state, "request_id", None)
+        user = auth_service.authenticate_user(email=payload.email, password=payload.password, request_id=request_id)
+        raw_session_token, raw_csrf_token, session = auth_service.create_session(user, request_id=request_id)
     except InvalidCredentialsError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -120,7 +127,10 @@ def logout(
     raw_session_token = request.cookies.get(settings.AUTH_COOKIE_NAME)
     if raw_session_token:
         auth_service = AuthService(db, settings)
-        auth_service.revoke_session(raw_session_token)
+        auth_service.revoke_session(
+            raw_session_token,
+            request_id=getattr(request.state, "request_id", None),
+        )
 
     response.delete_cookie(
         key=settings.AUTH_COOKIE_NAME,

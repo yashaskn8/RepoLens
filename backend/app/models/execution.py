@@ -110,6 +110,7 @@ class WorkItemModel(Base):
 
     idempotency_key = Column(String(256), nullable=False)
     request_digest = Column(String(64), nullable=False)
+    request_payload = Column(JSON, nullable=False, default=dict)
     side_effect_class = Column(String(32), nullable=False, default="SAFE_RECOMPUTATION")
     external_idempotency_key = Column(String(256), nullable=True)
     reconciliation_required = Column(Boolean, nullable=False, default=False)

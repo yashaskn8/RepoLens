@@ -22,6 +22,12 @@ from app.delivery.validator import (
     sanitize_branch_name,
     _normalize_path,
 )
+from app.execution.context import (
+    current_claim,
+    mark_current_side_effect_completed,
+    mark_current_side_effect_started,
+)
+from app.governance.events import AuditLedger, DomainOutbox
 from app.ingestion.snapshot import get_snapshot_service
 from app.models.delivery import DeliveryModel
 from app.models.finding import FindingModel
@@ -106,6 +112,76 @@ class DeliveryService:
             github_delivery_configured=self.provider.is_configured,
         )
 
+    def prepare_delivery(
+        self,
+        db: Session,
+        patch_id: str,
+        payload: Optional[DeliveryRequest] = None,
+    ) -> DeliveryModel:
+        """Create or reuse the local delivery intent without performing a GitHub call."""
+        payload = payload or DeliveryRequest()
+        if not self.provider.is_configured:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="GitHub delivery is not configured or is administratively disabled for this RepoLens instance.",
+            )
+        patch = db.query(PatchModel).filter(PatchModel.id == str(patch_id)).first()
+        if patch is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Patch proposal not found.")
+        if patch.status != PatchStatus.APPROVED.value:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Patch must be explicitly APPROVED before GitHub delivery can be queued.",
+            )
+        if patch.machine_verdict == "REJECTED":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="A machine-rejected patch cannot be delivered.",
+            )
+        finding = db.query(FindingModel).filter(FindingModel.id == str(patch.finding_id)).first()
+        scan = db.query(ScanModel).filter(ScanModel.id == str(patch.scan_id)).first()
+        if finding is None or scan is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Associated finding or scan not found.")
+        if scan.status != "COMPLETED" or not scan.branch or not scan.commit_hash:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Delivery requires a completed scan bound to an exact branch and commit.",
+            )
+        owner, repo = extract_github_owner_repo(scan.repository_url)
+        idem_key = compute_idempotency_key(owner, repo, str(patch.id), scan.branch.strip(), scan.commit_hash)
+        existing = db.query(DeliveryModel).filter(DeliveryModel.idempotency_key == idem_key).first()
+        if existing is not None:
+            if existing.status not in {DeliveryStatus.PR_CREATED.value, DeliveryStatus.BLOCKED.value}:
+                existing.requested_by = payload.requested_by or existing.requested_by
+                existing.request_notes = payload.notes or existing.request_notes
+            return existing
+
+        delivery = DeliveryModel(
+            scan_id=str(scan.id),
+            finding_id=str(finding.id),
+            patch_id=str(patch.id),
+            provider="github",
+            repository_url=scan.repository_url,
+            repository_owner=owner,
+            repository_name=repo,
+            base_branch=scan.branch.strip(),
+            scanned_base_sha=scan.commit_hash,
+            head_branch=sanitize_branch_name(str(finding.id), str(patch.id)),
+            status=DeliveryStatus.PENDING.value,
+            idempotency_key=idem_key,
+            requested_by=payload.requested_by or "user",
+            request_notes=payload.notes,
+            attempt_count=0,
+        )
+        try:
+            with db.begin_nested():
+                db.add(delivery)
+                db.flush()
+        except IntegrityError:
+            existing = db.query(DeliveryModel).filter(DeliveryModel.idempotency_key == idem_key).one()
+            return existing
+        return delivery
+
     async def deliver_patch(
         self,
         db: Session,
@@ -188,11 +264,36 @@ class DeliveryService:
                 logger.info(f"Delivery {delivery.id} is BLOCKED due to base drift. Returning blocked delivery.")
                 return delivery
 
-            # Retry attempt on FAILED or in-flight delivery
+            claim = current_claim()
+            active_statuses = {
+                DeliveryStatus.VALIDATING.value,
+                DeliveryStatus.READY.value,
+                DeliveryStatus.CREATING_COMMIT.value,
+                DeliveryStatus.CREATING_BRANCH.value,
+                DeliveryStatus.CREATING_PR.value,
+            }
+            if delivery.failure_code == "EXTERNAL_STATE_UNCERTAIN":
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Delivery remote state must be reconciled before another write attempt.",
+                )
+            if delivery.status in active_statuses and claim is None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Delivery execution is already owned by a durable work lease.",
+                )
+            if claim is not None and str(claim.resource_id) != str(delivery.id):
+                raise HTTPException(status_code=409, detail="Durable work lease does not own this delivery.")
+
+            # Only the durable lease owner (or a legacy FAILED retry) may reset execution state.
             delivery.attempt_count += 1
             delivery.last_attempt_at = _utc_now()
             delivery.status = DeliveryStatus.PENDING.value
             delivery.requested_by = payload.requested_by or delivery.requested_by
+            delivery.request_notes = payload.notes or delivery.request_notes
+            delivery.failure_code = None
+            delivery.failure_message = None
+            delivery.completed_at = None
             db.commit()
             db.refresh(delivery)
         else:
@@ -211,6 +312,7 @@ class DeliveryService:
                 status=DeliveryStatus.PENDING.value,
                 idempotency_key=idem_key,
                 requested_by=payload.requested_by or "user",
+                request_notes=payload.notes,
                 attempt_count=1,
                 last_attempt_at=_utc_now(),
             )
@@ -327,6 +429,41 @@ class DeliveryService:
         patch_id_str = str(patch.id)
         repo_url_str = scan.repository_url
         requested_by_str = delivery.requested_by or "system"
+        tenant_id = str(scan.owner_user_id or "legacy-local")
+        external_write_started = False
+
+        def record_write_intent() -> None:
+            """Persist the fence immediately before the first mutating provider call."""
+            nonlocal external_write_started
+            if external_write_started:
+                return
+            operation_id = f"github-delivery:{delivery.id}:{delivery.idempotency_key}"
+            mark_current_side_effect_started(
+                db=db,
+                external_operation_id=operation_id,
+            )
+            DomainOutbox.append(
+                db,
+                tenant_id=tenant_id,
+                aggregate_type="DELIVERY",
+                aggregate_id=str(delivery.id),
+                event_type="GITHUB_DELIVERY_WRITE_STARTED",
+                deduplication_key=f"delivery:{delivery.id}:write-started",
+                payload={"provider": "github", "head_branch": delivery.head_branch},
+            )
+            AuditLedger.append(
+                db,
+                tenant_id=tenant_id,
+                actor_id=delivery.requested_by,
+                event_type="GITHUB_DELIVERY_WRITE_STARTED",
+                resource_type="DELIVERY",
+                resource_id=str(delivery.id),
+                state_digest=delivery.idempotency_key,
+                payload={"head_branch": delivery.head_branch, "base_branch": base_branch},
+            )
+            db.commit()
+            external_write_started = True
+
         try:
             # 7a. CREATING_COMMIT
             delivery.status = DeliveryStatus.CREATING_COMMIT.value
@@ -351,12 +488,14 @@ class DeliveryService:
                     if os.path.exists(full_p):
                         with open(full_p, "r", encoding="utf-8", errors="replace") as f_obj:
                             file_content = f_obj.read()
+                        record_write_intent()
                         blob_sha = await self.provider.create_blob(owner=owner, repo=repo, content=file_content)
                         tree_entries.append(GitTreeEntry(path=norm_f, mode="100644", type="blob", sha=blob_sha))
                     else:
                         # Deletion
                         tree_entries.append(GitTreeEntry(path=norm_f, mode="100644", type="blob", sha=None))
 
+            record_write_intent()
             tree_sha = await self.provider.create_tree(
                 owner=owner,
                 repo=repo,
@@ -521,7 +660,7 @@ class DeliveryService:
                     patch=patch,
                     scan=scan,
                     requested_by=payload.requested_by or "user",
-                    notes=payload.notes,
+                    notes=payload.notes or delivery.request_notes,
                 )
                 try:
                     pr_info = await self.provider.create_pull_request(
@@ -579,6 +718,31 @@ class DeliveryService:
                 critical=True,
             )
 
+            external_operation_id = f"github-pr:{owner}/{repo}:{pr_info.number}"
+            mark_current_side_effect_completed(
+                db=db,
+                external_operation_id=external_operation_id,
+            )
+            DomainOutbox.append(
+                db,
+                tenant_id=tenant_id,
+                aggregate_type="DELIVERY",
+                aggregate_id=str(delivery.id),
+                event_type="GITHUB_DELIVERY_COMPLETED",
+                deduplication_key=f"delivery:{delivery.id}:completed",
+                payload={"pr_number": pr_info.number, "pr_url": delivery.pr_url},
+            )
+            AuditLedger.append(
+                db,
+                tenant_id=tenant_id,
+                actor_id=delivery.requested_by,
+                event_type="GITHUB_DELIVERY_PUBLISHED",
+                resource_type="DELIVERY",
+                resource_id=str(delivery.id),
+                state_digest=delivery.idempotency_key,
+                payload={"pr_number": pr_info.number, "head_branch": delivery.head_branch},
+            )
+
             db.commit()
             db.refresh(delivery)
             return delivery
@@ -589,8 +753,28 @@ class DeliveryService:
             db.rollback()
 
             # Determine failure code
-            failure_code = getattr(
-                exc, "safe_code", "LOCAL_STATE_PERSISTENCE_FAILED" if pr_info else "DELIVERY_FAILED"
+            known_failure_code = getattr(exc, "safe_code", None)
+            remote_identity_known = pr_info is not None or bool(known_failure_code)
+            if external_write_started and remote_identity_known:
+                try:
+                    operation_id = (
+                        f"github-pr:{owner}/{repo}:{pr_info.number}"
+                        if pr_info is not None
+                        else f"known-failure:github-delivery:{delivery_id}:{known_failure_code}"
+                    )
+                    mark_current_side_effect_completed(db=db, external_operation_id=operation_id)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    remote_identity_known = False
+            failure_code = (
+                "LOCAL_STATE_PERSISTENCE_FAILED"
+                if pr_info is not None and remote_identity_known
+                else known_failure_code
+                if known_failure_code
+                else "EXTERNAL_STATE_UNCERTAIN"
+                if external_write_started
+                else "DELIVERY_FAILED"
             )
             failure_message = redact_secrets(str(exc))[:512]
 
@@ -604,6 +788,36 @@ class DeliveryService:
                     failed_delivery.completed_at = _utc_now()
                     db.commit()
                     db.refresh(failed_delivery)
+
+                    try:
+                        tenant_id = str(scan.owner_user_id or "legacy-local")
+                        DomainOutbox.append(
+                            db,
+                            tenant_id=tenant_id,
+                            aggregate_type="DELIVERY",
+                            aggregate_id=str(failed_delivery.id),
+                            event_type="GITHUB_DELIVERY_FAILED",
+                            deduplication_key=f"delivery:{failed_delivery.id}:failed:{failed_delivery.attempt_count}",
+                            payload={"failure_code": failed_delivery.failure_code},
+                        )
+                        AuditLedger.append(
+                            db,
+                            tenant_id=tenant_id,
+                            actor_id=failed_delivery.requested_by,
+                            event_type=(
+                                "EXTERNAL_STATE_RECONCILIATION_REQUIRED"
+                                if failed_delivery.failure_code == "EXTERNAL_STATE_UNCERTAIN"
+                                else "GITHUB_DELIVERY_FAILED"
+                            ),
+                            resource_type="DELIVERY",
+                            resource_id=str(failed_delivery.id),
+                            state_digest=failed_delivery.idempotency_key,
+                            payload={"failure_code": failed_delivery.failure_code},
+                        )
+                        db.commit()
+                    except Exception:
+                        db.rollback()
+                        logger.warning("Could not persist canonical delivery failure events.", exc_info=True)
 
                     try:
                         WorkflowEventService.emit(
@@ -672,3 +886,61 @@ class DeliveryService:
                     detail=f"Delivery failed and could not persist failure state: {failure_message}",
                 )
 
+    async def reconcile_delivery(self, db: Session, delivery_id: str) -> str:
+        """Read GitHub state before any replay of an uncertain delivery."""
+        delivery = db.query(DeliveryModel).filter(DeliveryModel.id == str(delivery_id)).first()
+        if delivery is None:
+            return "MISSING"
+        if delivery.status == DeliveryStatus.PR_CREATED.value and delivery.pr_number:
+            return "COMPLETED"
+        existing_pr = await self.provider.find_existing_pull_request(
+            owner=delivery.repository_owner,
+            repo=delivery.repository_name,
+            head=delivery.head_branch,
+            base=delivery.base_branch,
+        )
+        branch_sha = await self.provider.try_get_branch_head(
+            owner=delivery.repository_owner,
+            repo=delivery.repository_name,
+            branch=delivery.head_branch,
+        )
+        if existing_pr is not None:
+            if not delivery.head_sha or branch_sha != delivery.head_sha:
+                delivery.failure_code = "EXTERNAL_STATE_UNCERTAIN"
+                delivery.failure_message = "A matching pull request exists, but its branch identity cannot be proven."
+                db.commit()
+                return "UNCERTAIN"
+            delivery.status = DeliveryStatus.PR_CREATED.value
+            delivery.pr_number = existing_pr.number
+            delivery.pr_url = f"https://github.com/{delivery.repository_owner}/{delivery.repository_name}/pull/{existing_pr.number}"
+            delivery.completed_at = _utc_now()
+            delivery.failure_code = None
+            delivery.failure_message = None
+            delivery.reconciliation_occurred = True
+            tenant_id = str(delivery.scan.owner_user_id or "legacy-local")
+            DomainOutbox.append(
+                db,
+                tenant_id=tenant_id,
+                aggregate_type="DELIVERY",
+                aggregate_id=str(delivery.id),
+                event_type="GITHUB_DELIVERY_RECONCILED",
+                deduplication_key=f"delivery:{delivery.id}:reconciled",
+                payload={"pr_number": existing_pr.number},
+            )
+            AuditLedger.append(
+                db,
+                tenant_id=tenant_id,
+                event_type="GITHUB_DELIVERY_RECONCILED",
+                resource_type="DELIVERY",
+                resource_id=str(delivery.id),
+                state_digest=delivery.idempotency_key,
+                payload={"pr_number": existing_pr.number},
+            )
+            db.commit()
+            return "COMPLETED"
+        if branch_sha is None:
+            return "ABSENT_SAFE_TO_RETRY"
+        delivery.failure_code = "EXTERNAL_STATE_UNCERTAIN"
+        delivery.failure_message = "A deterministic delivery branch exists without a matching pull request."
+        db.commit()
+        return "UNCERTAIN"

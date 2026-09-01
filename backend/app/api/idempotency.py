@@ -17,7 +17,9 @@ def request_digest(payload: Any) -> str:
 
 
 def idempotency_identity(scope: str, raw_key: str | None, *, maximum: int = 128) -> str | None:
-    if raw_key is None:
+    # FastAPI's Header default is only resolved by dependency injection. Direct
+    # service-level callers see the FieldInfo object and therefore mean "absent".
+    if not isinstance(raw_key, str):
         return None
     value = raw_key.strip()
     if len(value) < 8 or len(value) > maximum or not _VALID_KEY.fullmatch(value):

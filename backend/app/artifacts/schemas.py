@@ -31,6 +31,7 @@ class ArtifactType(str, Enum):
     CLAIM = "CLAIM"
     FINDING = "FINDING"
     AI_EXECUTION = "AI_EXECUTION"
+    REMEDIATION_RESULT = "REMEDIATION_RESULT"
     REPORT_DOCUMENT = "REPORT_DOCUMENT"
     PDF_REPORT = "PDF_REPORT"
 
@@ -246,6 +247,10 @@ class AIExecutionArtifact(CanonicalArtifact):
     artifact_type: Literal[ArtifactType.AI_EXECUTION] = ArtifactType.AI_EXECUTION
 
 
+class RemediationResultArtifact(RevisionBoundArtifact):
+    artifact_type: Literal[ArtifactType.REMEDIATION_RESULT] = ArtifactType.REMEDIATION_RESULT
+
+
 class ReportDocumentArtifact(RevisionBoundArtifact):
     artifact_type: Literal[ArtifactType.REPORT_DOCUMENT] = ArtifactType.REPORT_DOCUMENT
 
@@ -266,6 +271,7 @@ ArtifactRecord = Annotated[
         ClaimArtifact,
         FindingArtifact,
         AIExecutionArtifact,
+        RemediationResultArtifact,
         ReportDocumentArtifact,
         PdfReportArtifact,
     ],
@@ -284,6 +290,7 @@ ARTIFACT_CLASS_BY_TYPE: dict[ArtifactType, type[CanonicalArtifact]] = {
     ArtifactType.CLAIM: ClaimArtifact,
     ArtifactType.FINDING: FindingArtifact,
     ArtifactType.AI_EXECUTION: AIExecutionArtifact,
+    ArtifactType.REMEDIATION_RESULT: RemediationResultArtifact,
     ArtifactType.REPORT_DOCUMENT: ReportDocumentArtifact,
     ArtifactType.PDF_REPORT: PdfReportArtifact,
 }

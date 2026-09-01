@@ -259,6 +259,12 @@ class ArtifactRegistry:
             ArtifactType.CLAIM,
         ) not in related_types:
             raise ArtifactProvenanceError("a finding must derive from a claim")
+        if (
+            artifact.artifact_type == ArtifactType.REMEDIATION_RESULT
+            and artifact.lineage
+            and (LineageRelation.DERIVED_FROM, ArtifactType.FINDING) not in related_types
+        ):
+            raise ArtifactProvenanceError("a remediation result must derive from a canonical finding")
 
     def _edges_for(self, artifact_id: str) -> list[ArtifactLineageModel]:
         return list(

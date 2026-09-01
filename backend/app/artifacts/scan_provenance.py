@@ -295,6 +295,83 @@ def publish_finding_provenance(
     }
 
 
+def publish_graph_artifacts(
+    db: Session,
+    *,
+    scan: ScanModel,
+    commit_sha: str,
+    revision_artifact_id: str,
+    analyzer_artifact_id: str,
+    graph_data: Any,
+    request_id: str | None = None,
+) -> dict[str, str]:
+    """Publish deterministic symbol/relationship and cross-layer contract facts."""
+    authority = CanonicalArtifactService(db)
+    policy_id = scan_policy_snapshot_id(db, scan)
+    repository_id = repository_identity(scan.repository_url)
+    data = graph_data.model_dump(mode="json") if hasattr(graph_data, "model_dump") else dict(graph_data)
+    nodes = list(data.get("nodes") or [])
+    edges = list(data.get("edges") or [])
+    contract_report = data.get("contract_report") or {}
+    lineage = [
+        (LineageRelation.DERIVED_FROM, revision_artifact_id),
+        (LineageRelation.PRODUCED_BY, analyzer_artifact_id),
+    ]
+    symbol_index = authority.publish_json(
+        tenant_id=_tenant_id(scan),
+        repository_id=repository_id,
+        revision_id=commit_sha,
+        artifact_type=ArtifactType.SYMBOL_INDEX,
+        payload={
+            "schema_version": "1.0",
+            "nodes": nodes,
+            "edges": edges,
+            "node_counts_by_kind": data.get("node_counts_by_kind") or {},
+            "edge_counts_by_kind": data.get("edge_counts_by_kind") or {},
+        },
+        producer="repolens-tree-sitter-graph-builder",
+        producer_version="1.0",
+        policy_snapshot_id=policy_id,
+        lineage=lineage,
+        coverage=ArtifactCoverage(
+            status=CoverageStatus.SUCCESSFULLY_ANALYZED,
+            discovered_count=len(nodes),
+            analyzed_count=len(nodes),
+        ),
+        sensitivity=ArtifactSensitivity.SOURCE_DERIVED,
+        retention_class=RetentionClass.SOURCE_BEARING_ARTIFACT,
+        referrer=("SCAN", scan.id),
+        actor_id=scan.owner_user_id,
+        request_id=request_id,
+    )
+    matches = list(contract_report.get("matches") or [])
+    contract = authority.publish_json(
+        tenant_id=_tenant_id(scan),
+        repository_id=repository_id,
+        revision_id=commit_sha,
+        artifact_type=ArtifactType.CONTRACT,
+        payload={"schema_version": "1.0", "contract_match_report": contract_report},
+        producer="repolens-contract-matcher",
+        producer_version="1.0",
+        policy_snapshot_id=policy_id,
+        lineage=[*lineage, (LineageRelation.DERIVED_FROM, symbol_index.artifact.artifact_id)],
+        coverage=ArtifactCoverage(
+            status=CoverageStatus.SUCCESSFULLY_ANALYZED,
+            discovered_count=len(matches),
+            analyzed_count=len(matches),
+        ),
+        sensitivity=ArtifactSensitivity.INTERNAL,
+        retention_class=RetentionClass.ANALYSIS_ARTIFACT,
+        referrer=("SCAN", scan.id),
+        actor_id=scan.owner_user_id,
+        request_id=request_id,
+    )
+    return {
+        "symbol_index_artifact_id": symbol_index.artifact.artifact_id,
+        "contract_artifact_id": contract.artifact.artifact_id,
+    }
+
+
 def _scanner_coverage(scanner_summary: Iterable[dict[str, Any]]) -> ArtifactCoverage:
     rows = list(scanner_summary)
     completed = sum(1 for row in rows if str(row.get("status", "")).upper() == "COMPLETED")
@@ -345,6 +422,7 @@ def _single_scanner_coverage(scanner: dict[str, Any]) -> ArtifactCoverage:
 __all__ = [
     "publish_analysis_artifacts",
     "publish_finding_provenance",
+    "publish_graph_artifacts",
     "publish_repository_revision",
     "repository_identity",
     "scan_policy_snapshot_id",

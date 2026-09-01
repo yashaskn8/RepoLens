@@ -26,6 +26,8 @@ class PatchModel(Base):
     parent_patch_id = Column(String(36), ForeignKey("patches.id", ondelete="RESTRICT"), unique=True, nullable=True, index=True)
     revision_number = Column(Integer, default=0, nullable=False)
     thread_id = Column(String(128), nullable=True, index=True)
+    generation_work_item_id = Column(String(36), nullable=True, unique=True, index=True)
+    result_artifact_id = Column(String(128), nullable=True, index=True)
     status = Column(String(32), nullable=False, default=PatchStatus.DRAFT.value, index=True)
     machine_verdict = Column(String(32), nullable=True)
     unified_diff = Column(Text, nullable=False)

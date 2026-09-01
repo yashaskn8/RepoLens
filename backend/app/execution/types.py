@@ -221,6 +221,7 @@ class EnqueueRequest:
     request_digest: str
     resource_profile: ResourceProfile
     budget: RequestBudget
+    request_payload: Mapping[str, object] = field(default_factory=dict)
     side_effect_class: SideEffectClass = SideEffectClass.SAFE_RECOMPUTATION
     external_idempotency_key: Optional[str] = None
     input_artifact_id: Optional[str] = None

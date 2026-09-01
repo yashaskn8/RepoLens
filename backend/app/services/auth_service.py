@@ -12,13 +12,21 @@ from typing import Optional, Tuple
 from uuid import uuid4
 
 from sqlalchemy.orm import Session
+from sqlalchemy import inspect
 
 from app.core.config import Settings, get_settings
 from app.models.user import UserModel, UserSessionModel
 from app.schemas.enums import UserRole
 from app.security.password import hash_password, verify_password, verify_dummy_password
+from app.governance.events import AuditLedger
 
 logger = logging.getLogger(__name__)
+
+
+def _append_auth_audit(db: Session, **kwargs) -> None:
+    """Append when the platform migration is present; support rolling upgrades."""
+    if inspect(db.get_bind()).has_table("audit_chain_heads"):
+        AuditLedger.append(db, **kwargs)
 
 
 def _utc_now() -> datetime:
@@ -75,7 +83,7 @@ class AuthService:
         self.db = db
         self.settings = settings or get_settings()
 
-    def register_user(self, email: str, password: str) -> UserModel:
+    def register_user(self, email: str, password: str, *, request_id: str | None = None) -> UserModel:
         """Register a new user with USER role.
 
         Role is always USER — request body cannot specify role.
@@ -99,11 +107,20 @@ class AuthService:
             updated_at=_utc_now(),
         )
         self.db.add(user)
+        _append_auth_audit(
+            self.db,
+            tenant_id=user.id,
+            actor_id=user.id,
+            request_id=request_id,
+            event_type="AUTH_ACCOUNT_REGISTERED",
+            resource_type="USER",
+            resource_id=user.id,
+        )
         self.db.commit()
         self.db.refresh(user)
         return user
 
-    def authenticate_user(self, email: str, password: str) -> UserModel:
+    def authenticate_user(self, email: str, password: str, *, request_id: str | None = None) -> UserModel:
         """Authenticate user with durable failure tracking.
 
         Failed login: increment counter / set lock -> COMMIT -> raise generic error.
@@ -120,6 +137,16 @@ class AuthService:
         # Check if account is active
         if not user.is_active:
             verify_dummy_password()
+            _append_auth_audit(
+                self.db,
+                tenant_id=user.id,
+                request_id=request_id,
+                event_type="AUTH_LOGIN_REJECTED",
+                resource_type="USER",
+                resource_id=user.id,
+                payload={"reason_code": "ACCOUNT_DISABLED"},
+            )
+            self.db.commit()
             raise AccountDisabledError()
 
         # Check lockout
@@ -130,7 +157,16 @@ class AuthService:
         if user.locked_until and _normalize_dt(user.locked_until) > now:
             # Still locked — perform dummy verification for timing consistency
             verify_dummy_password()
-            # Commit is not needed here since we don't change state
+            _append_auth_audit(
+                self.db,
+                tenant_id=user.id,
+                request_id=request_id,
+                event_type="AUTH_LOGIN_REJECTED",
+                resource_type="USER",
+                resource_id=user.id,
+                payload={"reason_code": "ACCOUNT_LOCKED"},
+            )
+            self.db.commit()
             raise InvalidCredentialsError()
 
         # Verify password
@@ -140,6 +176,18 @@ class AuthService:
             if user.failed_login_attempts >= max_attempts:
                 user.locked_until = now + timedelta(seconds=lockout_seconds)
             user.updated_at = now
+            _append_auth_audit(
+                self.db,
+                tenant_id=user.id,
+                request_id=request_id,
+                event_type="AUTH_LOGIN_REJECTED",
+                resource_type="USER",
+                resource_id=user.id,
+                payload={
+                    "reason_code": "INVALID_CREDENTIALS",
+                    "account_locked": user.locked_until is not None,
+                },
+            )
             self.db.commit()
             raise InvalidCredentialsError()
 
@@ -151,7 +199,12 @@ class AuthService:
         # NOTE: Do NOT commit here — caller commits atomically with session creation
         return user
 
-    def create_session(self, user: UserModel) -> Tuple[str, str, UserSessionModel]:
+    def create_session(
+        self,
+        user: UserModel,
+        *,
+        request_id: str | None = None,
+    ) -> Tuple[str, str, UserSessionModel]:
         """Create a new server-side session with cryptographic tokens.
 
         Returns (raw_session_token, raw_csrf_token, session_model).
@@ -174,6 +227,15 @@ class AuthService:
             last_seen_at=now,
         )
         self.db.add(session)
+        _append_auth_audit(
+            self.db,
+            tenant_id=user.id,
+            actor_id=user.id,
+            request_id=request_id,
+            event_type="AUTH_SESSION_CREATED",
+            resource_type="USER_SESSION",
+            resource_id=session.id,
+        )
         # Atomic commit: user failure-clear + session creation
         self.db.commit()
         self.db.refresh(session)
@@ -213,7 +275,7 @@ class AuthService:
 
         return user, session
 
-    def revoke_session(self, raw_session_token: str) -> None:
+    def revoke_session(self, raw_session_token: str, *, request_id: str | None = None) -> None:
         """Revoke a session (logout). Commits before returning."""
         token_hash = _hash_token(raw_session_token)
         session = self.db.query(UserSessionModel).filter(
@@ -222,4 +284,13 @@ class AuthService:
 
         if session and session.revoked_at is None:
             session.revoked_at = _utc_now()
+            _append_auth_audit(
+                self.db,
+                tenant_id=session.user_id,
+                actor_id=session.user_id,
+                request_id=request_id,
+                event_type="AUTH_SESSION_REVOKED",
+                resource_type="USER_SESSION",
+                resource_id=session.id,
+            )
             self.db.commit()

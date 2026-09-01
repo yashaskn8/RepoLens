@@ -1,58 +1,139 @@
 """API endpoints for finding inspection, technical research, fix planning, and patch generation."""
 
 import logging
-from typing import Optional
+from typing import Any, Optional, Union
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from sqlalchemy.orm import sessionmaker
 
-from app.analysis.service import get_intelligence_service
-from app.analysis.store import EvidenceStore
-from app.context.engine import ContextEngine
-from app.context.runtime import ScanIntelligenceRuntime
-from app.core.database import get_db
-from app.ingestion.schemas import RepositoryManifest
-from app.ingestion.snapshot import SnapshotError, get_snapshot_service
-from app.models.finding import FindingModel
-from app.models.patch import PatchModel
-from app.models.scan import ScanModel
-from app.agents.checkpointer import get_sqlite_checkpointer
-from app.analysis.service import get_intelligence_service
-from app.analysis.store import EvidenceStore
 from app.api.dependencies import get_current_user, verify_csrf
-from app.context.engine import ContextEngine
-from app.context.runtime import ScanIntelligenceRuntime
+from app.api.idempotency import idempotency_identity
+from app.core.config import get_settings
 from app.core.database import get_db
-from app.ingestion.schemas import RepositoryManifest
-from app.ingestion.snapshot import SnapshotError, get_snapshot_service
+from app.execution.application import NewWorkPaused, WorkSubmissionService
+from app.execution.dispatcher import DurableWorkDispatcher
+from app.execution.errors import IdempotencyConflict
+from app.execution.types import RequestBudget, ResourceProfile, WorkKind
 from app.models.finding import FindingModel
-from app.models.patch import PatchModel
 from app.models.scan import ScanModel
-from app.patching.critic import PatchCriticAgent
-from app.patching.schemas import PatchProposal, PatchWorkflowResult
-from app.patching.service import PatchService
-from app.patching.verification import PatchVerificationService
-from app.patching.workflow import PatchWorkflowCoordinator
-from app.patching.workflow_graph import build_remediation_graph
+from app.patching.schemas import PatchWorkflowResult
 from app.planning.schemas import FixPlan
-from app.planning.service import FixPlanningService
 from app.research.schemas import ResearchResult
-from app.research.service import ResearchService
+from app.remediation.service import RemediationExecutionService
 from app.schemas.auth import CurrentUser
-from app.schemas.enums import FindingStatus, PatchStatus, ScanStatus, Severity, UsageOperation, VerificationVerdict
-from app.schemas.evidence import Evidence
-from app.schemas.finding import Finding
-from app.schemas.metadata import ModelExecutionMetadata
-from app.schemas.workflow_event import WorkflowEventCreate, WorkflowEventType
 from app.schemas.auth import get_user_id
+from app.schemas.enums import ScanStatus, UsageOperation, VerificationVerdict
+from app.schemas.finding import Finding
 from app.services.authorization_service import get_owned_finding_or_404
 from app.services.domain_mapping import finding_model_to_schema
 from app.services.quota_service import check_and_increment_quota
-from app.services.workflow_event_service import WorkflowEventService
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/findings", tags=["Findings & Remediation"])
+
+
+class RemediationAccepted(BaseModel):
+    job_id: str
+    state: str
+    status_url: str
+    result_url: str
+    reused: bool
+
+
+def _finding_artifact_id(model: FindingModel) -> str | None:
+    metadata = model.model_metadata if isinstance(model.model_metadata, dict) else {}
+    provenance = metadata.get("provenance") or (metadata.get("extra_metadata") or {}).get("provenance") or {}
+    return provenance.get("finding_artifact_id")
+
+
+async def _submit_remediation(
+    *,
+    finding_id: UUID,
+    kind: WorkKind,
+    request: Request | None,
+    response: Response,
+    current_user: CurrentUser,
+    db: Session,
+    idempotency_key: str | None,
+    prefer: str | None,
+) -> dict[str, Any] | RemediationAccepted:
+    _, scan = _get_verified_finding_and_scan(finding_id, current_user, db)
+    finding_model = get_owned_finding_or_404(db, str(finding_id), current_user)
+    scope = kind.value.lower().replace("_", "-")
+    client_identity = idempotency_identity(
+        scope,
+        idempotency_key,
+        maximum=get_settings().IDEMPOTENCY_KEY_MAX_LENGTH,
+    )
+    semantic_identity = client_identity or f"{scope}:{finding_id}:{scan.commit_hash}"
+    profile = ResourceProfile.PATCH_GENERATION if kind == WorkKind.PATCH_GENERATION else ResourceProfile.LLM_REASONING
+    budget = RequestBudget(
+        max_wall_clock_seconds=get_settings().MAX_SCAN_DURATION_SECONDS,
+        max_ai_calls=6 if kind != WorkKind.PATCH_GENERATION else 10,
+        max_input_tokens=250_000,
+        max_output_tokens=50_000,
+        max_escalation_tier=2,
+        max_retrieval_context_tokens=125_000,
+    )
+    try:
+        submission = WorkSubmissionService().submit(
+            db,
+            tenant_id=current_user.id,
+            actor_id=current_user.id,
+            request_id=getattr(getattr(request, "state", None), "request_id", str(uuid4())),
+            work_kind=kind,
+            resource_type="FINDING",
+            resource_id=str(finding_id),
+            request_payload={"finding_id": str(finding_id), "revision_id": scan.commit_hash},
+            idempotency_key=semantic_identity,
+            external_idempotency_key=client_identity,
+            resource_profile=profile,
+            budget=budget,
+            input_artifact_id=_finding_artifact_id(finding_model),
+        )
+        if kind == WorkKind.PATCH_GENERATION and not submission.result.reused:
+            check_and_increment_quota(db, current_user.id, UsageOperation.PATCH_GENERATE.value)
+        db.commit()
+    except NewWorkPaused as exc:
+        db.rollback()
+        raise HTTPException(status_code=503, detail={"error_code": "NEW_JOBS_PAUSED", "message": str(exc)}) from exc
+    except IdempotencyConflict as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail={"error_code": "IDEMPOTENCY_CONFLICT", "message": str(exc)}) from exc
+
+    job_id = submission.result.work_item_id
+    response.headers["X-Job-Location"] = f"/api/v1/jobs/{job_id}"
+    response.headers["Idempotency-Replayed"] = "true" if submission.result.reused else "false"
+    accepted = RemediationAccepted(
+        job_id=job_id,
+        state=submission.result.state.value,
+        status_url=f"/api/v1/jobs/{job_id}",
+        result_url=f"/api/v1/jobs/{job_id}/result",
+        reused=submission.result.reused,
+    )
+    if prefer and "respond-async" in prefer.lower():
+        response.status_code = status.HTTP_202_ACCEPTED
+        DurableWorkDispatcher.nudge()
+        return accepted
+
+    execution = await DurableWorkDispatcher.execute_specific(
+        job_id,
+        session_factory=sessionmaker(bind=db.get_bind(), autoflush=False, expire_on_commit=False),
+    )
+    if execution["state"] != "SUCCEEDED" or not execution["output_artifact_id"]:
+        response.status_code = status.HTTP_202_ACCEPTED
+        DurableWorkDispatcher.nudge()
+        accepted.state = str(execution["state"])
+        return accepted
+    stored = RemediationExecutionService.load_result(
+        db,
+        tenant_id=current_user.id,
+        artifact_id=str(execution["output_artifact_id"]),
+    )
+    return dict(stored["result"])
 
 
 def _get_verified_finding_and_scan(finding_id: UUID, current_user: CurrentUser, db: Session) -> tuple[Finding, ScanModel]:
@@ -114,242 +195,77 @@ def get_finding_by_id(
     return finding_model_to_schema(fm)
 
 
-@router.post("/{finding_id}/research", response_model=ResearchResult)
+@router.post("/{finding_id}/research", response_model=Union[ResearchResult, RemediationAccepted])
 async def request_finding_research(
     finding_id: UUID,
+    request: Request = None,
+    response: Response = None,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    prefer: str | None = Header(default=None, alias="Prefer"),
     current_user: CurrentUser = Depends(get_current_user),
     _csrf: None = Depends(verify_csrf),
     db: Session = Depends(get_db),
-) -> ResearchResult:
-    """Execute evidence-grounded technical research and upgrade intelligence against the exact analyzed repository."""
-    finding_schema, scan = _get_verified_finding_and_scan(finding_id, current_user, db)
-    snapshot_service = get_snapshot_service()
-
-    try:
-        async with snapshot_service.open_snapshot(scan_id=scan.id, db=db) as workspace_dir:
-            intelligence_service = get_intelligence_service()
-            evidence_store = await intelligence_service.analyze_repository(
-                repo_dir=workspace_dir,
-                repository_url=scan.repository_url,
-                commit_hash=scan.commit_hash,
-                branch=scan.branch,
-            )
-
-            service = ResearchService()
-            return await service.research_finding(
-                finding=finding_schema,
-                manifest=evidence_store.manifest,
-            )
-    except SnapshotError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to materialize exact repository snapshot: {str(exc)}",
-        )
+) -> ResearchResult | RemediationAccepted:
+    """Execute through the shared durable engine; async callers may use Prefer: respond-async."""
+    response = response or Response()
+    result = await _submit_remediation(
+        finding_id=finding_id,
+        kind=WorkKind.RESEARCH,
+        request=request,
+        response=response,
+        current_user=current_user,
+        db=db,
+        idempotency_key=idempotency_key,
+        prefer=prefer,
+    )
+    return result if isinstance(result, RemediationAccepted) else ResearchResult.model_validate(result)
 
 
-@router.post("/{finding_id}/plan", response_model=FixPlan)
+@router.post("/{finding_id}/plan", response_model=Union[FixPlan, RemediationAccepted])
 async def request_fix_plan(
     finding_id: UUID,
+    request: Request = None,
+    response: Response = None,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    prefer: str | None = Header(default=None, alias="Prefer"),
     current_user: CurrentUser = Depends(get_current_user),
     _csrf: None = Depends(verify_csrf),
     db: Session = Depends(get_db),
-) -> FixPlan:
-    """Generate and validate a structured, minimal-scope FixPlan against the exact analyzed repository."""
-    finding_schema, scan = _get_verified_finding_and_scan(finding_id, current_user, db)
-    snapshot_service = get_snapshot_service()
-
-    try:
-        async with snapshot_service.open_snapshot(scan_id=scan.id, db=db) as workspace_dir:
-            intelligence_service = get_intelligence_service()
-            evidence_store = await intelligence_service.analyze_repository(
-                repo_dir=workspace_dir,
-                repository_url=scan.repository_url,
-                commit_hash=scan.commit_hash,
-                branch=scan.branch,
-            )
-
-            runtime = await ScanIntelligenceRuntime.build(
-                evidence_store=evidence_store,
-                repo_dir=workspace_dir,
-            )
-
-            service = FixPlanningService()
-            return await service.create_fix_plan(
-                finding=finding_schema,
-                context_engine=runtime.context_engine,
-                repository_graph=runtime.repository_graph,
-                manifest=runtime.manifest,
-            )
-    except SnapshotError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to materialize exact repository snapshot: {str(exc)}",
-        )
+) -> FixPlan | RemediationAccepted:
+    response = response or Response()
+    result = await _submit_remediation(
+        finding_id=finding_id,
+        kind=WorkKind.FIX_PLAN,
+        request=request,
+        response=response,
+        current_user=current_user,
+        db=db,
+        idempotency_key=idempotency_key,
+        prefer=prefer,
+    )
+    return result if isinstance(result, RemediationAccepted) else FixPlan.model_validate(result)
 
 
-@router.post("/{finding_id}/patch", response_model=PatchWorkflowResult)
+@router.post("/{finding_id}/patch", response_model=Union[PatchWorkflowResult, RemediationAccepted])
 async def request_patch_generation(
     finding_id: UUID,
+    request: Request = None,
+    response: Response = None,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    prefer: str | None = Header(default=None, alias="Prefer"),
     current_user: CurrentUser = Depends(get_current_user),
     _csrf: None = Depends(verify_csrf),
     db: Session = Depends(get_db),
-) -> PatchWorkflowResult:
-    """Generate, verify in sandbox, conditionally critique, and persist candidate patch against the exact analyzed repository."""
-    # 1. Quota check & increment
-    check_and_increment_quota(db, current_user.id, UsageOperation.PATCH_GENERATE.value)
-
-    finding_schema, scan = _get_verified_finding_and_scan(finding_id, current_user, db)
-    snapshot_service = get_snapshot_service()
-
-    try:
-        async with snapshot_service.open_snapshot(scan_id=scan.id, db=db) as workspace_dir:
-            intelligence_service = get_intelligence_service()
-            evidence_store = await intelligence_service.analyze_repository(
-                repo_dir=workspace_dir,
-                repository_url=scan.repository_url,
-                commit_hash=scan.commit_hash,
-                branch=scan.branch,
-            )
-
-            runtime = await ScanIntelligenceRuntime.build(
-                evidence_store=evidence_store,
-                repo_dir=workspace_dir,
-            )
-
-            # 1. Generate FixPlan first
-            planning_service = FixPlanningService()
-            fix_plan = await planning_service.create_fix_plan(
-                finding=finding_schema,
-                context_engine=runtime.context_engine,
-                repository_graph=runtime.repository_graph,
-                manifest=runtime.manifest,
-            )
-            if not isinstance(fix_plan, FixPlan):
-                try:
-                    fix_plan = FixPlan.model_validate(fix_plan)
-                except Exception as e:
-                    raise HTTPException(
-                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                        detail=f"PATCH_PLAN_PROVENANCE_MISMATCH: Invalid canonical FixPlan: {e}",
-                    )
-
-            # 2. Execute Patch Workflow (Generator -> Sandbox Verifier -> Critic)
-            coordinator = PatchWorkflowCoordinator()
-            workflow_result = await coordinator.execute_patch_workflow(
-                finding=finding_schema,
-                fix_plan=fix_plan,
-                context_engine=runtime.context_engine,
-                original_repo_dir=workspace_dir,
-                manifest=runtime.manifest,
-            )
-
-            proposal = workflow_result.proposal
-            if not (
-                proposal.finding_id == fix_plan.finding_id
-                and proposal.plan_id == fix_plan.id
-                and fix_plan.finding_id == finding_schema.id
-            ):
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="PATCH_PLAN_PROVENANCE_MISMATCH: Patch proposal plan or finding identity does not match canonical FixPlan.",
-                )
-
-            patch_status = PatchStatus.VERIFIED if workflow_result.final_verdict in ("PASSED", "APPROVED") else (
-                PatchStatus.REJECTED if workflow_result.final_verdict == "REJECTED" else PatchStatus.NEEDS_REVIEW
-            )
-
-            # 3. Initialize durable LangGraph remediation thread paused at human approval interrupt
-            remediation_thread_id = f"remediation-{proposal.id}"
-            initial_remediation_state = {
-                "scan_id": str(scan.id),
-                "finding_id": str(finding_id),
-                "patch_id": str(proposal.id),
-                "thread_id": remediation_thread_id,
-                "proposal_dict": proposal.model_dump(mode="json"),
-                "verification_dict": workflow_result.verification_result.model_dump(mode="json") if workflow_result.verification_result else None,
-                "critic_dict": workflow_result.critic_report.model_dump(mode="json") if workflow_result.critic_report else None,
-                "patch_status": patch_status.value,
-                "revision_count": 0,
-            }
-            try:
-                async with get_sqlite_checkpointer() as checkpointer:
-                    remediation_app = build_remediation_graph(checkpointer=checkpointer)
-                    await remediation_app.ainvoke(
-                        initial_remediation_state,
-                        config={"configurable": {"thread_id": remediation_thread_id}},
-                    )
-            except Exception as exc:
-                logger.warning("Notice initializing remediation thread %s: %s", remediation_thread_id, str(exc))
-
-            # 4. Persist Patch Proposal into database
-            patch_model = PatchModel(
-                id=str(proposal.id),
-                finding_id=str(finding_id),
-                plan_id=str(fix_plan.id),
-                fix_plan_snapshot=fix_plan.model_dump(mode="json"),
-                scan_id=str(scan.id),
-                thread_id=remediation_thread_id,
-                status=patch_status.value,
-                machine_verdict=workflow_result.machine_verdict,
-                unified_diff=proposal.unified_diff,
-                files_modified=proposal.files_modified,
-                explanation=proposal.explanation,
-                expected_behavior_change=proposal.expected_behavior_change,
-                generated_tests_or_test_plan=proposal.generated_tests_or_test_plan,
-                verification_report=workflow_result.verification_result.model_dump(mode="json") if workflow_result.verification_result else None,
-                critic_report=workflow_result.critic_report.model_dump(mode="json") if workflow_result.critic_report else None,
-                model_metadata=proposal.model_metadata.model_dump(mode="json") if proposal.model_metadata else None,
-            )
-            db.add(patch_model)
-            db.commit()
-            db.refresh(patch_model)
-
-            # 5. Emit PATCH_GENERATED and machine verification verdict events with actor attribution
-            WorkflowEventService.emit(
-                db=db,
-                event=WorkflowEventCreate(
-                    event_type=WorkflowEventType.PATCH_GENERATED,
-                    scan_id=UUID(str(scan.id)),
-                    finding_id=UUID(str(finding_id)),
-                    patch_id=UUID(str(proposal.id)),
-                    actor_user_id=get_user_id(current_user),
-                    thread_id=remediation_thread_id,
-                    commit_sha=scan.commit_hash,
-                    stage="patch_generation",
-                    message="Safe remediation patch candidate generated and verified in sandbox",
-                    metadata_payload={"files_modified": proposal.files_modified},
-                ),
-            )
-
-            verdict_event_type = (
-                WorkflowEventType.PATCH_VERIFIED
-                if workflow_result.machine_verdict == "PASSED"
-                else (
-                    WorkflowEventType.PATCH_REJECTED
-                    if workflow_result.machine_verdict == "REJECTED"
-                    else WorkflowEventType.PATCH_NEEDS_REVIEW
-                )
-            )
-            WorkflowEventService.emit(
-                db=db,
-                event=WorkflowEventCreate(
-                    event_type=verdict_event_type,
-                    scan_id=UUID(str(scan.id)),
-                    finding_id=UUID(str(finding_id)),
-                    patch_id=UUID(str(proposal.id)),
-                    actor_user_id=get_user_id(current_user),
-                    thread_id=remediation_thread_id,
-                    commit_sha=scan.commit_hash,
-                    stage="patch_verification",
-                    message=f"Machine verification verdict: {workflow_result.machine_verdict}",
-                    metadata_payload={"machine_verdict": workflow_result.machine_verdict},
-                ),
-            )
-
-            return workflow_result
-    except SnapshotError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to materialize exact repository snapshot: {str(exc)}",
-        )
-
+) -> PatchWorkflowResult | RemediationAccepted:
+    response = response or Response()
+    result = await _submit_remediation(
+        finding_id=finding_id,
+        kind=WorkKind.PATCH_GENERATION,
+        request=request,
+        response=response,
+        current_user=current_user,
+        db=db,
+        idempotency_key=idempotency_key,
+        prefer=prefer,
+    )
+    return result if isinstance(result, RemediationAccepted) else PatchWorkflowResult.model_validate(result)

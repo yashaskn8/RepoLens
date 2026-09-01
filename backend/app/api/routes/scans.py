@@ -20,6 +20,7 @@ from app.analysis.service import get_intelligence_service
 from app.artifacts.scan_provenance import (
     publish_analysis_artifacts,
     publish_finding_provenance,
+    publish_graph_artifacts,
     publish_repository_revision,
 )
 from app.api.dependencies import get_current_user, verify_csrf
@@ -312,6 +313,24 @@ async def execute_background_scan(
             evidence_store=evidence_store,
             repo_dir=workspace_dir,
         )
+        graph_projection = publish_graph_artifacts(
+            db,
+            scan=scan_model,
+            commit_sha=commit_sha,
+            revision_artifact_id=revision_artifact_id,
+            analyzer_artifact_id=artifact_projection["analyzer_run_artifact_id"],
+            graph_data=runtime.repository_graph.to_domain_data(),
+        )
+        graph_meta = dict(scan_model.model_metadata or {})
+        graph_meta.update(graph_projection)
+        graph_meta["artifact_lineage"] = [
+            *(graph_meta.get("artifact_lineage") or []),
+            graph_projection["symbol_index_artifact_id"],
+            graph_projection["contract_artifact_id"],
+        ]
+        scan_model.model_metadata = graph_meta
+        flag_modified(scan_model, "model_metadata")
+        db.commit()
 
         # 5. Run durable LangGraph multi-agent analysis workflow using canonical SQLite checkpointer
         WorkflowEventService.emit(
@@ -725,13 +744,22 @@ def get_scan(
 @router.get("/{scan_id}/findings", response_model=List[Finding])
 def get_scan_findings(
     scan_id: UUID,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> List[Finding]:
     """Retrieve verified findings for a completed or ongoing scan."""
     scan_model = get_owned_scan_or_404(db, str(scan_id), current_user)
 
-    finding_models = db.query(FindingModel).filter(FindingModel.scan_id == str(scan_id)).all()
+    finding_models = (
+        db.query(FindingModel)
+        .filter(FindingModel.scan_id == str(scan_id))
+        .order_by(FindingModel.created_at.desc(), FindingModel.id.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
     results: List[Finding] = []
 
     for fm in finding_models:

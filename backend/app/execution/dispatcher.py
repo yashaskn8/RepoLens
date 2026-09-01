@@ -4,24 +4,25 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 import os
 import socket
 import time
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import inspect
 
 from app.core.config import get_settings
-from app.core.database import SessionLocal
+from app.execution.context import new_execution_session as SessionLocal
 from app.execution.application import WorkSubmissionService
 from app.execution.engine import DurableExecutionEngine
 from app.execution.errors import LeaseLost
 from app.execution.types import (
     ClaimedWork,
     DomainOutcome,
+    ExecutionState,
     FailureCode,
     RequestBudget,
     ResourceProfile,
@@ -46,11 +47,19 @@ class WorkHandlerResult:
 
 
 class DomainWorkFailed(RuntimeError):
-    def __init__(self, code: FailureCode, message: str, *, retryable: bool) -> None:
+    def __init__(
+        self,
+        code: FailureCode,
+        message: str,
+        *,
+        retryable: bool,
+        may_have_started_external_effect: bool = False,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.public_message = message
         self.retryable = retryable
+        self.may_have_started_external_effect = may_have_started_external_effect
 
 
 @dataclass
@@ -95,6 +104,47 @@ class DurableWorkDispatcher:
         return task
 
     @classmethod
+    async def execute_specific(
+        cls,
+        work_item_id: str,
+        *,
+        session_factory=None,
+    ) -> dict[str, Any]:
+        """Execute one item through canonical leases for synchronous API compatibility."""
+        try:
+            from app.execution.context import bind_execution_session_factory, reset_execution_session_factory
+
+            factory_token = bind_execution_session_factory(session_factory)
+            db = SessionLocal()
+            try:
+                claim = DurableExecutionEngine(
+                    db,
+                    lease_seconds=get_settings().EXECUTION_LEASE_SECONDS,
+                ).claim_specific(work_item_id, f"{cls._worker_prefix}:inline")
+            finally:
+                db.close()
+            if claim is not None:
+                await cls._run_claim(claim)
+            result_db = SessionLocal()
+            try:
+                work = result_db.query(WorkItemModel).filter(WorkItemModel.id == work_item_id).first()
+                if work is None:
+                    raise LookupError("work item not found after execution")
+                return {
+                    "id": work.id,
+                    "state": work.state,
+                    "domain_outcome": work.domain_outcome,
+                    "output_artifact_id": work.output_artifact_id,
+                    "outcome_detail": dict(work.outcome_detail or {}),
+                    "reconciliation_required": bool(work.reconciliation_required),
+                }
+            finally:
+                result_db.close()
+        finally:
+            if "factory_token" in locals():
+                reset_execution_session_factory(factory_token)
+
+    @classmethod
     async def stop(cls) -> None:
         cls._stopping = True
         if cls._wake_event is not None:
@@ -124,6 +174,7 @@ class DurableWorkDispatcher:
                 claim = await asyncio.to_thread(cls._recover_and_claim, run_recovery)
                 if run_recovery:
                     last_recovery = now
+                    await cls._reconcile_uncertain_side_effects(limit=20)
                 if claim is not None:
                     task = asyncio.create_task(
                         cls._run_claim(claim),
@@ -171,6 +222,157 @@ class DurableWorkDispatcher:
             db.close()
 
     @classmethod
+    async def _reconcile_uncertain_side_effects(cls, *, limit: int) -> int:
+        """Read remote state for uncertain writes and resolve SQL work authority.
+
+        Reconciliation is deliberately read-only at the provider boundary.  The
+        database row lock prevents concurrent state resolution while the remote
+        lookup itself remains safe to repeat across hosts after a crash.
+        """
+        db = SessionLocal()
+        try:
+            from app.models.platform import ReconciliationRecordModel
+
+            if not inspect(db.get_bind()).has_table("execution_work_items"):
+                return 0
+
+            now = datetime.now(timezone.utc)
+            rows = (
+                db.query(WorkItemModel)
+                .filter(
+                    WorkItemModel.state == ExecutionState.FAILED.value,
+                    WorkItemModel.reconciliation_required.is_(True),
+                    WorkItemModel.work_kind.in_([
+                        WorkKind.GITHUB_DELIVERY.value,
+                        WorkKind.REVIEW_PUBLICATION.value,
+                    ]),
+                )
+                .order_by(WorkItemModel.updated_at.asc())
+                .limit(limit)
+                .all()
+            )
+            identities = [
+                (row.id, row.tenant_id, row.work_kind, row.resource_id, row.attempt_count)
+                for row in rows
+            ]
+        finally:
+            db.close()
+
+        reconciled = 0
+        for work_id, tenant_id, work_kind, resource_id, work_attempt_count in identities:
+            record_db = SessionLocal()
+            try:
+                from app.models.platform import ReconciliationRecordModel
+
+                record = record_db.query(ReconciliationRecordModel).filter(
+                    ReconciliationRecordModel.tenant_id == tenant_id,
+                    ReconciliationRecordModel.resource_type == "WORK_ITEM",
+                    ReconciliationRecordModel.resource_id == work_id,
+                    ReconciliationRecordModel.operation == "EXTERNAL_SIDE_EFFECT",
+                ).first()
+                attempt_identity = str(work_attempt_count)
+                if (
+                    record is not None
+                    and record.status == "COMPLETED"
+                    and record.expected_digest == attempt_identity
+                ):
+                    continue
+                if record is not None and _aware(record.next_attempt_at) > datetime.now(timezone.utc):
+                    continue
+                if record is None:
+                    record = ReconciliationRecordModel(
+                        tenant_id=tenant_id,
+                        resource_type="WORK_ITEM",
+                        resource_id=work_id,
+                        operation="EXTERNAL_SIDE_EFFECT",
+                    )
+                    record_db.add(record)
+                record.expected_digest = attempt_identity
+                record.status = "RUNNING"
+                record.attempt_count = int(record.attempt_count or 0) + 1
+                record.failure_code = None
+                record.failure_message = None
+                record_db.commit()
+
+                completed = False
+                safe_to_retry = False
+                outcome_detail: dict[str, Any] = {"reconciliation": "UNCERTAIN"}
+                if work_kind == WorkKind.GITHUB_DELIVERY.value:
+                    from app.delivery.service import DeliveryService
+
+                    outcome = await DeliveryService().reconcile_delivery(record_db, resource_id)
+                    completed = outcome == "COMPLETED"
+                    safe_to_retry = outcome == "ABSENT_SAFE_TO_RETRY"
+                    outcome_detail = {"delivery_id": resource_id, "reconciliation": outcome}
+                elif work_kind == WorkKind.REVIEW_PUBLICATION.value:
+                    from app.models.review_publication import PullRequestReviewPublicationModel
+                    from app.services.review_publication_service import ReviewPublicationService
+
+                    publication = record_db.query(PullRequestReviewPublicationModel).filter(
+                        PullRequestReviewPublicationModel.id == resource_id
+                    ).first()
+                    if publication is None:
+                        outcome_detail = {"publication_id": resource_id, "reconciliation": "MISSING"}
+                    else:
+                        publication = await ReviewPublicationService(record_db).reconcile_publication(publication)
+                        completed = publication.status == "PUBLISHED"
+                        outcome_detail = {
+                            "publication_id": resource_id,
+                            "github_review_id": publication.github_review_id,
+                            "github_review_url": publication.github_review_url,
+                            "reconciliation": "COMPLETED" if completed else "UNCERTAIN",
+                        }
+
+                state = cls._engine(record_db).resolve_external_reconciliation(
+                    work_id,
+                    completed=completed,
+                    safe_to_retry=safe_to_retry,
+                    outcome_detail=outcome_detail,
+                )
+                record.status = "COMPLETED" if completed or safe_to_retry else "PENDING"
+                record.next_attempt_at = datetime.now(timezone.utc) + timedelta(
+                    seconds=min(3600, 30 * (2 ** min(record.attempt_count, 7)))
+                )
+                record.completed_at = datetime.now(timezone.utc) if record.status == "COMPLETED" else None
+                if record.status == "PENDING":
+                    record.failure_code = FailureCode.EXTERNAL_STATE_UNCERTAIN.value
+                    record.failure_message = "Remote state remains uncertain; no write was replayed."
+                DomainOutbox.append(
+                    record_db,
+                    tenant_id=tenant_id,
+                    aggregate_type="WORK_ITEM",
+                    aggregate_id=work_id,
+                    event_type="EXTERNAL_STATE_RECONCILED" if record.status == "COMPLETED" else "EXTERNAL_STATE_STILL_UNCERTAIN",
+                    deduplication_key=f"work:{work_id}:reconcile:{record.attempt_count}:{state.value}",
+                    payload={"state": state.value, **outcome_detail},
+                )
+                AuditLedger.append(
+                    record_db,
+                    tenant_id=tenant_id,
+                    event_type="EXTERNAL_STATE_RECONCILIATION",
+                    resource_type="WORK_ITEM",
+                    resource_id=work_id,
+                    payload={"state": state.value, **outcome_detail},
+                )
+                TelemetryRecorder.record(
+                    record_db,
+                    tenant_id=tenant_id,
+                    work_item_id=work_id,
+                    metric_name="external.reconciliation",
+                    value=1.0,
+                    unit="attempt",
+                    dimensions={"work_kind": work_kind, "result": outcome_detail["reconciliation"]},
+                )
+                record_db.commit()
+                reconciled += 1
+            except Exception as exc:
+                record_db.rollback()
+                logger.warning("External reconciliation failed for work %s: %s", work_id, type(exc).__name__)
+            finally:
+                record_db.close()
+        return reconciled
+
+    @classmethod
     async def _run_claim(cls, claim: ClaimedWork) -> None:
         from app.execution.context import bind_claim, reset_claim
 
@@ -185,15 +387,22 @@ class DurableWorkDispatcher:
         try:
             result = await handler_task
             if control.cancel_requested:
-                await asyncio.to_thread(cls._acknowledge_cancel, claim)
+                state = await asyncio.to_thread(cls._acknowledge_cancel, claim)
+                if state == ExecutionState.CANCELLED:
+                    await asyncio.to_thread(cls._mark_domain_cancelled, claim)
+                elif state == ExecutionState.FAILED:
+                    await asyncio.to_thread(cls._mark_external_state_uncertain, claim)
                 return
             if control.budget_stopped or control.lease_lost:
                 return
             await asyncio.to_thread(cls._complete_transition, claim, result)
         except asyncio.CancelledError:
             if control.cancel_requested:
-                await asyncio.to_thread(cls._mark_domain_cancelled, claim)
-                await asyncio.to_thread(cls._acknowledge_cancel, claim)
+                state = await asyncio.to_thread(cls._acknowledge_cancel, claim)
+                if state == ExecutionState.CANCELLED:
+                    await asyncio.to_thread(cls._mark_domain_cancelled, claim)
+                else:
+                    await asyncio.to_thread(cls._mark_external_state_uncertain, claim)
                 return
             if control.budget_stopped or control.lease_lost:
                 return
@@ -201,6 +410,13 @@ class DurableWorkDispatcher:
             # recovers it after expiry instead of claiming false completion.
             raise
         except DomainWorkFailed as exc:
+            logger.warning(
+                "Domain work %s failed with %s (retryable=%s): %s",
+                claim.work_item_id,
+                exc.code.value,
+                exc.retryable,
+                exc.public_message,
+            )
             await asyncio.to_thread(cls._fail_transition, claim, exc)
         except Exception as exc:
             logger.exception("Unhandled domain handler failure for work %s", claim.work_item_id)
@@ -379,6 +595,7 @@ class DurableWorkDispatcher:
                 retryable=failure.retryable,
                 internal_detail_digest=digest,
                 retry_delay_seconds=min(30, 2 ** min(claim.attempt_number, 5)),
+                may_have_started_external_effect=failure.may_have_started_external_effect,
             )
             work = db.query(WorkItemModel).filter(WorkItemModel.id == claim.work_item_id).one()
             DomainOutbox.append(
@@ -420,31 +637,73 @@ class DurableWorkDispatcher:
             db.close()
 
     @classmethod
-    def _acknowledge_cancel(cls, claim: ClaimedWork) -> None:
+    def _acknowledge_cancel(cls, claim: ClaimedWork) -> ExecutionState | None:
         db = SessionLocal()
         try:
             engine = cls._engine(db)
-            engine.acknowledge_cancel(claim.work_item_id, claim.lease_token)
+            next_state = engine.acknowledge_cancel(claim.work_item_id, claim.lease_token)
+            event_type = {
+                ExecutionState.FAILED: "EXTERNAL_STATE_RECONCILIATION_REQUIRED",
+                ExecutionState.SUCCEEDED: "WORK_ITEM_COMPLETED_BEFORE_LATE_CANCEL",
+                ExecutionState.CANCELLED: "WORK_ITEM_CANCELLED",
+            }[next_state]
+            audit_type = {
+                ExecutionState.FAILED: "EXTERNAL_STATE_RECONCILIATION_REQUIRED",
+                ExecutionState.SUCCEEDED: "JOB_COMPLETED_BEFORE_LATE_CANCEL",
+                ExecutionState.CANCELLED: "JOB_CANCELLED",
+            }[next_state]
             DomainOutbox.append(
                 db,
                 tenant_id=claim.tenant_id,
                 aggregate_type="WORK_ITEM",
                 aggregate_id=claim.work_item_id,
-                event_type="WORK_ITEM_CANCELLED",
-                deduplication_key=f"work:{claim.work_item_id}:cancelled",
-                payload={"attempt_number": claim.attempt_number},
+                event_type=event_type,
+                deduplication_key=(
+                    f"work:{claim.work_item_id}:reconciliation-required"
+                    if next_state == ExecutionState.FAILED
+                    else f"work:{claim.work_item_id}:{next_state.value.lower()}"
+                ),
+                payload={"attempt_number": claim.attempt_number, "state": next_state.value},
             )
             AuditLedger.append(
                 db,
                 tenant_id=claim.tenant_id,
-                event_type="JOB_CANCELLED",
+                event_type=audit_type,
                 resource_type="WORK_ITEM",
                 resource_id=claim.work_item_id,
                 payload={"attempt_number": claim.attempt_number},
             )
             db.commit()
+            return next_state
         except LeaseLost:
             db.rollback()
+            return None
+        finally:
+            db.close()
+
+    @staticmethod
+    def _mark_external_state_uncertain(claim: ClaimedWork) -> None:
+        db = SessionLocal()
+        try:
+            if claim.work_kind == WorkKind.GITHUB_DELIVERY:
+                from app.models.delivery import DeliveryModel
+
+                model = db.query(DeliveryModel).filter(DeliveryModel.id == claim.resource_id).first()
+                if model is not None and model.status != "PR_CREATED":
+                    model.status = "FAILED"
+                    model.failure_code = FailureCode.EXTERNAL_STATE_UNCERTAIN.value
+                    model.failure_message = "Remote GitHub state requires reconciliation."
+                    model.completed_at = datetime.now(timezone.utc)
+            elif claim.work_kind == WorkKind.REVIEW_PUBLICATION:
+                from app.models.review_publication import PullRequestReviewPublicationModel
+
+                model = db.query(PullRequestReviewPublicationModel).filter(
+                    PullRequestReviewPublicationModel.id == claim.resource_id
+                ).first()
+                if model is not None and model.status != "PUBLISHED":
+                    model.failure_code = FailureCode.EXTERNAL_STATE_UNCERTAIN.value
+                    model.failure_message = "Remote GitHub state requires reconciliation."
+            db.commit()
         finally:
             db.close()
 
@@ -512,11 +771,280 @@ class DurableWorkDispatcher:
             )
             return await asyncio.to_thread(cls._report_result, claim.resource_id)
 
+        if claim.work_kind in {WorkKind.RESEARCH, WorkKind.FIX_PLAN, WorkKind.PATCH_GENERATION}:
+            from app.ingestion.snapshot import SnapshotError
+            from app.remediation.service import RemediationExecutionService, RemediationInvariantError
+
+            try:
+                result = await RemediationExecutionService().execute(claim.work_item_id)
+            except SnapshotError as exc:
+                raise DomainWorkFailed(
+                    FailureCode.REPOSITORY_UNAVAILABLE,
+                    "The exact repository revision could not be materialized for remediation.",
+                    retryable=True,
+                ) from exc
+            except RemediationInvariantError as exc:
+                raise DomainWorkFailed(
+                    FailureCode.INTERNAL_INVARIANT_VIOLATION,
+                    str(exc),
+                    retryable=False,
+                ) from exc
+            return WorkHandlerResult(
+                outcome=DomainOutcome.COMPLETE,
+                coverage_summary={
+                    "schema_version": "1.0",
+                    "outcome": "COMPLETE",
+                    "units": [{"component": result.result_kind.lower(), "state": "SUCCESSFULLY_ANALYZED"}],
+                    "explanation": "Remediation output was generated against the pinned revision and published as an immutable artifact.",
+                },
+                output_artifact_id=result.artifact_id,
+                outcome_detail={
+                    "result_kind": result.result_kind,
+                    "patch_id": result.patch_id,
+                    "artifact_digest": result.artifact_digest,
+                    "artifact_reused": result.reused,
+                },
+            )
+
+        if claim.work_kind == WorkKind.GITHUB_DELIVERY:
+            from app.delivery.service import DeliveryService
+            from app.execution.context import mark_current_side_effect_completed
+            from app.models.delivery import DeliveryModel
+            from app.models.scan import ScanModel
+            from app.schemas.delivery import DeliveryRequest
+
+            await asyncio.to_thread(cls._assert_github_write_authorized, claim)
+            db = SessionLocal()
+            try:
+                delivery = (
+                    db.query(DeliveryModel)
+                    .join(ScanModel, ScanModel.id == DeliveryModel.scan_id)
+                    .filter(
+                        DeliveryModel.id == claim.resource_id,
+                        ScanModel.owner_user_id == claim.tenant_id,
+                    )
+                    .first()
+                )
+                if delivery is None:
+                    raise DomainWorkFailed(
+                        FailureCode.INTERNAL_INVARIANT_VIOLATION,
+                        "The delivery resource is missing or violates its tenant boundary.",
+                        retryable=False,
+                    )
+                result = await DeliveryService().deliver_patch(
+                    db=db,
+                    patch_id=delivery.patch_id,
+                    payload=DeliveryRequest(
+                        requested_by=delivery.requested_by,
+                        notes=delivery.request_notes,
+                    ),
+                )
+                if result.status == "PR_CREATED":
+                    mark_current_side_effect_completed(
+                        db=db,
+                        external_operation_id=f"github-pr:{result.repository_owner}/{result.repository_name}:{result.pr_number}",
+                    )
+                    db.commit()
+                    return WorkHandlerResult(
+                        outcome=DomainOutcome.COMPLETE,
+                        coverage_summary={
+                            "schema_version": "1.0",
+                            "outcome": "COMPLETE",
+                            "units": [{"component": "github_delivery", "state": "SUCCESSFULLY_ANALYZED"}],
+                            "explanation": "The approved patch was delivered or reconciled to one GitHub pull request.",
+                        },
+                        outcome_detail={
+                            "delivery_id": result.id,
+                            "pr_number": result.pr_number,
+                            "pr_url": result.pr_url,
+                            "reconciliation_occurred": bool(result.reconciliation_occurred),
+                        },
+                    )
+                if result.status == "BLOCKED":
+                    mark_current_side_effect_completed(
+                        db=db,
+                        external_operation_id=f"no-effect:delivery-blocked:{result.id}",
+                    )
+                    db.commit()
+                    return WorkHandlerResult(
+                        outcome=DomainOutcome.DEGRADED,
+                        coverage_summary={
+                            "schema_version": "1.0",
+                            "outcome": "DEGRADED",
+                            "units": [{"component": "github_delivery", "state": "SKIPPED"}],
+                            "explanation": "GitHub delivery was safely blocked before publication.",
+                        },
+                        outcome_detail={"delivery_id": result.id, "failure_code": result.failure_code},
+                    )
+                from app.models.execution import WorkAttemptModel
+
+                attempt = db.query(WorkAttemptModel).filter(WorkAttemptModel.id == claim.attempt_id).first()
+                external_started = bool(
+                    attempt
+                    and attempt.side_effect_started_at is not None
+                    and attempt.side_effect_completed_at is None
+                )
+                failure_map = {
+                    "GITHUB_RATE_LIMITED": FailureCode.PROVIDER_RATE_LIMITED,
+                    "GITHUB_AUTH_FAILED": FailureCode.PROVIDER_AUTH_FAILURE,
+                    "HEAD_BRANCH_COLLISION": FailureCode.INTERNAL_INVARIANT_VIOLATION,
+                    "HEAD_BRANCH_SHA_MISMATCH": FailureCode.INTERNAL_INVARIANT_VIOLATION,
+                    "TREE_BUILD_APPLY_FAILED": FailureCode.INTERNAL_INVARIANT_VIOLATION,
+                }
+                known_retryable = {
+                    "DELIVERY_FAILED",
+                    "LOCAL_STATE_PERSISTENCE_FAILED",
+                    "GITHUB_RATE_LIMITED",
+                }
+                domain_code = failure_map.get(
+                    result.failure_code or "",
+                    FailureCode.PROVIDER_UNAVAILABLE,
+                )
+                raise DomainWorkFailed(
+                    FailureCode.EXTERNAL_STATE_UNCERTAIN if external_started else domain_code,
+                    (
+                        "GitHub delivery may have changed remote state and requires reconciliation."
+                        if external_started
+                        else f"GitHub delivery failed with {result.failure_code or 'DELIVERY_FAILED'}."
+                    ),
+                    retryable=not external_started and (result.failure_code or "DELIVERY_FAILED") in known_retryable,
+                    may_have_started_external_effect=external_started,
+                )
+            finally:
+                db.close()
+
+        if claim.work_kind == WorkKind.REVIEW_PUBLICATION:
+            from app.execution.context import mark_current_side_effect_completed
+            from app.models.change_analysis import ChangeAnalysisModel
+            from app.models.execution import WorkAttemptModel
+            from app.models.review_publication import PullRequestReviewPublicationModel
+            from app.schemas.review_publication import ReviewPublicationError
+            from app.services.review_publication_service import ReviewPublicationService
+
+            await asyncio.to_thread(cls._assert_github_write_authorized, claim)
+            db = SessionLocal()
+            try:
+                publication = (
+                    db.query(PullRequestReviewPublicationModel)
+                    .join(ChangeAnalysisModel, ChangeAnalysisModel.id == PullRequestReviewPublicationModel.analysis_id)
+                    .filter(
+                        PullRequestReviewPublicationModel.id == claim.resource_id,
+                        ChangeAnalysisModel.owner_user_id == claim.tenant_id,
+                    )
+                    .first()
+                )
+                if publication is None or not publication.preview_digest:
+                    raise DomainWorkFailed(
+                        FailureCode.INTERNAL_INVARIANT_VIOLATION,
+                        "The review publication is missing or violates its tenant boundary.",
+                        retryable=False,
+                    )
+                try:
+                    result = await ReviewPublicationService(db=db).publish_review(
+                        UUID(publication.analysis_id),
+                        publication.preview_digest,
+                    )
+                except ReviewPublicationError as exc:
+                    db.expire_all()
+                    current = db.query(PullRequestReviewPublicationModel).filter(
+                        PullRequestReviewPublicationModel.id == claim.resource_id
+                    ).first()
+                    if current is not None and current.status == "BLOCKED":
+                        mark_current_side_effect_completed(
+                            db=db,
+                            external_operation_id=f"no-effect:review-blocked:{current.id}",
+                        )
+                        db.commit()
+                        return WorkHandlerResult(
+                            outcome=DomainOutcome.DEGRADED,
+                            coverage_summary={
+                                "schema_version": "1.0",
+                                "outcome": "DEGRADED",
+                                "units": [{"component": "github_review_publication", "state": "SKIPPED"}],
+                                "explanation": "Review publication was safely blocked by final drift validation.",
+                            },
+                            outcome_detail={"publication_id": current.id, "failure_code": current.failure_code},
+                        )
+                    attempt = db.query(WorkAttemptModel).filter(WorkAttemptModel.id == claim.attempt_id).first()
+                    external_started = bool(
+                        attempt
+                        and attempt.side_effect_started_at is not None
+                        and attempt.side_effect_completed_at is None
+                    )
+                    failure_map = {
+                        "GITHUB_RATE_LIMITED": FailureCode.PROVIDER_RATE_LIMITED,
+                        "GITHUB_AUTH_FAILED": FailureCode.PROVIDER_AUTH_FAILURE,
+                        "GITHUB_REVIEW_WRITE_DISABLED": FailureCode.PROVIDER_UNAVAILABLE,
+                        "GITHUB_REVIEW_STATE_UNCERTAIN": FailureCode.EXTERNAL_STATE_UNCERTAIN,
+                    }
+                    code = failure_map.get(exc.error_code, FailureCode.PROVIDER_UNAVAILABLE)
+                    retryable = exc.error_code in {"GITHUB_RATE_LIMITED", "GITHUB_REVIEW_CREATE_FAILED"}
+                    raise DomainWorkFailed(
+                        FailureCode.EXTERNAL_STATE_UNCERTAIN if external_started else code,
+                        (
+                            "GitHub review state requires reconciliation."
+                            if external_started
+                            else "GitHub review publication failed before a remote write."
+                        ),
+                        retryable=retryable and not external_started,
+                        may_have_started_external_effect=external_started,
+                    ) from exc
+                mark_current_side_effect_completed(
+                    db=db,
+                    external_operation_id=f"github-review:{result.github_review_id}",
+                )
+                db.commit()
+                return WorkHandlerResult(
+                    outcome=DomainOutcome.COMPLETE,
+                    coverage_summary={
+                        "schema_version": "1.0",
+                        "outcome": "COMPLETE",
+                        "units": [{"component": "github_review_publication", "state": "SUCCESSFULLY_ANALYZED"}],
+                        "explanation": "The approved review was published or reconciled exactly once.",
+                    },
+                    outcome_detail={
+                        "publication_id": result.id,
+                        "github_review_id": result.github_review_id,
+                        "github_review_url": result.github_review_url,
+                        "reconciliation_occurred": bool(result.reconciliation_occurred),
+                    },
+                )
+            finally:
+                db.close()
+
         raise DomainWorkFailed(
             FailureCode.INTERNAL_INVARIANT_VIOLATION,
             f"No durable handler is registered for {claim.work_kind.value}.",
             retryable=False,
         )
+
+    @staticmethod
+    def _assert_github_write_authorized(claim: ClaimedWork) -> None:
+        from app.governance.policies import OperationalPolicy, OperationalPolicyService
+        from app.models.platform import OperationalPolicyModel
+
+        db = SessionLocal()
+        try:
+            pinned = db.query(OperationalPolicyModel).filter(
+                OperationalPolicyModel.id == claim.policy_snapshot_id
+            ).first()
+            active = OperationalPolicyService.active(db, claim.tenant_id)
+            if pinned is None or active is None:
+                raise DomainWorkFailed(
+                    FailureCode.INTERNAL_INVARIANT_VIOLATION,
+                    "The GitHub write policy snapshot cannot be resolved.",
+                    retryable=False,
+                )
+            pinned_policy = OperationalPolicy.model_validate(pinned.policy_payload)
+            active_policy = OperationalPolicy.model_validate(active.policy_payload)
+            if not pinned_policy.github_writes_enabled or not active_policy.github_writes_enabled:
+                raise DomainWorkFailed(
+                    FailureCode.PROVIDER_UNAVAILABLE,
+                    "GitHub writes are disabled by operational policy.",
+                    retryable=False,
+                )
+        finally:
+            db.close()
 
     @staticmethod
     def _scan_payload(scan_id: str) -> tuple[str, str | None]:

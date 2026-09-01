@@ -210,6 +210,7 @@ class DurableExecutionEngine:
             state=ExecutionState.QUEUED.value,
             idempotency_key=request.idempotency_key,
             request_digest=request.request_digest.lower(),
+            request_payload=dict(request.request_payload),
             side_effect_class=side_effect.value,
             external_idempotency_key=request.external_idempotency_key,
             resource_profile=profile.value,
@@ -329,6 +330,53 @@ class DurableExecutionEngine:
                     return claim
             self._persist()
             return None
+        except Exception:
+            self._rollback_on_error()
+            raise
+
+    def claim_specific(self, work_item_id: str, worker_id: str) -> Optional[ClaimedWork]:
+        """Atomically claim one submitted item for request-coupled compatibility execution.
+
+        This uses the same attempt, lease, budget, and reservation authority as
+        background dispatch.  It exists only so older synchronous API contracts
+        can migrate without maintaining a second execution implementation.
+        """
+        if not worker_id or len(worker_id) > 128:
+            raise ValueError("worker_id must be 1-128 characters")
+        now = self.clock()
+        try:
+            self._expire_unstarted_deadlines(now, 1)
+            self._promote_retries(now, 1)
+            work = self.db.query(WorkItemModel).filter(WorkItemModel.id == work_item_id)
+            if self._dialect == "postgresql":
+                work = work.with_for_update(skip_locked=True)
+            candidate = work.first()
+            if candidate is None:
+                return None
+            if candidate.state == ExecutionState.QUEUED.value:
+                self._ensure_work_pools(candidate)
+                if not self._profile_has_available_capacity(candidate):
+                    self._persist()
+                    return None
+                candidate.state = ExecutionState.ADMITTED.value
+                candidate.admitted_at = now
+                candidate.updated_at = now
+                candidate.version += 1
+                self.db.flush()
+                candidate.state = ExecutionState.READY.value
+                candidate.version += 1
+            if (
+                candidate.state != ExecutionState.READY.value
+                or _aware(candidate.available_at) > _aware(now)
+                or _aware(candidate.deadline_at) <= _aware(now)
+                or candidate.cancel_requested_at is not None
+            ):
+                self._persist()
+                return None
+            self._ensure_work_pools(candidate)
+            claim = self._try_claim(candidate, worker_id, now)
+            self._persist()
+            return claim
         except Exception:
             self._rollback_on_error()
             raise
@@ -695,32 +743,79 @@ class DurableExecutionEngine:
             self._rollback_on_error()
             raise
 
-    def acknowledge_cancel(self, work_item_id: str, lease_token: str) -> None:
+    def acknowledge_cancel(self, work_item_id: str, lease_token: str) -> ExecutionState:
         """Release an active lease after the worker reaches a cancellation safe point."""
         now = self.clock()
         try:
             work, attempt, lease = self._owned_execution(work_item_id, lease_token, now)
             if work.cancel_requested_at is None:
                 raise InvalidExecutionTransition("cancellation has not been requested")
-            work.state = ExecutionState.CANCELLED.value
+            external_completed = (
+                work.side_effect_class == SideEffectClass.EXTERNAL_SIDE_EFFECT.value
+                and attempt.side_effect_completed_at is not None
+            )
+            if external_completed:
+                work.state = ExecutionState.SUCCEEDED.value
+                work.domain_outcome = DomainOutcome.COMPLETE.value
+                work.coverage_summary = {
+                    "schema_version": "1.0",
+                    "outcome": "COMPLETE",
+                    "units": [{"component": "external_side_effect", "state": "SUCCESSFULLY_ANALYZED"}],
+                    "explanation": "The external operation completed before cancellation was acknowledged.",
+                }
+                work.outcome_detail = {
+                    "external_operation_id": attempt.external_operation_id,
+                    "cancellation_arrived_after_completion": True,
+                }
+                work.terminal_at = now
+                work.updated_at = now
+                work.version += 1
+                work.reconciliation_required = False
+                attempt.state = ExecutionState.SUCCEEDED.value
+                attempt.finished_at = now
+                self._release_resources(lease, ReservationState.RELEASED, now)
+                lease.state = LeaseState.RELEASED.value
+                lease.released_at = now
+                self._persist()
+                return ExecutionState.SUCCEEDED
+            external_uncertain = (
+                work.side_effect_class == SideEffectClass.EXTERNAL_SIDE_EFFECT.value
+                and attempt.side_effect_started_at is not None
+                and attempt.side_effect_completed_at is None
+            )
+            next_state = ExecutionState.FAILED if external_uncertain else ExecutionState.CANCELLED
+            failure_code = (
+                FailureCode.EXTERNAL_STATE_UNCERTAIN
+                if external_uncertain
+                else FailureCode.CANCELLED_BY_USER
+            )
+            work.state = next_state.value
             work.terminal_at = now
             work.updated_at = now
             work.version += 1
-            attempt.state = ExecutionState.CANCELLED.value
-            attempt.failure_code = FailureCode.CANCELLED_BY_USER.value
+            work.reconciliation_required = external_uncertain
+            attempt.state = (
+                ExecutionState.FAILED.value if external_uncertain else ExecutionState.CANCELLED.value
+            )
+            attempt.failure_code = failure_code.value
             attempt.finished_at = now
             self._add_failure(
                 work,
                 attempt,
-                FailureCode.CANCELLED_BY_USER,
+                failure_code,
                 retryable=False,
-                public_message="The worker acknowledged cancellation at a safe point.",
-                infrastructure_state=ExecutionState.CANCELLED,
+                public_message=(
+                    "Cancellation arrived after an external write boundary; remote state requires reconciliation."
+                    if external_uncertain
+                    else "The worker acknowledged cancellation at a safe point."
+                ),
+                infrastructure_state=next_state,
             )
             self._release_resources(lease, ReservationState.REVOKED, now)
             lease.state = LeaseState.REVOKED.value
             lease.released_at = now
             self._persist()
+            return next_state
         except Exception:
             self._rollback_on_error()
             raise
@@ -765,7 +860,41 @@ class DurableExecutionEngine:
                 lease.state = LeaseState.EXPIRED.value
                 lease.released_at = now
 
-                if work.cancel_requested_at is not None:
+                if (
+                    work.side_effect_class == SideEffectClass.EXTERNAL_SIDE_EFFECT.value
+                    and attempt.side_effect_completed_at is not None
+                ):
+                    attempt.state = ExecutionState.SUCCEEDED.value
+                    attempt.failure_code = None
+                    work.state = ExecutionState.SUCCEEDED.value
+                    work.domain_outcome = DomainOutcome.COMPLETE.value
+                    work.coverage_summary = {
+                        "schema_version": "1.0",
+                        "outcome": "COMPLETE",
+                        "units": [{"component": "external_side_effect", "state": "SUCCESSFULLY_ANALYZED"}],
+                        "explanation": "The external operation was durably completed before the worker lease expired.",
+                    }
+                    work.outcome_detail = {
+                        "external_operation_id": attempt.external_operation_id,
+                        "recovered_after_worker_loss": True,
+                    }
+                    work.reconciliation_required = False
+                    work.terminal_at = now
+                    work.updated_at = now
+                    work.version += 1
+                    recovered_ids.append(work.id)
+                    continue
+
+                if (
+                    work.side_effect_class == SideEffectClass.EXTERNAL_SIDE_EFFECT.value
+                    and attempt.side_effect_started_at is not None
+                    and attempt.side_effect_completed_at is None
+                ):
+                    next_state = ExecutionState.FAILED
+                    failure_code = FailureCode.EXTERNAL_STATE_UNCERTAIN
+                    work.reconciliation_required = True
+                    uncertain += 1
+                elif work.cancel_requested_at is not None:
                     next_state = ExecutionState.CANCELLED
                     failure_code = FailureCode.CANCELLED_BY_USER
                     cancelled += 1
@@ -778,14 +907,6 @@ class DurableExecutionEngine:
                         "reason": "The workflow deadline expired before full coverage was completed.",
                     }
                     timed_out += 1
-                elif (
-                    work.side_effect_class == SideEffectClass.EXTERNAL_SIDE_EFFECT.value
-                    and attempt.side_effect_started_at is not None
-                ):
-                    next_state = ExecutionState.FAILED
-                    failure_code = FailureCode.EXTERNAL_STATE_UNCERTAIN
-                    work.reconciliation_required = True
-                    uncertain += 1
                 elif work.attempt_count < work.max_attempts:
                     next_state = ExecutionState.RETRY_WAIT
                     failure_code = FailureCode.WORKER_LOST
@@ -824,6 +945,59 @@ class DurableExecutionEngine:
                 uncertain=uncertain,
                 recovered_work_item_ids=tuple(recovered_ids),
             )
+        except Exception:
+            self._rollback_on_error()
+            raise
+
+    def resolve_external_reconciliation(
+        self,
+        work_item_id: str,
+        *,
+        completed: bool,
+        safe_to_retry: bool = False,
+        outcome_detail: Optional[Mapping[str, object]] = None,
+    ) -> ExecutionState:
+        """Resolve a terminal uncertain side effect after a read-only remote check."""
+        if completed and safe_to_retry:
+            raise ValueError("reconciliation cannot be both completed and retryable")
+        now = self.clock()
+        try:
+            work = (
+                self.db.query(WorkItemModel)
+                .filter(WorkItemModel.id == work_item_id)
+                .with_for_update()
+                .first()
+            )
+            if work is None:
+                raise LookupError("work item not found")
+            if work.side_effect_class != SideEffectClass.EXTERNAL_SIDE_EFFECT.value:
+                raise InvalidExecutionTransition("work item is not an external side effect")
+            if not work.reconciliation_required:
+                return ExecutionState(work.state)
+            if completed:
+                work.state = ExecutionState.SUCCEEDED.value
+                work.domain_outcome = DomainOutcome.COMPLETE.value
+                work.coverage_summary = {
+                    "schema_version": "1.0",
+                    "outcome": "COMPLETE",
+                    "units": [{"component": "external_reconciliation", "state": "SUCCESSFULLY_ANALYZED"}],
+                    "explanation": "Remote side-effect state was reconciled to a completed operation.",
+                }
+                work.outcome_detail = dict(outcome_detail or {})
+                work.terminal_at = now
+                next_state = ExecutionState.SUCCEEDED
+            elif safe_to_retry and work.attempt_count < work.max_attempts and _aware(work.deadline_at) > _aware(now):
+                work.state = ExecutionState.RETRY_WAIT.value
+                work.available_at = now
+                work.terminal_at = None
+                next_state = ExecutionState.RETRY_WAIT
+            else:
+                return ExecutionState(work.state)
+            work.reconciliation_required = False
+            work.updated_at = now
+            work.version += 1
+            self._persist()
+            return next_state
         except Exception:
             self._rollback_on_error()
             raise
@@ -877,6 +1051,14 @@ class DurableExecutionEngine:
             ch not in "0123456789abcdefABCDEF" for ch in request.request_digest
         ):
             raise ValueError("request_digest must be a SHA-256 hex digest")
+        try:
+            encoded_payload = json.dumps(
+                dict(request.request_payload), sort_keys=True, separators=(",", ":"), default=str
+            ).encode("utf-8")
+        except Exception as exc:
+            raise ValueError("request_payload must be JSON serializable") from exc
+        if len(encoded_payload) > 64 * 1024:
+            raise ValueError("request_payload exceeds the 64 KiB execution input limit")
         side_effect = SideEffectClass(_enum_value(request.side_effect_class))
         if side_effect == SideEffectClass.EXTERNAL_SIDE_EFFECT and not request.external_idempotency_key:
             raise ValueError("external side effects require an external_idempotency_key")

@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 import uuid
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from app.models.base import Base
@@ -38,6 +38,8 @@ class DeliveryModel(Base):
     failure_message = Column(String(512), nullable=True)
     idempotency_key = Column(String(128), unique=True, nullable=False, index=True)
     requested_by = Column(String(128), default="user", nullable=False)
+    request_notes = Column(Text, nullable=True)
+    reconciliation_occurred = Column(Boolean, default=False, nullable=False)
     attempt_count = Column(Integer, default=1, nullable=False)
     last_attempt_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=_utc_now, nullable=False)

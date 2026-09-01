@@ -63,6 +63,8 @@ class DeliveryResponse(BaseModel):
     failure_message: Optional[str] = Field(default=None, description="Sanitized failure message")
     idempotency_key: str = Field(..., description="Deterministic idempotency key")
     requested_by: str = Field(..., description="User who requested delivery")
+    request_notes: Optional[str] = Field(default=None, description="Operator sign-off notes")
+    reconciliation_occurred: bool = Field(default=False, description="Whether remote state was recovered by reconciliation")
     attempt_count: int = Field(default=1, description="Delivery execution attempt count")
     last_attempt_at: Optional[datetime] = Field(default=None, description="Timestamp of most recent attempt")
     created_at: datetime = Field(default_factory=_utc_now, description="Creation timestamp")

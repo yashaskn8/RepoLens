@@ -3,12 +3,18 @@
 import logging
 from typing import Optional
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.dependencies import get_current_user, require_operator, verify_csrf
+from app.api.idempotency import idempotency_identity
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.delivery.service import DeliveryService
+from app.execution.application import NewWorkPaused, WorkPolicyViolation, WorkSubmissionService
+from app.execution.dispatcher import DurableWorkDispatcher
+from app.execution.errors import IdempotencyConflict
+from app.execution.types import RequestBudget, ResourceProfile, SideEffectClass, WorkKind
 from app.models.delivery import DeliveryModel
 from app.schemas.auth import CurrentUser
 from app.schemas.delivery import (
@@ -46,12 +52,16 @@ async def get_delivery_preview(
 @router.post(
     "/patches/{patch_id}/deliver",
     response_model=DeliveryResponse,
-    status_code=status.HTTP_200_OK,
+    status_code=status.HTTP_202_ACCEPTED,
     summary="Deliver approved patch as a GitHub Pull Request",
 )
 async def deliver_patch(
     patch_id: str,
+    request: Request,
+    response: Response,
     payload: DeliveryRequest = DeliveryRequest(requested_by="user"),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    prefer: str | None = Header(default=None, alias="Prefer"),
     current_user: CurrentUser = Depends(require_operator),
     _csrf: None = Depends(verify_csrf),
     db: Session = Depends(get_db),
@@ -63,7 +73,64 @@ async def deliver_patch(
         requested_by=current_user.id,
         notes=payload.notes if payload else None,
     )
-    return await service.deliver_patch(db=db, patch_id=patch_id, payload=authenticated_payload)
+    client_identity = idempotency_identity(
+        "github-delivery",
+        idempotency_key,
+        maximum=get_settings().IDEMPOTENCY_KEY_MAX_LENGTH,
+    )
+    try:
+        delivery = service.prepare_delivery(db=db, patch_id=patch_id, payload=authenticated_payload)
+        submission = WorkSubmissionService().submit(
+            db,
+            tenant_id=current_user.id,
+            actor_id=current_user.id,
+            request_id=getattr(request.state, "request_id", delivery.id),
+            work_kind=WorkKind.GITHUB_DELIVERY,
+            resource_type="DELIVERY",
+            resource_id=str(delivery.id),
+            request_payload={
+                "delivery_id": str(delivery.id),
+                "patch_id": str(patch_id),
+                "semantic_idempotency_key": delivery.idempotency_key,
+                "notes": authenticated_payload.notes,
+            },
+            idempotency_key=client_identity or delivery.idempotency_key,
+            external_idempotency_key=delivery.idempotency_key,
+            resource_profile=ResourceProfile.GITHUB_WRITE,
+            side_effect_class=SideEffectClass.EXTERNAL_SIDE_EFFECT,
+            budget=RequestBudget(max_wall_clock_seconds=get_settings().MAX_SCAN_DURATION_SECONDS),
+        )
+        db.commit()
+        db.refresh(delivery)
+    except (NewWorkPaused, WorkPolicyViolation) as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error_code": "GITHUB_WRITES_DISABLED", "message": str(exc)},
+        ) from exc
+    except IdempotencyConflict as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error_code": "IDEMPOTENCY_CONFLICT", "message": str(exc)},
+        ) from exc
+    response.headers["Location"] = f"/api/v1/deliveries/{delivery.id}"
+    response.headers["X-Job-Location"] = f"/api/v1/jobs/{submission.result.work_item_id}"
+    response.headers["Idempotency-Replayed"] = "true" if submission.result.reused else "false"
+    if prefer and "respond-async" in prefer.lower():
+        DurableWorkDispatcher.nudge()
+        return delivery
+    execution = await DurableWorkDispatcher.execute_specific(
+        submission.result.work_item_id,
+        session_factory=sessionmaker(bind=db.get_bind(), autoflush=False, expire_on_commit=False),
+    )
+    db.expire_all()
+    current = get_owned_delivery_or_404(db, str(delivery.id), current_user)
+    if execution["state"] in {"LEASED", "RUNNING", "QUEUED", "READY", "RETRY_WAIT"}:
+        DurableWorkDispatcher.nudge()
+    else:
+        response.status_code = status.HTTP_200_OK
+    return current
 
 
 @router.get(

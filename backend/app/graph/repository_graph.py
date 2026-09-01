@@ -224,6 +224,9 @@ class RepositoryGraph:
 
     def to_domain_data(self) -> RepositoryGraphData:
         """Export serialized domain graph data with node/edge counts and contract match report."""
+        # Contract evaluation adds deterministic MATCHES_ROUTE edges, so it must
+        # run before the immutable graph export is assembled.
+        contract_report = self.evaluate_route_contracts()
         nodes = []
         node_counts = Counter()
         for n_id, data in self._graph.nodes(data=True):
@@ -254,8 +257,6 @@ class RepositoryGraph:
                     metadata=data.get("metadata", {}),
                 )
             )
-
-        contract_report = self.evaluate_route_contracts()
 
         return RepositoryGraphData(
             nodes=nodes,

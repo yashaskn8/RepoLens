@@ -272,14 +272,15 @@ async def create_change_analysis(
 )
 async def create_change_analysis_from_pr(
     payload: ChangeAnalysisPRRequest,
-    request: Request,
-    response: Response,
+    request: Request = None,
+    response: Response = None,
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
     current_user: CurrentUser = Depends(get_current_user),
     _csrf: None = Depends(verify_csrf),
     db: Session = Depends(get_db),
 ) -> ChangeAnalysisResponse:
     """Resolve public GitHub PR metadata, persist immutable base/head commit SHAs, and start asynchronous analysis."""
+    response = response or Response()
     external_identity = idempotency_identity(
         "change-analysis-from-pr",
         idempotency_key,
@@ -305,7 +306,7 @@ async def create_change_analysis_from_pr(
                     db,
                     tenant_id=current_user.id,
                     actor_id=current_user.id,
-                    request_id=getattr(request.state, "request_id", str(uuid4())),
+                    request_id=getattr(getattr(request, "state", None), "request_id", str(uuid4())),
                     work_kind=WorkKind.CHANGE_ANALYSIS,
                     resource_type="CHANGE_ANALYSIS",
                     resource_id=analysis_id,
@@ -385,7 +386,7 @@ async def create_change_analysis_from_pr(
             db,
             tenant_id=current_user.id,
             actor_id=current_user.id,
-            request_id=getattr(request.state, "request_id", str(uuid4())),
+            request_id=getattr(getattr(request, "state", None), "request_id", str(uuid4())),
             work_kind=WorkKind.CHANGE_ANALYSIS,
             resource_type="CHANGE_ANALYSIS",
             resource_id=analysis_id,

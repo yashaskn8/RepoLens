@@ -39,6 +39,7 @@ class JobResource(BaseModel):
     max_attempts: int
     cancel_requested: bool
     reconciliation_required: bool
+    output_artifact_id: str | None = None
     policy_snapshot_id: str
     created_at: datetime
     started_at: datetime | None = None
@@ -94,6 +95,7 @@ def _resource(db: Session, model: WorkItemModel, *, include_failures: bool = Tru
         max_attempts=model.max_attempts,
         cancel_requested=model.cancel_requested_at is not None,
         reconciliation_required=bool(model.reconciliation_required),
+        output_artifact_id=model.output_artifact_id,
         policy_snapshot_id=model.policy_snapshot_id,
         created_at=model.created_at,
         started_at=model.started_at,
@@ -155,6 +157,32 @@ def get_job(
     db: Session = Depends(get_db),
 ) -> JobResource:
     return _resource(db, _owned_job(db, job_id, current_user))
+
+
+@router.get("/{job_id}/result")
+def get_job_result(
+    job_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    model = _owned_job(db, job_id, current_user)
+    if model.state != "SUCCEEDED":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error_code": "JOB_NOT_COMPLETE", "message": "The job result is not ready."},
+        )
+    if model.work_kind not in {"RESEARCH", "FIX_PLAN", "PATCH_GENERATION"} or not model.output_artifact_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error_code": "JOB_RESULT_NOT_MATERIALIZABLE", "message": "This job has no JSON result resource."},
+        )
+    from app.remediation.service import RemediationExecutionService
+
+    return RemediationExecutionService.load_result(
+        db,
+        tenant_id=current_user.id,
+        artifact_id=model.output_artifact_id,
+    )
 
 
 @router.post("/{job_id}/cancel", response_model=JobResource, status_code=status.HTTP_202_ACCEPTED)

@@ -23,6 +23,11 @@ from app.delivery.publication_provider import (
     PullRequestReviewPublicationProvider,
 )
 from app.delivery.review_renderer import ReviewPublicationRenderer
+from app.execution.context import (
+    mark_current_side_effect_completed,
+    mark_current_side_effect_started,
+)
+from app.governance.events import AuditLedger, DomainOutbox
 from app.models.change_analysis import ChangeAnalysisModel
 from app.models.review_publication import PullRequestReviewPublicationModel
 from app.schemas.review_publication import (
@@ -268,7 +273,14 @@ class ReviewPublicationService:
 
         return pub
 
-    async def approve_preview(self, analysis_id: UUID, expected_preview_digest: str) -> PullRequestReviewPublicationModel:
+    async def approve_preview(
+        self,
+        analysis_id: UUID,
+        expected_preview_digest: str,
+        *,
+        actor_id: str | None = None,
+        request_id: str | None = None,
+    ) -> PullRequestReviewPublicationModel:
         """Explicit human approval bound strictly to expected preview digest."""
         pub = self.db.query(PullRequestReviewPublicationModel).filter_by(analysis_id=str(analysis_id)).first()
         if not pub:
@@ -299,6 +311,28 @@ class ReviewPublicationService:
                 message=f"Review publication approved for PR #{pub.pr_number}",
                 metadata_payload={"preview_digest": pub.preview_digest},
             ),
+        )
+
+        tenant_id = str(pub.analysis.owner_user_id or actor_id or "legacy-local")
+        DomainOutbox.append(
+            self.db,
+            tenant_id=tenant_id,
+            aggregate_type="REVIEW_PUBLICATION",
+            aggregate_id=str(pub.id),
+            event_type="PR_REVIEW_APPROVED",
+            deduplication_key=f"review-publication:{pub.id}:approved:{pub.preview_digest}",
+            payload={"analysis_id": str(analysis_id), "preview_digest": pub.preview_digest},
+        )
+        AuditLedger.append(
+            self.db,
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            request_id=request_id,
+            event_type="HUMAN_REVIEW_PUBLICATION_APPROVED",
+            resource_type="REVIEW_PUBLICATION",
+            resource_id=str(pub.id),
+            state_digest=pub.preview_digest,
+            payload={"analysis_id": str(analysis_id)},
         )
 
         self.db.commit()
@@ -414,12 +448,56 @@ class ReviewPublicationService:
             ),
         )
 
+        tenant_id = str(pub.analysis.owner_user_id or "legacy-local")
+        DomainOutbox.append(
+            self.db,
+            tenant_id=tenant_id,
+            aggregate_type="REVIEW_PUBLICATION",
+            aggregate_id=str(pub.id),
+            event_type="GITHUB_REVIEW_INTENT_RECORDED",
+            deduplication_key=f"review-publication:{pub.id}:intent:{pub.preview_digest}",
+            payload={"analysis_id": str(analysis_id), "preview_digest": pub.preview_digest},
+        )
+        AuditLedger.append(
+            self.db,
+            tenant_id=tenant_id,
+            event_type="GITHUB_REVIEW_INTENT_RECORDED",
+            resource_type="REVIEW_PUBLICATION",
+            resource_id=str(pub.id),
+            state_digest=pub.preview_digest,
+            payload={"analysis_id": str(analysis_id), "pr_number": pub.pr_number},
+        )
+
         self.db.commit()
 
         # Step 3: Execute single GitHub create-review POST
         inline_comments = [
             InlineReviewComment.model_validate(c) for c in (pub.inline_comments_payload or [])
         ]
+
+        mark_current_side_effect_started(
+            db=self.db,
+            external_operation_id=f"github-review:{pub.id}:{pub.preview_digest}",
+        )
+        DomainOutbox.append(
+            self.db,
+            tenant_id=tenant_id,
+            aggregate_type="REVIEW_PUBLICATION",
+            aggregate_id=str(pub.id),
+            event_type="GITHUB_REVIEW_WRITE_STARTED",
+            deduplication_key=f"review-publication:{pub.id}:write-started:{pub.preview_digest}",
+            payload={"pr_number": pub.pr_number},
+        )
+        AuditLedger.append(
+            self.db,
+            tenant_id=tenant_id,
+            event_type="GITHUB_REVIEW_WRITE_STARTED",
+            resource_type="REVIEW_PUBLICATION",
+            resource_id=str(pub.id),
+            state_digest=pub.preview_digest,
+            payload={"pr_number": pub.pr_number},
+        )
+        self.db.commit()
 
         try:
             res = await self.provider.create_comment_review(
@@ -447,6 +525,28 @@ class ReviewPublicationService:
                         message=f"Review publication failed before write: {safe_ext_err}",
                         metadata_payload={"failure_code": pub.failure_code},
                     ),
+                )
+                mark_current_side_effect_completed(
+                    db=self.db,
+                    external_operation_id=f"no-effect:github-review:{pub.id}:{pub.failure_code}",
+                )
+                DomainOutbox.append(
+                    self.db,
+                    tenant_id=tenant_id,
+                    aggregate_type="REVIEW_PUBLICATION",
+                    aggregate_id=str(pub.id),
+                    event_type="GITHUB_REVIEW_FAILED",
+                    deduplication_key=f"review-publication:{pub.id}:failed:{pub.failure_code}",
+                    payload={"failure_code": pub.failure_code},
+                )
+                AuditLedger.append(
+                    self.db,
+                    tenant_id=tenant_id,
+                    event_type="GITHUB_REVIEW_FAILED",
+                    resource_type="REVIEW_PUBLICATION",
+                    resource_id=str(pub.id),
+                    state_digest=pub.preview_digest,
+                    payload={"failure_code": pub.failure_code},
                 )
                 self.db.commit()
                 raise
@@ -487,6 +587,28 @@ class ReviewPublicationService:
                         "inline_comments_count": len(inline_comments),
                     },
                 ),
+            )
+            mark_current_side_effect_completed(
+                db=self.db,
+                external_operation_id=f"github-review:{github_review_id}",
+            )
+            DomainOutbox.append(
+                self.db,
+                tenant_id=tenant_id,
+                aggregate_type="REVIEW_PUBLICATION",
+                aggregate_id=str(pub.id),
+                event_type="GITHUB_REVIEW_PUBLISHED",
+                deduplication_key=f"review-publication:{pub.id}:published:{github_review_id}",
+                payload={"github_review_id": github_review_id},
+            )
+            AuditLedger.append(
+                self.db,
+                tenant_id=tenant_id,
+                event_type="GITHUB_REVIEW_PUBLISHED",
+                resource_type="REVIEW_PUBLICATION",
+                resource_id=str(pub.id),
+                state_digest=pub.preview_digest,
+                payload={"github_review_id": github_review_id, "pr_number": pub.pr_number},
             )
             self.db.commit()
             self.db.refresh(pub)
@@ -554,6 +676,25 @@ class ReviewPublicationService:
                             "reconciliation_occurred": True,
                         },
                     ),
+                )
+                tenant_id = str(pub.analysis.owner_user_id or "legacy-local")
+                DomainOutbox.append(
+                    self.db,
+                    tenant_id=tenant_id,
+                    aggregate_type="REVIEW_PUBLICATION",
+                    aggregate_id=str(pub.id),
+                    event_type="GITHUB_REVIEW_RECONCILED",
+                    deduplication_key=f"review-publication:{pub.id}:reconciled:{github_review_id}",
+                    payload={"github_review_id": github_review_id},
+                )
+                AuditLedger.append(
+                    self.db,
+                    tenant_id=tenant_id,
+                    event_type="GITHUB_REVIEW_RECONCILED",
+                    resource_type="REVIEW_PUBLICATION",
+                    resource_id=str(pub.id),
+                    state_digest=pub.preview_digest,
+                    payload={"github_review_id": github_review_id, "pr_number": pub.pr_number},
                 )
                 self.db.commit()
                 self.db.refresh(pub)
