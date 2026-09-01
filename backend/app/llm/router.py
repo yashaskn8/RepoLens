@@ -68,6 +68,10 @@ class LLMRouter:
         """Register or override an adapter (useful for testing and mocks)."""
         self._adapters[provider] = adapter
 
+    def reconcile_expired_quota(self, *, limit: int = 500) -> int:
+        """Reclaim provider allowance reserved by attempts that never settled."""
+        return self._capability_gateway.reconcile_expired_quota(limit=limit)
+
     def get_policy_routes(self, policy: TaskPolicy) -> Tuple[Tuple[LLMProvider, str], List[Tuple[LLMProvider, str]]]:
         """Return the primary (provider, model) and ordered list of fallback (provider, model) pairs."""
         settings = get_settings()

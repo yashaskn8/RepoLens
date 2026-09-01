@@ -73,6 +73,10 @@ class CapabilityAIGateway:
         self.policy_resolver = policy_resolver
         self.max_retries = max(0, max_retries)
 
+    def reconcile_expired_quota(self, *, limit: int = 500) -> int:
+        """Release durable provider reservations abandoned by crashed workers."""
+        return self.quota.reconcile_expired(limit=limit)
+
     async def generate(self, request: LLMRequest) -> LLMResponse:
         if request.capability is None:
             raise ValueError("CapabilityAIGateway requires request.capability")

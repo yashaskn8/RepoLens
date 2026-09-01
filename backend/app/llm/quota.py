@@ -57,6 +57,8 @@ class ProviderQuotaLedger(Protocol):
         actual_output_tokens: int | None,
     ) -> None: ...
 
+    def reconcile_expired(self, *, limit: int = 500) -> int: ...
+
 
 @dataclass(slots=True)
 class _Usage:
@@ -161,6 +163,11 @@ class LocalProviderQuotaLedger:
                 "consumed_input_tokens": usage.consumed_input,
                 "consumed_output_tokens": usage.consumed_output,
             }
+
+    def reconcile_expired(self, *, limit: int = 500) -> int:
+        """Local reservations vanish with the process, so no crash recovery is needed."""
+        del limit
+        return 0
 
 
 class SQLAlchemyProviderQuotaLedger:
@@ -332,7 +339,7 @@ class SQLAlchemyProviderQuotaLedger:
                 )
                 .order_by(AIQuotaReservationModel.expires_at.asc())
                 .limit(max(1, limit))
-                .with_for_update()
+                .with_for_update(skip_locked=True)
                 .all()
             )
             for row in rows:
@@ -355,4 +362,3 @@ class SQLAlchemyProviderQuotaLedger:
 
 def _fits(limit: int | None, used: int, requested: int) -> bool:
     return limit is None or used + requested <= limit
-

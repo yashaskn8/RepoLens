@@ -118,7 +118,7 @@ class TelemetryMetricModel(Base):
 
 
 class ReconciliationRecordModel(Base):
-    """Durable record for externally uncertain or eventually deleted state."""
+    """Durable, lease-owned record for externally uncertain state."""
 
     __tablename__ = "reconciliation_records"
     __table_args__ = (
@@ -134,7 +134,10 @@ class ReconciliationRecordModel(Base):
     status = Column(String(32), nullable=False, default="PENDING", index=True)
     attempt_count = Column(Integer, nullable=False, default=0)
     next_attempt_at = Column(DateTime(timezone=True), nullable=False, default=_utc_now, index=True)
+    lease_owner = Column(String(128), nullable=True, index=True)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=True, index=True)
     failure_code = Column(String(64), nullable=True)
     failure_message = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utc_now)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=_utc_now, onupdate=_utc_now)
     completed_at = Column(DateTime(timezone=True), nullable=True)

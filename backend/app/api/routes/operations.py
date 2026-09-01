@@ -1,5 +1,6 @@
 """Operator-only policy, audit-integrity, outbox, and telemetry controls."""
 
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -12,8 +13,14 @@ from app.core.database import get_db
 from app.governance.events import AuditLedger, DomainOutbox
 from app.governance.policies import OperationalPolicy, OperationalPolicyService
 from app.governance.telemetry import TelemetryRecorder
-from app.models.platform import AuditEventModel, OutboxEventModel, TelemetryMetricModel
+from app.models.platform import (
+    AuditEventModel,
+    OutboxEventModel,
+    ReconciliationRecordModel,
+    TelemetryMetricModel,
+)
 from app.models.artifact import ArtifactDeletionAttemptModel, ArtifactModel, ArtifactTombstoneModel
+from app.models.ai_execution import AIQuotaReservationModel
 from app.schemas.auth import CurrentUser
 
 
@@ -108,8 +115,39 @@ def get_platform_telemetry(
     outbox_counts = dict(db.query(OutboxEventModel.status, func.count(OutboxEventModel.id)).group_by(
         OutboxEventModel.status
     ).all())
+    reconciliation_counts = dict(
+        db.query(ReconciliationRecordModel.status, func.count(ReconciliationRecordModel.id))
+        .group_by(ReconciliationRecordModel.status)
+        .all()
+    )
+    quota_reservation_counts = dict(
+        db.query(AIQuotaReservationModel.state, func.count(AIQuotaReservationModel.id))
+        .group_by(AIQuotaReservationModel.state)
+        .all()
+    )
+    now = datetime.now(timezone.utc)
     return {
         "outbox": {str(key): int(value) for key, value in outbox_counts.items()},
+        "reconciliation": {
+            "by_status": {str(key): int(value) for key, value in reconciliation_counts.items()},
+            "expired_running_leases": int(
+                db.query(func.count(ReconciliationRecordModel.id)).filter(
+                    ReconciliationRecordModel.status == "RUNNING",
+                    ReconciliationRecordModel.lease_expires_at <= now,
+                ).scalar()
+                or 0
+            ),
+        },
+        "ai_quota_reservations": {
+            "by_state": {str(key): int(value) for key, value in quota_reservation_counts.items()},
+            "expired_reserved": int(
+                db.query(func.count(AIQuotaReservationModel.id)).filter(
+                    AIQuotaReservationModel.state == "RESERVED",
+                    AIQuotaReservationModel.expires_at <= now,
+                ).scalar()
+                or 0
+            ),
+        },
         "audit_events": int(db.query(func.count(AuditEventModel.id)).scalar() or 0),
         "telemetry_metrics": int(db.query(func.count(TelemetryMetricModel.id)).scalar() or 0),
         "request_duration": TelemetryRecorder.aggregate(db, "request.duration"),
@@ -118,6 +156,7 @@ def get_platform_telemetry(
         "artifact_reuse": TelemetryRecorder.aggregate(db, "artifact.reuse"),
         "report_generation": TelemetryRecorder.aggregate(db, "report.generation_duration"),
         "external_reconciliation": TelemetryRecorder.aggregate(db, "external.reconciliation"),
+        "ai_quota_recovery": TelemetryRecorder.aggregate(db, "ai.quota_reservations_reclaimed"),
     }
 
 

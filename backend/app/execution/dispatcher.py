@@ -13,6 +13,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import inspect
+from sqlalchemy.exc import IntegrityError
 
 from app.core.config import get_settings
 from app.execution.context import new_execution_session as SessionLocal
@@ -174,6 +175,7 @@ class DurableWorkDispatcher:
                 claim = await asyncio.to_thread(cls._recover_and_claim, run_recovery)
                 if run_recovery:
                     last_recovery = now
+                    await asyncio.to_thread(cls._reconcile_expired_ai_quota, limit=500)
                     await cls._reconcile_uncertain_side_effects(limit=20)
                 if claim is not None:
                     task = asyncio.create_task(
@@ -222,6 +224,38 @@ class DurableWorkDispatcher:
             db.close()
 
     @classmethod
+    def _reconcile_expired_ai_quota(cls, *, limit: int) -> int:
+        """Best-effort recovery of provider capacity abandoned by dead attempts."""
+        try:
+            from app.llm.router import get_llm_router
+
+            released = get_llm_router().reconcile_expired_quota(limit=limit)
+        except Exception:
+            logger.exception("Expired AI quota reservation reconciliation failed.")
+            return 0
+        if not released:
+            return 0
+
+        logger.warning("Released %s expired AI quota reservations.", released)
+        db = SessionLocal()
+        try:
+            if inspect(db.get_bind()).has_table("telemetry_metrics"):
+                TelemetryRecorder.record(
+                    db,
+                    metric_name="ai.quota_reservations_reclaimed",
+                    value=float(released),
+                    unit="reservations",
+                    dimensions={"worker": cls._worker_prefix},
+                )
+                db.commit()
+        except Exception:
+            db.rollback()
+            logger.debug("AI quota recovery telemetry persistence failed.", exc_info=True)
+        finally:
+            db.close()
+        return released
+
+    @classmethod
     async def _reconcile_uncertain_side_effects(cls, *, limit: int) -> int:
         """Read remote state for uncertain writes and resolve SQL work authority.
 
@@ -261,38 +295,19 @@ class DurableWorkDispatcher:
         reconciled = 0
         for work_id, tenant_id, work_kind, resource_id, work_attempt_count in identities:
             record_db = SessionLocal()
+            record_id: str | None = None
             try:
                 from app.models.platform import ReconciliationRecordModel
 
-                record = record_db.query(ReconciliationRecordModel).filter(
-                    ReconciliationRecordModel.tenant_id == tenant_id,
-                    ReconciliationRecordModel.resource_type == "WORK_ITEM",
-                    ReconciliationRecordModel.resource_id == work_id,
-                    ReconciliationRecordModel.operation == "EXTERNAL_SIDE_EFFECT",
-                ).first()
                 attempt_identity = str(work_attempt_count)
-                if (
-                    record is not None
-                    and record.status == "COMPLETED"
-                    and record.expected_digest == attempt_identity
-                ):
+                record_id = cls._claim_reconciliation_record(
+                    record_db,
+                    tenant_id=tenant_id,
+                    work_id=work_id,
+                    attempt_identity=attempt_identity,
+                )
+                if record_id is None:
                     continue
-                if record is not None and _aware(record.next_attempt_at) > datetime.now(timezone.utc):
-                    continue
-                if record is None:
-                    record = ReconciliationRecordModel(
-                        tenant_id=tenant_id,
-                        resource_type="WORK_ITEM",
-                        resource_id=work_id,
-                        operation="EXTERNAL_SIDE_EFFECT",
-                    )
-                    record_db.add(record)
-                record.expected_digest = attempt_identity
-                record.status = "RUNNING"
-                record.attempt_count = int(record.attempt_count or 0) + 1
-                record.failure_code = None
-                record.failure_message = None
-                record_db.commit()
 
                 completed = False
                 safe_to_retry = False
@@ -323,6 +338,23 @@ class DurableWorkDispatcher:
                             "reconciliation": "COMPLETED" if completed else "UNCERTAIN",
                         }
 
+                record_db.expire_all()
+                record = (
+                    record_db.query(ReconciliationRecordModel)
+                    .filter(
+                        ReconciliationRecordModel.id == record_id,
+                        ReconciliationRecordModel.lease_owner == cls._worker_prefix,
+                    )
+                    .with_for_update()
+                    .first()
+                )
+                if (
+                    record is None
+                    or record.lease_expires_at is None
+                    or _aware(record.lease_expires_at) <= datetime.now(timezone.utc)
+                ):
+                    record_db.rollback()
+                    continue
                 state = cls._engine(record_db).resolve_external_reconciliation(
                     work_id,
                     completed=completed,
@@ -334,6 +366,9 @@ class DurableWorkDispatcher:
                     seconds=min(3600, 30 * (2 ** min(record.attempt_count, 7)))
                 )
                 record.completed_at = datetime.now(timezone.utc) if record.status == "COMPLETED" else None
+                record.lease_owner = None
+                record.lease_expires_at = None
+                record.updated_at = datetime.now(timezone.utc)
                 if record.status == "PENDING":
                     record.failure_code = FailureCode.EXTERNAL_STATE_UNCERTAIN.value
                     record.failure_message = "Remote state remains uncertain; no write was replayed."
@@ -367,10 +402,95 @@ class DurableWorkDispatcher:
                 reconciled += 1
             except Exception as exc:
                 record_db.rollback()
+                if record_id is not None:
+                    try:
+                        record = record_db.query(ReconciliationRecordModel).filter(
+                            ReconciliationRecordModel.id == record_id,
+                            ReconciliationRecordModel.lease_owner == cls._worker_prefix,
+                        ).with_for_update().first()
+                        if record is not None:
+                            record.status = "PENDING"
+                            record.lease_owner = None
+                            record.lease_expires_at = None
+                            record.failure_code = "RECONCILIATION_CHECK_FAILED"
+                            record.failure_message = "The read-only provider reconciliation check failed."
+                            record.next_attempt_at = datetime.now(timezone.utc) + timedelta(
+                                seconds=min(3600, 30 * (2 ** min(record.attempt_count, 7)))
+                            )
+                            record.updated_at = datetime.now(timezone.utc)
+                            record_db.commit()
+                    except Exception:
+                        record_db.rollback()
                 logger.warning("External reconciliation failed for work %s: %s", work_id, type(exc).__name__)
             finally:
                 record_db.close()
         return reconciled
+
+    @classmethod
+    def _claim_reconciliation_record(
+        cls,
+        db,
+        *,
+        tenant_id: str,
+        work_id: str,
+        attempt_identity: str,
+    ) -> str | None:
+        """Acquire one crash-recoverable ownership lease for a remote state check."""
+        from app.models.platform import ReconciliationRecordModel
+
+        now = datetime.now(timezone.utc)
+        query = db.query(ReconciliationRecordModel).filter(
+            ReconciliationRecordModel.tenant_id == tenant_id,
+            ReconciliationRecordModel.resource_type == "WORK_ITEM",
+            ReconciliationRecordModel.resource_id == work_id,
+            ReconciliationRecordModel.operation == "EXTERNAL_SIDE_EFFECT",
+        )
+        if db.get_bind().dialect.name == "postgresql":
+            query = query.with_for_update(skip_locked=True)
+        record = query.first()
+        if record is None:
+            record = ReconciliationRecordModel(
+                tenant_id=tenant_id,
+                resource_type="WORK_ITEM",
+                resource_id=work_id,
+                operation="EXTERNAL_SIDE_EFFECT",
+            )
+            db.add(record)
+        else:
+            if record.status == "COMPLETED" and record.expected_digest == attempt_identity:
+                db.rollback()
+                return None
+            lease_active = (
+                record.status == "RUNNING"
+                and record.lease_expires_at is not None
+                and _aware(record.lease_expires_at) > now
+            )
+            if lease_active:
+                db.rollback()
+                return None
+            if record.status == "PENDING" and _aware(record.next_attempt_at) > now:
+                db.rollback()
+                return None
+
+        record.expected_digest = attempt_identity
+        record.status = "RUNNING"
+        record.attempt_count = int(record.attempt_count or 0) + 1
+        record.lease_owner = cls._worker_prefix
+        record.lease_expires_at = now + timedelta(
+            seconds=max(30, get_settings().EXECUTION_LEASE_SECONDS)
+        )
+        record.next_attempt_at = now
+        record.failure_code = None
+        record.failure_message = None
+        record.completed_at = None
+        record.updated_at = now
+        try:
+            db.commit()
+        except IntegrityError:
+            # Another host won first-record creation; its lease owns this sweep.
+            db.rollback()
+            return None
+        return str(record.id)
 
     @classmethod
     async def _run_claim(cls, claim: ClaimedWork) -> None:
