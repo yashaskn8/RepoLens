@@ -38,9 +38,10 @@ from app.analysis.evidence_ids import (
 from app.analysis.review_verifier import ChangeReviewVerifier, get_review_verifier
 from app.graph.repository_graph import RepositoryGraph
 from app.llm.exceptions import LLMError
+from app.llm.budgets import CHANGE_REVIEW_BUDGET
 from app.llm.router import LLMRouter, get_llm_router
 from app.llm.types import LLMMessage, LLMRequest, ModelCapability, TaskPolicy
-from app.llm.workflow_contracts import OBJECT_OUTPUT_SCHEMA, lineage_for_change_analysis
+from app.llm.workflow_contracts import CHANGE_REVIEW_OUTPUT_SCHEMA, lineage_for_change_analysis
 from app.schemas.change_analysis import (
     BlastRadiusReport,
     ChangeReviewFinding,
@@ -75,6 +76,7 @@ CRITICAL RULES:
 
 OUTPUT SCHEMA (JSON):
 {
+  "confidence": 0.0,
   "summary": "Executive summary of the revision risks",
   "findings": [
     {
@@ -110,8 +112,6 @@ class ChangeReviewAgent:
         blast_radius: BlastRadiusReport,
     ) -> str:
         """Construct bounded, structured context text summarizing deterministic facts with exact IDs."""
-        sections: List[str] = []
-
         # 1. Structural Diff Facts
         diff_summary = {
             "changed_files_count": len(diff_result.changed_files),
@@ -145,24 +145,24 @@ class ChangeReviewAgent:
                     "symbol": s.symbol_name,
                     "kind": s.symbol_kind,
                     "change_type": s.change_type.value if hasattr(s.change_type, "value") else str(s.change_type),
-                    "diff": s.evidence.get("diff", ""),
+                    "diff": str(s.evidence.get("diff", ""))[:1_200],
                     "symbol_evidence_id": make_symbol_evidence_id(
                         s.file_path, s.symbol_kind, s.symbol_name, s.head_location.get("start_line", 1) if s.head_location else 1
                     ),
                 }
-                for s in diff_result.modified_symbols[:25]
+                for s in diff_result.modified_symbols[:16]
             ],
             "added_symbols": [
                 {
                     "file": s.file_path,
                     "symbol": s.symbol_name,
                     "kind": s.symbol_kind,
-                    "diff": s.evidence.get("diff", ""),
+                    "diff": str(s.evidence.get("diff", ""))[:1_200],
                     "symbol_evidence_id": make_symbol_evidence_id(
                         s.file_path, s.symbol_kind, s.symbol_name, s.head_location.get("start_line", 1) if s.head_location else 1
                     ),
                 }
-                for s in diff_result.added_symbols[:25]
+                for s in diff_result.added_symbols[:16]
             ],
 
             "route_deltas": [
@@ -215,11 +215,9 @@ class ChangeReviewAgent:
                 for c in diff_result.config_deltas[:15]
             ],
         }
-        sections.append(f"DETERMINISTIC STRUCTURAL DIFF FACTS:\n{json.dumps(diff_summary, indent=2)}")
-
         # 2. Graph-Aware Blast Radius Facts
         impacts_summary = []
-        for imp in blast_radius.impacts[:30]:
+        for imp in blast_radius.impacts[:24]:
             imp_dict = {
                 "impact_evidence_id": make_impact_evidence_id(imp.id),
                 "id": str(imp.id),
@@ -240,12 +238,44 @@ class ChangeReviewAgent:
                 imp_dict["edge_evidence_id"] = make_edge_evidence_id(str(edge_type).upper(), str(c_node), str(t_node))
             impacts_summary.append(imp_dict)
 
-        sections.append(
-            f"GRAPH-AWARE BLAST RADIUS IMPACTS (Total: {blast_radius.total_impacts}, Truncated: {blast_radius.is_truncated}):\n"
-            f"{json.dumps(impacts_summary, indent=2)}"
-        )
-
-        return "\n\n".join(sections)
+        available = {
+            key: len(value)
+            for key, value in diff_summary.items()
+            if isinstance(value, list)
+        }
+        available["impacts"] = len(impacts_summary)
+        payload: Dict[str, Any] = {
+            "schema": "change-review-context/2.0",
+            "coverage": {
+                "available": available,
+                "source_total_impacts": blast_radius.total_impacts,
+                "source_truncated": blast_radius.is_truncated,
+                "prompt_truncated": False,
+            },
+            "structural_diff": diff_summary,
+            "impacts": impacts_summary,
+        }
+        bounded_lists = [
+            value for value in diff_summary.values() if isinstance(value, list)
+        ] + [impacts_summary]
+        max_context_bytes = 48_000
+        while len(json.dumps(payload, separators=(",", ":"), default=str).encode("utf-8")) > max_context_bytes:
+            candidates = [items for items in bounded_lists if items]
+            if not candidates:
+                break
+            largest = max(
+                candidates,
+                key=lambda items: len(json.dumps(items, separators=(",", ":"), default=str)),
+            )
+            largest.pop()
+            payload["coverage"]["prompt_truncated"] = True
+        payload["coverage"]["included"] = {
+            key: len(value)
+            for key, value in diff_summary.items()
+            if isinstance(value, list)
+        }
+        payload["coverage"]["included"]["impacts"] = len(impacts_summary)
+        return json.dumps(payload, separators=(",", ":"), ensure_ascii=False, default=str)
 
     async def review_changes(
         self,
@@ -282,17 +312,19 @@ class ChangeReviewAgent:
                     LLMMessage(role="user", content=user_prompt),
                 ],
                 task_policy=TaskPolicy.CHANGE_REVIEW,
-                capability=ModelCapability.DEEP_REASONING,
-                output_schema=OBJECT_OUTPUT_SCHEMA,
+                capability=ModelCapability.REPOSITORY_ANALYSIS,
+                output_schema=CHANGE_REVIEW_OUTPUT_SCHEMA,
                 lineage=lineage_for_change_analysis(
                     str(analysis_id),
-                    prompt_template_version="change-reviewer/1.0",
-                    output_schema_version="change-review/1.0",
+                    prompt_template_version="change-reviewer/2.0",
+                    output_schema_version="change-review/2.0",
                     evidence=bounded_context,
                 ),
                 temperature=0.0,
                 json_mode=True,
                 max_tokens=4000,
+                confidence_threshold=0.72,
+                budget=CHANGE_REVIEW_BUDGET,
             )
 
             response = await self.router.generate(request)

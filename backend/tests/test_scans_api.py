@@ -1,3 +1,4 @@
+import hashlib
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 import pytest
@@ -5,6 +6,7 @@ import pytest
 from app.models.finding import EvidenceModel, FindingModel
 from app.models.scan import ScanModel
 from app.schemas.enums import FindingStatus, ScanStatus, Severity, VerificationVerdict
+from app.services.finding_grounding import build_grounding_context_notes
 
 
 def test_post_scans_valid_url_accepted(client, db_session):
@@ -74,11 +76,13 @@ def test_get_scan_findings(client, db_session):
     """GET /api/v1/scans/{id}/findings returns verified findings with evidence."""
     scan_id = str(uuid4())
     finding_id = str(uuid4())
+    commit_sha = "a" * 40
 
     scan = ScanModel(
         id=scan_id,
         repository_url="https://github.com/org/sample-repo.git",
         status=ScanStatus.COMPLETED.value,
+        commit_hash=commit_sha,
     )
     db_session.add(scan)
 
@@ -93,13 +97,22 @@ def test_get_scan_findings(client, db_session):
         verification_verdict=VerificationVerdict.CONFIRMED.value,
         verification_reason="Code evidence confirms verify=False.",
     )
+    snippet = "jwt.decode(token, verify=False)"
     evidence = EvidenceModel(
         id=str(uuid4()),
         finding_id=finding_id,
         file_path="src/auth.py",
         start_line=12,
         end_line=14,
-        code_snippet="jwt.decode(token, verify=False)",
+        code_snippet=snippet,
+        context_notes=build_grounding_context_notes(
+            commit_sha=commit_sha,
+            file_path="src/auth.py",
+            start_line=12,
+            end_line=14,
+            file_sha256="3" * 64,
+            snippet_sha256=hashlib.sha256(snippet.encode("utf-8")).hexdigest(),
+        ),
     )
     finding.evidences.append(evidence)
     db_session.add(finding)

@@ -210,6 +210,7 @@ async def test_repolens_end_to_end_correctness_acceptance_gate(e2e_client, e2e_f
         elif "Security Specialist" in system_content or "security" in system_content.lower():
             return LLMResponse(
                 content=json.dumps({
+                    "confidence": 0.95,
                     "findings": [
                         {
                             "title": "Insecure Session Cookie in routes.py",
@@ -217,10 +218,9 @@ async def test_repolens_end_to_end_correctness_acceptance_gate(e2e_client, e2e_f
                             "severity": "HIGH",
                             "category": "security",
                             "rule_id": "fastapi.insecure-cookie",
-                            "file_path": "backend/app/routes.py",
-                            "start_line": 19,
-                            "end_line": 21,
-                            "code_snippet": "response.set_cookie(key='session_id', value=token)",
+                            "evidence_refs": [
+                                f"chunk:{original_commit_sha[:12]}:backend/app/routes.py:set_session_cookie:17"
+                            ],
                             "mitigation_guidance": "Add httponly=True, secure=True, and samesite='lax' to response.set_cookie.",
                         }
                     ]
@@ -234,6 +234,7 @@ async def test_repolens_end_to_end_correctness_acceptance_gate(e2e_client, e2e_f
         elif "Verifier" in system_content or "verdict" in user_content.lower() or "evaluations" in system_content.lower():
             return LLMResponse(
                 content=json.dumps({
+                    "confidence": 0.95,
                     "evaluations": [
                         {
                             "index": 0,
@@ -379,7 +380,8 @@ async def test_repolens_end_to_end_correctness_acceptance_gate(e2e_client, e2e_f
             assert target_finding is not None
             assert target_finding.verification_verdict == VerificationVerdict.CONFIRMED.value
             assert target_finding.evidences[0].file_path == "backend/app/routes.py"
-            assert target_finding.evidences[0].start_line in (19, 20)
+            assert target_finding.evidences[0].start_line == 17
+            assert target_finding.evidences[0].end_line == 18
             finding_id = target_finding.id
         finally:
             db.close()

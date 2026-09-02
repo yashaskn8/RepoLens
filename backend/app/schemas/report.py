@@ -84,6 +84,7 @@ class ReportSummary(BaseModel):
     medium_findings: int = 0
     low_findings: int = 0
     confirmed_findings: int = 0
+    excluded_noncanonical_findings: int = 0
     total_patches: int = 0
     approved_patches: int = 0
     rejected_patches: int = 0
@@ -141,4 +142,3 @@ class ScanReport(BaseModel):
     summary: ReportSummary
     findings: List[ReportFinding] = Field(default_factory=list)
     events_audit_trail: List[ReportWorkflowEvent] = Field(default_factory=list)
-

@@ -31,7 +31,7 @@ class ModelCapabilitySpec:
 
 
 _POLICY_CAPABILITIES: Mapping[TaskPolicy, ModelCapability] = {
-    TaskPolicy.ARCHITECTURE: ModelCapability.DEEP_REASONING,
+    TaskPolicy.ARCHITECTURE: ModelCapability.REPOSITORY_ANALYSIS,
     TaskPolicy.INTEGRATION_CODE: ModelCapability.CODE_REASONING,
     TaskPolicy.BUG_REASONING: ModelCapability.CODE_REASONING,
     TaskPolicy.SECURITY_REASONING: ModelCapability.SECURITY_REASONING,
@@ -41,7 +41,7 @@ _POLICY_CAPABILITIES: Mapping[TaskPolicy, ModelCapability] = {
     TaskPolicy.FIX_PLANNING: ModelCapability.DEEP_REASONING,
     TaskPolicy.PATCH_GENERATION: ModelCapability.PATCH_GENERATION,
     TaskPolicy.PATCH_CRITIC: ModelCapability.VERIFICATION,
-    TaskPolicy.CHANGE_REVIEW: ModelCapability.DEEP_REASONING,
+    TaskPolicy.CHANGE_REVIEW: ModelCapability.REPOSITORY_ANALYSIS,
 }
 
 
@@ -105,9 +105,11 @@ class ModelCapabilityRegistry:
                     model=configured.MODEL_INTEGRATION_CODE,
                     capabilities=frozenset(
                         {
+                            ModelCapability.REPOSITORY_ANALYSIS,
                             ModelCapability.CODE_REASONING,
                             ModelCapability.PATCH_GENERATION,
                             ModelCapability.STRUCTURED_EXTRACTION,
+                            ModelCapability.VERIFICATION,
                         }
                     ),
                     cost_tier=ModelCostTier.FREE,
@@ -120,6 +122,7 @@ class ModelCapabilityRegistry:
                     model=configured.MODEL_ARCHITECTURE,
                     capabilities=frozenset(
                         {
+                            ModelCapability.REPOSITORY_ANALYSIS,
                             ModelCapability.CODE_REASONING,
                             ModelCapability.DEEP_REASONING,
                             ModelCapability.STRUCTURED_EXTRACTION,
@@ -137,6 +140,7 @@ class ModelCapabilityRegistry:
                     model=configured.MODEL_BUG_REASONING,
                     capabilities=frozenset(
                         {
+                            ModelCapability.REPOSITORY_ANALYSIS,
                             ModelCapability.CODE_REASONING,
                             ModelCapability.DEEP_REASONING,
                             ModelCapability.SECURITY_REASONING,
@@ -153,6 +157,7 @@ class ModelCapabilityRegistry:
                     model=configured.MODEL_SECURITY_REASONING,
                     capabilities=frozenset(
                         {
+                            ModelCapability.REPOSITORY_ANALYSIS,
                             ModelCapability.DEEP_REASONING,
                             ModelCapability.SECURITY_REASONING,
                             ModelCapability.STRUCTURED_EXTRACTION,
@@ -196,7 +201,7 @@ class ModelCapabilityRegistry:
 class RoutingPolicy:
     """Select one ordered, sequential chain with cheap/healthy/capable models first."""
 
-    version = "capability-routing/1.0"
+    version = "capability-routing/1.1"
 
     def __init__(
         self,
@@ -228,4 +233,3 @@ class RoutingPolicy:
         ]
         eligible.sort(key=lambda spec: (spec.cost_tier.value, spec.quality_rank, spec.provider.value, spec.model))
         return tuple(eligible)
-

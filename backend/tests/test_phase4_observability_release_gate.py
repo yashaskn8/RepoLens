@@ -40,6 +40,7 @@ from app.models.scan import ScanModel
 from app.models.workflow_event import WorkflowEventModel
 from app.schemas.enums import FindingStatus, PatchStatus, ScanStatus, Severity, VerificationVerdict
 from app.schemas.workflow_event import WorkflowEventCreate, WorkflowEventType
+from app.services.finding_grounding import build_grounding_context_notes
 from app.services.report_service import ScanReportService
 from app.services.workflow_event_service import WorkflowEventService
 
@@ -185,14 +186,22 @@ def test_phase4_synthetic_observability_contracts(client: TestClient, db_session
     )
     db_session.add(finding)
 
+    evidence_snippet = "full_path = os.path.join(self.directory, path)"
     evidence = EvidenceModel(
         id=str(uuid4()),
         finding_id=str(finding_id),
         file_path="fastapi/staticfiles.py",
         start_line=50,
         end_line=55,
-        code_snippet="full_path = os.path.join(self.directory, path)",
-        context_notes="Direct path concatenation without boundary check",
+        code_snippet=evidence_snippet,
+        context_notes=build_grounding_context_notes(
+            commit_sha=scan.commit_hash,
+            file_path="fastapi/staticfiles.py",
+            start_line=50,
+            end_line=55,
+            file_sha256="4" * 64,
+            snippet_sha256=hashlib.sha256(evidence_snippet.encode("utf-8")).hexdigest(),
+        ),
     )
     db_session.add(evidence)
 
@@ -405,14 +414,22 @@ async def test_phase4_observability_lifecycle_and_restart_release_gate(
         verification_verdict=VerificationVerdict.CONFIRMED.value,
         verification_reason="Reproducible via static analysis of path concatenation",
     )
+    evidence_snippet = "full_path = os.path.join('/var/data', file_path)\nwith open(full_path, 'r') as f:\n    return {'content': f.read()}"
     evidence = EvidenceModel(
         id=str(uuid4()),
         finding_id=finding_id,
         file_path="backend/app/server.py",
         start_line=8,
         end_line=12,
-        code_snippet="full_path = os.path.join('/var/data', file_path)\nwith open(full_path, 'r') as f:\n    return {'content': f.read()}",
-        context_notes="Path join directly uses file_path without confinement check",
+        code_snippet=evidence_snippet,
+        context_notes=build_grounding_context_notes(
+            commit_sha=fixture_commit_sha,
+            file_path="backend/app/server.py",
+            start_line=8,
+            end_line=12,
+            file_sha256="5" * 64,
+            snippet_sha256=hashlib.sha256(evidence_snippet.encode("utf-8")).hexdigest(),
+        ),
     )
     db_session.add(finding)
     db_session.add(evidence)

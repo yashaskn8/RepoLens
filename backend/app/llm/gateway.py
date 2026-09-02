@@ -72,6 +72,10 @@ class CapabilityAIGateway:
         self.structured_gateway = structured_gateway or StructuredOutputGateway()
         self.policy_resolver = policy_resolver
         self.max_retries = max(0, max_retries)
+        # Public free inference endpoints commonly enforce very small burst
+        # limits.  Keep unrelated endpoints concurrent while ensuring one
+        # process never fans out simultaneous calls to the same free endpoint.
+        self._free_endpoint_locks: dict[tuple[LLMProvider, str], asyncio.Lock] = {}
 
     def reconcile_expired_quota(self, *, limit: int = 500) -> int:
         """Release durable provider reservations abandoned by crashed workers."""
@@ -123,6 +127,8 @@ class CapabilityAIGateway:
         attempted: list[LLMError] = []
         call_count = 0
         parent_execution_id = request.lineage.parent_execution_id
+        best_uncertain_response: LLMResponse | None = None
+        best_uncertain_confidence = -1.0
         for candidate_index, candidate in enumerate(candidates):
             if not self.health.allow_request(candidate.provider, candidate.model):
                 attempted.append(LLMProviderUnavailableError(
@@ -162,11 +168,19 @@ class CapabilityAIGateway:
                     ),
                 )
                 if not allowed:
-                    raise LLMQuotaExhaustedError(
+                    budget_error = LLMQuotaExhaustedError(
                         "The durable work-item AI budget was exhausted.",
                         provider=candidate.provider,
                         model=candidate.model,
                     )
+                    if best_uncertain_response is not None:
+                        attempted.append(budget_error)
+                        return self._retained_uncertain_response(
+                            best_uncertain_response,
+                            attempted=attempted,
+                            reason="escalation_budget_exhausted",
+                        )
+                    raise budget_error
                 execution_id = str(uuid4())
                 reservation = self.quota.reserve(
                     execution_id=execution_id,
@@ -197,10 +211,21 @@ class CapabilityAIGateway:
                 })
                 started = time.monotonic()
                 try:
-                    response = await adapter.generate(attempt_request)
+                    if candidate.cost_tier == ModelCostTier.FREE:
+                        endpoint_lock = self._free_endpoint_locks.setdefault(
+                            (candidate.provider, candidate.model),
+                            asyncio.Lock(),
+                        )
+                        async with endpoint_lock:
+                            started = time.monotonic()
+                            response = await adapter.generate(attempt_request)
+                    else:
+                        started = time.monotonic()
+                        response = await adapter.generate(attempt_request)
                     latency_ms = max(0.0, (time.monotonic() - started) * 1000.0)
                     validation = AIValidationResult.NOT_REQUESTED
                     uncertain = False
+                    confidence: float | None = None
                     if attempt_request.json_mode or attempt_request.output_schema is not None:
                         structured = self.structured_gateway.validate(
                             response.content,
@@ -211,6 +236,7 @@ class CapabilityAIGateway:
                         )
                         validation = structured.result
                         uncertain = structured.result == AIValidationResult.UNCERTAIN
+                        confidence = structured.confidence
 
                     input_tokens = response.metadata.prompt_tokens
                     output_tokens = response.metadata.completion_tokens
@@ -268,8 +294,30 @@ class CapabilityAIGateway:
                         ],
                     })
                     response.metadata.extra_metadata = extra
+                    if uncertain:
+                        confidence_score = confidence if confidence is not None else -1.0
+                        if (
+                            best_uncertain_response is None
+                            or confidence_score > best_uncertain_confidence
+                        ):
+                            best_uncertain_response = response
+                            best_uncertain_confidence = confidence_score
                     if can_escalate:
                         break
+                    if uncertain and best_uncertain_response is not None:
+                        return self._retained_uncertain_response(
+                            best_uncertain_response,
+                            attempted=attempted,
+                            reason=(
+                                "escalation_not_allowed"
+                                if not request.allow_escalation
+                                else (
+                                    "escalation_candidates_exhausted"
+                                    if candidate_index + 1 >= len(candidates)
+                                    else "escalation_budget_exhausted"
+                                )
+                            ),
+                        )
                     return response
                 except LLMError as exc:
                     latency_ms = max(0.0, (time.monotonic() - started) * 1000.0)
@@ -312,7 +360,15 @@ class CapabilityAIGateway:
                         model_registry_version=self.registry.version,
                     )
                     attempted.append(exc)
-                    if exc.retryable and retry_number < self.max_retries and call_count < request.budget.max_ai_calls:
+                    reserve_escalation_slot = (
+                        request.allow_escalation and candidate_index + 1 < len(candidates)
+                    )
+                    retry_call_limit = request.budget.max_ai_calls - int(reserve_escalation_slot)
+                    if (
+                        exc.retryable
+                        and retry_number < self.max_retries
+                        and call_count < retry_call_limit
+                    ):
                         await asyncio.sleep(min(2.0, 0.2 * (2 ** retry_number)))
                         continue
                     break
@@ -362,6 +418,13 @@ class CapabilityAIGateway:
                     logger.exception("Unexpected AI gateway error: %s", type(exc).__name__)
                     break
 
+        if best_uncertain_response is not None:
+            return self._retained_uncertain_response(
+                best_uncertain_response,
+                attempted=attempted,
+                reason="stronger_escalation_failed",
+            )
+
         summary = "; ".join(
             f"{error.provider.value if error.provider else 'gateway'}:{error.failure_code.value}"
             for error in attempted
@@ -370,3 +433,29 @@ class CapabilityAIGateway:
             f"All sequential candidates for capability {request.capability.value} failed ({summary}).",
             attempted_errors=attempted,
         )
+
+    @staticmethod
+    def _retained_uncertain_response(
+        response: LLMResponse,
+        *,
+        attempted: list[LLMError],
+        reason: str,
+    ) -> LLMResponse:
+        """Return schema-valid evidence when optional escalation cannot improve it."""
+        extra = dict(response.metadata.extra_metadata or {})
+        extra.update(
+            {
+                "uncertain_response_retained": True,
+                "escalation_outcome": reason,
+                "fallbacks_attempted": [
+                    {
+                        "provider": error.provider.value if error.provider else "gateway",
+                        "model": error.model,
+                        "failure_code": error.failure_code.value,
+                    }
+                    for error in attempted
+                ],
+            }
+        )
+        response.metadata.extra_metadata = extra
+        return response

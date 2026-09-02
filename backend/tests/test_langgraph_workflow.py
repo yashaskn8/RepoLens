@@ -87,26 +87,16 @@ async def test_langgraph_full_workflow_mocked_execution(sample_analysis_environm
             latency_ms=50.0,
         )
 
-        if policy == TaskPolicy.LIGHTWEIGHT_CLASSIFICATION:
-            return LLMResponse(
-                content="REST API application using FastAPI.",
-                model="mock-model",
-                provider=LLMProvider.GROQ,
-                metadata=metadata,
-            )
-
-        elif policy == TaskPolicy.ARCHITECTURE:
+        if policy == TaskPolicy.ARCHITECTURE:
             payload = {
+                "confidence": 0.9,
                 "findings": [
                     {
                         "title": "Monolithic Route Coupling",
                         "description": "Routes defined in root without modular APIRouter.",
                         "severity": "LOW",
                         "category": "architecture",
-                        "file_path": "server.py",
-                        "start_line": 4,
-                        "end_line": 6,
-                        "code_snippet": "@app.get('/items')",
+                        "evidence_refs": ["chunk:abcdef123456:server.py:GET /items:4"],
                         "mitigation_guidance": "Extract into APIRouter module.",
                     }
                 ]
@@ -121,16 +111,14 @@ async def test_langgraph_full_workflow_mocked_execution(sample_analysis_environm
         elif policy == TaskPolicy.SECURITY_REASONING:
             # Emits one grounded finding (server.py) and one hallucinated file finding (fake_auth.py)
             payload = {
+                "confidence": 0.9,
                 "findings": [
                     {
                         "title": "Missing Authentication on Route",
                         "description": "Endpoint /items lacks authentication dependency.",
                         "severity": "HIGH",
                         "category": "security",
-                        "file_path": "server.py",
-                        "start_line": 4,
-                        "end_line": 6,
-                        "code_snippet": "def list_items():",
+                        "evidence_refs": ["chunk:abcdef123456:server.py:GET /items:4"],
                         "mitigation_guidance": "Add Depends(get_current_user).",
                     },
                     {
@@ -138,9 +126,7 @@ async def test_langgraph_full_workflow_mocked_execution(sample_analysis_environm
                         "description": "In non-existent file",
                         "severity": "CRITICAL",
                         "category": "security",
-                        "file_path": "fake_auth.py",
-                        "start_line": 10,
-                        "end_line": 12,
+                        "evidence_refs": ["chunk:invented:fake_auth.py:10"],
                     },
                 ]
             }
@@ -153,7 +139,7 @@ async def test_langgraph_full_workflow_mocked_execution(sample_analysis_environm
 
         elif policy in (TaskPolicy.INTEGRATION_CODE, TaskPolicy.BUG_REASONING):
             return LLMResponse(
-                content=json.dumps({"findings": []}),
+                content=json.dumps({"confidence": 0.9, "findings": []}),
                 model="mock-model",
                 provider=LLMProvider.HUGGINGFACE,
                 metadata=metadata,
@@ -162,6 +148,7 @@ async def test_langgraph_full_workflow_mocked_execution(sample_analysis_environm
         elif policy == TaskPolicy.VERIFICATION:
             # Verifier confirms grounded findings
             payload = {
+                "confidence": 0.9,
                 "evaluations": [
                     {"index": 0, "verdict": "CONFIRMED", "justified_severity": "LOW", "reason": "Valid architectural observation."},
                     {"index": 1, "verdict": "CONFIRMED", "justified_severity": "HIGH", "reason": "Endpoint lacks authentication."},
@@ -179,9 +166,7 @@ async def test_langgraph_full_workflow_mocked_execution(sample_analysis_environm
     mock_router = AsyncMock()
     mock_router.generate.side_effect = mock_generate_side_effect
 
-    with patch("app.agents.mapper.get_llm_router", return_value=mock_router), \
-         patch("app.agents.architecture.get_llm_router", return_value=mock_router), \
-         patch("app.agents.integration.get_llm_router", return_value=mock_router), \
+    with patch("app.agents.architecture.get_llm_router", return_value=mock_router), \
          patch("app.agents.security.get_llm_router", return_value=mock_router), \
          patch("app.agents.bug.get_llm_router", return_value=mock_router), \
          patch("app.agents.verifier.get_llm_router", return_value=mock_router):
@@ -198,7 +183,7 @@ async def test_langgraph_full_workflow_mocked_execution(sample_analysis_environm
     assert "FastAPI" in final_state["architecture_overview"]
 
     # 2. Candidate findings collected
-    assert len(final_state["candidate_findings"]) >= 3
+    assert len(final_state["candidate_findings"]) == 2
 
     # 3. Grounding Verification assertions
     verified = final_state["verified_findings"]
@@ -210,7 +195,10 @@ async def test_langgraph_full_workflow_mocked_execution(sample_analysis_environm
         assert isinstance(vf, Finding)
         assert vf.evidences[0].file_path == "server.py"
 
-    # Hallucinated fake_auth.py must be in rejected findings
-    rejected_files = [rf.get("file_path") for rf in rejected]
-    assert "fake_auth.py" in rejected_files
-    assert any("does not exist" in rf.get("reason", "") for rf in rejected if rf.get("file_path") == "fake_auth.py")
+    # Unknown evidence IDs are rejected before they become candidates.
+    assert all(
+        evidence.file_path != "fake_auth.py"
+        for finding in final_state["candidate_findings"]
+        for evidence in finding.evidences
+    )
+    assert all(rf.get("file_path") != "fake_auth.py" for rf in rejected)

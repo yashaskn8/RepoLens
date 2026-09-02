@@ -458,8 +458,9 @@ async def test_malformed_structured_output_handled_gracefully(base_sample_diff, 
     """Verify that corrupted JSON or non-schema LLM output is safely rejected without throwing."""
     malformed_json = """
     ```json
-    {
-      "summary": "Partial analysis",
+        {
+          "confidence": 0.9,
+          "summary": "Partial analysis",
       "findings": [
         {
           "title": "Good finding",
@@ -499,9 +500,11 @@ async def test_malformed_structured_output_handled_gracefully(base_sample_diff, 
         base_graph=base_sample_graph,
     )
 
-    assert report.total_findings >= 1
-    # Check that valid finding passed
-    assert any(f.title == "Good finding" for f in report.findings)
+    # One malformed item invalidates the untrusted model envelope; deterministic
+    # facts remain available and no partially validated claims are published.
+    assert report.total_findings == 0
+    assert report.model_metadata is not None
+    assert report.model_metadata.extra_metadata["is_fallback"] is True
 
 
 # =========================================================================
@@ -535,6 +538,7 @@ async def test_prompt_injection_content_treated_as_data(base_sample_blast_radius
     )
 
     canned_safe_output = json.dumps({
+        "confidence": 0.95,
         "summary": "Review detected added exploit symbol",
         "findings": [
             {

@@ -29,6 +29,7 @@ from app.schemas.report import (
 )
 from app.schemas.telemetry import ScanTelemetry
 from app.security.redaction import redact_secrets
+from app.services.finding_grounding import is_canonical_confirmed_finding
 
 logger = logging.getLogger(__name__)
 
@@ -79,9 +80,37 @@ class ScanReportService:
         if not scan:
             return None
 
-        finding_models = db.query(FindingModel).filter(FindingModel.scan_id == str(scan_id)).all()
-        patch_models = db.query(PatchModel).filter(PatchModel.scan_id == str(scan_id)).all()
-        delivery_models = db.query(DeliveryModel).filter(DeliveryModel.scan_id == str(scan_id)).all()
+        all_finding_models = db.query(FindingModel).filter(FindingModel.scan_id == str(scan_id)).all()
+        finding_models = [
+            finding
+            for finding in all_finding_models
+            if is_canonical_confirmed_finding(
+                finding,
+                expected_commit_sha=scan.commit_hash or "__missing_commit__",
+            )
+        ]
+        meta = scan.model_metadata or {}
+        verification_summary = meta.get("verification_summary") if isinstance(meta, dict) else {}
+        recorded_excluded = (
+            verification_summary.get("excluded_noncanonical_findings", 0)
+            if isinstance(verification_summary, dict)
+            else 0
+        )
+        if not isinstance(recorded_excluded, int) or isinstance(recorded_excluded, bool):
+            recorded_excluded = 0
+        excluded_noncanonical_findings = max(0, recorded_excluded) + (
+            len(all_finding_models) - len(finding_models)
+        )
+        canonical_finding_ids = {finding.id for finding in finding_models}
+        all_patch_models = db.query(PatchModel).filter(PatchModel.scan_id == str(scan_id)).all()
+        patch_models = [
+            patch for patch in all_patch_models if patch.finding_id in canonical_finding_ids
+        ]
+        canonical_patch_ids = {patch.id for patch in patch_models}
+        all_delivery_models = db.query(DeliveryModel).filter(DeliveryModel.scan_id == str(scan_id)).all()
+        delivery_models = [
+            delivery for delivery in all_delivery_models if delivery.patch_id in canonical_patch_ids
+        ]
         event_models = (
             db.query(WorkflowEventModel)
             .filter(WorkflowEventModel.scan_id == str(scan_id))
@@ -174,6 +203,7 @@ class ScanReportService:
             medium_findings=sum(1 for f in report_findings if f.severity == "MEDIUM"),
             low_findings=sum(1 for f in report_findings if f.severity == "LOW"),
             confirmed_findings=sum(1 for f in report_findings if f.verification_verdict == "CONFIRMED"),
+            excluded_noncanonical_findings=excluded_noncanonical_findings,
             total_patches=len(patch_models),
             approved_patches=sum(1 for p in patch_models if p.status == "APPROVED"),
             rejected_patches=sum(1 for p in patch_models if p.status == "REJECTED"),
@@ -197,7 +227,6 @@ class ScanReportService:
             for e in event_models
         ]
 
-        meta = scan.model_metadata or {}
         req_branch = meta.get("requested_branch") if isinstance(meta, dict) else None
         res_branch = meta.get("resolved_branch_or_ref") if isinstance(meta, dict) else None
         arch_overview = _redact_secrets(meta.get("architecture_overview")) if isinstance(meta, dict) and meta.get("architecture_overview") else None
@@ -299,12 +328,17 @@ class ScanReportService:
         lines.append("")
         lines.append("| Metric | Count |")
         lines.append("| :--- | :--- |")
-        lines.append(f"| **Total Findings** | {report.summary.total_findings} |")
+        lines.append(f"| **Total Canonical Findings** | {report.summary.total_findings} |")
         lines.append(f"| 🔴 Critical Severity | {report.summary.critical_findings} |")
         lines.append(f"| 🟠 High Severity | {report.summary.high_findings} |")
         lines.append(f"| 🟡 Medium Severity | {report.summary.medium_findings} |")
         lines.append(f"| 🔵 Low Severity | {report.summary.low_findings} |")
         lines.append(f"| ✅ Confirmed Grounded Findings | {report.summary.confirmed_findings} |")
+        if report.summary.excluded_noncanonical_findings > 0:
+            lines.append(
+                f"| ⚠️ Excluded Unverified / Ungrounded Candidates | "
+                f"{report.summary.excluded_noncanonical_findings} |"
+            )
         lines.append(f"| 🛡️ Total Generated Patches | {report.summary.total_patches} |")
         lines.append(f"| 👤 Approved Patches | {report.summary.approved_patches} |")
         lines.append(f"| ❌ Rejected Patches | {report.summary.rejected_patches} |")

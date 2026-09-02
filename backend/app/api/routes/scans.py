@@ -58,6 +58,10 @@ from app.schemas.workflow_event import WorkflowEventCreate, WorkflowEventType
 from app.security.redaction import redact_secrets
 from app.schemas.auth import get_user_id
 from app.services.authorization_service import get_owned_scan_or_404
+from app.services.finding_grounding import (
+    canonicalize_repository_evidences,
+    is_canonical_confirmed_finding,
+)
 from app.services.quota_service import check_and_increment_quota
 from app.services.workflow_event_service import WorkflowEventService
 
@@ -83,7 +87,22 @@ def _scan_request_budget() -> RequestBudget:
 
 
 def _scan_resource(db: Session, scan_model: ScanModel) -> Scan:
-    findings_count = db.query(FindingModel).filter(FindingModel.scan_id == scan_model.id).count()
+    candidate_findings = (
+        db.query(FindingModel)
+        .filter(
+            FindingModel.scan_id == scan_model.id,
+            FindingModel.verification_verdict == VerificationVerdict.CONFIRMED.value,
+        )
+        .all()
+    )
+    findings_count = sum(
+        1
+        for finding in candidate_findings
+        if is_canonical_confirmed_finding(
+            finding,
+            expected_commit_sha=scan_model.commit_hash or "__missing_commit__",
+        )
+    )
     metadata = scan_model.model_metadata if isinstance(scan_model.model_metadata, dict) else {}
     model_metadata = (
         ModelExecutionMetadata(model_name="RepoLens-MultiAgent", extra_metadata=metadata)
@@ -391,17 +410,45 @@ async def execute_background_scan(
             return
 
         # 7. Persist verified findings into database (idempotent, no duplicates on resume)
-        existing_finding_ids = {
-            f_id for (f_id,) in db.query(FindingModel.id).filter(FindingModel.scan_id == scan_id).all()
-        }
-        raw_verified_findings = final_state.get("verified_findings", [])
-        for item in raw_verified_findings:
-            if isinstance(item, dict):
-                f = Finding.model_validate(item)
-            else:
-                f = item
+        existing_finding_models = db.query(FindingModel).filter(FindingModel.scan_id == scan_id).all()
+        existing_findings_by_id = {str(existing.id): existing for existing in existing_finding_models}
+        existing_finding_ids = set(existing_findings_by_id)
+        existing_canonical_count = sum(
+            1
+            for existing in existing_finding_models
+            if is_canonical_confirmed_finding(existing, expected_commit_sha=commit_sha)
+        )
+        raw_verified_findings = list(final_state.get("verified_findings", []) or [])
+        newly_persisted_findings: list[Finding] = []
+        excluded_candidate_keys: set[str] = set()
+        for index, item in enumerate(raw_verified_findings):
+            try:
+                f = Finding.model_validate(item) if isinstance(item, dict) else item
+                verdict = getattr(f.verification_verdict, "value", f.verification_verdict)
+                canonical_evidences = canonicalize_repository_evidences(
+                    repo_dir=workspace_dir,
+                    commit_sha=commit_sha,
+                    evidences=f.evidences,
+                )
+            except (TypeError, ValueError, OSError):
+                candidate_id = item.get("id") if isinstance(item, dict) else getattr(item, "id", None)
+                excluded_candidate_keys.add(str(candidate_id or f"invalid:{index}"))
+                continue
+
+            # The workflow's list name is not an authority boundary.  Only an
+            # explicit CONFIRMED verdict with source re-read from the exact
+            # repository snapshot can enter canonical persistence.
+            if str(verdict or "").upper() != VerificationVerdict.CONFIRMED.value or not canonical_evidences:
+                excluded_candidate_keys.add(str(f.id))
+                continue
+            f.evidences = canonical_evidences
 
             if str(f.id) in existing_finding_ids:
+                if not is_canonical_confirmed_finding(
+                    existing_findings_by_id[str(f.id)],
+                    expected_commit_sha=commit_sha,
+                ):
+                    excluded_candidate_keys.add(str(f.id))
                 continue
 
             provenance = publish_finding_provenance(
@@ -477,6 +524,7 @@ async def execute_background_scan(
                 finding_model.evidences.append(ev_model)
 
             db.add(finding_model)
+            newly_persisted_findings.append(f)
             finding_state_digest = hashlib.sha256(json.dumps(
                 {
                     "finding_id": str(f.id),
@@ -516,6 +564,13 @@ async def execute_background_scan(
                 },
             )
 
+        for index, item in enumerate(final_state.get("rejected_findings", []) or []):
+            if isinstance(item, dict):
+                candidate_id = item.get("finding_id") or item.get("id")
+            else:
+                candidate_id = getattr(item, "finding_id", None) or getattr(item, "id", None)
+            excluded_candidate_keys.add(str(candidate_id or f"diagnostic:{index}"))
+
         # 8. Mark scan COMPLETED and preserve merged metadata
         scan_model.status = ScanStatus.COMPLETED.value
         scan_model.completed_at = _utc_now()
@@ -527,26 +582,29 @@ async def execute_background_scan(
             "total_files": evidence_store.manifest.total_files,
             "total_size_bytes": evidence_store.manifest.total_size_bytes,
             "analysis_scope": evidence_store.manifest.analysis_scope.model_dump() if getattr(evidence_store.manifest, "analysis_scope", None) else None,
+            "verification_summary": {
+                "canonical_confirmed_findings": existing_canonical_count + len(newly_persisted_findings),
+                "excluded_noncanonical_findings": len(excluded_candidate_keys),
+            },
         })
         scan_model.model_metadata = existing_meta
         flag_modified(scan_model, "model_metadata")
         db.commit()
 
         # Emit finding confirmed events and scan completed event independently
-        for f in raw_verified_findings:
-            if str(f.id) not in existing_finding_ids:
-                sev_val = f.severity.value if hasattr(f.severity, "value") else str(f.severity)
-                WorkflowEventService.emit(
-                    db=db,
-                    event=WorkflowEventCreate(
-                        event_type=WorkflowEventType.FINDING_CONFIRMED,
-                        scan_id=UUID(scan_id),
-                        finding_id=UUID(str(f.id)),
-                        commit_sha=commit_sha,
-                        message=f"Confirmed finding: {f.title} ({sev_val})",
-                        metadata_payload={"severity": sev_val, "category": f.category, "source_tool": getattr(f, "source_tool", None)},
-                    ),
-                )
+        for f in newly_persisted_findings:
+            sev_val = f.severity.value if hasattr(f.severity, "value") else str(f.severity)
+            WorkflowEventService.emit(
+                db=db,
+                event=WorkflowEventCreate(
+                    event_type=WorkflowEventType.FINDING_CONFIRMED,
+                    scan_id=UUID(scan_id),
+                    finding_id=UUID(str(f.id)),
+                    commit_sha=commit_sha,
+                    message=f"Confirmed grounded finding: {f.title} ({sev_val})",
+                    metadata_payload={"severity": sev_val, "category": f.category, "source_tool": getattr(f, "source_tool", None)},
+                ),
+            )
 
         WorkflowEventService.emit(
             db=db,
@@ -555,7 +613,10 @@ async def execute_background_scan(
                 scan_id=UUID(scan_id),
                 commit_sha=commit_sha,
                 message="Scan completed successfully",
-                metadata_payload={"findings_count": len(raw_verified_findings)},
+                metadata_payload={
+                    "findings_count": existing_canonical_count + len(newly_persisted_findings),
+                    "excluded_noncanonical_findings": len(excluded_candidate_keys),
+                },
             ),
         )
 
@@ -754,7 +815,10 @@ def get_scan_findings(
 
     finding_models = (
         db.query(FindingModel)
-        .filter(FindingModel.scan_id == str(scan_id))
+        .filter(
+            FindingModel.scan_id == str(scan_id),
+            FindingModel.verification_verdict == VerificationVerdict.CONFIRMED.value,
+        )
         .order_by(FindingModel.created_at.desc(), FindingModel.id.desc())
         .offset(offset)
         .limit(limit)
@@ -763,6 +827,11 @@ def get_scan_findings(
     results: List[Finding] = []
 
     for fm in finding_models:
+        if not is_canonical_confirmed_finding(
+            fm,
+            expected_commit_sha=scan_model.commit_hash or "__missing_commit__",
+        ):
+            continue
         evidences = [
             Evidence(
                 id=UUID(em.id),
@@ -795,6 +864,9 @@ def get_scan_findings(
                 mitigation_guidance=fm.mitigation_guidance,
                 verification_verdict=VerificationVerdict(fm.verification_verdict) if fm.verification_verdict else None,
                 verification_reason=fm.verification_reason,
+                source_tool=fm.source_tool,
+                detector_id=fm.detector_id,
+                detector_kind=fm.detector_kind,
                 evidences=evidences,
                 model_metadata=metadata,
                 created_at=fm.created_at,

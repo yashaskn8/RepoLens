@@ -1,6 +1,7 @@
 """Adversarial and rigorous unit tests for the enhanced Phase 1F Verifier Agent."""
 
 import json
+import hashlib
 import os
 import tempfile
 from unittest.mock import AsyncMock, patch
@@ -216,13 +217,20 @@ async def test_verifier_adjusts_severity_and_confirms(workspace_with_code):
         description="Empty pass statement in debug endpoint",
         severity=Severity.CRITICAL,  # Exaggerated severity
         evidences=[
-            Evidence(file_path="auth.py", start_line=7, end_line=8)
+            Evidence(
+                file_path="auth.py",
+                start_line=7,
+                end_line=8,
+                code_snippet="MODEL INVENTED THIS SNIPPET",
+                context_notes="MODEL INVENTED THIS NOTE",
+            )
         ],
         model_metadata=ModelExecutionMetadata(provider="gemini", model_name="gemini-3.7-flash"),
     )
 
     state = {
         "scan_id": scan_id,
+        "commit_hash": "abc123",
         "repo_dir": workspace_with_code,
         "candidate_findings": [valid_finding],
     }
@@ -253,6 +261,18 @@ async def test_verifier_adjusts_severity_and_confirms(workspace_with_code):
     assert vf.verification_verdict == VerificationVerdict.CONFIRMED
     assert vf.severity == Severity.LOW  # Adjusted from CRITICAL
     assert "Downgraded to LOW" in vf.verification_reason
+    with open(os.path.join(workspace_with_code, "auth.py"), "rb") as source_file:
+        expected_bytes = b"".join(source_file.read().splitlines(keepends=True)[6:8])
+    expected_snippet = expected_bytes.decode("utf-8")
+    assert vf.evidences[0].code_snippet == expected_snippet
+    assert "MODEL INVENTED" not in (vf.evidences[0].context_notes or "")
+    assert "commit_sha=abc123" in (vf.evidences[0].context_notes or "")
+    assert "path=auth.py" in (vf.evidences[0].context_notes or "")
+    assert "range=7-8" in (vf.evidences[0].context_notes or "")
+    assert (
+        f"content_sha256={hashlib.sha256(expected_bytes).hexdigest()}"
+        in (vf.evidences[0].context_notes or "")
+    )
 
 
 @pytest.mark.asyncio
@@ -339,29 +359,155 @@ async def test_verifier_no_variable_leakage_across_candidates_multiverdict(works
     with patch("app.agents.verifier.get_llm_router", return_value=mock_router):
         result = await run_verifier_agent(state)
 
-    # 1. Verify finding counts
-    assert len(result["verified_findings"]) == 2
-    assert len(result["rejected_findings"]) == 1
+    # 1. Only independently CONFIRMED findings cross the publication boundary.
+    assert len(result["verified_findings"]) == 1
+    assert len(result["rejected_findings"]) == 2
 
     # 2. Verify CONFIRMED candidate mapping
-    vf_conf = next(f for f in result["verified_findings"] if f.verification_verdict == VerificationVerdict.CONFIRMED)
+    vf_conf = result["verified_findings"][0]
     assert vf_conf.id == c_confirmed.id
     assert vf_conf.title == "Confirmed Hardcoded JWT Secret"
     assert vf_conf.verification_reason == "Hardcoded secret verified on line 2."
     assert vf_conf.evidences[0].file_path == "auth.py"
 
-    # 3. Verify POSSIBLE candidate mapping
-    vf_poss = next(f for f in result["verified_findings"] if f.verification_verdict == VerificationVerdict.POSSIBLE)
-    assert vf_poss.id == c_possible.id
-    assert vf_poss.title == "Possible Insecure Token Verification"
-    assert vf_poss.verification_reason == "Token decode could be insecure depending on algorithm whitelist."
-    assert vf_poss.evidences[0].file_path == "auth.py"
+    # 3. POSSIBLE remains an honest diagnostic and is never published.
+    possible = next(
+        finding for finding in result["rejected_findings"]
+        if finding["finding_id"] == str(c_possible.id)
+    )
+    assert possible["title"] == "Possible Insecure Token Verification"
+    assert possible["file_path"] == "auth.py"
+    assert possible["verdict"] == "POSSIBLE"
+    assert possible["reason"] == "Token decode could be insecure depending on algorithm whitelist."
 
     # 4. Verify REJECTED candidate mapping (specifically ensuring NO variable leakage from other candidates)
-    rf = result["rejected_findings"][0]
+    rf = next(
+        finding for finding in result["rejected_findings"]
+        if finding["finding_id"] == str(c_rejected.id)
+    )
     assert rf["finding_id"] == str(c_rejected.id)
     assert rf["title"] == "Rejected False Positive SQLi"
     assert rf["file_path"] == "auth.py"
     assert rf["verdict"] == "REJECTED"
     assert rf["reason"] == "No SQL query in function; false positive."
 
+
+@pytest.mark.asyncio
+async def test_verifier_missing_evaluation_fails_closed(workspace_with_code):
+    """A partial/empty verifier response must not publish a merely located claim."""
+    scan_id = str(uuid4())
+    candidate = Finding(
+        scan_id=scan_id,
+        title="Unconfirmed claim",
+        description="A source locator alone does not prove this semantic claim.",
+        severity=Severity.HIGH,
+        evidences=[Evidence(file_path="auth.py", start_line=1, end_line=2)],
+        model_metadata=ModelExecutionMetadata(provider="gemini", model_name="gemini-flash"),
+    )
+    mock_router = AsyncMock()
+    mock_router.generate.return_value = LLMResponse(
+        content=json.dumps({"confidence": 0.9, "evaluations": []}),
+        model="nemotron",
+        provider=LLMProvider.NVIDIA,
+        metadata=ModelExecutionMetadata(provider=LLMProvider.NVIDIA, model_name="nemotron"),
+    )
+
+    with patch("app.agents.verifier.get_llm_router", return_value=mock_router):
+        result = await run_verifier_agent({
+            "scan_id": scan_id,
+            "commit_hash": "deadbeef",
+            "repo_dir": workspace_with_code,
+            "candidate_findings": [candidate],
+        })
+
+    assert result["verified_findings"] == []
+    assert len(result["rejected_findings"]) == 1
+    diagnostic = result["rejected_findings"][0]
+    assert diagnostic["finding_id"] == str(candidate.id)
+    assert diagnostic["verdict"] == VerificationVerdict.POSSIBLE.value
+    assert "semantic claim remains unconfirmed" in diagnostic["reason"]
+
+
+@pytest.mark.asyncio
+async def test_verifier_provider_failure_fails_closed(workspace_with_code):
+    """Provider errors remain diagnostics rather than silently accepted findings."""
+    scan_id = str(uuid4())
+    candidate = Finding(
+        scan_id=scan_id,
+        title="Unconfirmed claim after provider failure",
+        description="The verifier is unavailable.",
+        severity=Severity.MEDIUM,
+        evidences=[Evidence(file_path="auth.py", start_line=4, end_line=5)],
+        model_metadata=ModelExecutionMetadata(provider="gemini", model_name="gemini-flash"),
+    )
+    mock_router = AsyncMock()
+    mock_router.generate.side_effect = RuntimeError("quota exhausted")
+
+    with patch("app.agents.verifier.get_llm_router", return_value=mock_router):
+        result = await run_verifier_agent({
+            "scan_id": scan_id,
+            "repo_dir": workspace_with_code,
+            "candidate_findings": [candidate],
+        })
+
+    assert result["verified_findings"] == []
+    assert result["rejected_findings"][0]["verdict"] == VerificationVerdict.POSSIBLE.value
+    assert result["errors"]
+    assert "quota exhausted" in result["errors"][0]
+
+
+@pytest.mark.asyncio
+async def test_attested_deterministic_detectors_do_not_depend_on_an_llm(workspace_with_code):
+    """Scanner/contract facts survive provider outages without inferring exploitability."""
+    scan_id = str(uuid4())
+    scanner_finding = Finding(
+        scan_id=scan_id,
+        title="Semgrep detector result",
+        description="Canonical scanner-authored description.",
+        severity=Severity.HIGH,
+        evidences=[Evidence(
+            file_path="auth.py",
+            start_line=2,
+            end_line=2,
+            code_snippet="MODEL-SUPPLIED FALSE SNIPPET",
+        )],
+        source_tool="semgrep",
+        detector_id="python.lang.security.hardcoded-secret",
+        detector_kind="static_scanner",
+    )
+    contract_finding = Finding(
+        scan_id=scan_id,
+        title="Catastrophic remote compromise",
+        description="Model-authored impact that is not a deterministic contract fact.",
+        severity=Severity.CRITICAL,
+        mitigation_guidance="Model-authored remediation.",
+        evidences=[Evidence(file_path="auth.py", start_line=4, end_line=4)],
+        source_tool="route_contract",
+        detector_id="contract:frontend-login-request",
+        detector_kind="contract_matcher",
+    )
+
+    mock_router = AsyncMock()
+    mock_router.generate.side_effect = AssertionError("deterministic facts must not call an LLM")
+    with patch("app.agents.verifier.get_llm_router", return_value=mock_router):
+        result = await run_verifier_agent({
+            "scan_id": scan_id,
+            "commit_hash": "feedface",
+            "repo_dir": workspace_with_code,
+            "candidate_findings": [scanner_finding, contract_finding],
+        })
+
+    assert len(result["verified_findings"]) == 2
+    assert result["rejected_findings"] == []
+    mock_router.generate.assert_not_awaited()
+
+    scanner = next(f for f in result["verified_findings"] if f.source_tool == "semgrep")
+    assert scanner.verification_verdict == VerificationVerdict.CONFIRMED
+    assert scanner.evidences[0].code_snippet != "MODEL-SUPPLIED FALSE SNIPPET"
+    assert "exploitability was not inferred" in (scanner.verification_reason or "")
+
+    contract = next(f for f in result["verified_findings"] if f.source_tool == "route_contract")
+    assert contract.title == "Deterministic frontend/API contract mismatch"
+    assert contract.severity == Severity.INFO
+    assert contract.mitigation_guidance is None
+    assert "Catastrophic remote compromise" not in contract.title

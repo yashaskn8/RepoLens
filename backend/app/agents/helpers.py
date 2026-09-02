@@ -2,7 +2,7 @@
 
 import json
 import re
-from typing import Any, Dict, List
+from typing import Any, List
 import uuid
 from uuid import UUID
 
@@ -10,6 +10,7 @@ from app.schemas.enums import FindingStatus, Severity
 from app.schemas.evidence import Evidence
 from app.schemas.finding import Finding
 from app.schemas.metadata import ModelExecutionMetadata
+from app.agents.grounding import EvidenceIndex, ground_model_findings
 
 
 def safe_to_uuid(val: Any) -> UUID:
@@ -36,8 +37,9 @@ def parse_llm_findings(
     scan_id: Any,
     default_category: str,
     model_metadata: ModelExecutionMetadata,
+    evidence_index: EvidenceIndex,
 ) -> List[Finding]:
-    """Parse JSON array of findings from LLM output into validated canonical Finding objects."""
+    """Parse only exactly cited, deterministically grounded model findings."""
     findings: List[Finding] = []
     clean_scan_id = safe_to_uuid(scan_id)
     json_str = extract_json_block(raw_content)
@@ -48,8 +50,11 @@ def parse_llm_findings(
         return findings
 
     raw_items = data.get("findings", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+    if not isinstance(raw_items, list):
+        return findings
+    grounded_items = ground_model_findings(raw_items, evidence_index)
 
-    for item in raw_items:
+    for item in grounded_items:
         if not isinstance(item, dict):
             continue
 
@@ -68,12 +73,16 @@ def parse_llm_findings(
             snippet = item.get("code_snippet")
 
             provider_str = model_metadata.provider.value if hasattr(model_metadata.provider, "value") else str(model_metadata.provider or "AI")
+            grounding_note = item.get("context_notes") or "Deterministic evidence reference validated"
             evidence = Evidence(
                 file_path=file_path,
                 start_line=int(start_line) if start_line and str(start_line).isdigit() else None,
                 end_line=int(end_line) if end_line and str(end_line).isdigit() else None,
                 code_snippet=snippet,
-                context_notes=f"Identified by {provider_str} ({model_metadata.model_name})",
+                context_notes=(
+                    f"{grounding_note}; reasoning_provider={provider_str}; "
+                    f"reasoning_model={model_metadata.model_name}"
+                ),
             )
 
             finding = Finding(
@@ -86,6 +95,9 @@ def parse_llm_findings(
                 category=category,
                 evidences=[evidence],
                 mitigation_guidance=mitigation,
+                source_tool=item.get("source_tool"),
+                detector_id=item.get("detector_id"),
+                detector_kind=item.get("detector_kind"),
                 model_metadata=model_metadata,
             )
             findings.append(finding)

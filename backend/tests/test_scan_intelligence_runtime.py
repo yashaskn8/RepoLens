@@ -29,6 +29,9 @@ from app.schemas.evidence import Evidence
 class DeterministicMockEmbeddingProvider(EmbeddingProvider):
     """Deterministic token-hash embedding provider for testing vector indexing."""
 
+    def __init__(self) -> None:
+        self.requests: List[EmbeddingRequest] = []
+
     @property
     def provider_name(self) -> str:
         return "mock_test"
@@ -42,6 +45,7 @@ class DeterministicMockEmbeddingProvider(EmbeddingProvider):
         return 16
 
     async def embed(self, request: EmbeddingRequest) -> EmbeddingResponse:
+        self.requests.append(request)
         results = []
         for idx, text in enumerate(request.texts):
             vec = [0.0] * 16
@@ -256,6 +260,56 @@ async def test_scan_intelligence_runtime_embedding_failure_graceful_degradation(
     assert any(c.chunk.symbol == "list_items" for c in bundle.relevant_chunks)
 
 
+@pytest.mark.asyncio
+async def test_scan_intelligence_runtime_reuses_unchanged_embeddings():
+    """A prepopulated index skips unchanged chunks and embeds only stale content."""
+    evidence_store, files_content = _build_test_evidence_store()
+    mock_embedder = DeterministicMockEmbeddingProvider()
+
+    initial_runtime = await ScanIntelligenceRuntime.build(
+        evidence_store=evidence_store,
+        file_contents=files_content,
+        embedding_provider=mock_embedder,
+    )
+    assert mock_embedder.requests
+
+    mock_embedder.requests.clear()
+    reused_runtime = await ScanIntelligenceRuntime.build(
+        evidence_store=evidence_store,
+        file_contents=files_content,
+        embedding_provider=mock_embedder,
+        vector_index=initial_runtime.vector_index,
+    )
+
+    assert mock_embedder.requests == []
+    assert reused_runtime.vector_index.count() == len(reused_runtime.chunks)
+    for chunk in reused_runtime.chunks:
+        stored = reused_runtime.vector_index.get(chunk.chunk_id)
+        assert stored is not None
+        assert stored["metadata"]["content_hash"] == chunk.content_hash
+        assert stored["metadata"]["model"] == mock_embedder.default_model
+        assert stored["metadata"]["index_version"] == chunk.index_version
+
+    changed_contents = dict(files_content)
+    changed_contents["app/db/connection.py"] = (
+        "import sqlite3\n\n"
+        "def get_db_connection():\n"
+        "    return sqlite3.connect('cache.db')\n"
+    )
+    stale_runtime = await ScanIntelligenceRuntime.build(
+        evidence_store=evidence_store,
+        file_contents=changed_contents,
+        embedding_provider=mock_embedder,
+        vector_index=reused_runtime.vector_index,
+    )
+
+    assert len(mock_embedder.requests) == 1
+    assert mock_embedder.requests[0].texts == [
+        "def get_db_connection():\n    return sqlite3.connect('cache.db')"
+    ]
+    assert stale_runtime.vector_index.count() == len(stale_runtime.chunks)
+
+
 # =========================================================================
 # 2. Real Runtime Wiring into LangGraph Workflow Tests
 # =========================================================================
@@ -314,7 +368,9 @@ async def test_langgraph_workflow_with_real_runtime_delivers_chunks_to_agents():
         # 3. Prove at least one agent received real retrieved chunks in its prompt
         prompts_with_chunks = [
             p for p in received_prompts
-            if "--- app/routes/items.py" in p or "--- frontend/src/api/items.ts" in p or "--- app/db/connection.py" in p
+            if '"file":"app/routes/items.py"' in p
+            or '"file":"frontend/src/api/items.ts"' in p
+            or '"file":"app/db/connection.py"' in p
         ]
         assert len(prompts_with_chunks) >= 1, (
             "Expected at least one agent to receive targeted code chunks in its prompt."
@@ -349,4 +405,3 @@ async def test_scan_intelligence_runtime_build_from_directory(tmp_path):
     )
     assert len(bundle.relevant_chunks) >= 1
     assert any("connection.py" in c.chunk.file_path for c in bundle.relevant_chunks)
-

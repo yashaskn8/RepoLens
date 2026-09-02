@@ -2,7 +2,7 @@
 
 import logging
 import os
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from app.analysis.store import EvidenceStore
 from app.context.engine import ContextEngine
@@ -22,6 +22,76 @@ from app.retrieval.service import RetrievalService
 from app.retrieval.vector_index import InMemoryVectorIndex, VectorIndex
 
 logger = logging.getLogger(__name__)
+
+
+def _vector_is_current(
+    entry: Optional[Dict[str, Any]],
+    chunk: CodeChunk,
+    *,
+    model_name: str,
+    dimensions: int,
+    vector_index_version: str,
+) -> bool:
+    """Return whether a stored vector is safe to reuse for this exact chunk."""
+    if not entry:
+        return False
+
+    metadata = entry.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+
+    vector = entry.get("vector")
+    try:
+        stored_dimensions = len(vector)
+    except TypeError:
+        return False
+
+    stored_dimensions_metadata = metadata.get("dimensions")
+    stored_vector_index_version = metadata.get(
+        "vector_index_version",
+        entry.get("index_version"),
+    )
+    return (
+        stored_dimensions == dimensions
+        and metadata.get("content_hash") == chunk.content_hash
+        and metadata.get("model") == model_name
+        and (stored_dimensions_metadata is None or stored_dimensions_metadata == dimensions)
+        and metadata.get("index_version") == chunk.index_version
+        and (
+            stored_vector_index_version is None
+            or str(stored_vector_index_version) == vector_index_version
+        )
+    )
+
+
+def _embedding_provenance(
+    chunk: CodeChunk,
+    *,
+    provider_name: str,
+    model_name: str,
+    response_provider: str,
+    response_model: str,
+    dimensions: int,
+    vector_index: VectorIndex,
+) -> Dict[str, Any]:
+    """Build durable provenance needed to validate incremental vector reuse."""
+    return {
+        "content_hash": chunk.content_hash,
+        "commit_sha": chunk.commit_sha,
+        "file_path": chunk.file_path,
+        "symbol": chunk.symbol,
+        "symbol_kind": chunk.symbol_kind.value,
+        "start_line": chunk.start_line,
+        "end_line": chunk.end_line,
+        "provider": provider_name,
+        "model": model_name,
+        "response_provider": response_provider,
+        "response_model": response_model,
+        "dimensions": dimensions,
+        "index_version": chunk.index_version,
+        "vector_index_version": str(getattr(vector_index, "index_version", "v1")),
+        "vector_namespace": str(getattr(vector_index, "namespace", "default")),
+    }
 
 
 def _read_file_contents_from_workspace(manifest: RepositoryManifest, repo_dir: str) -> Dict[str, str]:
@@ -141,18 +211,57 @@ class ScanIntelligenceRuntime:
 
         if provider and chunks:
             try:
-                # Embed chunks in batches
+                provider_name = str(provider.provider_name)
+                vector_index_version = str(getattr(v_index, "index_version", "v1"))
+                chunks_to_embed = [
+                    chunk
+                    for chunk in chunks
+                    if not _vector_is_current(
+                        v_index.get(chunk.chunk_id),
+                        chunk,
+                        model_name=model_name,
+                        dimensions=dim,
+                        vector_index_version=vector_index_version,
+                    )
+                ]
+
+                # Only missing or stale chunks consume embedding-provider quota.
                 batch_size = 32
-                for i in range(0, len(chunks), batch_size):
-                    batch = chunks[i:i + batch_size]
+                for i in range(0, len(chunks_to_embed), batch_size):
+                    batch = chunks_to_embed[i:i + batch_size]
                     req = EmbeddingRequest(
                         texts=[c.content for c in batch],
                         input_type="passage",
-                        model=provider.default_model,
+                        model=model_name,
                     )
                     resp = await provider.embed(req)
-                    for emb_res, chunk in zip(resp.embeddings, batch):
-                        v_index.upsert(chunk.chunk_id, emb_res.vector)
+                    embeddings_by_index = {result.index: result for result in resp.embeddings}
+                    upserts = []
+                    for position, chunk in enumerate(batch):
+                        emb_res = embeddings_by_index.get(position)
+                        if emb_res is None:
+                            logger.warning(
+                                "Embedding provider omitted result %d for chunk '%s'; lexical retrieval remains available.",
+                                position,
+                                chunk.chunk_id,
+                            )
+                            continue
+                        upserts.append(
+                            (
+                                chunk.chunk_id,
+                                emb_res.vector,
+                                _embedding_provenance(
+                                    chunk,
+                                    provider_name=provider_name,
+                                    model_name=model_name,
+                                    response_provider=resp.provider,
+                                    response_model=resp.model,
+                                    dimensions=emb_res.dimensions,
+                                    vector_index=v_index,
+                                ),
+                            )
+                        )
+                    v_index.upsert_batch(upserts)
             except Exception as exc:
                 logger.warning(
                     "Embedding generation encountered an issue: %s. "
@@ -211,4 +320,3 @@ def get_scan_context_engine(scan_id: str) -> Optional[ContextEngine]:
     """Retrieve ContextEngine for an active scan."""
     rt = get_scan_runtime(scan_id)
     return rt.context_engine if rt else None
-

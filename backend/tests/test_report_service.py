@@ -1,5 +1,6 @@
 """Tests for Task 4E: Structured Evidence Reporting Service (Markdown and JSON)."""
 
+import hashlib
 from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
@@ -12,6 +13,7 @@ from app.models.workflow_event import WorkflowEventModel
 from app.schemas.enums import FindingStatus, PatchStatus, ScanStatus, Severity, VerificationVerdict
 from app.schemas.workflow_event import WorkflowEventCreate, WorkflowEventType
 from app.services.report_service import ScanReportService
+from app.services.finding_grounding import build_grounding_context_notes
 from app.services.workflow_event_service import WorkflowEventService
 
 
@@ -53,14 +55,22 @@ def test_build_scan_report_and_render_markdown(db_session: Session):
     )
     db_session.add(finding)
 
+    evidence_snippet = "data = pickle.loads(raw_data)"
     evidence = EvidenceModel(
         id=str(uuid4()),
         finding_id=str(finding_id),
         file_path="app/serializer.py",
         start_line=45,
         end_line=46,
-        code_snippet="data = pickle.loads(raw_data)",
-        context_notes="Direct pickle deserialization",
+        code_snippet=evidence_snippet,
+        context_notes=build_grounding_context_notes(
+            commit_sha=scan.commit_hash,
+            file_path="app/serializer.py",
+            start_line=45,
+            end_line=46,
+            file_sha256="0" * 64,
+            snippet_sha256=hashlib.sha256(evidence_snippet.encode("utf-8")).hexdigest(),
+        ),
     )
     db_session.add(evidence)
 
@@ -169,6 +179,120 @@ def test_report_unknown_scan_returns_404(client: TestClient):
     assert resp.status_code == 404
 
 
+def test_report_projects_only_confirmed_attested_findings(db_session: Session):
+    """POSSIBLE and ungrounded rows must never be reported as verified truth."""
+    scan_id = uuid4()
+    commit_sha = "f" * 40
+    db_session.add(
+        ScanModel(
+            id=str(scan_id),
+            repository_url="https://github.com/org/publication-guard",
+            commit_hash=commit_sha,
+            status=ScanStatus.COMPLETED.value,
+        )
+    )
+
+    grounded_snippet = "dangerous_call(user_input)"
+    grounded_id = uuid4()
+    db_session.add(
+        FindingModel(
+            id=str(grounded_id),
+            scan_id=str(scan_id),
+            title="Grounded",
+            description="Grounded deterministic evidence",
+            severity=Severity.HIGH.value,
+            status=FindingStatus.OPEN.value,
+            verification_verdict=VerificationVerdict.CONFIRMED.value,
+        )
+    )
+    db_session.add(
+        EvidenceModel(
+            id=str(uuid4()),
+            finding_id=str(grounded_id),
+            file_path="src/app.py",
+            start_line=8,
+            end_line=8,
+            code_snippet=grounded_snippet,
+            context_notes=build_grounding_context_notes(
+                commit_sha=commit_sha,
+                file_path="src/app.py",
+                start_line=8,
+                end_line=8,
+                file_sha256="2" * 64,
+                snippet_sha256=hashlib.sha256(grounded_snippet.encode("utf-8")).hexdigest(),
+            ),
+        )
+    )
+
+    possible_id = uuid4()
+    db_session.add(
+        FindingModel(
+            id=str(possible_id),
+            scan_id=str(scan_id),
+            title="Model hypothesis",
+            description="Not independently confirmed",
+            severity=Severity.MEDIUM.value,
+            status=FindingStatus.OPEN.value,
+            verification_verdict=VerificationVerdict.POSSIBLE.value,
+        )
+    )
+    db_session.add(
+        EvidenceModel(
+            id=str(uuid4()),
+            finding_id=str(possible_id),
+            file_path="src/app.py",
+            start_line=8,
+            end_line=8,
+            code_snippet=grounded_snippet,
+            context_notes=build_grounding_context_notes(
+                commit_sha=commit_sha,
+                file_path="src/app.py",
+                start_line=8,
+                end_line=8,
+                file_sha256="2" * 64,
+                snippet_sha256=hashlib.sha256(grounded_snippet.encode("utf-8")).hexdigest(),
+            ),
+        )
+    )
+
+    ungrounded_id = uuid4()
+    db_session.add(
+        FindingModel(
+            id=str(ungrounded_id),
+            scan_id=str(scan_id),
+            title="Invented locator",
+            description="CONFIRMED text without deterministic attestation",
+            severity=Severity.CRITICAL.value,
+            status=FindingStatus.OPEN.value,
+            verification_verdict=VerificationVerdict.CONFIRMED.value,
+        )
+    )
+    db_session.add(
+        EvidenceModel(
+            id=str(uuid4()),
+            finding_id=str(ungrounded_id),
+            file_path="src/missing.py",
+            start_line=1,
+            end_line=1,
+            code_snippet="hallucinated()",
+            context_notes="model-authored prose is not an attestation",
+        )
+    )
+    db_session.commit()
+
+    report = ScanReportService.build_scan_report(db=db_session, scan_id=str(scan_id))
+    assert report is not None
+    assert [finding.title for finding in report.findings] == ["Grounded"]
+    assert report.summary.total_findings == 1
+    assert report.summary.confirmed_findings == 1
+    assert report.summary.critical_findings == 0
+    assert report.summary.excluded_noncanonical_findings == 2
+    markdown = ScanReportService.render_markdown(report)
+    assert "Model hypothesis" not in markdown
+    assert "Invented locator" not in markdown
+    assert "Excluded Unverified / Ungrounded Candidates | 2" in markdown
+
+
 def test_report_analysis_scope_and_scanner_coverage(db_session: Session):
     """Verify ScanReport accurately reflects analysis scope, truncation, and scanner coverage statuses."""
     scan_id = uuid4()
@@ -176,6 +300,7 @@ def test_report_analysis_scope_and_scanner_coverage(db_session: Session):
         id=str(scan_id),
         repository_url="https://github.com/org/scope-test-repo",
         branch="main",
+        commit_hash="d" * 40,
         status=ScanStatus.COMPLETED.value,
         model_metadata={
             "analysis_scope": {
@@ -254,6 +379,7 @@ def test_report_hostile_markdown_and_secret_redaction(db_session: Session):
         id=str(scan_id),
         repository_url="https://github.com/org/hostile-repo",
         branch="main",
+        commit_hash="e" * 40,
         status=ScanStatus.COMPLETED.value,
         model_metadata={
             "architecture_overview": "Overview with <script>alert(1)</script> and sk-12345678901234567890 and Bearer secrettoken12345",
@@ -270,18 +396,27 @@ def test_report_hostile_markdown_and_secret_redaction(db_session: Session):
         description="User input contains <script>alert('pwned')</script> and Authorization: Bearer supersecrettoken999",
         severity=Severity.CRITICAL.value,
         status=FindingStatus.OPEN.value,
+        verification_verdict=VerificationVerdict.CONFIRMED.value,
     )
     db_session.add(finding)
 
     # Snippet with nested code fences to test breakout prevention
+    hostile_snippet = 'const token = "sk-live12345678901234567890";\n```javascript\n// Attempted fence breakout\n```\nconst auth = "Bearer toplevelsecret99999";'
     evidence = EvidenceModel(
         id=str(uuid4()),
         finding_id=str(finding_id),
         file_path="app/auth/`user_token`.py",
         start_line=10,
         end_line=20,
-        code_snippet='const token = "sk-live12345678901234567890";\n```javascript\n// Attempted fence breakout\n```\nconst auth = "Bearer toplevelsecret99999";',
-        context_notes="Host path leak attempt C:\\Users\\Administrator\\AppData and AIzaSyD1234567890123456789012345678901",
+        code_snippet=hostile_snippet,
+        context_notes=build_grounding_context_notes(
+            commit_sha=scan.commit_hash,
+            file_path="app/auth/`user_token`.py",
+            start_line=10,
+            end_line=20,
+            file_sha256="1" * 64,
+            snippet_sha256=hashlib.sha256(hostile_snippet.encode("utf-8")).hexdigest(),
+        ),
     )
     db_session.add(evidence)
 
@@ -396,5 +531,3 @@ def test_scanner_failure_reasons_redacted_in_json_and_markdown(db_session: Sessi
     assert "/home/alice" not in md
     assert "FAILED" in md
     assert "UNAVAILABLE" in md
-
-

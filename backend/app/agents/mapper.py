@@ -1,59 +1,70 @@
-"""Repository Mapper specialist node: deterministic structural mapping and light classification."""
+"""Repository Mapper specialist node using deterministic structural facts only."""
 
-import json
 from typing import Any, Dict
 from app.agents.state import AnalysisState
-from app.llm.router import get_llm_router
-from app.llm.types import LLMMessage, LLMRequest, ModelCapability, TaskPolicy
-from app.llm.workflow_contracts import lineage_for_scan
+
+
+def _repository_archetype(
+    *,
+    frameworks: list[str],
+    routes: list[dict[str, Any]],
+    frontend_calls: list[dict[str, Any]],
+) -> str:
+    normalized = " ".join(frameworks).lower()
+    if routes and frontend_calls:
+        return "full-stack web application"
+    if routes:
+        return "API or backend service"
+    if frontend_calls or any(value in normalized for value in ("react", "next", "vue", "angular", "svelte")):
+        return "frontend application"
+    if any(value in normalized for value in ("django", "flask", "fastapi", "express", "spring")):
+        return "web service"
+    return "software repository"
+
+
+def _deterministic_frameworks(
+    configured: list[str],
+    routes: list[dict[str, Any]],
+) -> list[str]:
+    """Augment manifest detection from canonical route symbol kinds."""
+    detected = {str(name) for name in configured if str(name).strip()}
+    for route in routes:
+        kind = str(getattr(route.get("kind"), "value", route.get("kind", ""))).upper()
+        if "FASTAPI" in kind:
+            detected.add("FastAPI")
+        elif "EXPRESS" in kind:
+            detected.add("Express")
+    return sorted(detected)
 
 
 async def run_repository_mapper(state: AnalysisState) -> Dict[str, Any]:
     """Execute Repository Mapper.
     
-    Extracts structural facts from the repository manifest, routes, frameworks,
-    and static findings, invoking Groq GPT-OSS 20B only for light architectural categorization.
+    Extracts structural facts from the repository manifest, routes, and frameworks
+    without spending a model call on a summary that deterministic metadata proves.
     """
     manifest_summary = state.get("manifest_summary", {})
     languages = state.get("languages", {})
     frameworks = state.get("frameworks", [])
-
-    # If architecture overview is not provided, invoke lightweight classification
-    overview = f"Repository containing {manifest_summary.get('total_files', 0)} files across languages: {list(languages.keys())}."
-    model_executions = []
-    errors = []
-
-    try:
-        router = get_llm_router()
-        prompt = (
-            f"Given a repository with languages {languages} and frameworks {frameworks}, "
-            f"provide a concise 1-sentence architectural summary and archetype category (e.g. Monorepo, REST API, Fullstack Web App)."
-        )
-        request = LLMRequest(
-            messages=[
-                LLMMessage(role="system", content="You are a repository mapping assistant. Respond concisely."),
-                LLMMessage(role="user", content=prompt),
-            ],
-            task_policy=TaskPolicy.LIGHTWEIGHT_CLASSIFICATION,
-            capability=ModelCapability.CLASSIFICATION,
-            lineage=lineage_for_scan(
-                str(state.get("scan_id", "")),
-                prompt_template_version="repository-mapper/1.0",
-                output_schema_version=None,
-                evidence={"manifest": manifest_summary, "languages": languages, "frameworks": frameworks},
-            ),
-            temperature=0.0,
-            max_tokens=150,
-        )
-        response = await router.generate(request)
-        overview = response.content.strip()
-        model_executions.append(response.metadata)
-    except Exception as exc:
-        errors.append(f"Repository Mapper LLM classification notice: {str(exc)}")
+    routes = state.get("routes", [])
+    frontend_calls = state.get("frontend_calls", [])
+    frameworks = _deterministic_frameworks(frameworks, routes)
+    ordered_languages = sorted(languages, key=lambda key: (-int(languages.get(key, 0)), key))
+    archetype = _repository_archetype(
+        frameworks=frameworks,
+        routes=routes,
+        frontend_calls=frontend_calls,
+    )
+    overview = (
+        f"{archetype.capitalize()} with {manifest_summary.get('total_files', 0)} files; "
+        f"languages: {', '.join(ordered_languages) or 'unknown'}; "
+        f"frameworks: {', '.join(sorted(frameworks)) or 'none detected'}; "
+        f"routes: {len(routes)}; frontend requests: {len(frontend_calls)}."
+    )
 
     return {
         "architecture_overview": overview,
         "completed_nodes": ["mapper"],
-        "model_executions": model_executions,
-        "errors": errors,
+        "model_executions": [],
+        "errors": [],
     }

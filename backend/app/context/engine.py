@@ -34,6 +34,7 @@ class ContextEngine:
         analysis_intent: str = "general",
         context_budget: int = 4000,
         max_chunks: int = 5,
+        use_neural_reranker: bool = False,
     ) -> ContextBundle:
         """Assemble a bounded, evidence-grounded ContextBundle for a specific query and intent."""
         relevant_chunks: List[RetrievalResult] = []
@@ -44,9 +45,37 @@ class ContextEngine:
             retrieval_query = RetrievalQuery(
                 query=query,
                 top_k=max_chunks,
-                use_reranker=True,
+                use_reranker=use_neural_reranker,
             )
             raw_results = await self.retrieval_service.retrieve(retrieval_query)
+            if not raw_results:
+                # Exact/lexical/dense retrieval may legitimately yield no
+                # match (or the free embedding provider may be unavailable).
+                # A deterministic structural sample preserves scan coverage
+                # without consuming another model call or fabricating context.
+                fallback_chunks = sorted(
+                    self.retrieval_service.chunks_by_id.values(),
+                    key=lambda chunk: (chunk.file_path, chunk.start_line, chunk.chunk_id),
+                )[:max_chunks]
+                raw_results = [
+                    RetrievalResult(
+                        chunk_id=chunk.chunk_id,
+                        score=0.0,
+                        source_channels=[],
+                        chunk=chunk,
+                        provenance={
+                            "commit_sha": chunk.commit_sha,
+                            "file_path": chunk.file_path,
+                            "symbol": chunk.symbol,
+                            "symbol_kind": chunk.symbol_kind.value,
+                            "start_line": chunk.start_line,
+                            "end_line": chunk.end_line,
+                            "content_hash": chunk.content_hash,
+                            "selection": "deterministic_structural_fallback",
+                        },
+                    )
+                    for chunk in fallback_chunks
+                ]
             
             # Enforce context budget (approx 4 chars per token)
             current_chars = 0
@@ -87,22 +116,56 @@ class ContextEngine:
         routes_and_contracts: List[RouteContractMatch] = []
         if self.repository_graph:
             report = self.repository_graph.evaluate_route_contracts()
+            ranked_matches: List[tuple[int, int, str, RouteContractMatch]] = []
             for match in report.matches:
-                # Include if match involves any retrieved file
-                if match.frontend_file in target_files:
-                    routes_and_contracts.append(match)
-                elif any(rf in match.matched_backend_paths for rf in target_files):
-                    routes_and_contracts.append(match)
-                if len(routes_and_contracts) >= 10:
+                backend_files = {
+                    node.file_path
+                    for route_id in match.matched_route_ids
+                    if (node := self.repository_graph.get_node(route_id)) is not None
+                    and node.file_path
+                }
+                touches_retrieved_code = (
+                    match.frontend_file in target_files
+                    or bool(backend_files.intersection(target_files))
+                )
+                is_mismatch = str(getattr(match.status, "value", match.status)) != "MATCHED"
+                # Integration analysis must see every deterministic mismatch
+                # before spending context on already-matched or merely nearby routes.
+                if analysis_intent != "integration" and not touches_retrieved_code:
+                    continue
+                ranked_matches.append(
+                    (
+                        0 if is_mismatch else 1,
+                        0 if touches_retrieved_code else 1,
+                        match.frontend_request_id,
+                        match,
+                    )
+                )
+            for _, _, _, match in sorted(ranked_matches, key=lambda item: item[:3]):
+                routes_and_contracts.append(match)
+                if len(routes_and_contracts) >= 20:
                     break
 
         # 4. Extract relevant static scanner findings
-        static_findings: List[StaticFinding] = []
-        for file_path in target_files:
-            file_findings = self.evidence_store.get_findings(file_path=file_path)
-            static_findings.extend(file_findings)
-            if len(static_findings) >= 15:
-                break
+        severity_rank = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
+        if analysis_intent in {"security", "verification"}:
+            static_pool = list(self.evidence_store.all_findings)
+        else:
+            static_pool = [
+                finding
+                for file_path in sorted(target_files)
+                for finding in self.evidence_store.get_findings(file_path=file_path)
+            ]
+        static_findings = sorted(
+            static_pool,
+            key=lambda finding: (
+                severity_rank.get(str(getattr(finding.severity, "value", finding.severity)), 5),
+                finding.evidence.file_path,
+                finding.evidence.start_line or 0,
+                finding.tool,
+                finding.rule_id or "",
+            ),
+        )[:25]
 
         # 5. Estimate token usage
         total_text_len = sum(len(r.chunk.content) for r in relevant_chunks)
@@ -119,6 +182,7 @@ class ContextEngine:
             "total_static_findings": len(static_findings),
             "context_budget": context_budget,
             "estimated_tokens": estimated_tokens,
+            "neural_reranker_used": use_neural_reranker,
         }
 
         return ContextBundle(

@@ -8,7 +8,7 @@ from uuid import uuid4
 import pytest
 
 from app.api.routes.scans import execute_background_scan
-from app.llm.types import LLMProvider, LLMResponse
+from app.llm.types import LLMProvider, LLMResponse, ModelCapability
 from app.models.finding import FindingModel
 from app.models.scan import ScanModel
 from app.schemas.enums import ScanStatus, Severity
@@ -38,6 +38,7 @@ async def test_production_scan_interruption_resume_and_deduplication():
     )
     mock_llm_resp = LLMResponse(
         content='''{
+            "confidence": 0.95,
             "findings": [
                 {
                     "title": "SQL Injection in User Query",
@@ -45,10 +46,7 @@ async def test_production_scan_interruption_resume_and_deduplication():
                     "severity": "HIGH",
                     "category": "security",
                     "rule_id": "semgrep.py-sql",
-                    "file_path": "app/main.py",
-                    "start_line": 1,
-                    "end_line": 2,
-                    "code_snippet": "cursor.execute(f\\"SELECT * FROM users WHERE id={user_id}\\")",
+                    "evidence_refs": ["chunk:e1a2b3c4d5e6:app/main.py:get_user:1"],
                     "mitigation_guidance": "Use parameterized queries."
                 }
             ]
@@ -57,6 +55,25 @@ async def test_production_scan_interruption_resume_and_deduplication():
         provider=LLMProvider.GEMINI,
         metadata=dummy_metadata,
     )
+    verifier_response = LLMResponse(
+        content='''{
+            "confidence": 0.95,
+            "evaluations": [{
+                "index": 0,
+                "verdict": "CONFIRMED",
+                "justified_severity": "HIGH",
+                "reason": "The attested source constructs a SQL query from user input."
+            }]
+        }''',
+        model="mock-verifier",
+        provider=LLMProvider.NVIDIA,
+        metadata=dummy_metadata,
+    )
+
+    async def mock_llm_generate(request):
+        if request.capability == ModelCapability.VERIFICATION:
+            return verifier_response
+        return mock_llm_resp
 
     with tempfile.TemporaryDirectory(prefix="durable_scan_integration_") as shared_dir:
         # Create a persistent SQLite checkpoint DB file for cross-process simulation
@@ -86,7 +103,7 @@ async def test_production_scan_interruption_resume_and_deduplication():
         with patch("app.api.routes.scans.SessionLocal", side_effect=TestingSessionLocal), \
              patch("app.api.routes.scans.clone_repository", return_value=(repo_workspace, commit_sha)), \
              patch("app.llm.router.LLMRouter.generate", new_callable=AsyncMock) as mock_gen:
-            mock_gen.return_value = mock_llm_resp
+            mock_gen.side_effect = mock_llm_generate
 
             # Inject failure into verifier to interrupt workflow after specialists
             with patch("app.agents.graph.run_verifier_agent", side_effect=RuntimeError("Simulated interruption during verifier")):
@@ -146,7 +163,7 @@ async def test_production_scan_interruption_resume_and_deduplication():
              patch("app.ingestion.snapshot.RepositorySnapshotService.materialize_snapshot_from_metadata", side_effect=mock_materialize), \
              patch("app.llm.router.LLMRouter.generate", new_callable=AsyncMock) as mock_gen, \
              patch("app.agents.graph.run_repository_mapper", side_effect=tracking_mapper):
-            mock_gen.return_value = mock_llm_resp
+            mock_gen.side_effect = mock_llm_generate
 
             # Run resumed scan with healthy verifier
             await execute_background_scan(
@@ -179,7 +196,7 @@ async def test_production_scan_interruption_resume_and_deduplication():
             with patch("app.api.routes.scans.SessionLocal", side_effect=TestingSessionLocal), \
                  patch("app.ingestion.snapshot.RepositorySnapshotService.materialize_snapshot_from_metadata", side_effect=mock_materialize), \
                  patch("app.llm.router.LLMRouter.generate", new_callable=AsyncMock) as mock_gen:
-                mock_gen.return_value = mock_llm_resp
+                mock_gen.side_effect = mock_llm_generate
 
                 await execute_background_scan(
                     scan_id=scan_id,

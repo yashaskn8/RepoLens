@@ -15,20 +15,48 @@ from app.models.execution import WorkAttemptModel, WorkItemModel
 
 FINDINGS_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "required": ["findings"],
+    "required": ["confidence", "findings"],
     "properties": {
+        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
         "findings": {
             "type": "array",
             "maxItems": 100,
-            "items": {"type": "object"},
+            "items": {
+                "type": "object",
+                "required": [
+                    "title",
+                    "description",
+                    "severity",
+                    "category",
+                    "evidence_refs",
+                ],
+                "properties": {
+                    "title": {"type": "string", "minLength": 1, "maxLength": 300},
+                    "description": {"type": "string", "minLength": 1, "maxLength": 8_000},
+                    "severity": {
+                        "type": "string",
+                        "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"],
+                    },
+                    "category": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "rule_id": {"type": ["string", "null"], "maxLength": 256},
+                    "evidence_refs": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 16,
+                        "items": {"type": "string", "minLength": 1, "maxLength": 1_024},
+                    },
+                    "mitigation_guidance": {"type": ["string", "null"], "maxLength": 8_000},
+                },
+            },
         }
     },
 }
 
 VERIFICATION_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "required": ["evaluations"],
+    "required": ["confidence", "evaluations"],
     "properties": {
+        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
         "evaluations": {
             "type": "array",
             "maxItems": 200,
@@ -45,6 +73,16 @@ VERIFICATION_OUTPUT_SCHEMA: dict[str, Any] = {
 }
 
 OBJECT_OUTPUT_SCHEMA: dict[str, Any] = {"type": "object"}
+
+CHANGE_REVIEW_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["confidence", "summary", "findings"],
+    "properties": {
+        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "summary": {"type": "string", "maxLength": 8_000},
+        "findings": {"type": "array", "maxItems": 100, "items": {"type": "object"}},
+    },
+}
 
 
 def evidence_digest(value: Any) -> str:
@@ -157,6 +195,7 @@ def lineage_for_finding(
 
 
 __all__ = [
+    "CHANGE_REVIEW_OUTPUT_SCHEMA",
     "FINDINGS_OUTPUT_SCHEMA",
     "OBJECT_OUTPUT_SCHEMA",
     "VERIFICATION_OUTPUT_SCHEMA",

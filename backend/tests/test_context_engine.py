@@ -6,6 +6,7 @@ import pytest
 from app.analysis.schemas import ScannerResult, StaticFinding, ToolStatus
 from app.analysis.store import EvidenceStore
 from app.context.engine import ContextEngine
+from app.context.prompt import pack_repository_context
 from app.graph.builder import build_repository_graph
 from app.indexing.schemas import ChunkSymbolKind, CodeChunk, INDEX_VERSION, content_hash
 from app.ingestion.schemas import (
@@ -188,3 +189,7 @@ async def test_context_engine_budget_enforcement():
 
     assert len(bundle.relevant_chunks) <= 2
     assert bundle.provenance["context_budget"] == 300
+    packed = pack_repository_context(bundle, token_budget=300)
+    assert len(packed.text.encode("utf-8")) <= 900
+    assert packed.estimated_tokens <= 300
+    assert packed.digest

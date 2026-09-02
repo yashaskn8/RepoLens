@@ -36,6 +36,7 @@ class TaskPolicy(str, Enum):
 class ModelCapability(str, Enum):
     """Capabilities requested by workflows instead of provider-specific models."""
 
+    REPOSITORY_ANALYSIS = "REPOSITORY_ANALYSIS"
     CODE_REASONING = "CODE_REASONING"
     STRUCTURED_EXTRACTION = "STRUCTURED_EXTRACTION"
     PATCH_GENERATION = "PATCH_GENERATION"
