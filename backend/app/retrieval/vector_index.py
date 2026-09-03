@@ -12,7 +12,11 @@ logger = logging.getLogger(__name__)
 
 
 def cosine_similarity(v1: List[float], v2: List[float]) -> float:
-    """Compute cosine similarity between two float vectors deterministically."""
+    """Compute cosine similarity between two float vectors deterministically.
+
+    Returns 0.0 for degenerate inputs: mismatched dimensions, empty vectors,
+    zero-norm vectors, or vectors containing NaN/Inf values.
+    """
     if len(v1) != len(v2) or not v1:
         return 0.0
 
@@ -21,6 +25,8 @@ def cosine_similarity(v1: List[float], v2: List[float]) -> float:
     norm2 = 0.0
 
     for a, b in zip(v1, v2):
+        if not math.isfinite(a) or not math.isfinite(b):
+            return 0.0
         dot += a * b
         norm1 += a * a
         norm2 += b * b

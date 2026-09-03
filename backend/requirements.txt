@@ -41,6 +41,9 @@ pypdf>=6.0.0,<7.0.0
 # Model Context Protocol (MCP) SDK
 mcp>=1.28.0,<2.0.0
 
+# Local Embeddings
+sentence-transformers>=6.0.0,<7.0.0
+
 # Development & Testing
 pytest>=8.0.0
 pytest-asyncio>=0.23.0

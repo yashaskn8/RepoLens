@@ -34,8 +34,14 @@ class RetrievalService:
         self.chunks_by_id: Dict[str, CodeChunk] = {c.chunk_id: c for c in chunks}
         self.vector_index = vector_index or InMemoryVectorIndex()
 
-        if embedding_provider is None and settings.COHERE_API_KEY:
-            self.embedding_provider = CohereEmbeddingAdapter()
+        if embedding_provider is None:
+            if getattr(settings, "LOCAL_EMBEDDING_ENABLED", False):
+                from app.embeddings.adapter import LocalEmbeddingAdapter
+                self.embedding_provider = LocalEmbeddingAdapter()
+            elif settings.COHERE_API_KEY:
+                self.embedding_provider = CohereEmbeddingAdapter()
+            else:
+                self.embedding_provider = None
         else:
             self.embedding_provider = embedding_provider
 

@@ -192,7 +192,10 @@ class ScanIntelligenceRuntime:
         settings = get_settings()
         provider = embedding_provider
         if provider is None:
-            if getattr(settings, "NVIDIA_API_KEY", None):
+            if getattr(settings, "LOCAL_EMBEDDING_ENABLED", False):
+                from app.embeddings.adapter import LocalEmbeddingAdapter
+                provider = LocalEmbeddingAdapter()
+            elif getattr(settings, "NVIDIA_API_KEY", None):
                 provider = NvidiaEmbeddingAdapter()
             elif getattr(settings, "HUGGINGFACE_API_KEY", None):
                 provider = HuggingFaceEmbeddingAdapter()
