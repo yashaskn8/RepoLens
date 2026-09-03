@@ -578,7 +578,8 @@ async def test_reconciliation_existing_branch_different_sha_fails_closed(db_sess
             yield fresh_ws
 
     with mock_patch("app.delivery.service.get_snapshot_service") as mock_snap, \
-         mock_patch("app.delivery.validator.get_snapshot_service") as mock_val_snap:
+         mock_patch("app.delivery.validator.get_snapshot_service") as mock_val_snap, \
+         mock_patch("app.delivery.service.current_claim", return_value=MagicMock(resource_id=delivery.id)):
         mock_inst = MagicMock()
         mock_inst.snapshot_context.side_effect = _fake_snapshot
         mock_snap.return_value = mock_inst
@@ -1128,11 +1129,11 @@ async def test_initial_patch_generation_persists_exact_fix_plan_snapshot(db_sess
                 f.write("def read_file(p):\n    return open(p)\n")
             yield fresh_ws
 
-    with mock_patch("app.api.routes.findings.get_snapshot_service") as mock_snap, \
-         mock_patch("app.api.routes.findings.get_intelligence_service") as mock_intel, \
-         mock_patch("app.api.routes.findings.ScanIntelligenceRuntime.build") as mock_runtime_build, \
-         mock_patch("app.api.routes.findings.FixPlanningService.create_fix_plan", new_callable=AsyncMock) as mock_create_plan, \
-         mock_patch("app.api.routes.findings.PatchWorkflowCoordinator.execute_patch_workflow", new_callable=AsyncMock) as mock_exec_wf:
+    with mock_patch("app.remediation.service.get_snapshot_service") as mock_snap, \
+         mock_patch("app.remediation.service.get_intelligence_service") as mock_intel, \
+         mock_patch("app.remediation.service.ScanIntelligenceRuntime.build") as mock_runtime_build, \
+         mock_patch("app.remediation.service.FixPlanningService.create_fix_plan", new_callable=AsyncMock) as mock_create_plan, \
+         mock_patch("app.remediation.service.PatchWorkflowCoordinator.execute_patch_workflow", new_callable=AsyncMock) as mock_exec_wf:
 
         mock_inst = MagicMock()
         mock_inst.open_snapshot.side_effect = _fake_open_snapshot
@@ -1153,7 +1154,9 @@ async def test_initial_patch_generation_persists_exact_fix_plan_snapshot(db_sess
         mock_exec_wf.return_value = mock_wf_result
 
         user_ctx = CurrentUser(id=scan.owner_user_id, email="sec@example.com", role="USER", is_active=True, session_id="s1")
-        result = await request_patch_generation(finding_id=UUID(finding_id), current_user=user_ctx, db=db_session)
+        result = await request_patch_generation(
+            finding_id=UUID(finding_id), current_user=user_ctx, db=db_session, prefer=None
+        )
         assert result.machine_verdict == "PASSED"
 
         # Verify persisted PatchModel in database
@@ -1236,11 +1239,11 @@ async def test_revision_child_persists_exact_revised_fix_plan_snapshot(db_sessio
                 f.write("def read_file(p):\n    return open(p)\n")
             yield fresh_ws
 
-    with mock_patch("app.ingestion.snapshot.get_snapshot_service") as mock_snap, \
-         mock_patch("app.analysis.service.get_intelligence_service") as mock_intel, \
-         mock_patch("app.context.runtime.ScanIntelligenceRuntime.build") as mock_runtime_build, \
-         mock_patch("app.planning.service.FixPlanningService.create_fix_plan", new_callable=AsyncMock) as mock_create_plan, \
-         mock_patch("app.patching.workflow.PatchWorkflowCoordinator.execute_patch_workflow", new_callable=AsyncMock) as mock_exec_wf:
+    with mock_patch("app.remediation.service.get_snapshot_service") as mock_snap, \
+         mock_patch("app.remediation.service.get_intelligence_service") as mock_intel, \
+         mock_patch("app.remediation.service.ScanIntelligenceRuntime.build") as mock_runtime_build, \
+         mock_patch("app.remediation.service.FixPlanningService.create_fix_plan", new_callable=AsyncMock) as mock_create_plan, \
+         mock_patch("app.remediation.service.PatchWorkflowCoordinator.execute_patch_workflow", new_callable=AsyncMock) as mock_exec_wf:
 
         mock_inst = MagicMock()
         mock_inst.open_snapshot.side_effect = _fake_open_snapshot
@@ -1339,11 +1342,11 @@ async def test_initial_patch_generation_proposal_plan_id_mismatch_blocks_persist
                 f.write("def read_file(p):\n    return open(p)\n")
             yield fresh_ws
 
-    with mock_patch("app.api.routes.findings.get_snapshot_service") as mock_snap, \
-         mock_patch("app.api.routes.findings.get_intelligence_service") as mock_intel, \
-         mock_patch("app.api.routes.findings.ScanIntelligenceRuntime.build") as mock_runtime_build, \
-         mock_patch("app.api.routes.findings.FixPlanningService.create_fix_plan", new_callable=AsyncMock) as mock_create_plan, \
-         mock_patch("app.api.routes.findings.PatchWorkflowCoordinator.execute_patch_workflow", new_callable=AsyncMock) as mock_exec_wf:
+    with mock_patch("app.remediation.service.get_snapshot_service") as mock_snap, \
+         mock_patch("app.remediation.service.get_intelligence_service") as mock_intel, \
+         mock_patch("app.remediation.service.ScanIntelligenceRuntime.build") as mock_runtime_build, \
+         mock_patch("app.remediation.service.FixPlanningService.create_fix_plan", new_callable=AsyncMock) as mock_create_plan, \
+         mock_patch("app.remediation.service.PatchWorkflowCoordinator.execute_patch_workflow", new_callable=AsyncMock) as mock_exec_wf:
 
         mock_inst = MagicMock()
         mock_inst.open_snapshot.side_effect = _fake_open_snapshot
@@ -1361,7 +1364,9 @@ async def test_initial_patch_generation_proposal_plan_id_mismatch_blocks_persist
 
         user_ctx = CurrentUser(id=scan.owner_user_id, email="sec@example.com", role="USER", is_active=True, session_id="s1")
         with pytest.raises(HTTPException) as exc_info:
-            await request_patch_generation(finding_id=UUID(finding_id), current_user=user_ctx, db=db_session)
+            await request_patch_generation(
+                finding_id=UUID(finding_id), current_user=user_ctx, db=db_session, prefer=None
+            )
         assert exc_info.value.status_code == 422
         assert "PATCH_PLAN_PROVENANCE_MISMATCH" in exc_info.value.detail
 
@@ -1433,11 +1438,11 @@ async def test_initial_patch_generation_proposal_finding_id_mismatch_blocks_pers
                 f.write("def read_file(p):\n    return open(p)\n")
             yield fresh_ws
 
-    with mock_patch("app.api.routes.findings.get_snapshot_service") as mock_snap, \
-         mock_patch("app.api.routes.findings.get_intelligence_service") as mock_intel, \
-         mock_patch("app.api.routes.findings.ScanIntelligenceRuntime.build") as mock_runtime_build, \
-         mock_patch("app.api.routes.findings.FixPlanningService.create_fix_plan", new_callable=AsyncMock) as mock_create_plan, \
-         mock_patch("app.api.routes.findings.PatchWorkflowCoordinator.execute_patch_workflow", new_callable=AsyncMock) as mock_exec_wf:
+    with mock_patch("app.remediation.service.get_snapshot_service") as mock_snap, \
+         mock_patch("app.remediation.service.get_intelligence_service") as mock_intel, \
+         mock_patch("app.remediation.service.ScanIntelligenceRuntime.build") as mock_runtime_build, \
+         mock_patch("app.remediation.service.FixPlanningService.create_fix_plan", new_callable=AsyncMock) as mock_create_plan, \
+         mock_patch("app.remediation.service.PatchWorkflowCoordinator.execute_patch_workflow", new_callable=AsyncMock) as mock_exec_wf:
 
         mock_inst = MagicMock()
         mock_inst.open_snapshot.side_effect = _fake_open_snapshot
@@ -1455,7 +1460,9 @@ async def test_initial_patch_generation_proposal_finding_id_mismatch_blocks_pers
 
         user_ctx = CurrentUser(id=scan.owner_user_id, email="sec@example.com", role="USER", is_active=True, session_id="s1")
         with pytest.raises(HTTPException) as exc_info:
-            await request_patch_generation(finding_id=UUID(finding_id), current_user=user_ctx, db=db_session)
+            await request_patch_generation(
+                finding_id=UUID(finding_id), current_user=user_ctx, db=db_session, prefer=None
+            )
         assert exc_info.value.status_code == 422
         assert "PATCH_PLAN_PROVENANCE_MISMATCH" in exc_info.value.detail
 
@@ -1528,11 +1535,11 @@ async def test_revision_patch_proposal_plan_id_mismatch_blocks_persistence(db_se
                 f.write("def read_file(p):\n    return open(p)\n")
             yield fresh_ws
 
-    with mock_patch("app.ingestion.snapshot.get_snapshot_service") as mock_snap, \
-         mock_patch("app.analysis.service.get_intelligence_service") as mock_intel, \
-         mock_patch("app.context.runtime.ScanIntelligenceRuntime.build") as mock_runtime_build, \
-         mock_patch("app.planning.service.FixPlanningService.create_fix_plan", new_callable=AsyncMock) as mock_create_plan, \
-         mock_patch("app.patching.workflow.PatchWorkflowCoordinator.execute_patch_workflow", new_callable=AsyncMock) as mock_exec_wf:
+    with mock_patch("app.remediation.service.get_snapshot_service") as mock_snap, \
+         mock_patch("app.remediation.service.get_intelligence_service") as mock_intel, \
+         mock_patch("app.remediation.service.ScanIntelligenceRuntime.build") as mock_runtime_build, \
+         mock_patch("app.remediation.service.FixPlanningService.create_fix_plan", new_callable=AsyncMock) as mock_create_plan, \
+         mock_patch("app.remediation.service.PatchWorkflowCoordinator.execute_patch_workflow", new_callable=AsyncMock) as mock_exec_wf:
 
         mock_inst = MagicMock()
         mock_inst.open_snapshot.side_effect = _fake_open_snapshot
@@ -1780,7 +1787,8 @@ async def test_existing_branch_matching_head_sha_wrong_tree_blocked(db_session: 
             yield fresh_ws
 
     with mock_patch("app.delivery.service.get_snapshot_service") as mock_snap, \
-         mock_patch("app.delivery.validator.get_snapshot_service") as mock_val_snap:
+         mock_patch("app.delivery.validator.get_snapshot_service") as mock_val_snap, \
+         mock_patch("app.delivery.service.current_claim", return_value=MagicMock(resource_id=delivery.id)):
         mock_inst = MagicMock()
         mock_inst.snapshot_context.side_effect = _fake_snapshot
         mock_snap.return_value = mock_inst
@@ -1838,7 +1846,8 @@ async def test_existing_branch_matching_head_sha_two_parents_merge_commit_blocke
             yield fresh_ws
 
     with mock_patch("app.delivery.service.get_snapshot_service") as mock_snap, \
-         mock_patch("app.delivery.validator.get_snapshot_service") as mock_val_snap:
+         mock_patch("app.delivery.validator.get_snapshot_service") as mock_val_snap, \
+         mock_patch("app.delivery.service.current_claim", return_value=MagicMock(resource_id=delivery.id)):
         mock_inst = MagicMock()
         mock_inst.snapshot_context.side_effect = _fake_snapshot
         mock_snap.return_value = mock_inst
@@ -1981,9 +1990,6 @@ async def test_phase5_remote_pr_created_local_db_failure_recovery(db_session: Se
 async def test_phase5_remote_pr_success_real_db_transaction_failure_recovery(db_session: Session, base_entities):
     """Alias pointing to the real transaction failure recovery test."""
     await test_phase5_remote_pr_created_local_db_failure_recovery(db_session, base_entities)
-
-
-
 
 
 

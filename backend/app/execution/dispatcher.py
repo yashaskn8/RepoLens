@@ -32,7 +32,7 @@ from app.execution.types import (
 from app.governance.events import AuditLedger, DomainOutbox
 from app.governance.taxonomy import AnalysisCoverage, CoverageState, CoverageUnit
 from app.governance.telemetry import TelemetryRecorder
-from app.models.execution import WorkItemModel
+from app.models.execution import FailureRecordModel, WorkItemModel
 
 
 logger = logging.getLogger(__name__)
@@ -131,6 +131,12 @@ class DurableWorkDispatcher:
                 work = result_db.query(WorkItemModel).filter(WorkItemModel.id == work_item_id).first()
                 if work is None:
                     raise LookupError("work item not found after execution")
+                failure = (
+                    result_db.query(FailureRecordModel)
+                    .filter(FailureRecordModel.work_item_id == work_item_id)
+                    .order_by(FailureRecordModel.created_at.desc(), FailureRecordModel.id.desc())
+                    .first()
+                )
                 return {
                     "id": work.id,
                     "state": work.state,
@@ -138,6 +144,8 @@ class DurableWorkDispatcher:
                     "output_artifact_id": work.output_artifact_id,
                     "outcome_detail": dict(work.outcome_detail or {}),
                     "reconciliation_required": bool(work.reconciliation_required),
+                    "failure_code": failure.code if failure is not None else None,
+                    "failure_message": failure.public_message if failure is not None else None,
                 }
             finally:
                 result_db.close()
@@ -893,7 +901,11 @@ class DurableWorkDispatcher:
 
         if claim.work_kind in {WorkKind.RESEARCH, WorkKind.FIX_PLAN, WorkKind.PATCH_GENERATION}:
             from app.ingestion.snapshot import SnapshotError
-            from app.remediation.service import RemediationExecutionService, RemediationInvariantError
+            from app.remediation.service import (
+                RemediationExecutionService,
+                RemediationInvariantError,
+                RemediationModelOutputError,
+            )
 
             try:
                 result = await RemediationExecutionService().execute(claim.work_item_id)
@@ -902,6 +914,12 @@ class DurableWorkDispatcher:
                     FailureCode.REPOSITORY_UNAVAILABLE,
                     "The exact repository revision could not be materialized for remediation.",
                     retryable=True,
+                ) from exc
+            except RemediationModelOutputError as exc:
+                raise DomainWorkFailed(
+                    FailureCode.MODEL_INVALID_OUTPUT,
+                    str(exc),
+                    retryable=False,
                 ) from exc
             except RemediationInvariantError as exc:
                 raise DomainWorkFailed(

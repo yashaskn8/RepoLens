@@ -22,6 +22,7 @@ from app.delivery.github_provider import GitHubDeliveryProvider
 from app.delivery.provider import RepositoryDeliveryProvider
 from app.delivery.schemas import GitCommitInfo, GitPullRequestInfo, GitTreeEntry
 from app.delivery.service import DeliveryService
+from app.governance.policies import OperationalPolicy, OperationalPolicyService
 from app.ingestion.snapshot import get_snapshot_service
 from app.main import app
 from app.models.delivery import DeliveryModel
@@ -166,10 +167,20 @@ def _make_local_snapshot_context(repo_path: str):
     return _ctx
 
 
+def _enable_github_writes(db_session: Session) -> None:
+    """Enable the explicit operational-policy gate for delivery release tests."""
+    policy = OperationalPolicy.from_settings(get_settings()).model_copy(
+        update={"github_writes_enabled": True}
+    )
+    OperationalPolicyService.snapshot(db_session, policy)
+    db_session.commit()
+
+
 # 1. Canonical End-to-End Delivery Flow
 @pytest.mark.asyncio
 async def test_phase5_e2e_canonical_delivery_flow(client: TestClient, db_session: Session, local_git_repo):
     repo_path, commit_sha = local_git_repo
+    _enable_github_writes(db_session)
 
     scan_id = str(uuid4())
     scan = ScanModel(
@@ -253,7 +264,8 @@ async def test_phase5_e2e_canonical_delivery_flow(client: TestClient, db_session
 
     mock_ctx_fn = _make_local_snapshot_context(repo_path)
     try:
-        with mock_patch("app.delivery.service.get_snapshot_service") as mock_svc_snap, \
+        with mock_patch("app.delivery.service.DeliveryService", return_value=service), \
+             mock_patch("app.delivery.service.get_snapshot_service") as mock_svc_snap, \
              mock_patch("app.delivery.validator.get_snapshot_service") as mock_val_snap:
             
             mock_inst = MagicMock()
@@ -304,9 +316,9 @@ async def test_phase5_e2e_canonical_delivery_flow(client: TestClient, db_session
     # Step 5: True Fresh DB Session Verification (Session Restart)
     from tests.conftest import TestingSessionLocal
     db_bind = db_session.get_bind()
-    db_session.close()
+    db_session.expire_all()
 
-    fresh_session = TestingSessionLocal(bind=db_bind)
+    fresh_session = TestingSessionLocal(bind=db_bind, join_transaction_mode="create_savepoint")
     try:
         # Re-query all models in fresh session
         fresh_scan = fresh_session.query(ScanModel).filter(ScanModel.id == scan_id).first()
@@ -365,6 +377,7 @@ async def test_phase5_e2e_canonical_delivery_flow(client: TestClient, db_session
 @pytest.mark.asyncio
 async def test_phase5_e2e_base_drift_protection_gate(client: TestClient, db_session: Session, local_git_repo):
     repo_path, commit_sha = local_git_repo
+    _enable_github_writes(db_session)
 
     scan_id = str(uuid4())
     scan = ScanModel(
@@ -439,7 +452,8 @@ async def test_phase5_e2e_base_drift_protection_gate(client: TestClient, db_sess
 
     mock_ctx_fn = _make_local_snapshot_context(repo_path)
     try:
-        with mock_patch("app.delivery.service.get_snapshot_service") as mock_svc_snap, \
+        with mock_patch("app.delivery.service.DeliveryService", return_value=service), \
+             mock_patch("app.delivery.service.get_snapshot_service") as mock_svc_snap, \
              mock_patch("app.delivery.validator.get_snapshot_service") as mock_val_snap:
 
             mock_inst = MagicMock()
@@ -473,6 +487,7 @@ async def test_phase5_e2e_base_drift_protection_gate(client: TestClient, db_sess
     assert len(mock_provider.prs_created) == 0
 
     # Telemetry and report reflect blocked delivery
+    db_session.expire_all()
     report = ScanReportService.build_scan_report(db=db_session, scan_id=UUID(scan_id))
     assert report.summary.deliveries_blocked == 1
     assert report.summary.pull_requests_created == 0
@@ -583,6 +598,7 @@ async def test_phase5_e2e_partial_failure_and_resume_reconciliation(db_session: 
 async def test_phase5_e2e_full_route_level_lifecycle_gate(client: TestClient, db_session: Session, local_git_repo):
     """Proves the full unshortcutted lifecycle from actual finding patch generation route to GitHub PR delivery."""
     repo_path, commit_sha = local_git_repo
+    _enable_github_writes(db_session)
 
     # 1. Create canonical completed ScanModel
     scan_id = str(uuid4())
@@ -705,6 +721,7 @@ async def test_phase5_e2e_full_route_level_lifecycle_gate(client: TestClient, db
              mock_patch("app.context.runtime.ScanIntelligenceRuntime.build", AsyncMock(return_value=MagicMock(context_engine=MagicMock(), repository_graph=MagicMock(), manifest=MagicMock()))), \
              mock_patch("app.planning.service.FixPlanningService.create_fix_plan", AsyncMock(return_value=real_fix_plan)), \
              mock_patch("app.patching.workflow.PatchWorkflowCoordinator.execute_patch_workflow", AsyncMock(return_value=real_wf_result)), \
+             mock_patch("app.delivery.service.DeliveryService", return_value=service), \
              mock_patch("app.delivery.service.get_snapshot_service") as mock_svc_snap, \
              mock_patch("app.delivery.validator.get_snapshot_service") as mock_val_snap:
 
@@ -779,4 +796,3 @@ async def test_phase5_e2e_full_route_level_lifecycle_gate(client: TestClient, db
 
     finally:
         app.dependency_overrides.pop(get_delivery_service, None)
-

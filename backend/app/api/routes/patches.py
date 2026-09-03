@@ -341,8 +341,22 @@ async def request_patch_revision(
 
     execution = await DurableWorkDispatcher.execute_specific(
         submission.result.work_item_id,
-        session_factory=sessionmaker(bind=db.get_bind(), autoflush=False, expire_on_commit=False),
+        session_factory=sessionmaker(
+            bind=db.get_bind(),
+            autoflush=False,
+            expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        ),
     )
+    if (
+        execution["state"] == "FAILED"
+        and execution.get("failure_code") == "MODEL_INVALID_OUTPUT"
+        and str(execution.get("failure_message") or "").startswith("PATCH_PLAN_PROVENANCE_MISMATCH:")
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(execution["failure_message"]),
+        )
     if execution["state"] != "SUCCEEDED" or not execution["outcome_detail"].get("patch_id"):
         db.expire_all()
         conflicting_child = db.execute(

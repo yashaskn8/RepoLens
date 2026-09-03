@@ -253,7 +253,12 @@ async def publish_review(
         return _pub_to_publish_response(pub)
     execution = await DurableWorkDispatcher.execute_specific(
         submission.result.work_item_id,
-        session_factory=sessionmaker(bind=db.get_bind(), autoflush=False, expire_on_commit=False),
+        session_factory=sessionmaker(
+            bind=db.get_bind(),
+            autoflush=False,
+            expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        ),
     )
     db.expire_all()
     pub = db.query(PullRequestReviewPublicationModel).filter_by(id=str(pub.id)).first()

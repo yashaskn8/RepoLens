@@ -122,7 +122,12 @@ async def deliver_patch(
         return delivery
     execution = await DurableWorkDispatcher.execute_specific(
         submission.result.work_item_id,
-        session_factory=sessionmaker(bind=db.get_bind(), autoflush=False, expire_on_commit=False),
+        session_factory=sessionmaker(
+            bind=db.get_bind(),
+            autoflush=False,
+            expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        ),
     )
     db.expire_all()
     current = get_owned_delivery_or_404(db, str(delivery.id), current_user)

@@ -46,7 +46,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.api.dependencies import get_current_user, require_operator, verify_csrf
 from app.cli.create_operator import main as cli_main
 from app.core.config import Settings, get_settings
-from app.core.database import Base, SessionLocal
+from app.core.database import Base
 from app.delivery.github_client import GitHubHttpTransport
 from app.ingestion.github_pr import (
     GitHubPRAPIError,
@@ -81,20 +81,20 @@ from app.services.quota_service import check_and_increment_quota, get_usage_coun
 # Helpers
 # =========================================================================
 
-def _create_user_client(email: str = "sec_user@example.com", role: str = "USER") -> Dict[str, Any]:
-    """Helper creating a test user and returning a dedicated TestClient with active session."""
-    user_client = TestClient(app)
+def _create_user_client(
+    user_client: TestClient,
+    db: Session,
+    email: str = "sec_user@example.com",
+    role: str = "USER",
+) -> Dict[str, Any]:
+    """Create a test user through the caller's isolated app/database fixtures."""
     user_client.post("/api/v1/auth/register", json={"email": email, "password": "SecurePassword123!"})
-    
+
     # If role is OPERATOR, elevate in DB
-    db = SessionLocal()
-    try:
-        user = db.query(UserModel).filter(UserModel.email == email).first()
-        if role == "OPERATOR" and user:
-            user.role = UserRole.OPERATOR.value
-            db.commit()
-    finally:
-        db.close()
+    user = db.query(UserModel).filter(UserModel.email == email).first()
+    if role == "OPERATOR" and user:
+        user.role = UserRole.OPERATOR.value
+        db.commit()
 
     login_resp = user_client.post("/api/v1/auth/login", json={"email": email, "password": "SecurePassword123!"})
     user_id = login_resp.json()["id"]
@@ -586,7 +586,11 @@ async def test_confused_deputy_public_pr_outbound_request_has_no_authorization_h
 
 
 @pytest.mark.asyncio
-async def test_e2e_from_pr_route_confused_deputy_outbound_request_strips_token(monkeypatch):
+async def test_e2e_from_pr_route_confused_deputy_outbound_request_strips_token(
+    monkeypatch,
+    client: TestClient,
+    db_session: Session,
+):
     """Full E2E route test: POST /api/v1/change-analyses/from-pr executes through real resolver
     and sends outbound HTTP request WITHOUT Authorization header, even when server GITHUB_TOKEN is set.
     """
@@ -625,8 +629,7 @@ async def test_e2e_from_pr_route_confused_deputy_outbound_request_strips_token(m
     e2e_resolver = GitHubPRResolver(settings=custom_settings, client=mock_async_client)
     monkeypatch.setattr("app.api.routes.change_analysis.get_github_pr_resolver", lambda: e2e_resolver)
 
-    user_info = _create_user_client(email="pr_tester@example.com")
-    client = user_info["client"]
+    user_info = _create_user_client(client, db_session, email="pr_tester@example.com")
 
     response = client.post(
         "/api/v1/change-analyses/from-pr",

@@ -54,6 +54,10 @@ class RemediationInvariantError(RuntimeError):
     pass
 
 
+class RemediationModelOutputError(RemediationInvariantError):
+    """The model returned remediation output that violates canonical lineage."""
+
+
 class RemediationExecutionService:
     """Execute and artifactize one remediation request against an exact revision."""
 
@@ -304,7 +308,9 @@ class RemediationExecutionService:
             and proposal.finding_id == fix_plan.finding_id
             and fix_plan.finding_id == finding_id
         ):
-            raise RemediationInvariantError("Patch proposal lineage does not match the canonical fix plan.")
+            raise RemediationModelOutputError(
+                "PATCH_PLAN_PROVENANCE_MISMATCH: Patch proposal lineage does not match the canonical fix plan."
+            )
 
     @staticmethod
     def _persist_patch(
@@ -404,4 +410,5 @@ __all__ = [
     "RemediationExecutionResult",
     "RemediationExecutionService",
     "RemediationInvariantError",
+    "RemediationModelOutputError",
 ]
