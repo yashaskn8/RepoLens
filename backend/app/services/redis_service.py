@@ -24,7 +24,7 @@ from redis.exceptions import (
 
 from app.core.config import get_settings
 from app.core.redis import RedisManager, get_redis_manager
-from app.security.redaction import contains_secrets, contains_sensitive_material
+from app.security.redaction import contains_secrets, contains_sensitive_material, is_sensitive_key
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +137,11 @@ class RedisService:
         # Zero Secrets Invariant: structural and token secret inspection on logical key
         # and Python value before serialization, plus serialized content as defense-in-depth.
         # Secret rejection returns False, logs no secrets, writes nothing, and does NOT degrade Redis.
-        if contains_sensitive_material(key) or contains_sensitive_material(value):
+        if (
+            is_sensitive_key(key)
+            or contains_sensitive_material(key)
+            or contains_sensitive_material(value)
+        ):
             logger.warning("SECURITY ALERT: Attempted to cache credentials or sensitive tokens in Redis! Write blocked.")
             return False
 

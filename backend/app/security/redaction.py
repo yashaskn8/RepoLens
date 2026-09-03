@@ -63,16 +63,104 @@ def contains_secrets(text: Optional[str]) -> bool:
 
 
 # Keys and identifiers representing credentials, auth tokens, or secrets
-_CREDENTIAL_KEY_IDENTIFIERS = (
-    "api_key",
-    "apikey",
-    "token",
-    "secret",
-    "password",
-    "credential",
+_SAFE_METRIC_OR_METADATA_MODIFIERS = {
+    "count", "counts", "usage", "used", "limit", "limits", "total", "totals", "max", "min",
+    "policy", "policies", "rule", "rules", "status", "state", "at", "date",
+    "time", "timestamp", "by", "type", "types", "method", "methods", "version",
+    "remaining", "cost", "consumed", "length", "hint", "strength", "requirements",
+    "prompt", "completion", "input", "output", "num", "number",
+}
+
+_EXACT_SENSITIVE_NAMES = {
+    "apikey", "api_key",
+    "secret", "secrets",
+    "password", "passwd",
+    "credential", "credentials",
     "authorization",
     "auth",
-)
+    "token", "tokens",
+}
+
+_CREDENTIAL_ROOT_TOKENS = {
+    "password", "passwd",
+    "secret", "secrets",
+    "credential", "credentials",
+    "authorization",
+}
+
+_KEY_COMBINATIONS = {
+    "api", "access", "secret", "private", "priv", "auth", "token", "license", "client",
+}
+
+
+def _split_into_tokens(key: str) -> list[str]:
+    """Split a dictionary key string into normalized tokens handling camelCase and delimiters."""
+    s = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(key))
+    parts = [p.lower() for p in re.split(r"[^a-zA-Z0-9]+", s) if p]
+    return parts
+
+
+def is_sensitive_key(key: str) -> bool:
+    """Determine whether a dictionary key represents a sensitive credential or secret field.
+
+    Uses normalized token matching rather than unrestricted substring matching to avoid
+    false positives on safe keys like 'author', 'secretary', 'token_count', etc.
+    """
+    if not key or not isinstance(key, str):
+        return False
+
+    clean_key = key.strip()
+    if not clean_key:
+        return False
+
+    # Normalized concatenated name (e.g. 'api-key' -> 'apikey', 'API_KEY' -> 'apikey')
+    flat_name = re.sub(r"[^a-zA-Z0-9]", "", clean_key).lower()
+    if flat_name in {
+        "apikey",
+        "apisecret",
+        "clientsecret",
+        "password",
+        "passwd",
+        "credential",
+        "credentials",
+        "authorization",
+        "authtoken",
+        "accesstoken",
+        "refreshtoken",
+    }:
+        return True
+
+    tokens = _split_into_tokens(clean_key)
+    if not tokens:
+        return False
+
+    # If any safe modifier is present (e.g. 'token_count', 'password_policy', 'authentication_status', 'authorized_at')
+    # treat as safe non-credential metadata
+    if any(tok in _SAFE_METRIC_OR_METADATA_MODIFIERS for tok in tokens):
+        return False
+
+    # Exact single-token sensitive names
+    if len(tokens) == 1 and tokens[0] in _EXACT_SENSITIVE_NAMES:
+        return True
+
+    # Check for root credential tokens in multi-token keys
+    # e.g. 'client_secret', 'user_password', 'aws_credentials', 'authorization_header'
+    if any(tok in _CREDENTIAL_ROOT_TOKENS for tok in tokens):
+        return True
+
+    # Check for 'key' combined with credential prefixes: e.g. 'api_key', 'secret_key', 'private_key'
+    if "key" in tokens and any(tok in _KEY_COMBINATIONS for tok in tokens if tok != "key"):
+        return True
+
+    # Check for 'token' in compound credential keys (e.g. 'access_token', 'refresh_token', 'id_token', 'bearer_token')
+    if "token" in tokens or "tokens" in tokens:
+        return True
+
+    # Check for 'auth' as standalone token in compound credential keys (e.g. 'auth_token', 'auth_header', 'auth_key')
+    if "auth" in tokens:
+        return True
+
+    return False
 
 
 def contains_sensitive_material(val: Any, depth: int = 0) -> bool:
@@ -80,13 +168,15 @@ def contains_sensitive_material(val: Any, depth: int = 0) -> bool:
     contains sensitive credentials, tokens, or known secret patterns.
 
     Detects:
-    1. Known token/credential patterns in strings (via contains_secrets).
-    2. Structural credential field names in dict keys (e.g. api_key, apikey, token,
-       secret, password, credential, authorization, auth).
-    3. Nested dicts, lists, tuples, sets, and Pydantic models containing credentials.
+    1. Excessive nesting depth beyond MAX_METADATA_DEPTH (fails closed as unsafe).
+    2. Known token/credential patterns in strings (via contains_secrets).
+    3. Structural credential field names in dict keys (via is_sensitive_key).
+    4. Nested dicts, lists, tuples, sets, and Pydantic models containing credentials.
     """
     if depth > MAX_METADATA_DEPTH:
-        return False
+        # Fail-closed: deeply nested payloads beyond the maximum inspection depth
+        # cannot be securely verified and must be treated as unsafe to prevent credential smuggling.
+        return True
 
     if val is None or isinstance(val, (int, float, bool)):
         return False
@@ -107,8 +197,7 @@ def contains_sensitive_material(val: Any, depth: int = 0) -> bool:
 
     if isinstance(val, dict):
         for k, v in val.items():
-            k_str = str(k).lower()
-            if any(ident in k_str for ident in _CREDENTIAL_KEY_IDENTIFIERS):
+            if is_sensitive_key(str(k)):
                 return True
             if contains_secrets(str(k)):
                 return True

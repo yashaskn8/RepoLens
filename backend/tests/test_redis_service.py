@@ -19,7 +19,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError, RedisError
 
 from app.core.config import get_settings
 from app.core.redis import RedisManager
-from app.security.redaction import contains_sensitive_material
+from app.security.redaction import contains_sensitive_material, is_sensitive_key
 from app.services.redis_service import RedisService, _deserialize, _serialize
 
 
@@ -289,12 +289,15 @@ async def test_secrets_never_stored_in_redis(redis_service: RedisService, mock_r
     mock_client = mock_redis_manager.get_client()
     assert mock_client is not None
 
-    # 1. Structural credential identifiers without known token prefixes (opaque values)
+    # 1. Structural credential identifiers without known token prefixes (opaque values) - MUST REJECT
     structural_samples = [
-        ("dict with api_key", {"api_key": "opaque-random-value"}),
-        ("dict with token", {"token": "opaque-random-value"}),
-        ("nested dict with credentials", {"credentials": {"value": "opaque-random-value"}}),
-        ("deeply nested authorization", {"nested": {"authorization": "opaque-random-value"}}),
+        ("api_key", {"api_key": "opaque"}),
+        ("apiKey", {"apiKey": "opaque"}),
+        ("access_token", {"access_token": "opaque"}),
+        ("refresh-token", {"refresh-token": "opaque"}),
+        ("client_secret", {"client_secret": "opaque"}),
+        ("credentials", {"credentials": {"value": "opaque"}}),
+        ("nested authorization", {"nested": {"authorization": "opaque-random-value"}}),
         ("list containing password", {"items": [{"password": "opaque-random-value"}]}),
     ]
 
@@ -307,7 +310,20 @@ async def test_secrets_never_stored_in_redis(redis_service: RedisService, mock_r
         assert redis_service.is_available is True
         assert mock_redis_manager.is_available is True
 
-    # 2. Known provider-token formats inside string values
+    # 2. Deeply nested payloads beyond MAX_METADATA_DEPTH (6) fail closed - MUST REJECT
+    deeply_nested_secret = {"l1": {"l2": {"l3": {"l4": {"l5": {"l6": {"l7": {"secret": "hidden_value"}}}}}}}}
+    deep_secret_res = await redis_service.set("deep_secret_key", deeply_nested_secret, namespace="cache")
+    assert deep_secret_res is False, "Deeply nested secret was NOT rejected!"
+    assert redis_service.build_key("deep_secret_key", "cache") not in mock_client.storage
+    assert redis_service.is_available is True
+
+    deeply_nested_safe = {"l1": {"l2": {"l3": {"l4": {"l5": {"l6": {"l7": "value"}}}}}}}
+    deep_safe_res = await redis_service.set("deep_safe_key", deeply_nested_safe, namespace="cache")
+    assert deep_safe_res is False, "Deeply nested structure did NOT fail closed as unsafe!"
+    assert redis_service.build_key("deep_safe_key", "cache") not in mock_client.storage
+    assert redis_service.is_available is True
+
+    # 3. Known provider-token formats inside string values - MUST REJECT
     token_samples = [
         ("OpenAI sk- key", {"custom_field": "sk-proj-123456789012345678901234567890"}),
         ("Groq gsk_ key", {"custom_field": "gsk_abcdefghij1234567890"}),
@@ -329,18 +345,39 @@ async def test_secrets_never_stored_in_redis(redis_service: RedisService, mock_r
         assert redis_service.build_key(f"test_{desc}", "cache") not in mock_client.storage
         assert redis_service.is_available is True
 
-    # 3. Key containing token is also blocked
+    # 4. Key containing token or sensitive identifier is also blocked - MUST REJECT
     token_key = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
     result_key = await redis_service.set(token_key, {"safe": "value"}, namespace="cache")
     assert result_key is False, "GitHub PAT in key was NOT rejected!"
     assert redis_service.build_key(token_key, "cache") not in mock_client.storage
     assert redis_service.is_available is True
 
-    # 4. Safe payload should succeed
-    safe_result = await redis_service.set("safe_key", {"project": "RepoLens", "stars": 42}, namespace="cache")
-    assert safe_result is True
-    assert redis_service.build_key("safe_key", "cache") in mock_client.storage
+    sensitive_named_key = "api_key"
+    result_named = await redis_service.set(sensitive_named_key, {"safe": "value"}, namespace="cache")
+    assert result_named is False, "Sensitive key 'api_key' was NOT rejected!"
+    assert redis_service.build_key(sensitive_named_key, "cache") not in mock_client.storage
     assert redis_service.is_available is True
+
+    # 5. Non-sensitive safe payloads - MUST ALLOW (no false positives)
+    safe_samples = [
+        ("author", {"author": "Yashas"}),
+        ("author_name", {"author_name": "Yashas"}),
+        ("token_count", {"token_count": 150}),
+        ("token_usage", {"token_usage": 250}),
+        ("secretary", {"secretary": "Alice"}),
+        ("authentication_status", {"authentication_status": "verified"}),
+        ("authorized_at", {"authorized_at": "2026-09-03"}),
+        ("password_policy", {"password_policy": "strong"}),
+    ]
+
+    for desc, payload in safe_samples:
+        safe_key = f"safe_{desc}"
+        safe_result = await redis_service.set(safe_key, payload, namespace="cache")
+        assert safe_result is True, f"Safe payload '{desc}' was falsely rejected!"
+        assert redis_service.build_key(safe_key, "cache") in mock_client.storage
+        retrieved = await redis_service.get(safe_key, namespace="cache")
+        assert retrieved == payload, f"Retrieved safe payload mismatch for '{desc}'"
+        assert redis_service.is_available is True
 
 
 # ------------------------------------------------------------------------------
@@ -399,35 +436,83 @@ async def test_probe_health_returns_false_when_no_client():
 
 
 # ------------------------------------------------------------------------------
-# Test 13: Canonical contains_sensitive_material helper
+# Test 13: Canonical contains_sensitive_material helper & is_sensitive_key
 # ------------------------------------------------------------------------------
 def test_contains_sensitive_material_canonical():
     """Direct verification of canonical structural and token sensitive material detection."""
-    # Primitive types
+    # 1. Direct unit verification of is_sensitive_key - MUST BE SENSITIVE
+    sensitive_keys = [
+        "api_key",
+        "apiKey",
+        "api-key",
+        "apikey",
+        "access_token",
+        "auth_token",
+        "refresh_token",
+        "refresh-token",
+        "token",
+        "secret",
+        "client_secret",
+        "password",
+        "credentials",
+        "credential",
+        "authorization",
+        "auth",
+    ]
+    for k in sensitive_keys:
+        assert is_sensitive_key(k) is True, f"Key '{k}' was NOT recognized as sensitive!"
+
+    # 2. Direct unit verification of is_sensitive_key - MUST BE SAFE (no false positives)
+    safe_keys = [
+        "author",
+        "author_name",
+        "token_count",
+        "token_usage",
+        "secretary",
+        "authentication_status",
+        "authorized_at",
+        "password_policy",
+        "prompt_tokens",
+        "completion_tokens",
+        "max_tokens",
+        "authority",
+    ]
+    for k in safe_keys:
+        assert is_sensitive_key(k) is False, f"Safe key '{k}' was falsely classified as sensitive!"
+
+    # 3. Primitive types
     assert contains_sensitive_material(None) is False
     assert contains_sensitive_material(123) is False
     assert contains_sensitive_material(True) is False
     assert contains_sensitive_material("clean string") is False
 
-    # Strings with known token formats
+    # 4. Strings with known token formats
     assert contains_sensitive_material("Bearer eyJhbGciOiJSUzI1NiJ9token") is True
     assert contains_sensitive_material("sk-proj-123456789012345678901234567890") is True
 
-    # Dicts with sensitive field keys (opaque values)
+    # 5. Dicts with sensitive field keys (opaque values)
     assert contains_sensitive_material({"api_key": "opaque-random-value"}) is True
     assert contains_sensitive_material({"token": "opaque-random-value"}) is True
     assert contains_sensitive_material({"credentials": {"value": "opaque-random-value"}}) is True
     assert contains_sensitive_material({"nested": {"authorization": "opaque-random-value"}}) is True
     assert contains_sensitive_material({"items": [{"password": "opaque-random-value"}]}) is True
 
-    # Pydantic model with sensitive field
+    # 6. Deeply nested payloads beyond MAX_METADATA_DEPTH fail closed
+    deep_structure = {"l1": {"l2": {"l3": {"l4": {"l5": {"l6": {"l7": "deep_val"}}}}}}}
+    assert contains_sensitive_material(deep_structure) is True, "Excessive nesting depth did NOT fail closed!"
+
+    # 7. Safe nested payload within depth limit
+    safe_structure = {"l1": {"l2": {"l3": {"l4": {"author": "Yashas", "token_count": 50}}}}}
+    assert contains_sensitive_material(safe_structure) is False, "Safe payload within depth was falsely rejected!"
+
+    # 8. Pydantic model with sensitive field
     class ModelWithSecret(BaseModel):
         token: str
         name: str
 
     assert contains_sensitive_material(ModelWithSecret(token="xyz", name="safe")) is True
 
-    # Pydantic model without sensitive field
+    # 9. Pydantic model without sensitive field
     class ModelSafe(BaseModel):
         title: str
         count: int
