@@ -545,3 +545,337 @@ def test_no_direct_provider_selection_in_orchestration_and_revision():
     for forbidden in ("'cloudflare'", '"cloudflare"', "'openrouter'", '"openrouter"', "'mistral'", '"mistral"'):
         assert forbidden not in graph_source, f"Direct provider selection {forbidden} found in graph.py"
         assert forbidden not in revision_source, f"Direct provider selection {forbidden} found in revision.py"
+
+
+@pytest.mark.asyncio
+async def test_deterministic_only_all_confirmed(sample_analysis_environment):
+    """Bug 1: All candidates deterministically confirmed sets verified decision and routes to finalize."""
+    store, repo_dir = sample_analysis_environment
+    scan_id = str(uuid4())
+
+    from app.schemas.evidence import Evidence
+    from app.schemas.enums import FindingStatus
+    det_finding = Finding(
+        scan_id=uuid4(),
+        title="Deterministic Detector Finding",
+        description="Found via static scanner",
+        severity=Severity.HIGH,
+        status=FindingStatus.OPEN,
+        source_tool="static_scanner",
+        detector_id="static_scanner",
+        detector_kind="static_scanner",
+        category="security",
+        evidences=[
+            Evidence(
+                file_path="server.py",
+                start_line=1,
+                end_line=3,
+                code_snippet="from fastapi import FastAPI\napp = FastAPI()\n",
+            )
+        ],
+    )
+
+    mock_router = AsyncMock()
+    with patch("app.agents.graph.run_security_agent", new_callable=AsyncMock) as mock_sec, \
+         patch("app.agents.graph.run_architecture_agent", new_callable=AsyncMock) as mock_arch, \
+         patch("app.agents.graph.run_integration_agent", new_callable=AsyncMock) as mock_integ, \
+         patch("app.agents.graph.run_bug_agent", new_callable=AsyncMock) as mock_bug, \
+         patch("app.agents.verifier.get_llm_router", return_value=mock_router):
+
+        mock_sec.return_value = {"candidate_findings": [det_finding], "completed_nodes": ["security"], "errors": []}
+        mock_arch.return_value = {"candidate_findings": [], "completed_nodes": ["architecture"], "errors": []}
+        mock_integ.return_value = {"candidate_findings": [], "completed_nodes": ["integration"], "errors": []}
+        mock_bug.return_value = {"candidate_findings": [], "completed_nodes": ["bug"], "errors": []}
+
+        final_state = await run_analysis_workflow(
+            evidence_store=store,
+            scan_id=scan_id,
+            repo_dir=repo_dir,
+        )
+
+    # Verifier made zero LLM calls
+    mock_router.generate.assert_not_called()
+    assert final_state["status"] == "COMPLETED"
+    assert final_state["verification_decision"] == "verified"
+    assert "finalize" in final_state["completed_nodes"]
+    assert len(final_state["verified_findings"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_deterministic_only_all_rejected(sample_analysis_environment):
+    """Bug 1: All candidates deterministically rejected sets verified decision and routes to finalize (not uncertain)."""
+    store, repo_dir = sample_analysis_environment
+    scan_id = str(uuid4())
+
+    from app.schemas.evidence import Evidence
+    from app.schemas.enums import FindingStatus
+    bogus_finding = Finding(
+        scan_id=uuid4(),
+        title="Fabricated File Finding",
+        description="Points to non-existent file",
+        severity=Severity.HIGH,
+        status=FindingStatus.OPEN,
+        source_tool="model",
+        category="security",
+        evidences=[
+            Evidence(
+                file_path="non_existent_file.py",
+                start_line=1,
+                end_line=2,
+                code_snippet="bogus()",
+            )
+        ],
+    )
+
+    mock_router = AsyncMock()
+    with patch("app.agents.graph.run_security_agent", new_callable=AsyncMock) as mock_sec, \
+         patch("app.agents.graph.run_architecture_agent", new_callable=AsyncMock) as mock_arch, \
+         patch("app.agents.graph.run_integration_agent", new_callable=AsyncMock) as mock_integ, \
+         patch("app.agents.graph.run_bug_agent", new_callable=AsyncMock) as mock_bug, \
+         patch("app.agents.verifier.get_llm_router", return_value=mock_router):
+
+        mock_sec.return_value = {"candidate_findings": [bogus_finding], "completed_nodes": ["security"], "errors": []}
+        mock_arch.return_value = {"candidate_findings": [], "completed_nodes": ["architecture"], "errors": []}
+        mock_integ.return_value = {"candidate_findings": [], "completed_nodes": ["integration"], "errors": []}
+        mock_bug.return_value = {"candidate_findings": [], "completed_nodes": ["bug"], "errors": []}
+
+        final_state = await run_analysis_workflow(
+            evidence_store=store,
+            scan_id=scan_id,
+            repo_dir=repo_dir,
+        )
+
+    mock_router.generate.assert_not_called()
+    assert final_state["status"] == "COMPLETED"
+    assert final_state["verification_decision"] == "verified"
+    assert final_state["revision_target_ids"] == []
+    assert "finalize" in final_state["completed_nodes"]
+    assert "finalize_uncertain" not in final_state["completed_nodes"]
+    assert len(final_state["rejected_findings"]) == 1
+    assert len(final_state["verified_findings"]) == 0
+
+
+@pytest.mark.asyncio
+async def test_deterministic_only_mixed_confirmed_and_rejected(sample_analysis_environment):
+    """Bug 1: Mixed deterministic CONFIRMED + REJECTED produces graph-level verified with no revision."""
+    store, repo_dir = sample_analysis_environment
+    scan_id = str(uuid4())
+
+    from app.schemas.evidence import Evidence
+    from app.schemas.enums import FindingStatus
+    det_finding = Finding(
+        scan_id=uuid4(),
+        title="Valid Deterministic Finding",
+        description="Static scanner match",
+        severity=Severity.MEDIUM,
+        status=FindingStatus.OPEN,
+        source_tool="static_scanner",
+        detector_id="static_scanner",
+        detector_kind="static_scanner",
+        category="security",
+        evidences=[
+            Evidence(
+                file_path="server.py",
+                start_line=1,
+                end_line=2,
+                code_snippet="from fastapi import FastAPI\n",
+            )
+        ],
+    )
+    bogus_finding = Finding(
+        scan_id=uuid4(),
+        title="Fabricated File Finding",
+        description="Points to non-existent file",
+        severity=Severity.HIGH,
+        status=FindingStatus.OPEN,
+        source_tool="model",
+        category="security",
+        evidences=[
+            Evidence(
+                file_path="does_not_exist.py",
+                start_line=1,
+                end_line=2,
+                code_snippet="fake()",
+            )
+        ],
+    )
+
+    mock_router = AsyncMock()
+    with patch("app.agents.graph.run_security_agent", new_callable=AsyncMock) as mock_sec, \
+         patch("app.agents.graph.run_architecture_agent", new_callable=AsyncMock) as mock_arch, \
+         patch("app.agents.graph.run_integration_agent", new_callable=AsyncMock) as mock_integ, \
+         patch("app.agents.graph.run_bug_agent", new_callable=AsyncMock) as mock_bug, \
+         patch("app.agents.verifier.get_llm_router", return_value=mock_router):
+
+        mock_sec.return_value = {"candidate_findings": [det_finding, bogus_finding], "completed_nodes": ["security"], "errors": []}
+        mock_arch.return_value = {"candidate_findings": [], "completed_nodes": ["architecture"], "errors": []}
+        mock_integ.return_value = {"candidate_findings": [], "completed_nodes": ["integration"], "errors": []}
+        mock_bug.return_value = {"candidate_findings": [], "completed_nodes": ["bug"], "errors": []}
+
+        final_state = await run_analysis_workflow(
+            evidence_store=store,
+            scan_id=scan_id,
+            repo_dir=repo_dir,
+        )
+
+    mock_router.generate.assert_not_called()
+    assert final_state["status"] == "COMPLETED"
+    assert final_state["verification_decision"] == "verified"
+    assert final_state["revision_target_ids"] == []
+    assert "finalize" in final_state["completed_nodes"]
+    assert "revise" not in final_state["completed_nodes"]
+    assert len(final_state["verified_findings"]) == 1
+    assert len(final_state["rejected_findings"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_deterministic_second_pass_merging(sample_analysis_environment):
+    """Bug 1: Deterministic-only second verification pass preserves prior verified findings and merges correctly."""
+    from app.agents.verifier import run_verifier_agent
+    from app.schemas.evidence import Evidence
+    from app.schemas.enums import FindingStatus
+
+    scan_id = str(uuid4())
+    _, repo_dir = sample_analysis_environment
+
+    pass1_finding = Finding(
+        id=uuid4(),
+        scan_id=uuid4(),
+        title="Pass 1 Confirmed Finding",
+        description="Confirmed in pass 1",
+        severity=Severity.HIGH,
+        status=FindingStatus.OPEN,
+        source_tool="llm",
+        category="security",
+        evidences=[
+            Evidence(
+                file_path="server.py",
+                start_line=1,
+                end_line=2,
+                code_snippet="from fastapi import FastAPI\n",
+            )
+        ],
+    )
+
+    revised_det_finding = Finding(
+        id=uuid4(),
+        scan_id=uuid4(),
+        title="Revised Deterministic Finding",
+        description="Deterministic finding on pass 2",
+        severity=Severity.LOW,
+        status=FindingStatus.OPEN,
+        source_tool="static_scanner",
+        detector_id="static_scanner",
+        detector_kind="static_scanner",
+        category="security",
+        evidences=[
+            Evidence(
+                file_path="server.py",
+                start_line=3,
+                end_line=5,
+                code_snippet="@app.get('/items')\n",
+            )
+        ],
+    )
+
+    state = {
+        "scan_id": scan_id,
+        "repo_dir": repo_dir,
+        "commit_hash": "abcdef1234567890",
+        "revision_count": 1,
+        "revision_candidates": [revised_det_finding],
+        "verified_findings": [pass1_finding],
+        "rejected_findings": [{"finding_id": str(revised_det_finding.id), "verdict": "POSSIBLE", "reason": "prior"}],
+        "revision_target_ids": [str(revised_det_finding.id)],
+    }
+
+    result = await run_verifier_agent(state)
+
+    assert result["verification_decision"] == "verified"
+    assert result["revision_target_ids"] == []
+    assert len(result["verified_findings"]) == 2
+    verified_ids = {f.id for f in result["verified_findings"]}
+    assert pass1_finding.id in verified_ids
+    assert revised_det_finding.id in verified_ids
+
+
+@pytest.mark.asyncio
+async def test_finalize_uncertain_no_duplicate_existing_errors():
+    """Bug 2: finalize_uncertain returns only new errors, avoiding duplication by operator.add reducer."""
+    from app.agents.graph import run_finalize_uncertain_node
+
+    state = {
+        "status": "RUNNING",
+        "errors": ["Verifier batch 1 failed closed: network timeout"],
+    }
+
+    result = run_finalize_uncertain_node(state)
+    assert result["status"] == "COMPLETED_UNCERTAIN"
+    assert len(result["errors"]) == 1
+    assert "Scan completed with unconfirmed findings" in result["errors"][0]
+    assert "Verifier batch 1 failed closed" not in result["errors"]
+
+
+@pytest.mark.asyncio
+async def test_finalize_uncertain_graph_reducer_integration(sample_analysis_environment):
+    """Bug 2: In the compiled graph, existing errors appear exactly once in the final state."""
+    store, repo_dir = sample_analysis_environment
+    scan_id = str(uuid4())
+
+    async def mock_generate_side_effect(request: LLMRequest):
+        policy = request.task_policy
+        metadata = ModelExecutionMetadata(
+            provider=LLMProvider.GEMINI,
+            model_name="mock-model",
+            prompt_tokens=10,
+            completion_tokens=20,
+            total_tokens=30,
+            latency_ms=40.0,
+        )
+
+        if policy == TaskPolicy.SECURITY_REASONING:
+            payload = {
+                "confidence": 0.9,
+                "findings": [
+                    {
+                        "title": "Auth Issue",
+                        "description": "Auth check.",
+                        "severity": "HIGH",
+                        "category": "security",
+                        "evidence_refs": ["chunk:abcdef123456:server.py:GET /items:4"],
+                    }
+                ],
+            }
+            return LLMResponse(content=json.dumps(payload), model="m", provider=LLMProvider.GEMINI, metadata=metadata)
+
+        elif policy in (TaskPolicy.ARCHITECTURE, TaskPolicy.INTEGRATION_CODE, TaskPolicy.BUG_REASONING):
+            return LLMResponse(content=json.dumps({"findings": []}), model="m", provider=LLMProvider.GEMINI, metadata=metadata)
+
+        elif policy == TaskPolicy.VERIFICATION:
+            raise RuntimeError("Verifier batch 1 failed closed: network timeout")
+
+        return LLMResponse(content="{}", model="m", provider=LLMProvider.GEMINI, metadata=metadata)
+
+    mock_router = AsyncMock()
+    mock_router.generate.side_effect = mock_generate_side_effect
+
+    with patch("app.agents.architecture.get_llm_router", return_value=mock_router), \
+         patch("app.agents.security.get_llm_router", return_value=mock_router), \
+         patch("app.agents.bug.get_llm_router", return_value=mock_router), \
+         patch("app.agents.verifier.get_llm_router", return_value=mock_router):
+
+        final_state = await run_analysis_workflow(
+            evidence_store=store,
+            scan_id=scan_id,
+            repo_dir=repo_dir,
+        )
+
+    assert final_state["status"] == "COMPLETED_UNCERTAIN"
+    errors = final_state["errors"]
+
+    verifier_errors = [e for e in errors if "failed closed" in e.lower()]
+    assert len(verifier_errors) == 1, f"Expected 1 verifier error, got {verifier_errors}"
+
+    uncertain_errors = [e for e in errors if "unconfirmed findings or exhausted" in e.lower()]
+    assert len(uncertain_errors) == 1, f"Expected 1 uncertainty error, got {uncertain_errors}"
+

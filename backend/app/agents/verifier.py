@@ -225,6 +225,45 @@ def _confirm_deterministic_detection(finding: Finding) -> bool:
     return True
 
 
+def _merge_findings_for_pass(
+    *,
+    is_revision_pass: bool,
+    verified_findings: List[Finding],
+    rejected_findings: List[Dict[str, Any]],
+    prior_verified: List[Finding],
+    prior_rejected: List[Dict[str, Any]],
+    prior_target_ids: Set[str],
+) -> Tuple[List[Finding], List[Dict[str, Any]]]:
+    """Merge findings on revision pass, preserving pass-1 confirmed findings without duplication."""
+    if not is_revision_pass:
+        return verified_findings, rejected_findings
+
+    seen_verified_ids = {str(f.id) for f in prior_verified}
+    seen_signatures = {
+        (
+            f.category,
+            f.evidences[0].file_path if f.evidences else None,
+            f.evidences[0].start_line if f.evidences else None,
+        )
+        for f in prior_verified
+    }
+    final_verified = list(prior_verified)
+    for f in verified_findings:
+        sig = (
+            f.category,
+            f.evidences[0].file_path if f.evidences else None,
+            f.evidences[0].start_line if f.evidences else None,
+        )
+        if str(f.id) not in seen_verified_ids and sig not in seen_signatures:
+            final_verified.append(f)
+            seen_verified_ids.add(str(f.id))
+            seen_signatures.add(sig)
+
+    final_rejected = [rf for rf in prior_rejected if str(rf.get("finding_id")) not in prior_target_ids]
+    final_rejected.extend(rejected_findings)
+    return final_verified, final_rejected
+
+
 async def run_verifier_agent(
     state: AnalysisState,
     runtime: Optional[Runtime[AnalysisRuntimeContext]] = None,
@@ -366,13 +405,25 @@ async def run_verifier_agent(
 
         candidates_for_llm.append((candidate, code_slice, verifier_policy, independent_context))
 
-    # If all candidate findings failed deterministic checks, return early
+    # If all candidate findings were resolved deterministically without LLM calls, return early
     if not candidates_for_llm:
+        final_verified, final_rejected = _merge_findings_for_pass(
+            is_revision_pass=is_revision_pass,
+            verified_findings=verified_findings,
+            rejected_findings=rejected_findings,
+            prior_verified=prior_verified,
+            prior_rejected=prior_rejected,
+            prior_target_ids=set(state.get("revision_target_ids", [])),
+        )
         return {
-            "verified_findings": verified_findings,
-            "rejected_findings": rejected_findings,
+            "verified_findings": final_verified,
+            "rejected_findings": final_rejected,
             "completed_nodes": ["verifier"],
-            "status": "COMPLETED",
+            "model_executions": model_executions,
+            "errors": errors,
+            "status": "VERIFIED",
+            "verification_decision": "verified",
+            "revision_target_ids": [],
         }
 
     # =========================================================================
@@ -595,34 +646,14 @@ async def run_verifier_agent(
     else:
         verification_decision = "verified"
 
-    if is_revision_pass:
-        seen_verified_ids = {str(f.id) for f in prior_verified}
-        seen_signatures = {
-            (
-                f.category,
-                f.evidences[0].file_path if f.evidences else None,
-                f.evidences[0].start_line if f.evidences else None,
-            )
-            for f in prior_verified
-        }
-        final_verified = list(prior_verified)
-        for f in verified_findings:
-            sig = (
-                f.category,
-                f.evidences[0].file_path if f.evidences else None,
-                f.evidences[0].start_line if f.evidences else None,
-            )
-            if str(f.id) not in seen_verified_ids and sig not in seen_signatures:
-                final_verified.append(f)
-                seen_verified_ids.add(str(f.id))
-                seen_signatures.add(sig)
-
-        prior_targeted = set(state.get("revision_target_ids", []))
-        final_rejected = [rf for rf in prior_rejected if str(rf.get("finding_id")) not in prior_targeted]
-        final_rejected.extend(rejected_findings)
-    else:
-        final_verified = verified_findings
-        final_rejected = rejected_findings
+    final_verified, final_rejected = _merge_findings_for_pass(
+        is_revision_pass=is_revision_pass,
+        verified_findings=verified_findings,
+        rejected_findings=rejected_findings,
+        prior_verified=prior_verified,
+        prior_rejected=prior_rejected,
+        prior_target_ids=set(state.get("revision_target_ids", [])),
+    )
 
     return {
         "verified_findings": final_verified,

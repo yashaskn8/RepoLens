@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from langgraph.graph import END, START, StateGraph
 
 from app.agents.architecture import run_architecture_agent
@@ -39,13 +39,14 @@ def run_finalize_node(state: AnalysisState) -> Dict[str, Any]:
 
 def run_finalize_uncertain_node(state: AnalysisState) -> Dict[str, Any]:
     """Deterministic finalization for uncertain or revision-exhausted repository analysis."""
-    errors = list(state.get("errors", []))
-    if not any("uncertain" in err.lower() for err in errors):
-        errors.append("Scan completed with unconfirmed findings or exhausted revision budget.")
+    new_errors: List[str] = []
+    existing_errors = state.get("errors", [])
+    if not any("uncertain" in err.lower() for err in existing_errors):
+        new_errors.append("Scan completed with unconfirmed findings or exhausted revision budget.")
     return {
         "status": "COMPLETED_UNCERTAIN",
         "completed_nodes": ["finalize_uncertain"],
-        "errors": errors,
+        "errors": new_errors,
     }
 
 
