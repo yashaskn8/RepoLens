@@ -12,26 +12,18 @@ from app.security.redaction import redact_secrets
 
 logger = logging.getLogger(__name__)
 
-# Strict runtime allowlist for repository analysis revision enrichment
-RUNTIME_MCP_ALLOWLIST = frozenset({
-    "repo_read_file",
-    "repo_get_related_symbols",
-    "repo_trace_contract",
-    "repo_retrieve_context",
-    "repo_get_static_findings",
-})
-
-# Call budgets
-MAX_MCP_TARGETS_PER_REVISION = 4
-MAX_MCP_CALLS_PER_TARGET = 2
-MAX_MCP_CALLS_PER_WORKFLOW = 8
-
-# Output and parameter bounds
-MAX_MCP_RESULT_BYTES = 50_000
-MAX_MCP_TEXT_CHARS = 20_000
-MAX_MCP_LIST_ITEMS = 20
-MAX_MCP_SNIPPET_CHARS = 5_000
-MAX_LINE_SPAN_READ = 200
+from app.mcp.constants import (
+    DEFAULT_MCP_TOOL_TIMEOUT_SECONDS,
+    MAX_LINE_SPAN_READ,
+    MAX_MCP_CALLS_PER_TARGET,
+    MAX_MCP_CALLS_PER_WORKFLOW,
+    MAX_MCP_LIST_ITEMS,
+    MAX_MCP_RESULT_BYTES,
+    MAX_MCP_SNIPPET_CHARS,
+    MAX_MCP_TARGETS_PER_REVISION,
+    MAX_MCP_TEXT_CHARS,
+    RUNTIME_MCP_ALLOWLIST,
+)
 
 
 class MCPToolEvidence(BaseModel):
@@ -223,18 +215,13 @@ class MCPToolExecutor:
 
         # 5. Handle invocation failure
         if result.is_error:
-            err_code = "MCP_TOOL_FAILED"
-            if result.error_message and "MCP_TOOL_TIMEOUT" in result.error_message:
-                err_code = "MCP_TOOL_TIMEOUT"
-            elif result.error_message and "MCP_TOOL_NOT_FOUND" in result.error_message:
-                err_code = "MCP_TOOL_NOT_FOUND"
-
+            error_code = result.error_code or "MCP_TOOL_FAILED"
             record = MCPToolExecutionRecord(
                 tool_name=tool_name,
                 target_finding_id=target_finding_id,
                 success=False,
                 duration_ms=duration_ms,
-                error_code=err_code,
+                error_code=error_code,
             )
             self.execution_records.append(record)
             return None, record
@@ -263,6 +250,8 @@ class MCPToolExecutor:
         digest = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()[:16]
 
         truncated = False
+        if isinstance(content, dict) and content.get("truncated") is True:
+            truncated = True
         if len(raw_text) > MAX_MCP_RESULT_BYTES:
             truncated = True
 

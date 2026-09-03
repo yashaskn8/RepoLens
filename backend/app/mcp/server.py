@@ -14,6 +14,7 @@ from app.mcp.types import (
     MCPToolCallResponse,
     MCPToolDefinition,
 )
+from app.mcp.constants import MAX_MCP_SERVER_COLLECTION_ITEMS
 from app.schemas.enums import Severity
 from app.security.redaction import redact_secrets
 
@@ -258,7 +259,12 @@ class MCPRepositoryServer:
                                 break
                 except Exception as exc:
                     safe_msg = redact_secrets(str(exc))[:256]
-                    return MCPToolCallResponse(tool_name=tool_name, is_error=True, error_message=f"Could not read file: {safe_msg}")
+                    logger.warning("Failed to read repository file %s: %s", redact_secrets(file_path)[:256], safe_msg)
+                    return MCPToolCallResponse(
+                        tool_name=tool_name,
+                        is_error=True,
+                        error_message="MCP_FILE_READ_FAILED: Could not read repository file.",
+                    )
 
                 total_lines = known_total if known_total is not None else current_line
                 end_line = requested_end if requested_end is not None else total_lines
@@ -317,9 +323,18 @@ class MCPRepositoryServer:
                     category=category,
                     tool=tool,
                 )
+                total_count = len(findings)
+                bounded_findings = findings[:MAX_MCP_SERVER_COLLECTION_ITEMS]
+                is_truncated = total_count > MAX_MCP_SERVER_COLLECTION_ITEMS
                 return MCPToolCallResponse(
                     tool_name=tool_name,
-                    content={"findings": [f.model_dump() for f in findings], "count": len(findings)},
+                    content={
+                        "findings": [f.model_dump() for f in bounded_findings],
+                        "total_count": total_count,
+                        "returned_count": len(bounded_findings),
+                        "count": len(bounded_findings),
+                        "truncated": is_truncated,
+                    },
                 )
 
             elif tool_name == "repo_get_related_symbols":
@@ -329,23 +344,39 @@ class MCPRepositoryServer:
                     return MCPToolCallResponse(tool_name=tool_name, is_error=True, error_message="Parameter 'symbol_name' is required.")
 
                 related = []
+                is_truncated = False
                 if self.repository_graph:
                     for node in self.repository_graph.get_nodes_by_kind(NodeKind.SYMBOL):
+                        if len(related) >= MAX_MCP_SERVER_COLLECTION_ITEMS:
+                            is_truncated = True
+                            break
                         if node.label == sym_name or sym_name in node.label:
                             if not f_path or (node.file_path and f_path in node.file_path):
                                 # Gather connected neighbors
                                 for edge in self.repository_graph.get_outgoing_edges(node.id):
+                                    if len(related) >= MAX_MCP_SERVER_COLLECTION_ITEMS:
+                                        is_truncated = True
+                                        break
                                     tgt = self.repository_graph.get_node(edge.target)
                                     if tgt:
                                         related.append({"relationship": edge.kind.value, "target": tgt.model_dump()})
                                 for edge in self.repository_graph.get_incoming_edges(node.id):
+                                    if len(related) >= MAX_MCP_SERVER_COLLECTION_ITEMS:
+                                        is_truncated = True
+                                        break
                                     src = self.repository_graph.get_node(edge.source)
                                     if src:
                                         related.append({"relationship": f"INCOMING_{edge.kind.value}", "source": src.model_dump()})
 
                 return MCPToolCallResponse(
                     tool_name=tool_name,
-                    content={"symbol_name": sym_name, "related_symbols": related, "count": len(related)},
+                    content={
+                        "symbol_name": sym_name,
+                        "related_symbols": related,
+                        "returned_count": len(related),
+                        "count": len(related),
+                        "truncated": is_truncated,
+                    },
                 )
 
             elif tool_name == "repo_trace_contract":
@@ -368,22 +399,33 @@ class MCPRepositoryServer:
                     if normalize_route_path(c.details.get("url") or c.details.get("target", "")) == norm_path
                 ]
 
+                backend_total = len(matched_routes)
+                frontend_total = len(matched_calls)
+                bounded_routes = matched_routes[:MAX_MCP_SERVER_COLLECTION_ITEMS]
+                bounded_calls = matched_calls[:MAX_MCP_SERVER_COLLECTION_ITEMS]
+                is_truncated = backend_total > MAX_MCP_SERVER_COLLECTION_ITEMS or frontend_total > MAX_MCP_SERVER_COLLECTION_ITEMS
+
                 return MCPToolCallResponse(
                     tool_name=tool_name,
                     content={
                         "input_pattern": raw_route,
                         "normalized_path": norm_path,
                         "http_method": method,
-                        "backend_routes": matched_routes,
-                        "frontend_calls": matched_calls,
-                        "is_matched": len(matched_routes) > 0 and len(matched_calls) > 0,
+                        "backend_routes": bounded_routes,
+                        "backend_total_count": backend_total,
+                        "backend_returned_count": len(bounded_routes),
+                        "frontend_calls": bounded_calls,
+                        "frontend_total_count": frontend_total,
+                        "frontend_returned_count": len(bounded_calls),
+                        "is_matched": len(bounded_routes) > 0 and len(bounded_calls) > 0,
+                        "truncated": is_truncated,
                     },
                 )
 
             elif tool_name == "repo_retrieve_context":
                 query = arguments.get("query", "")
                 intent = arguments.get("analysis_intent", "general")
-                max_chunks = min(int(arguments.get("max_chunks", 5)), 20)
+                max_chunks = min(max(1, int(arguments.get("max_chunks", 5))), 10)
 
                 if not query:
                     return MCPToolCallResponse(tool_name=tool_name, is_error=True, error_message="Parameter 'query' is required.")

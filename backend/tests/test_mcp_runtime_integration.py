@@ -37,7 +37,13 @@ from app.context.runtime import AnalysisRuntimeContext, ScanIntelligenceRuntime
 from app.graph.repository_graph import RepositoryGraph
 from app.ingestion.schemas import FileEntry, RepositoryManifest
 from app.llm.types import LLMProvider, LLMResponse, ModelExecutionMetadata, TaskPolicy
+from app.graph.schemas import EdgeKind, GraphEdge, GraphNode, NodeKind
 from app.mcp.adapter import create_mcp_protocol_server
+from app.mcp.constants import (
+    DEFAULT_MCP_INITIALIZATION_TIMEOUT_SECONDS,
+    MAX_MCP_CLIENT_RESULT_BYTES,
+    MAX_MCP_SERVER_COLLECTION_ITEMS,
+)
 from app.mcp.executor import (
     MAX_LINE_SPAN_READ,
     MAX_MCP_CALLS_PER_TARGET,
@@ -804,7 +810,8 @@ async def test_mcp_executor_timeout_consumes_budget(mcp_executor_fixture):
             tool_name="repo_read_file",
             is_error=True,
             content=None,
-            error_message="MCP_TOOL_TIMEOUT: Tool 'repo_read_file' exceeded timeout of 10.0s.",
+                error_code="MCP_TOOL_TIMEOUT",
+                error_message="MCP_TOOL_TIMEOUT: Tool 'repo_read_file' exceeded timeout of 10.0s.",
         ),
     ):
         ev, rec = await mcp_executor_fixture.execute_tool(
@@ -818,4 +825,613 @@ async def test_mcp_executor_timeout_consumes_budget(mcp_executor_fixture):
         # Attempted call consumed budget
         assert mcp_executor_fixture.workflow_call_count == 1
         assert mcp_executor_fixture.target_call_counts[target_id] == 1
+
+
+# =============================================================================
+# 14. Lifecycle & Timeout Edge Cases
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_mcp_initialization_timeout_cleans_up_task(mcp_server_fixture):
+    """Verify that a hanging MCP session creation/initialize times out, cleans up tasks, and resets state."""
+    client = MCPRuntimeClient(mcp_server_fixture, init_timeout_seconds=0.05)
+
+    # Patch create_connected_server_and_client_session to simulate a hung connection
+    async def hung_session(*args, **kwargs):
+        await asyncio.sleep(5.0)
+        yield None
+
+    from contextlib import asynccontextmanager
+    @asynccontextmanager
+    async def hung_cm(*args, **kwargs):
+        await asyncio.sleep(5.0)
+        yield None
+
+    with patch("app.mcp.runtime_client.create_connected_server_and_client_session", side_effect=hung_cm):
+        with pytest.raises(RuntimeError, match="MCP protocol session initialization failed"):
+            await client.ensure_connected()
+
+    assert client.is_connected is False
+    assert client._session is None
+    assert client._session_task is None
+    assert client._stop_event is None
+    assert client._discovered_tools is None
+
+
+@pytest.mark.asyncio
+async def test_mcp_list_tools_timeout_cleans_up_task(mcp_server_fixture):
+    """Verify that a hanging list_tools() call times out, cleans up task, and resets client state."""
+    client = MCPRuntimeClient(mcp_server_fixture, init_timeout_seconds=0.05)
+
+    class StallingSession:
+        async def list_tools(self):
+            await asyncio.sleep(5.0)
+            return None
+
+    from contextlib import asynccontextmanager
+    @asynccontextmanager
+    async def mock_cm(*args, **kwargs):
+        yield StallingSession()
+
+    with patch("app.mcp.runtime_client.create_connected_server_and_client_session", side_effect=mock_cm):
+        with pytest.raises(RuntimeError, match="MCP protocol session initialization failed"):
+            await client.ensure_connected()
+
+    assert client.is_connected is False
+    assert client._session is None
+    assert client._session_task is None
+    assert client._stop_event is None
+    assert client._discovered_tools is None
+
+
+@pytest.mark.asyncio
+async def test_mcp_list_tools_exception_cleans_up_task(mcp_server_fixture):
+    """Verify that an exception during list_tools() cleans up local session task and resets state."""
+    client = MCPRuntimeClient(mcp_server_fixture, init_timeout_seconds=2.0)
+
+    class FailingSession:
+        async def list_tools(self):
+            raise RuntimeError("Simulated list_tools transport failure")
+
+    from contextlib import asynccontextmanager
+    @asynccontextmanager
+    async def mock_cm(*args, **kwargs):
+        yield FailingSession()
+
+    with patch("app.mcp.runtime_client.create_connected_server_and_client_session", side_effect=mock_cm):
+        with pytest.raises(RuntimeError, match="MCP protocol session initialization failed"):
+            await client.ensure_connected()
+
+    assert client.is_connected is False
+    assert client._session is None
+    assert client._session_task is None
+    assert client._stop_event is None
+    assert client._discovered_tools is None
+
+
+@pytest.mark.asyncio
+async def test_mcp_initialization_cancellation_cleans_up_task(mcp_server_fixture):
+    """Verify that cancelling ensure_connected() cleans up the local runner task and propagates CancelledError."""
+    client = MCPRuntimeClient(mcp_server_fixture, init_timeout_seconds=5.0)
+
+    from contextlib import asynccontextmanager
+    @asynccontextmanager
+    async def slow_cm(*args, **kwargs):
+        await asyncio.sleep(2.0)
+        yield None
+
+    with patch("app.mcp.runtime_client.create_connected_server_and_client_session", side_effect=slow_cm):
+        task = asyncio.create_task(client.ensure_connected())
+        await asyncio.sleep(0.05)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert client.is_connected is False
+    assert client._session is None
+    assert client._session_task is None
+    assert client._stop_event is None
+    assert client._discovered_tools is None
+
+
+@pytest.mark.asyncio
+async def test_mcp_reconnect_after_failed_initialization(mcp_server_fixture):
+    """Verify that a subsequent ensure_connected() call succeeds cleanly after a failed attempt."""
+    client = MCPRuntimeClient(mcp_server_fixture, init_timeout_seconds=2.0)
+
+    # First attempt fails
+    from contextlib import asynccontextmanager
+    @asynccontextmanager
+    async def failing_cm(*args, **kwargs):
+        raise ConnectionError("Simulated network drop")
+        yield None
+
+    with patch("app.mcp.runtime_client.create_connected_server_and_client_session", side_effect=failing_cm):
+        with pytest.raises(RuntimeError, match="MCP protocol session initialization failed"):
+            await client.ensure_connected()
+
+    assert client.is_connected is False
+
+    # Second attempt succeeds with real server
+    try:
+        await client.ensure_connected()
+        assert client.is_connected is True
+        assert len(client.get_discovered_tools()) > 0
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_mcp_aclose_after_failed_initialization_is_safe(mcp_server_fixture):
+    """Verify that calling aclose() after a failed initialization is a safe no-op."""
+    client = MCPRuntimeClient(mcp_server_fixture, init_timeout_seconds=0.05)
+
+    from contextlib import asynccontextmanager
+    @asynccontextmanager
+    async def failing_cm(*args, **kwargs):
+        raise RuntimeError("Immediate failure")
+        yield None
+
+    with patch("app.mcp.runtime_client.create_connected_server_and_client_session", side_effect=failing_cm):
+        with pytest.raises(RuntimeError):
+            await client.ensure_connected()
+
+    # Safe no-op, must not raise
+    await client.aclose()
+    assert client.is_connected is False
+
+
+# =============================================================================
+# 15. Startup Failure Normalization
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_mcp_call_tool_normalizes_initialization_timeout(mcp_server_fixture):
+    """Verify that call_tool() returns MCP_PROTOCOL_ERROR when initialization times out, with no escaping exception."""
+    client = MCPRuntimeClient(mcp_server_fixture, init_timeout_seconds=0.05)
+
+    from contextlib import asynccontextmanager
+    @asynccontextmanager
+    async def hung_cm(*args, **kwargs):
+        await asyncio.sleep(5.0)
+        yield None
+
+    with patch("app.mcp.runtime_client.create_connected_server_and_client_session", side_effect=hung_cm):
+        res = await client.call_tool("repo_read_file", {"file_path": "main.py"})
+
+    assert res.is_error is True
+    assert res.error_code == "MCP_PROTOCOL_ERROR"
+    assert res.error_message == "MCP runtime connection failed."
+    assert res.content is None
+
+
+@pytest.mark.asyncio
+async def test_mcp_call_tool_normalizes_list_tools_exception(mcp_server_fixture):
+    """Verify that call_tool() returns MCP_PROTOCOL_ERROR when discovery raises an error."""
+    client = MCPRuntimeClient(mcp_server_fixture, init_timeout_seconds=2.0)
+
+    class FailingSession:
+        async def list_tools(self):
+            raise RuntimeError("Internal discovery fault")
+
+    from contextlib import asynccontextmanager
+    @asynccontextmanager
+    async def failing_cm(*args, **kwargs):
+        yield FailingSession()
+
+    with patch("app.mcp.runtime_client.create_connected_server_and_client_session", side_effect=failing_cm):
+        res = await client.call_tool("repo_read_file", {"file_path": "main.py"})
+
+    assert res.is_error is True
+    assert res.error_code == "MCP_PROTOCOL_ERROR"
+    assert res.error_message == "MCP runtime connection failed."
+
+
+@pytest.mark.asyncio
+async def test_mcp_executor_startup_failure_consumes_budget(mcp_server_fixture):
+    """Verify that an executor tool attempt resulting in MCP_PROTOCOL_ERROR consumes budget and records failure."""
+    client = MCPRuntimeClient(mcp_server_fixture, init_timeout_seconds=0.05)
+    executor = MCPToolExecutor(client)
+    target_id = "test-startup-failure-target"
+
+    from contextlib import asynccontextmanager
+    @asynccontextmanager
+    async def hung_cm(*args, **kwargs):
+        await asyncio.sleep(5.0)
+        yield None
+
+    with patch("app.mcp.runtime_client.create_connected_server_and_client_session", side_effect=hung_cm):
+        ev, rec = await executor.execute_tool("repo_read_file", target_id, {"file_path": "main.py"})
+
+    assert ev is None
+    assert rec.success is False
+    assert rec.error_code == "MCP_PROTOCOL_ERROR"
+    assert executor.workflow_call_count == 1
+    assert executor.target_call_counts[target_id] == 1
+
+
+@pytest.mark.asyncio
+async def test_langgraph_mcp_startup_failure_does_not_crash_workflow(evidence_store_fixture, temp_repo):
+    """Verify that if MCP startup fails, LangGraph mcp_enrich node completes safely without crashing."""
+    scan_id = str(uuid.uuid4())
+    candidate_id = uuid.uuid4()
+
+    heuristic_finding = Finding(
+        id=candidate_id,
+        scan_id=uuid.UUID(scan_id),
+        title="Candidate For Revision",
+        description="Path parameter id lacks validation.",
+        severity=Severity.HIGH,
+        status=FindingStatus.OPEN,
+        category="security",
+        evidences=[
+            Evidence(file_path="main.py", start_line=6, end_line=8, code_snippet="@app.get('/api/users/{id}')\n")
+        ],
+    )
+
+    async def mock_router_generate(request):
+        policy = request.task_policy
+        if policy == TaskPolicy.VERIFICATION:
+            # First pass says POSSIBLE (triggering mcp_enrich + revise), second pass says CONFIRMED
+            payload = {
+                "confidence": 0.9,
+                "evaluations": [{"index": 0, "verdict": "CONFIRMED", "reason": "Confirmed."}],
+            }
+            return LLMResponse(
+                content=json.dumps(payload),
+                model="mock-model",
+                provider=LLMProvider.GEMINI,
+                metadata=ModelExecutionMetadata(provider="mock", model_name="verifier"),
+            )
+        elif policy == TaskPolicy.BUG_REASONING:
+            payload = {
+                "findings": [
+                    {
+                        "title": "Grounded Vulnerability",
+                        "description": "Revised finding.",
+                        "category": "security",
+                        "severity": "HIGH",
+                        "evidence_refs": ["chunk:test:main.py:6:8"],
+                    }
+                ]
+            }
+            return LLMResponse(
+                content=json.dumps(payload),
+                model="mock-model",
+                provider=LLMProvider.GEMINI,
+                metadata=ModelExecutionMetadata(provider="mock", model_name="revision"),
+            )
+        return LLMResponse(content="{}", model="mock-model", provider=LLMProvider.GEMINI, metadata=ModelExecutionMetadata(provider="mock", model_name="mock"))
+
+    mock_router = AsyncMock()
+    mock_router.generate.side_effect = mock_router_generate
+
+    # Force MCPRuntimeClient to fail on ensure_connected
+    with patch("app.agents.graph.run_security_agent", new_callable=AsyncMock) as mock_sec, \
+         patch("app.agents.graph.run_architecture_agent", new_callable=AsyncMock) as mock_arch, \
+         patch("app.agents.graph.run_integration_agent", new_callable=AsyncMock) as mock_integ, \
+         patch("app.agents.graph.run_bug_agent", new_callable=AsyncMock) as mock_bug, \
+         patch("app.agents.revision.get_llm_router", return_value=mock_router), \
+         patch("app.agents.verifier.get_llm_router", return_value=mock_router), \
+         patch.object(MCPRuntimeClient, "ensure_connected", side_effect=RuntimeError("MCP startup failed")):
+
+        mock_sec.return_value = {"candidate_findings": [heuristic_finding], "completed_nodes": ["security"], "errors": []}
+        mock_arch.return_value = {"candidate_findings": [], "completed_nodes": ["architecture"], "errors": []}
+        mock_integ.return_value = {"candidate_findings": [], "completed_nodes": ["integration"], "errors": []}
+        mock_bug.return_value = {"candidate_findings": [], "completed_nodes": ["bug"], "errors": []}
+
+        final_state = await run_analysis_workflow(
+            evidence_store=evidence_store_fixture,
+            scan_id=scan_id,
+            repo_dir=temp_repo,
+            checkpointer=MemorySaver(),
+        )
+
+        # Workflow does NOT crash; runs through mcp_enrich, revise, verifier
+        assert "mcp_enrich" in final_state["completed_nodes"]
+        assert final_state["status"] in ("COMPLETED", "COMPLETED_UNCERTAIN")
+
+
+# =============================================================================
+# 16. Result Boundary & UTF-8 Byte Limits
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_mcp_oversized_ascii_text_result_rejected_before_json_loads(mcp_client_fixture):
+    """Verify that oversized textual result (>50,000 bytes) is rejected before json.loads is called."""
+    import mcp.types as mcp_types
+    from unittest.mock import MagicMock
+
+    large_text = "A" * 60_000
+    mock_res = mcp_types.CallToolResult(
+        content=[mcp_types.TextContent(type="text", text=large_text)],
+        isError=False,
+    )
+
+    with patch("json.loads") as mock_json_loads:
+        norm = mcp_client_fixture._normalize_result("repo_read_file", mock_res)
+
+        assert norm.is_error is True
+        assert norm.error_code == "MCP_RESULT_TOO_LARGE"
+        assert norm.error_message == "MCP response exceeded the maximum allowed result size."
+        assert norm.content is None
+        # json.loads was NOT called on the oversized string
+        mock_json_loads.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_mcp_oversized_unicode_text_result_rejected_by_utf8_bytes(mcp_client_fixture):
+    """Verify that a Unicode payload with <50,000 chars but >50,000 UTF-8 bytes is rejected by byte length."""
+    import mcp.types as mcp_types
+
+    # Each '😀' is 1 character, but 4 bytes in UTF-8
+    # 15,000 emojis = 15,000 characters, but 60,000 UTF-8 bytes (> 50,000 limit)
+    emojis = "😀" * 15_000
+    assert len(emojis) == 15_000
+    assert len(emojis.encode("utf-8")) == 60_000
+
+    mock_res = mcp_types.CallToolResult(
+        content=[mcp_types.TextContent(type="text", text=emojis)],
+        isError=False,
+    )
+
+    norm = mcp_client_fixture._normalize_result("repo_read_file", mock_res)
+    assert norm.is_error is True
+    assert norm.error_code == "MCP_RESULT_TOO_LARGE"
+    assert norm.content is None
+
+
+@pytest.mark.asyncio
+async def test_mcp_multiple_text_blocks_aggregate_limit_enforced(mcp_client_fixture):
+    """Verify that the ceiling applies to the aggregate of all text blocks, not individually."""
+    import mcp.types as mcp_types
+
+    # Three blocks of 20,000 bytes each -> aggregate 60,000 bytes (> 50,000 limit)
+    mock_res = mcp_types.CallToolResult(
+        content=[
+            mcp_types.TextContent(type="text", text="A" * 20_000),
+            mcp_types.TextContent(type="text", text="B" * 20_000),
+            mcp_types.TextContent(type="text", text="C" * 20_000),
+        ],
+        isError=False,
+    )
+
+    norm = mcp_client_fixture._normalize_result("repo_read_file", mock_res)
+    assert norm.is_error is True
+    assert norm.error_code == "MCP_RESULT_TOO_LARGE"
+
+
+@pytest.mark.asyncio
+async def test_mcp_exact_boundary_text_accepted_and_rejected(mcp_client_fixture):
+    """Verify exact 50,000 byte boundary: 50,000 bytes accepted, 50,001 bytes rejected."""
+    import mcp.types as mcp_types
+
+    # Exactly 50,000 bytes
+    res_exact = mcp_types.CallToolResult(
+        content=[mcp_types.TextContent(type="text", text="X" * MAX_MCP_CLIENT_RESULT_BYTES)],
+        isError=False,
+    )
+    norm_exact = mcp_client_fixture._normalize_result("repo_read_file", res_exact)
+    assert norm_exact.is_error is False
+
+    # Exactly 50,001 bytes
+    res_over = mcp_types.CallToolResult(
+        content=[mcp_types.TextContent(type="text", text="X" * (MAX_MCP_CLIENT_RESULT_BYTES + 1))],
+        isError=False,
+    )
+    norm_over = mcp_client_fixture._normalize_result("repo_read_file", res_over)
+    assert norm_over.is_error is True
+    assert norm_over.error_code == "MCP_RESULT_TOO_LARGE"
+
+
+@pytest.mark.asyncio
+async def test_mcp_oversized_structured_content_rejected(mcp_client_fixture):
+    """Verify that structuredContent exceeding 50,000 bytes serialized is rejected."""
+    import mcp.types as mcp_types
+
+    class StructuredMockResult:
+        isError = False
+        content = []
+        structuredContent = {"huge_list": ["item_" + str(i) for i in range(5000)]}
+
+    norm = mcp_client_fixture._normalize_result("repo_read_file", StructuredMockResult())
+    assert norm.is_error is True
+    assert norm.error_code == "MCP_RESULT_TOO_LARGE"
+
+
+@pytest.mark.asyncio
+async def test_mcp_valid_structured_content_accepted(mcp_client_fixture):
+    """Verify that valid structuredContent below 50,000 bytes is accepted."""
+    class StructuredMockResult:
+        isError = False
+        content = []
+        structuredContent = {"status": "ok", "items": [1, 2, 3]}
+
+    norm = mcp_client_fixture._normalize_result("repo_read_file", StructuredMockResult())
+    assert norm.is_error is False
+    assert norm.content == {"status": "ok", "items": [1, 2, 3]}
+
+
+@pytest.mark.asyncio
+async def test_mcp_oversized_result_consumes_budget_and_produces_no_evidence(mcp_executor_fixture):
+    """Verify that an oversized result consumes call budget and produces NO fake evidence."""
+    target_id = "test-oversized-target"
+
+    with patch.object(
+        mcp_executor_fixture.client,
+        "call_tool",
+        return_value=MCPNormalizedResult(
+            tool_name="repo_read_file",
+            is_error=True,
+            content=None,
+            error_code="MCP_RESULT_TOO_LARGE",
+            error_message="MCP response exceeded the maximum allowed result size.",
+        ),
+    ):
+        ev, rec = await mcp_executor_fixture.execute_tool("repo_read_file", target_id, {"file_path": "main.py"})
+
+    assert ev is None
+    assert rec.success is False
+    assert rec.error_code == "MCP_RESULT_TOO_LARGE"
+    assert mcp_executor_fixture.workflow_call_count == 1
+    assert mcp_executor_fixture.target_call_counts[target_id] == 1
+
+
+# =============================================================================
+# 17. Canonical Server Collection Bounds
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_server_repo_get_related_symbols_collection_bounded(temp_repo, evidence_store_fixture):
+    """Verify that repo_get_related_symbols limits returned items to MAX_MCP_SERVER_COLLECTION_ITEMS."""
+    graph = RepositoryGraph()
+    graph.add_node("sym:center", NodeKind.SYMBOL, "target_func")
+
+    # Add 70 connected symbols
+    for i in range(70):
+        graph.add_node(f"sym:neighbor_{i}", NodeKind.SYMBOL, f"func_{i}")
+        graph.add_edge("sym:center", f"sym:neighbor_{i}", EdgeKind.CALLS)
+
+    server = MCPRepositoryServer(evidence_store=evidence_store_fixture, repo_dir=temp_repo, repository_graph=graph)
+    res = await server.call_tool("repo_get_related_symbols", {"symbol_name": "target_func"})
+
+    assert res.is_error is False
+    content = res.content
+    assert content["returned_count"] <= MAX_MCP_SERVER_COLLECTION_ITEMS
+    assert len(content["related_symbols"]) <= MAX_MCP_SERVER_COLLECTION_ITEMS
+    assert content["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_server_repo_get_static_findings_collection_bounded(temp_repo, evidence_store_fixture):
+    """Verify that repo_get_static_findings limits returned findings to MAX_MCP_SERVER_COLLECTION_ITEMS."""
+    from app.analysis.schemas import StaticFinding
+    for i in range(70):
+        evidence_store_fixture._findings.append(
+            StaticFinding(
+                tool="bandit",
+                rule_id=f"B{i:03d}",
+                title=f"Finding {i}",
+                description="desc",
+                severity=Severity.LOW,
+                evidence=Evidence(file_path="main.py", start_line=1, end_line=2, code_snippet="pass"),
+            )
+        )
+
+    server = MCPRepositoryServer(evidence_store=evidence_store_fixture, repo_dir=temp_repo)
+    res = await server.call_tool("repo_get_static_findings", {})
+
+    assert res.is_error is False
+    content = res.content
+    assert content["total_count"] >= 70
+    assert content["returned_count"] == MAX_MCP_SERVER_COLLECTION_ITEMS
+    assert len(content["findings"]) == MAX_MCP_SERVER_COLLECTION_ITEMS
+    assert content["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_server_repo_trace_contract_collection_bounded(temp_repo, evidence_store_fixture):
+    """Verify that repo_trace_contract bounds backend_routes and frontend_calls collections."""
+    from app.ingestion.schemas import ParsedSymbol, SymbolKind
+
+    for i in range(60):
+        evidence_store_fixture.manifest.files[0].symbols.append(
+            ParsedSymbol(
+                name=f"route_{i}",
+                kind=SymbolKind.FASTAPI_ROUTE,
+                start_line=1,
+                end_line=2,
+                details={"http_method": "GET", "path": "/api/v1/items"},
+            )
+        )
+        evidence_store_fixture.manifest.files[0].symbols.append(
+            ParsedSymbol(
+                name=f"call_{i}",
+                kind=SymbolKind.FETCH_CALL,
+                start_line=1,
+                end_line=2,
+                details={"url": "/api/v1/items"},
+            )
+        )
+
+    server = MCPRepositoryServer(evidence_store=evidence_store_fixture, repo_dir=temp_repo)
+    res = await server.call_tool("repo_trace_contract", {"route_or_url": "/api/v1/items"})
+
+    assert res.is_error is False
+    content = res.content
+    assert content["backend_total_count"] == 60
+    assert content["backend_returned_count"] == MAX_MCP_SERVER_COLLECTION_ITEMS
+    assert len(content["backend_routes"]) == MAX_MCP_SERVER_COLLECTION_ITEMS
+    assert content["frontend_total_count"] == 60
+    assert content["frontend_returned_count"] == MAX_MCP_SERVER_COLLECTION_ITEMS
+    assert len(content["frontend_calls"]) == MAX_MCP_SERVER_COLLECTION_ITEMS
+    assert content["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_server_repo_retrieve_context_max_chunks_bounded(temp_repo, evidence_store_fixture):
+    """Verify that repo_retrieve_context clamps max_chunks to server bound of 10."""
+    server = MCPRepositoryServer(evidence_store=evidence_store_fixture, repo_dir=temp_repo)
+
+    # Calling without context engine returns summary fallback without error
+    res = await server.call_tool("repo_retrieve_context", {"query": "auth", "max_chunks": 99})
+    assert res.is_error is False
+
+
+# =============================================================================
+# 18. File Error Hygiene
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_repo_read_file_inner_error_hides_windows_drive_path(mcp_server_fixture):
+    """Verify that Windows drive letters and private paths are completely masked on file read error."""
+    windows_err = PermissionError("D:\\Private\\Repositories\\RepoLens\\secret.py: Access is denied")
+
+    with patch("builtins.open", side_effect=windows_err):
+        res = await mcp_server_fixture.call_tool("repo_read_file", {"file_path": "main.py"})
+
+    assert res.is_error is True
+    assert res.error_message == "MCP_FILE_READ_FAILED: Could not read repository file."
+    assert "D:\\" not in res.error_message
+    assert "Private" not in res.error_message
+    assert "secret.py" not in res.error_message
+    assert "Private" not in res.error_message
+    assert "secret.py" not in res.error_message
+
+
+@pytest.mark.asyncio
+async def test_repo_read_file_inner_error_hides_linux_path(mcp_server_fixture):
+    """Verify that Linux-style private paths are completely masked on file read error."""
+    linux_err = OSError("/opt/private/repos/repolens/secret.py: I/O error 5")
+
+    with patch("builtins.open", side_effect=linux_err):
+        res = await mcp_server_fixture.call_tool("repo_read_file", {"file_path": "main.py"})
+
+    assert res.is_error is True
+    assert res.error_message == "MCP_FILE_READ_FAILED: Could not read repository file."
+    assert "/opt/private" not in res.error_message
+
+
+@pytest.mark.asyncio
+async def test_repo_read_file_inner_error_hides_token_and_path(mcp_server_fixture):
+    """Verify that exceptions containing secret API tokens and paths expose strictly generic error."""
+    token_err = Exception("Auth failed for key Bearer eyJhbGciOiJIUzI1NiIsIn... on /mnt/data/secrets.env")
+
+    with patch("builtins.open", side_effect=token_err):
+        res = await mcp_server_fixture.call_tool("repo_read_file", {"file_path": "main.py"})
+
+    assert res.is_error is True
+    assert res.error_message == "MCP_FILE_READ_FAILED: Could not read repository file."
+    assert "Bearer" not in res.error_message
+    assert "secrets.env" not in res.error_message
+
+
+@pytest.mark.asyncio
+async def test_repo_read_file_path_confinement_remains_safe(mcp_server_fixture):
+    """Verify that path traversal attempts continue returning the safe access-denied message."""
+    res = await mcp_server_fixture.call_tool("repo_read_file", {"file_path": "../../etc/passwd"})
+    assert res.is_error is True
+    assert res.error_message == "Access denied: repository path is not permitted."
+
 
