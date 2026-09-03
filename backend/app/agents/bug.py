@@ -1,21 +1,30 @@
 """Bug specialist using compact evidence and governed free-first routing."""
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
+from langgraph.runtime import Runtime
 from app.agents.helpers import parse_llm_findings, safe_to_uuid
 from app.agents.state import AnalysisState
-from app.context.runtime import get_scan_context_engine
+from app.context.runtime import AnalysisRuntimeContext, get_scan_context_engine
 from app.context.prompt import pack_repository_context
 from app.agents.grounding import build_evidence_index
 from app.llm.budgets import REPOSITORY_ANALYSIS_BUDGET
 from app.llm.router import get_llm_router
 from app.llm.types import LLMMessage, LLMRequest, ModelCapability, TaskPolicy
 from app.llm.workflow_contracts import FINDINGS_OUTPUT_SCHEMA, lineage_for_scan
+from app.security.redaction import redact_secrets
 
 
-async def run_bug_agent(state: AnalysisState) -> Dict[str, Any]:
+async def run_bug_agent(
+    state: AnalysisState,
+    runtime: Optional[Runtime[AnalysisRuntimeContext]] = None,
+) -> Dict[str, Any]:
     """Analyze code logic, exception handling, resource management, and asynchronous patterns using targeted ContextBundle."""
     scan_id = safe_to_uuid(state["scan_id"])
-    context_engine = state.get("context_engine") or get_scan_context_engine(str(scan_id))
+    context_engine = None
+    if runtime is not None and getattr(runtime, "context", None) is not None:
+        context_engine = runtime.context.context_engine
+    if context_engine is None:
+        context_engine = get_scan_context_engine(str(scan_id))
     manifest = state.get("manifest_summary", {})
     routes = state.get("routes", [])
 
@@ -115,7 +124,8 @@ async def run_bug_agent(state: AnalysisState) -> Dict[str, Any]:
             evidence_index=evidence_index,
         )
     except Exception as exc:
-        errors.append(f"Bug Agent error: {str(exc)}")
+        safe_msg = redact_secrets(str(exc))[:2048]
+        errors.append(f"Bug Agent error: {safe_msg}")
 
     return {
         "candidate_findings": candidate_findings,

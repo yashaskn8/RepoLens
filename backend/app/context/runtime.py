@@ -1,5 +1,6 @@
 """Canonical ScanIntelligenceRuntime assembling full Phase 2 repository intelligence from EvidenceStore."""
 
+from dataclasses import dataclass
 import logging
 import os
 from typing import Any, Dict, List, Optional
@@ -320,3 +321,23 @@ def get_scan_context_engine(scan_id: str) -> Optional[ContextEngine]:
     """Retrieve ContextEngine for an active scan."""
     rt = get_scan_runtime(scan_id)
     return rt.context_engine if rt else None
+
+
+@dataclass(frozen=True)
+class AnalysisRuntimeContext:
+    """Transient repository intelligence runtime context. Never checkpointed."""
+
+    scan_runtime: ScanIntelligenceRuntime
+
+    @property
+    def context_engine(self) -> ContextEngine:
+        return self.scan_runtime.context_engine
+
+    @property
+    def repository_graph(self) -> RepositoryGraph:
+        return self.scan_runtime.repository_graph
+
+    @property
+    def evidence_store(self) -> EvidenceStore:
+        return self.scan_runtime.evidence_store
+

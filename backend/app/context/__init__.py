@@ -2,6 +2,7 @@
 
 from app.context.engine import ContextEngine
 from app.context.runtime import (
+    AnalysisRuntimeContext,
     ScanIntelligenceRuntime,
     get_scan_context_engine,
     get_scan_runtime,
@@ -11,6 +12,7 @@ from app.context.runtime import (
 from app.context.schemas import ContextBundle
 
 __all__ = [
+    "AnalysisRuntimeContext",
     "ContextBundle",
     "ContextEngine",
     "ScanIntelligenceRuntime",

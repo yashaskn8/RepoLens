@@ -10,6 +10,7 @@ from app.agents.bug import run_bug_agent
 from app.agents.checkpointer import get_sqlite_checkpointer
 from app.agents.integration import run_integration_agent
 from app.agents.mapper import run_repository_mapper
+from app.agents.revision import run_revision_agent
 from app.agents.security import run_security_agent
 from app.agents.state import AnalysisState
 from app.agents.verifier import run_verifier_agent
@@ -17,28 +18,65 @@ from app.analysis.store import EvidenceStore
 
 from app.context.engine import ContextEngine
 from app.context.runtime import (
+    AnalysisRuntimeContext,
     ScanIntelligenceRuntime,
     register_scan_runtime,
     unregister_scan_runtime,
 )
 from app.graph.repository_graph import RepositoryGraph
+from app.security.redaction import redact_secrets
 
 logger = logging.getLogger(__name__)
 
 
+def run_finalize_node(state: AnalysisState) -> Dict[str, Any]:
+    """Deterministic finalization for verified repository analysis."""
+    return {
+        "status": "COMPLETED",
+        "completed_nodes": ["finalize"],
+    }
+
+
+def run_finalize_uncertain_node(state: AnalysisState) -> Dict[str, Any]:
+    """Deterministic finalization for uncertain or revision-exhausted repository analysis."""
+    errors = list(state.get("errors", []))
+    if not any("uncertain" in err.lower() for err in errors):
+        errors.append("Scan completed with unconfirmed findings or exhausted revision budget.")
+    return {
+        "status": "COMPLETED_UNCERTAIN",
+        "completed_nodes": ["finalize_uncertain"],
+        "errors": errors,
+    }
+
+
+def route_after_verifier(state: AnalysisState) -> str:
+    """Pure conditional routing function evaluating verification outcome and revision count."""
+    decision = state.get("verification_decision")
+    revision_count = state.get("revision_count", 0)
+
+    if decision == "verified":
+        return "finalize"
+    elif decision == "needs_revision" and revision_count < 1:
+        return "revise"
+    return "finalize_uncertain"
+
+
 def build_analysis_graph(checkpointer: Optional[Any] = None) -> Any:
     """Construct and compile the parallel specialist LangGraph analysis workflow with optional checkpointer."""
-    workflow = StateGraph(AnalysisState)
+    workflow = StateGraph(AnalysisState, context_schema=AnalysisRuntimeContext)
 
-    # 1. Register specialist nodes
+    # 1. Register specialist and lifecycle nodes
     workflow.add_node("mapper", run_repository_mapper)
     workflow.add_node("architecture", run_architecture_agent)
     workflow.add_node("integration", run_integration_agent)
     workflow.add_node("security", run_security_agent)
     workflow.add_node("bug", run_bug_agent)
     workflow.add_node("verifier", run_verifier_agent)
+    workflow.add_node("revise", run_revision_agent)
+    workflow.add_node("finalize", run_finalize_node)
+    workflow.add_node("finalize_uncertain", run_finalize_uncertain_node)
 
-    # 2. Wire execution flow: START -> mapper -> parallel specialists -> verifier -> END
+    # 2. Wire execution flow: START -> mapper -> parallel specialists -> verifier
     workflow.add_edge(START, "mapper")
     workflow.add_edge("mapper", "architecture")
     workflow.add_edge("mapper", "integration")
@@ -50,7 +88,23 @@ def build_analysis_graph(checkpointer: Optional[Any] = None) -> Any:
     workflow.add_edge("security", "verifier")
     workflow.add_edge("bug", "verifier")
 
-    workflow.add_edge("verifier", END)
+    # 3. Conditional routing from verifier
+    workflow.add_conditional_edges(
+        "verifier",
+        route_after_verifier,
+        {
+            "finalize": "finalize",
+            "revise": "revise",
+            "finalize_uncertain": "finalize_uncertain",
+        },
+    )
+
+    # 4. Loop revise back to verifier (bounded to at most 1 attempt by route_after_verifier and revision_count)
+    workflow.add_edge("revise", "verifier")
+
+    # 5. Terminal edges
+    workflow.add_edge("finalize", END)
+    workflow.add_edge("finalize_uncertain", END)
 
     return workflow.compile(checkpointer=checkpointer)
 
@@ -67,19 +121,21 @@ async def run_analysis_workflow(
     """Execute or resume the durable LangGraph multi-agent analysis workflow using scan_id as thread identifier.
     
     Guarantees:
-    - Automatically builds and registers canonical ScanIntelligenceRuntime.
-    - Large code files and complex class instances remain outside msgpack state.
+    - Automatically builds and registers canonical ScanIntelligenceRuntime and passes AnalysisRuntimeContext.
+    - Large code files, service objects, and complex class instances remain outside msgpack state.
     - Checkpoint saves serializable state after every super-step.
     - An interrupted scan resumes from the last completed node without re-executing finished agents.
-    - Failed nodes or terminal failures capture errors without corrupting the checkpointer.
+    - Failed nodes or terminal failures capture sanitized errors without corrupting the checkpointer.
     """
-    config = {"configurable": {"thread_id": scan_id}}
+    config = {
+        "configurable": {"thread_id": scan_id},
+        "recursion_limit": 25,
+    }
     app = build_analysis_graph(checkpointer=checkpointer)
 
     # Assemble and register ScanIntelligenceRuntime for this scan_id
     try:
         if context_engine is not None:
-            # If ContextEngine was explicitly provided, construct or register lightweight runtime
             runtime = ScanIntelligenceRuntime(
                 evidence_store=evidence_store,
                 repository_graph=repository_graph or ContextEngine(evidence_store).repository_graph,
@@ -98,7 +154,21 @@ async def run_analysis_workflow(
             )
             register_scan_runtime(scan_id, runtime)
     except Exception as exc:
-        logger.warning("Notice during ScanIntelligenceRuntime setup for scan %s: %s", scan_id, str(exc))
+        safe_msg = redact_secrets(str(exc))[:2048]
+        logger.warning("Notice during ScanIntelligenceRuntime setup for scan %s: %s", scan_id, safe_msg)
+        runtime = ScanIntelligenceRuntime(
+            evidence_store=evidence_store,
+            repository_graph=repository_graph or ContextEngine(evidence_store).repository_graph,
+            chunks=[],
+            vector_index=None,
+            embedding_provider=None,
+            retrieval_service=None,
+            context_engine=context_engine or ContextEngine(evidence_store),
+            repo_dir=repo_dir,
+        )
+        register_scan_runtime(scan_id, runtime)
+
+    runtime_context = AnalysisRuntimeContext(scan_runtime=runtime)
 
     try:
         # Check for existing checkpoint state for this scan_id thread
@@ -107,7 +177,8 @@ async def run_analysis_workflow(
             try:
                 current_state = await app.aget_state(config)
             except Exception as exc:
-                logger.warning("Failed to retrieve existing checkpoint state for %s: %s", scan_id, str(exc))
+                safe_msg = redact_secrets(str(exc))[:2048]
+                logger.warning("Failed to retrieve existing checkpoint state for %s: %s", scan_id, safe_msg)
 
             if current_state and current_state.values:
                 # If all nodes already finished, return the completed state directly
@@ -118,16 +189,17 @@ async def run_analysis_workflow(
                 # Interrupted scan: resume execution from last completed super-step
                 logger.info("Resuming scan %s from checkpoint (next nodes: %s)...", scan_id, current_state.next)
                 try:
-                    resumed_result = await app.ainvoke(None, config=config)
+                    resumed_result = await app.ainvoke(None, config=config, context=runtime_context)
                     return resumed_result
                 except Exception as exc:
-                    logger.error("Terminal workflow failure during resume of scan %s: %s", scan_id, str(exc))
+                    safe_msg = redact_secrets(str(exc))[:2048]
+                    logger.error("Terminal workflow failure during resume of scan %s: %s", scan_id, safe_msg)
                     failed_state = dict(current_state.values)
                     failed_state["status"] = "FAILED"
-                    failed_state.setdefault("errors", []).append(f"Terminal execution failure on resume: {str(exc)}")
+                    failed_state.setdefault("errors", []).append(f"Terminal execution failure on resume: {safe_msg}")
                     return failed_state
 
-        # Fresh scan initialization (strictly JSON/msgpack serializable for SQLite checkpoints)
+        # Fresh scan initialization (strictly JSON/msgpack serializable for checkpoints)
         summary = evidence_store.get_summary()
         initial_state: AnalysisState = {
             "scan_id": scan_id,
@@ -143,8 +215,12 @@ async def run_analysis_workflow(
             "frontend_calls": [c.model_dump() for c in evidence_store.get_http_calls()],
             "static_findings": [f.model_dump() for f in evidence_store.all_findings],
             "candidate_findings": [],
+            "revision_candidates": [],
             "verified_findings": [],
             "rejected_findings": [],
+            "revision_count": 0,
+            "verification_decision": None,
+            "revision_target_ids": [],
             "completed_nodes": [],
             "model_executions": [],
             "errors": [],
@@ -152,15 +228,13 @@ async def run_analysis_workflow(
         }
 
         try:
-            final_state = await app.ainvoke(initial_state, config=config)
+            final_state = await app.ainvoke(initial_state, config=config, context=runtime_context)
             return final_state
         except Exception as exc:
-            logger.error("Terminal workflow failure for scan %s: %s", scan_id, str(exc))
-            # Attempt to record failure in state
+            safe_msg = redact_secrets(str(exc))[:2048]
+            logger.error("Terminal workflow failure for scan %s: %s", scan_id, safe_msg)
             initial_state["status"] = "FAILED"
-            initial_state["errors"].append(f"Terminal execution failure: {str(exc)}")
+            initial_state.setdefault("errors", []).append(f"Terminal execution failure: {safe_msg}")
             return initial_state
     finally:
         unregister_scan_runtime(scan_id)
-
-

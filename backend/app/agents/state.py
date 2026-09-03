@@ -8,11 +8,12 @@ from app.schemas.finding import Finding
 from app.schemas.metadata import ModelExecutionMetadata
 
 
-class AnalysisState(TypedDict):
+class AnalysisState(TypedDict, total=False):
     """Explicit shared state schema for the LangGraph multi-agent analysis workflow.
-    
-    Strictly keeps large source code out of state; stores identifiers, metadata,
-    and structured finding representations for safe SQLite checkpoint persistence.
+
+    Strictly keeps large source code and runtime service objects out of state;
+    stores identifiers, metadata, structured finding representations, and bounded
+    orchestration tracking for safe SQLite / InMemory checkpoint persistence.
     """
 
     scan_id: str
@@ -30,12 +31,20 @@ class AnalysisState(TypedDict):
     frontend_calls: List[Dict[str, Any]]
     static_findings: List[Dict[str, Any]]
 
-    # Candidate findings aggregated from parallel specialists
+    # Candidate findings aggregated from parallel specialists (uses operator.add for fan-in)
     candidate_findings: Annotated[List[Finding], operator.add]
+
+    # Bounded semantic revision candidates (no reducer - replaced on revision pass)
+    revision_candidates: List[Finding]
 
     # Grounded findings verified by Verifier agent
     verified_findings: List[Finding]
     rejected_findings: List[Dict[str, Any]]
+
+    # Bounded orchestration tracking
+    revision_count: int
+    verification_decision: Optional[str]
+    revision_target_ids: List[str]
 
     # Checkpoint execution tracking
     completed_nodes: Annotated[List[str], operator.add]
@@ -44,7 +53,3 @@ class AnalysisState(TypedDict):
     model_executions: Annotated[List[ModelExecutionMetadata], operator.add]
     errors: Annotated[List[str], operator.add]
     status: str
-
-    # Repository intelligence runtime abstractions (ContextEngine & RepositoryGraph)
-    context_engine: Optional[Any]
-    repository_graph: Optional[Any]

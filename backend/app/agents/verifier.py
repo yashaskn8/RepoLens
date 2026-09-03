@@ -9,13 +9,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from app.agents.helpers import extract_json_block
 from app.agents.state import AnalysisState
-from app.context.runtime import get_scan_context_engine
+from app.context.runtime import AnalysisRuntimeContext, get_scan_context_engine, get_scan_runtime
 from app.llm.budgets import REPOSITORY_VERIFICATION_BUDGET
 from app.llm.router import get_llm_router
 from app.llm.types import LLMMessage, LLMProvider, LLMRequest, ModelCapability, TaskPolicy
 from app.llm.workflow_contracts import VERIFICATION_OUTPUT_SCHEMA, lineage_for_scan
 from app.schemas.enums import Severity, VerificationVerdict
 from app.schemas.finding import Finding
+from app.security.redaction import redact_secrets
+from langgraph.runtime import Runtime
 
 
 _DETERMINISTIC_DETECTOR_KINDS = frozenset({
@@ -223,7 +225,10 @@ def _confirm_deterministic_detection(finding: Finding) -> bool:
     return True
 
 
-async def run_verifier_agent(state: AnalysisState) -> Dict[str, Any]:
+async def run_verifier_agent(
+    state: AnalysisState,
+    runtime: Optional[Runtime[AnalysisRuntimeContext]] = None,
+) -> Dict[str, Any]:
     """Rigorously verify candidate findings against 7 independent criteria:
     
     1. File exists in workspace
@@ -234,14 +239,27 @@ async def run_verifier_agent(state: AnalysisState) -> Dict[str, Any]:
     6. Recommendation addresses root cause
     7. Deduplication against already accepted findings
     """
-    candidate_findings: List[Finding] = state.get("candidate_findings", [])
+    is_revision_pass = bool(state.get("revision_count", 0) > 0 and state.get("revision_candidates") is not None)
+    if is_revision_pass:
+        candidate_findings: List[Finding] = state.get("revision_candidates", [])
+        prior_verified: List[Finding] = list(state.get("verified_findings", []))
+        prior_rejected: List[Dict[str, Any]] = list(state.get("rejected_findings", []))
+    else:
+        candidate_findings = state.get("candidate_findings", [])
+        prior_verified = []
+        prior_rejected = []
+
     scan_id = state.get("scan_id", "")
     commit_hash = state.get("commit_hash", "")
-    from app.context.runtime import get_scan_runtime
-    active_runtime = get_scan_runtime(str(scan_id))
-    repo_dir = (active_runtime.repo_dir if active_runtime and getattr(active_runtime, "repo_dir", None) else None) or state.get("repo_dir", "")
-    context_engine = state.get("context_engine") or (active_runtime.context_engine if active_runtime else None) or get_scan_context_engine(str(scan_id))
 
+    active_runtime = None
+    if runtime is not None and getattr(runtime, "context", None) is not None:
+        active_runtime = runtime.context.scan_runtime
+    if active_runtime is None:
+        active_runtime = get_scan_runtime(str(scan_id))
+
+    repo_dir = (active_runtime.repo_dir if active_runtime and getattr(active_runtime, "repo_dir", None) else None) or state.get("repo_dir", "")
+    context_engine = (active_runtime.context_engine if active_runtime else None) or get_scan_context_engine(str(scan_id))
 
     verified_findings: List[Finding] = []
     rejected_findings: List[Dict[str, Any]] = []
@@ -250,10 +268,12 @@ async def run_verifier_agent(state: AnalysisState) -> Dict[str, Any]:
 
     if not candidate_findings:
         return {
-            "verified_findings": [],
-            "rejected_findings": [],
+            "verified_findings": prior_verified if is_revision_pass else [],
+            "rejected_findings": prior_rejected if is_revision_pass else [],
             "completed_nodes": ["verifier"],
-            "status": "COMPLETED",
+            "status": "VERIFIED",
+            "verification_decision": "verified",
+            "revision_target_ids": [],
         }
 
     seen_signatures: Set[Tuple[str, Optional[str], Optional[int]]] = set()
@@ -453,7 +473,8 @@ async def run_verifier_agent(state: AnalysisState) -> Dict[str, Any]:
                 if item_index in allowed_indices:
                     eval_map[item_index] = item
         except Exception as exc:
-            errors.append(f"Verifier batch {batch_number} failed closed: {str(exc)}")
+            safe_msg = redact_secrets(str(exc))[:2048]
+            errors.append(f"Verifier batch {batch_number} failed closed: {safe_msg}")
 
     for idx, (target_candidate, _, _, _) in enumerate(candidates_for_llm):
         evaluation = eval_map.get(idx)
@@ -538,11 +559,78 @@ async def run_verifier_agent(state: AnalysisState) -> Dict[str, Any]:
                 reason=target_candidate.verification_reason,
             ))
 
+    # =========================================================================
+    # Phase 3: Explicit Orchestration Routing & Revision Pass Merging
+    # =========================================================================
+    has_infrastructure_failure = bool(errors)
+    has_missing_eval = any(
+        rf.get("verdict") == VerificationVerdict.POSSIBLE.value
+        and "no valid evaluation" in str(rf.get("reason", "")).lower()
+        for rf in rejected_findings
+    )
+
+    revision_target_ids: List[str] = []
+    if not has_infrastructure_failure and not has_missing_eval:
+        for rf in rejected_findings:
+            f_id = rf.get("finding_id")
+            verdict = rf.get("verdict")
+            reason = str(rf.get("reason", ""))
+            # Must be VerificationVerdict.POSSIBLE.value string comparison
+            if verdict == VerificationVerdict.POSSIBLE.value:
+                # Must be attested from checked repository bytes
+                if f_id in attested_candidate_ids:
+                    # Must be a genuine semantic claim uncertainty, not format or provider errors
+                    if (
+                        not reason.startswith("Independent verifier returned no valid evaluation")
+                        and not reason.startswith("Independent verifier returned invalid verdict")
+                        and "failed closed" not in reason.lower()
+                    ):
+                        revision_target_ids.append(str(f_id))
+
+    if has_infrastructure_failure or has_missing_eval:
+        verification_decision = "uncertain"
+        revision_target_ids = []
+    elif revision_target_ids:
+        verification_decision = "needs_revision"
+    else:
+        verification_decision = "verified"
+
+    if is_revision_pass:
+        seen_verified_ids = {str(f.id) for f in prior_verified}
+        seen_signatures = {
+            (
+                f.category,
+                f.evidences[0].file_path if f.evidences else None,
+                f.evidences[0].start_line if f.evidences else None,
+            )
+            for f in prior_verified
+        }
+        final_verified = list(prior_verified)
+        for f in verified_findings:
+            sig = (
+                f.category,
+                f.evidences[0].file_path if f.evidences else None,
+                f.evidences[0].start_line if f.evidences else None,
+            )
+            if str(f.id) not in seen_verified_ids and sig not in seen_signatures:
+                final_verified.append(f)
+                seen_verified_ids.add(str(f.id))
+                seen_signatures.add(sig)
+
+        prior_targeted = set(state.get("revision_target_ids", []))
+        final_rejected = [rf for rf in prior_rejected if str(rf.get("finding_id")) not in prior_targeted]
+        final_rejected.extend(rejected_findings)
+    else:
+        final_verified = verified_findings
+        final_rejected = rejected_findings
+
     return {
-        "verified_findings": verified_findings,
-        "rejected_findings": rejected_findings,
+        "verified_findings": final_verified,
+        "rejected_findings": final_rejected,
         "completed_nodes": ["verifier"],
         "model_executions": model_executions,
         "errors": errors,
-        "status": "COMPLETED",
+        "status": "VERIFIED",
+        "verification_decision": verification_decision,
+        "revision_target_ids": revision_target_ids,
     }

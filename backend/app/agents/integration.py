@@ -1,16 +1,25 @@
 """Integration specialist projecting deterministic route-contract facts."""
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
+from langgraph.runtime import Runtime
 from app.agents.helpers import safe_to_uuid
 from app.agents.deterministic import contract_candidates
 from app.agents.state import AnalysisState
-from app.context.runtime import get_scan_context_engine
+from app.context.runtime import AnalysisRuntimeContext, get_scan_context_engine
+from app.security.redaction import redact_secrets
 
 
-async def run_integration_agent(state: AnalysisState) -> Dict[str, Any]:
+async def run_integration_agent(
+    state: AnalysisState,
+    runtime: Optional[Runtime[AnalysisRuntimeContext]] = None,
+) -> Dict[str, Any]:
     """Analyze API contracts, frontend-backend alignment, and route consistency using targeted ContextBundle."""
     scan_id = safe_to_uuid(state["scan_id"])
-    context_engine = state.get("context_engine") or get_scan_context_engine(str(scan_id))
+    context_engine = None
+    if runtime is not None and getattr(runtime, "context", None) is not None:
+        context_engine = runtime.context.context_engine
+    if context_engine is None:
+        context_engine = get_scan_context_engine(str(scan_id))
     frontend_calls = state.get("frontend_calls", [])
 
 
