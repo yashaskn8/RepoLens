@@ -253,7 +253,24 @@ class MCPRuntimeClient:
         if result.isError:
             err_text = ""
             if result.content:
-                text_parts = [c.text for c in result.content if getattr(c, "type", "") == "text" and hasattr(c, "text")]
+                total_err_utf8_bytes = 0
+                text_parts = []
+                for block in result.content:
+                    if getattr(block, "type", "") == "text" and hasattr(block, "text") and block.text:
+                        b_text = str(block.text)
+                        b_bytes = len(b_text.encode("utf-8"))
+                        sep_bytes = 1 if text_parts else 0
+                        if total_err_utf8_bytes + sep_bytes + b_bytes > MAX_MCP_CLIENT_RESULT_BYTES:
+                            return MCPNormalizedResult(
+                                tool_name=tool_name,
+                                is_error=True,
+                                content=None,
+                                error_code="MCP_RESULT_TOO_LARGE",
+                                error_message="MCP response exceeded the maximum allowed result size.",
+                                raw_text="",
+                            )
+                        total_err_utf8_bytes += sep_bytes + b_bytes
+                        text_parts.append(b_text)
                 err_text = "\n".join(text_parts).strip()
             if not err_text:
                 err_text = f"Tool '{tool_name}' returned error with no details."

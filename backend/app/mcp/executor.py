@@ -238,6 +238,12 @@ class MCPToolExecutor:
         self.execution_records.append(record)
         return evidence, record
 
+    def _bound_snippet(self, text: str) -> Tuple[str, bool]:
+        """Slice text to MAX_MCP_SNIPPET_CHARS and return (bounded_text, was_truncated)."""
+        if len(text) > MAX_MCP_SNIPPET_CHARS:
+            return text[:MAX_MCP_SNIPPET_CHARS], True
+        return text, False
+
     def _normalize_evidence(
         self,
         tool_name: str,
@@ -280,7 +286,8 @@ class MCPToolExecutor:
                 symbols = symbols[:MAX_MCP_LIST_ITEMS]
                 truncated = True
             summary = f"Discovered {len(symbols)} connected symbols for '{sym_name}'."
-            snippet = json.dumps(symbols, indent=2, default=str)[:MAX_MCP_SNIPPET_CHARS]
+            snippet, was_trunc = self._bound_snippet(json.dumps(symbols, indent=2, default=str))
+            truncated = truncated or was_trunc
 
         elif tool_name == "repo_trace_contract" and isinstance(content, dict):
             pattern = content.get("input_pattern", "")
@@ -288,7 +295,8 @@ class MCPToolExecutor:
             routes = content.get("backend_routes", [])
             calls = content.get("frontend_calls", [])
             summary = f"Route contract trace for '{pattern}': matched={is_matched} (backend_routes={len(routes)}, frontend_calls={len(calls)})."
-            snippet = json.dumps(content, indent=2, default=str)[:MAX_MCP_SNIPPET_CHARS]
+            snippet, was_trunc = self._bound_snippet(json.dumps(content, indent=2, default=str))
+            truncated = truncated or was_trunc
 
         elif tool_name == "repo_retrieve_context" and isinstance(content, dict):
             chunks = content.get("relevant_chunks", [])
@@ -296,7 +304,8 @@ class MCPToolExecutor:
                 chunks = chunks[:MAX_MCP_LIST_ITEMS]
                 truncated = True
             summary = f"Retrieved {len(chunks)} code chunks for query: '{arguments.get('query', '')[:80]}'."
-            snippet = json.dumps(chunks, indent=2, default=str)[:MAX_MCP_SNIPPET_CHARS]
+            snippet, was_trunc = self._bound_snippet(json.dumps(chunks, indent=2, default=str))
+            truncated = truncated or was_trunc
 
         elif tool_name == "repo_get_static_findings" and isinstance(content, dict):
             findings = content.get("findings", [])
@@ -304,7 +313,8 @@ class MCPToolExecutor:
                 findings = findings[:MAX_MCP_LIST_ITEMS]
                 truncated = True
             summary = f"Retrieved {len(findings)} deterministic static scanner findings."
-            snippet = json.dumps(findings, indent=2, default=str)[:MAX_MCP_SNIPPET_CHARS]
+            snippet, was_trunc = self._bound_snippet(json.dumps(findings, indent=2, default=str))
+            truncated = truncated or was_trunc
 
         else:
             summary = f"Tool '{tool_name}' executed."

@@ -1434,4 +1434,68 @@ async def test_repo_read_file_path_confinement_remains_safe(mcp_server_fixture):
     assert res.is_error is True
     assert res.error_message == "Access denied: repository path is not permitted."
 
+# =============================================================================
+# 19. Hardening Regression Tests (2026-09-03)
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_mcp_client_error_result_too_large(mcp_client_fixture):
+    """Verify that oversized error results are rejected with MCP_RESULT_TOO_LARGE."""
+    import mcp.types as mcp_types
+
+    # Error result exceeding limit
+    large_err_text = "E" * (MAX_MCP_CLIENT_RESULT_BYTES + 100)
+    mock_res = mcp_types.CallToolResult(
+        content=[mcp_types.TextContent(type="text", text=large_err_text)],
+        isError=True,
+    )
+
+    norm = mcp_client_fixture._normalize_result("test_tool", mock_res)
+    assert norm.is_error is True
+    assert norm.error_code == "MCP_RESULT_TOO_LARGE"
+    assert norm.raw_text == ""
+
+@pytest.mark.asyncio
+async def test_mcp_executor_truthful_snippet_truncation(mcp_executor_fixture):
+    """Verify snippet truncation is truthfully marked for specific tools."""
+    # Test for tools that slice JSON snippets
+    tools_to_test = [
+        ("repo_get_related_symbols", {"related_symbols": ["s" * 6000]}),
+        ("repo_trace_contract", {"backend_routes": ["r" * 6000]}),
+        ("repo_retrieve_context", {"relevant_chunks": ["c" * 6000]}),
+        ("repo_get_static_findings", {"findings": ["f" * 6000]}),
+    ]
+
+    for tool_name, content in tools_to_test:
+        ev, truncated = mcp_executor_fixture._normalize_evidence(
+            tool_name, "target-1", {}, content
+        )
+        assert truncated is True, f"Tool {tool_name} failed to mark snippet truncation"
+        assert len(ev.snippet) <= 5000 # MAX_MCP_SNIPPET_CHARS
+
+@pytest.mark.asyncio
+async def test_mcp_executor_symbols_boundary_truncation(mcp_executor_fixture):
+    """Verify repo_get_related_symbols truncation boundary at MAX_MCP_LIST_ITEMS."""
+    from app.mcp.constants import MAX_MCP_LIST_ITEMS
+
+    # Case 1: Exactly at the cap -> NOT truncated
+    content_exact = {
+        "symbol_name": "test",
+        "related_symbols": [{"name": f"s{i}"} for i in range(MAX_MCP_LIST_ITEMS)]
+    }
+    ev_exact, truncated_exact = mcp_executor_fixture._normalize_evidence(
+        "repo_get_related_symbols", "target-1", {}, content_exact
+    )
+    assert truncated_exact is False
+
+    # Case 2: One over the cap -> truncated
+    content_over = {
+        "symbol_name": "test",
+        "related_symbols": [{"name": f"s{i}"} for i in range(MAX_MCP_LIST_ITEMS + 1)]
+    }
+    ev_over, truncated_over = mcp_executor_fixture._normalize_evidence(
+        "repo_get_related_symbols", "target-1", {}, content_over
+    )
+    assert truncated_over is True
+
 
