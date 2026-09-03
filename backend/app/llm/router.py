@@ -5,11 +5,26 @@ import random
 from typing import Callable, Dict, List, Optional, Tuple
 from sqlalchemy.orm import Session
 from app.core.config import get_settings
-from app.llm.adapters import GeminiAdapter, GroqAdapter, HuggingFaceAdapter, NvidiaAdapter
+from app.llm.adapters import (
+    CloudflareAdapter,
+    GeminiAdapter,
+    GroqAdapter,
+    HuggingFaceAdapter,
+    MistralAdapter,
+    NvidiaAdapter,
+    OpenRouterAdapter,
+)
 from app.llm.base import BaseLLMAdapter
-from app.llm.exceptions import LLMAllFallbacksFailedError, LLMError, LLMRateLimitError
-from app.llm.types import LLMProvider, LLMRequest, LLMResponse, TaskPolicy
+from app.llm.classifier import TaskCategory, TaskClassifier
+from app.llm.exceptions import (
+    LLMAllFallbacksFailedError,
+    LLMError,
+    LLMRateLimitError,
+    ProviderFailureCode,
+)
 from app.llm.gateway import CapabilityAIGateway
+from app.llm.health import ProviderHealthRegistry
+from app.llm.types import LLMProvider, LLMRequest, LLMResponse, TaskPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -38,24 +53,30 @@ def _calculate_retry_delay(
 class LLMRouter:
     """Canonical LLM Gateway Router.
     
-    Dispatches LLM requests based on task policy to designated primary models and
-    automatically executes fallback routes on provider failures or timeouts.
+    Dispatches LLM requests based on task classification and policies to designated primary models and
+    automatically executes fallback routes on provider failures or timeouts without model voting.
     """
 
     def __init__(
         self,
         adapters: Optional[Dict[LLMProvider, BaseLLMAdapter]] = None,
         capability_gateway: Optional[CapabilityAIGateway] = None,
+        health: Optional[ProviderHealthRegistry] = None,
     ):
+        self._health = health or ProviderHealthRegistry()
         self._adapters: Dict[LLMProvider, BaseLLMAdapter] = adapters or {
             LLMProvider.GEMINI: GeminiAdapter(),
             LLMProvider.GROQ: GroqAdapter(),
             LLMProvider.NVIDIA: NvidiaAdapter(),
             LLMProvider.HUGGINGFACE: HuggingFaceAdapter(),
+            LLMProvider.CLOUDFLARE: CloudflareAdapter(),
+            LLMProvider.MISTRAL: MistralAdapter(),
+            LLMProvider.OPENROUTER: OpenRouterAdapter(),
         }
         self._capability_gateway = capability_gateway or CapabilityAIGateway(
             self._adapters,
             max_retries=max(0, get_settings().LLM_MAX_RETRIES),
+            health=self._health,
         )
 
     def get_adapter(self, provider: LLMProvider) -> BaseLLMAdapter:
@@ -164,29 +185,68 @@ class LLMRouter:
             ),
         )
 
+    def get_task_aware_routes(
+        self,
+        request: LLMRequest,
+        category: Optional[TaskCategory] = None,
+    ) -> Tuple[Tuple[LLMProvider, str], List[Tuple[LLMProvider, str]]]:
+        """Determine primary provider and fallback chain based on deterministic task classification."""
+        settings = get_settings()
+        cat = category or TaskClassifier.classify(request)
+
+        if cat == TaskCategory.COMPLEX_REASONING:
+            # Mistral primary for complex reasoning / structured generation
+            primary = (LLMProvider.MISTRAL, settings.MISTRAL_DEFAULT_MODEL)
+            fallbacks = [
+                (LLMProvider.CLOUDFLARE, settings.CLOUDFLARE_DEFAULT_MODEL),
+                (LLMProvider.OPENROUTER, settings.OPENROUTER_DEFAULT_MODEL),
+            ]
+            return primary, fallbacks
+
+        elif cat == TaskCategory.RETRIEVAL:
+            # Cohere primary for semantic search / retrieval embeddings
+            primary = (LLMProvider.COHERE, getattr(settings, "COHERE_EMBEDDING_MODEL", "embed-english-v3.0"))
+            fallbacks = [
+                (LLMProvider.NVIDIA, getattr(settings, "EMBEDDING_MODEL_PRIMARY", "nvidia/nv-embedcode-7b-v1")),
+            ]
+            return primary, fallbacks
+
+        else:  # SIMPLE_GENERATION (Default general-purpose)
+            primary = (LLMProvider.CLOUDFLARE, settings.CLOUDFLARE_DEFAULT_MODEL)
+            fallbacks = [
+                (LLMProvider.MISTRAL, settings.MISTRAL_DEFAULT_MODEL),
+                (LLMProvider.OPENROUTER, settings.OPENROUTER_DEFAULT_MODEL),
+            ]
+            return primary, fallbacks
+
     async def generate(self, request: LLMRequest) -> LLMResponse:
-        """Route request according to policy/provider overrides with bounded transient retries and automatic fallback."""
+        """Route request according to task classification/policy/overrides with circuit breaking and fallback."""
         import asyncio
         settings = get_settings()
         max_retries = max(0, settings.LLM_MAX_RETRIES)
 
-        # Capability requests use the governed cheap-first control plane. The
-        # task-policy path below remains for backward-compatible callers.
+        # Capability requests use the governed cheap-first control plane.
         if request.capability is not None:
             return await self._capability_gateway.generate(request)
 
         # 1. Direct explicit provider override
         if request.provider is not None:
             adapter = self.get_adapter(request.provider)
+            model_target = request.model or ""
             for attempt in range(max_retries + 1):
                 try:
                     response = await adapter.generate(request)
+                    if model_target:
+                        self._health.record_success(request.provider, model_target)
                     if attempt > 0:
                         if response.metadata.extra_metadata is None:
                             response.metadata.extra_metadata = {}
                         response.metadata.extra_metadata["retry_count"] = attempt
                     return response
                 except LLMError as exc:
+                    if model_target:
+                        code = getattr(exc, "failure_code", ProviderFailureCode.UNAVAILABLE)
+                        self._health.record_failure(request.provider, model_target, code, retry_after_seconds=getattr(exc, "retry_after_seconds", None))
                     if not exc.retryable or attempt >= max_retries:
                         raise
                     delay = _calculate_retry_delay(attempt, exc)
@@ -196,24 +256,39 @@ class LLMRouter:
                     )
                     await asyncio.sleep(delay)
 
-        # 2. Determine policy route
-        policy = request.task_policy or TaskPolicy.ARCHITECTURE
-        primary, fallbacks = self.get_policy_routes(policy)
-        execution_chain = [primary] + fallbacks
+        # 2. Determine execution chain via task classification or explicit task policy
+        if request.task_policy is not None:
+            primary, fallbacks = self.get_policy_routes(request.task_policy)
+            routing_target = f"policy '{request.task_policy.value}'"
+        else:
+            category = TaskClassifier.classify(request)
+            primary, fallbacks = self.get_task_aware_routes(request, category=category)
+            routing_target = f"task '{category.value}'"
 
+        execution_chain = [primary] + fallbacks
         attempted_errors: List[LLMError] = []
 
         for provider, model in execution_chain:
+            # Check circuit breaker health state
+            if not self._health.allow_request(provider, model):
+                logger.warning(f"Circuit breaker is OPEN or in cooldown for {provider.value} ({model}). Skipping...")
+                continue
+
             adapter = self.get_adapter(provider)
             attempt_request = request.model_copy(update={"provider": provider, "model": model})
 
-            for attempt in range(max_retries + 1):
+            # OpenRouter constraint: single attempt only, never retry OpenRouter repeatedly
+            route_max_retries = 0 if provider == LLMProvider.OPENROUTER else max_retries
+
+            for attempt in range(route_max_retries + 1):
                 try:
                     response = await adapter.generate(attempt_request)
+                    self._health.record_success(provider, model)
                     if attempt > 0 or attempted_errors:
                         if response.metadata.extra_metadata is None:
                             response.metadata.extra_metadata = {}
                         response.metadata.extra_metadata["retry_count"] = attempt
+                        response.metadata.extra_metadata["fallback_used"] = bool(attempted_errors)
                         if attempted_errors:
                             response.metadata.extra_metadata["fallbacks_attempted"] = [
                                 {
@@ -225,9 +300,17 @@ class LLMRouter:
                             ]
                     return response
                 except LLMError as exc:
-                    if not exc.retryable or attempt >= max_retries:
+                    code = getattr(exc, "failure_code", ProviderFailureCode.UNAVAILABLE)
+                    self._health.record_failure(
+                        provider,
+                        model,
+                        code,
+                        retry_after_seconds=getattr(exc, "retry_after_seconds", None),
+                    )
+
+                    if not exc.retryable or attempt >= route_max_retries:
                         logger.warning(
-                            f"LLM execution exhausted/permanent failure for policy '{policy.value}' on {provider.value} ({model}): {exc.message}. "
+                            f"LLM execution exhausted/permanent failure for route target '{routing_target}' on {provider.value} ({model}): {exc.message}. "
                             f"Attempting fallback..."
                         )
                         attempted_errors.append(exc)
@@ -236,12 +319,13 @@ class LLMRouter:
                     delay = _calculate_retry_delay(attempt, exc)
                     logger.warning(
                         f"Transient LLM error on {provider.value} ({model}): {exc.message}. "
-                        f"Retrying in {delay:.2f}s (attempt {attempt + 1}/{max_retries})..."
+                        f"Retrying in {delay:.2f}s (attempt {attempt + 1}/{route_max_retries})..."
                     )
                     await asyncio.sleep(delay)
 
                 except Exception as exc:
                     logger.error(f"Unexpected error executing {provider.value} ({model}): {str(exc)}")
+                    self._health.record_failure(provider, model, ProviderFailureCode.UNKNOWN)
                     attempted_errors.append(
                         LLMError(f"Unexpected execution failure: {str(exc)}", provider=provider, model=model, retryable=False)
                     )
@@ -250,7 +334,7 @@ class LLMRouter:
         # If all routes in the execution chain failed
         error_summary = "; ".join([f"[{err.provider.value if err.provider else 'unknown'}]: {err.message}" for err in attempted_errors])
         raise LLMAllFallbacksFailedError(
-            f"All LLM candidate models for policy '{policy.value}' failed: {error_summary}",
+            f"All LLM candidate models for {routing_target} failed: {error_summary}",
             attempted_errors=attempted_errors,
         )
 

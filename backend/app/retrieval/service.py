@@ -4,11 +4,12 @@ import math
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from app.core.config import get_settings
 from app.graph.repository_graph import RepositoryGraph
-from app.indexing.embeddings import EmbeddingProvider
+from app.indexing.embeddings import CohereEmbeddingAdapter, EmbeddingProvider
 from app.indexing.schemas import CodeChunk, EmbeddingRequest
 from app.retrieval.fusion import reciprocal_rank_fusion
-from app.retrieval.reranker import QwenReranker
+from app.retrieval.reranker import CohereReranker, QwenReranker
 from app.retrieval.schemas import (
     RerankCandidate,
     RetrievalChannel,
@@ -27,13 +28,26 @@ class RetrievalService:
         vector_index: Optional[VectorIndex] = None,
         embedding_provider: Optional[EmbeddingProvider] = None,
         repository_graph: Optional[RepositoryGraph] = None,
-        reranker: Optional[QwenReranker] = None,
+        reranker: Optional[Any] = None,
     ):
+        settings = get_settings()
         self.chunks_by_id: Dict[str, CodeChunk] = {c.chunk_id: c for c in chunks}
         self.vector_index = vector_index or InMemoryVectorIndex()
-        self.embedding_provider = embedding_provider
+
+        if embedding_provider is None and settings.COHERE_API_KEY:
+            self.embedding_provider = CohereEmbeddingAdapter()
+        else:
+            self.embedding_provider = embedding_provider
+
         self.repository_graph = repository_graph
-        self.reranker = reranker or QwenReranker()
+
+        if reranker is None:
+            if settings.COHERE_API_KEY:
+                self.reranker = CohereReranker()
+            else:
+                self.reranker = QwenReranker()
+        else:
+            self.reranker = reranker
 
     # =========================================================================
     # Channel 1: Exact Symbol / Path Match

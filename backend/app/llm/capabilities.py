@@ -171,6 +171,53 @@ class ModelCapabilityRegistry:
                     max_output_tokens=32_768,
                 ),
                 ModelCapabilitySpec(
+                    provider=LLMProvider.CLOUDFLARE,
+                    model=configured.CLOUDFLARE_DEFAULT_MODEL,
+                    capabilities=frozenset(
+                        {
+                            ModelCapability.CLASSIFICATION,
+                            ModelCapability.STRUCTURED_EXTRACTION,
+                        }
+                    ),
+                    cost_tier=ModelCostTier.FREE,
+                    quality_rank=25,
+                    context_window_tokens=128_000,
+                    max_output_tokens=8_192,
+                ),
+                ModelCapabilitySpec(
+                    provider=LLMProvider.MISTRAL,
+                    model=configured.MISTRAL_DEFAULT_MODEL,
+                    capabilities=frozenset(
+                        {
+                            ModelCapability.REPOSITORY_ANALYSIS,
+                            ModelCapability.CODE_REASONING,
+                            ModelCapability.DEEP_REASONING,
+                            ModelCapability.SECURITY_REASONING,
+                            ModelCapability.STRUCTURED_EXTRACTION,
+                            ModelCapability.RESEARCH,
+                            ModelCapability.PATCH_GENERATION,
+                        }
+                    ),
+                    cost_tier=ModelCostTier.STANDARD,
+                    quality_rank=5,
+                    context_window_tokens=128_000,
+                    max_output_tokens=16_384,
+                ),
+                ModelCapabilitySpec(
+                    provider=LLMProvider.OPENROUTER,
+                    model=configured.OPENROUTER_DEFAULT_MODEL,
+                    capabilities=frozenset(
+                        {
+                            ModelCapability.CLASSIFICATION,
+                            ModelCapability.RESEARCH,
+                        }
+                    ),
+                    cost_tier=ModelCostTier.STANDARD,
+                    quality_rank=50,
+                    context_window_tokens=128_000,
+                    max_output_tokens=8_192,
+                ),
+                ModelCapabilitySpec(
                     provider=LLMProvider.NVIDIA,
                     model=configured.MODEL_VERIFICATION,
                     capabilities=frozenset(

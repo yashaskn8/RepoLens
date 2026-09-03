@@ -59,3 +59,7 @@ backend/artifacts/
 output/
 *.png
 skills-lock.json
+
+# Repomix
+repomix-output.*
+.repomix/

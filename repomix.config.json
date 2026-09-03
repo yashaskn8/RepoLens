@@ -1,0 +1,39 @@
+{
+  "output": {
+    "filePath": "repomix-output.txt",
+    "style": "markdown"
+  },
+  "ignore": {
+    "customPatterns": [
+      ".env",
+      ".env.*",
+      "**/.env",
+      "**/.env.*",
+      "**/node_modules/**",
+      "**/.venv/**",
+      "**/venv/**",
+      "**/__pycache__/**",
+      "**/.pytest_cache/**",
+      "**/.next/**",
+      "**/out/**",
+      "**/build/**",
+      "**/dist/**",
+      "*.db",
+      "*.sqlite3",
+      "checkpoints.db",
+      "**/output/**",
+      "**/scratch/**",
+      "**/artifacts/**",
+      "*.png",
+      "*.jpg",
+      "*.jpeg",
+      "*.gif",
+      "*.webp",
+      "package-lock.json",
+      "*.tsbuildinfo",
+      "skills-lock.json",
+      "**/.git/**",
+      "repomix-output.*"
+    ]
+  }
+}

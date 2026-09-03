@@ -209,3 +209,97 @@ class HuggingFaceEmbeddingAdapter(EmbeddingProvider):
             dimensions=embeddings[0].dimensions if embeddings else self.DIMENSIONS,
             total_tokens=usage.get("total_tokens"),
         )
+
+
+# ---------------------------------------------------------------------------
+# Cohere Embedding Adapter
+# ---------------------------------------------------------------------------
+
+class CohereEmbeddingAdapter(EmbeddingProvider):
+    """Cohere embedding adapter for embed-english-v3.0 / embed-multilingual-v3.0."""
+
+    MODEL_ID: str = "embed-english-v3.0"
+    DIMENSIONS: int = 1024
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ):
+        settings = get_settings()
+        self.api_key = api_key or settings.COHERE_API_KEY
+        self.base_url = (base_url or settings.COHERE_BASE_URL).rstrip("/")
+
+    @property
+    def provider_name(self) -> str:
+        return "cohere"
+
+    @property
+    def default_model(self) -> str:
+        settings = get_settings()
+        return getattr(settings, "COHERE_EMBEDDING_MODEL", self.MODEL_ID)
+
+    @property
+    def dimensions(self) -> int:
+        return self.DIMENSIONS
+
+    async def embed(self, request: EmbeddingRequest) -> EmbeddingResponse:
+        """Call Cohere /embed endpoint."""
+        settings = get_settings()
+        model = request.model or self.default_model
+        if not self.api_key:
+            raise RuntimeError("Cohere API key is not configured in settings or environment.")
+
+        url = f"{self.base_url}/embed"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+
+        # Map input_type to Cohere v3 semantics
+        input_type = "search_query" if request.input_type in ("query", "search_query") else "search_document"
+        payload = {
+            "model": model,
+            "texts": request.texts,
+            "input_type": input_type,
+            "embedding_types": ["float"],
+        }
+
+        timeout = settings.LLM_DEFAULT_TIMEOUT
+        start = time.perf_counter()
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Cohere embedding request failed ({resp.status_code}): {resp.text}"
+            )
+
+        data = resp.json()
+        raw_embeddings = data.get("embeddings", [])
+        if isinstance(raw_embeddings, dict) and "float" in raw_embeddings:
+            raw_embeddings = raw_embeddings["float"]
+
+        embeddings = []
+        for idx, vec in enumerate(raw_embeddings):
+            embeddings.append(
+                EmbeddingResult(
+                    index=idx,
+                    vector=vec,
+                    dimensions=len(vec),
+                )
+            )
+
+        meta = data.get("meta", {})
+        billed_units = meta.get("billed_units", {})
+        total_tokens = billed_units.get("input_tokens")
+
+        return EmbeddingResponse(
+            embeddings=embeddings,
+            model=data.get("model", model),
+            provider=self.provider_name,
+            dimensions=embeddings[0].dimensions if embeddings else self.DIMENSIONS,
+            total_tokens=total_tokens,
+        )

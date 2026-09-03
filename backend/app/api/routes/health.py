@@ -90,6 +90,26 @@ def _build_telemetry_report(db: Session) -> TelemetryReport:
             default_model=settings.MODEL_INTEGRATION_CODE,
         ),
         ProviderTelemetry(
+            provider="cloudflare",
+            configured=bool(settings.CLOUDFLARE_API_TOKEN and settings.CLOUDFLARE_API_TOKEN.strip()),
+            default_model=settings.CLOUDFLARE_DEFAULT_MODEL,
+        ),
+        ProviderTelemetry(
+            provider="mistral",
+            configured=bool(settings.MISTRAL_API_KEY and settings.MISTRAL_API_KEY.strip()),
+            default_model=settings.MISTRAL_DEFAULT_MODEL,
+        ),
+        ProviderTelemetry(
+            provider="cohere",
+            configured=bool(settings.COHERE_API_KEY and settings.COHERE_API_KEY.strip()),
+            default_model=settings.COHERE_RERANK_MODEL,
+        ),
+        ProviderTelemetry(
+            provider="openrouter",
+            configured=bool(settings.OPENROUTER_API_KEY and settings.OPENROUTER_API_KEY.strip()),
+            default_model=settings.OPENROUTER_DEFAULT_MODEL,
+        ),
+        ProviderTelemetry(
             provider="github",
             configured=bool(settings.GITHUB_DELIVERY_ENABLED and settings.GITHUB_TOKEN and settings.GITHUB_TOKEN.strip()),
             default_model="github-git-data-api",

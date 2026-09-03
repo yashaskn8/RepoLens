@@ -15,6 +15,10 @@ class LLMProvider(str, Enum):
     GROQ = "groq"
     NVIDIA = "nvidia"
     HUGGINGFACE = "huggingface"
+    CLOUDFLARE = "cloudflare"
+    MISTRAL = "mistral"
+    COHERE = "cohere"
+    OPENROUTER = "openrouter"
 
 
 class TaskPolicy(str, Enum):
@@ -153,3 +157,14 @@ class LLMResponse(BaseModel):
     provider: LLMProvider = Field(..., description="Provider that served the response")
     metadata: ModelExecutionMetadata = Field(..., description="Telemetry and token usage metadata")
     finish_reason: Optional[str] = Field(default=None, description="Model stop/finish reason")
+
+    def to_normalized_dict(self) -> Dict[str, Any]:
+        """Return canonical cross-provider normalized response dictionary."""
+        extra = self.metadata.extra_metadata or {}
+        return {
+            "content": self.content,
+            "provider": self.provider.value,
+            "model": self.model,
+            "fallbackUsed": bool(extra.get("fallback_used", False) or extra.get("retry_count", 0) > 0 or extra.get("fallbacks_attempted")),
+            "latencyMs": round(self.metadata.execution_time_ms, 2) if self.metadata.execution_time_ms is not None else None,
+        }

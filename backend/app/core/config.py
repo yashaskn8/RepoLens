@@ -33,12 +33,21 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str = ""
     NVIDIA_API_KEY: str = ""
     HUGGINGFACE_API_KEY: str = ""
+    CLOUDFLARE_API_TOKEN: str = ""
+    CLOUDFLARE_ACCOUNT_ID: str = ""
+    MISTRAL_API_KEY: str = ""
+    COHERE_API_KEY: str = ""
+    OPENROUTER_API_KEY: str = ""
 
     # LLM Provider Base URLs
     GEMINI_BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta"
     GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
     NVIDIA_BASE_URL: str = "https://integrate.api.nvidia.com/v1"
     HUGGINGFACE_BASE_URL: str = "https://router.huggingface.co/v1"
+    CLOUDFLARE_BASE_URL: str = "https://api.cloudflare.com/client/v4"
+    MISTRAL_BASE_URL: str = "https://api.mistral.ai/v1"
+    COHERE_BASE_URL: str = "https://api.cohere.com/v1"
+    OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
 
     # Canonical Policy Model IDs
     MODEL_ARCHITECTURE: str = "gemini-3.7-flash"
@@ -47,6 +56,17 @@ class Settings(BaseSettings):
     MODEL_SECURITY_REASONING: str = "openai/gpt-oss-120b"
     MODEL_LIGHTWEIGHT_CLASSIFICATION: str = "openai/gpt-oss-20b"
     MODEL_VERIFICATION: str = "nvidia/nemotron-3-ultra-550b-a55b"
+
+    # Task-Aware Multi-Provider Model Defaults
+    CLOUDFLARE_DEFAULT_MODEL: str = "@cf/meta/llama-3.1-8b-instruct"
+    MISTRAL_DEFAULT_MODEL: str = "mistral-small-latest"
+    COHERE_EMBEDDING_MODEL: str = "embed-english-v3.0"
+    COHERE_RERANK_MODEL: str = "rerank-v3.5"
+    OPENROUTER_DEFAULT_MODEL: str = "meta-llama/llama-3.2-3b-instruct:free"
+
+    # Routing & Reranking Optimization Thresholds
+    ROUTER_RERANK_MIN_CANDIDATES: int = 3
+    ROUTER_COMPLEXITY_CONTEXT_THRESHOLD: int = 2000
 
     # LLM Gateway Execution Settings
     LLM_DEFAULT_TIMEOUT: float = 30.0

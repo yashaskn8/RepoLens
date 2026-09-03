@@ -20,6 +20,7 @@ _SENSITIVE_KEY_SUBSTRINGS = ("key", "token", "secret", "auth", "password", "cred
 # Canonical Secret and Host-Path Redaction Patterns
 _SECRET_PATTERNS = [
     (re.compile(r"(?i)\b(bearer\s+)[a-zA-Z0-9_\-\.]{10,}\b"), r"\1[REDACTED]"),
+    (re.compile(r"\b(sk-or-v1-[a-zA-Z0-9_\-]{16,})\b"), r"sk-or-[REDACTED]"),
     (re.compile(r"\b(sk-[a-zA-Z0-9_\-]{16,})\b"), r"sk-[REDACTED]"),
     (re.compile(r"\b(gsk_[a-zA-Z0-9_\-]{16,})\b"), r"gsk_[REDACTED]"),
     (re.compile(r"\b(hf_[a-zA-Z0-9_\-]{16,})\b"), r"hf_[REDACTED]"),
@@ -27,6 +28,8 @@ _SECRET_PATTERNS = [
     (re.compile(r"\b(AIza[0-9A-Za-z\-_]{20,})\b"), r"AIza[REDACTED]"),
     (re.compile(r"\b(ghp_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9_]{22,})\b"), r"[REDACTED_GITHUB_TOKEN]"),
     (re.compile(r"\b(eyJ[a-zA-Z0-9_\-]{10,}\.eyJ[a-zA-Z0-9_\-]{10,}\.[a-zA-Z0-9_\-]{10,})\b"), r"[REDACTED_JWT]"),
+    (re.compile(r"\b(cfut_[a-zA-Z0-9_\-]{16,})\b"), r"cfut_[REDACTED]"),
+    (re.compile(r"\b(cohere_[a-zA-Z0-9_\-]{16,})\b"), r"cohere_[REDACTED]"),
     (re.compile(r"(?i)\b(api[_-]?key|secret|password|auth[_-]?token)\s*[:=]\s*['\"][^\s'\"]{6,}['\"]"), r"\1='[REDACTED]'"),
 ]
 
