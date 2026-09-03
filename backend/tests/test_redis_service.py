@@ -19,6 +19,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError, RedisError
 
 from app.core.config import get_settings
 from app.core.redis import RedisManager
+from app.security.redaction import contains_sensitive_material
 from app.services.redis_service import RedisService, _deserialize, _serialize
 
 
@@ -280,40 +281,66 @@ async def test_exception_resilience():
 
 
 # ------------------------------------------------------------------------------
-# Test 10: Secrets are never stored in Redis (canonical redaction patterns)
+# Test 10: Secrets and structural credentials rejected by Redis
 # ------------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_secrets_never_stored_in_redis(redis_service: RedisService):
-    """Verify Redis rejects writes containing representative secrets from canonical redaction."""
+async def test_secrets_never_stored_in_redis(redis_service: RedisService, mock_redis_manager: RedisManager):
+    """Verify Redis rejects writes containing representative secrets and opaque structural credentials."""
+    mock_client = mock_redis_manager.get_client()
+    assert mock_client is not None
 
-    # Each tuple: (description, key_or_value_containing_secret)
-    secret_samples = [
-        ("OpenAI sk- key", {"api_key": "sk-proj-123456789012345678901234567890"}),
-        ("Groq gsk_ key", {"token": "gsk_abcdefghij1234567890"}),
-        ("HuggingFace hf_ key", {"auth": "hf_abcdefghijklmnop1234"}),
-        ("NVIDIA nvapi- key", {"key": "nvapi-abcdefghijklmnop1234"}),
-        ("Google AIza key", {"gcp_key": "AIzaSyD1234567890abcdefghij"}),
-        ("GitHub PAT ghp_", {"token": "ghp_abcdefghijklmnopqrstuvwxyz0123456789"}),
-        ("JWT token", {"jwt": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"}),
-        ("Cloudflare cfut_ key", {"cf_token": "cfut_abcdefghijklmnop1234"}),
-        ("Cohere API key", {"cohere_key": "cohere_abcdefghijklmnop1234"}),
-        ("Bearer token", {"auth_header": "Bearer eyJhbGciOiJSUzI1NiJ9token"}),
-        ("Generic api_key='...'", {"raw": "api_key='my_secret_value_here'"}),
-        ("OpenRouter sk-or-v1 key", {"key": "sk-or-v1-abcdefghijklmnop1234"}),
+    # 1. Structural credential identifiers without known token prefixes (opaque values)
+    structural_samples = [
+        ("dict with api_key", {"api_key": "opaque-random-value"}),
+        ("dict with token", {"token": "opaque-random-value"}),
+        ("nested dict with credentials", {"credentials": {"value": "opaque-random-value"}}),
+        ("deeply nested authorization", {"nested": {"authorization": "opaque-random-value"}}),
+        ("list containing password", {"items": [{"password": "opaque-random-value"}]}),
     ]
 
-    for desc, payload in secret_samples:
+    for desc, payload in structural_samples:
         result = await redis_service.set(f"test_{desc}", payload, namespace="cache")
-        assert result is False, f"Secret type '{desc}' was NOT rejected by Redis write!"
+        assert result is False, f"Structural secret '{desc}' was NOT rejected by Redis write!"
+        # Verify no actual write reached mocked Redis storage
+        assert redis_service.build_key(f"test_{desc}", "cache") not in mock_client.storage
+        # Verify availability state is completely unaffected (does NOT mark degraded)
+        assert redis_service.is_available is True
+        assert mock_redis_manager.is_available is True
 
-    # Key containing token is also blocked
+    # 2. Known provider-token formats inside string values
+    token_samples = [
+        ("OpenAI sk- key", {"custom_field": "sk-proj-123456789012345678901234567890"}),
+        ("Groq gsk_ key", {"custom_field": "gsk_abcdefghij1234567890"}),
+        ("HuggingFace hf_ key", {"custom_field": "hf_abcdefghijklmnop1234"}),
+        ("NVIDIA nvapi- key", {"custom_field": "nvapi-abcdefghijklmnop1234"}),
+        ("Google AIza key", {"custom_field": "AIzaSyD1234567890abcdefghij"}),
+        ("GitHub PAT ghp_", {"custom_field": "ghp_abcdefghijklmnopqrstuvwxyz0123456789"}),
+        ("JWT token", {"custom_field": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"}),
+        ("Cloudflare cfut_ key", {"custom_field": "cfut_abcdefghijklmnop1234"}),
+        ("Cohere API key", {"custom_field": "cohere_abcdefghijklmnop1234"}),
+        ("Bearer token", {"custom_field": "Bearer eyJhbGciOiJSUzI1NiJ9token"}),
+        ("Generic api_key='...'", {"custom_field": "api_key='my_secret_value_here'"}),
+        ("OpenRouter sk-or-v1 key", {"custom_field": "sk-or-v1-abcdefghijklmnop1234"}),
+    ]
+
+    for desc, payload in token_samples:
+        result = await redis_service.set(f"test_{desc}", payload, namespace="cache")
+        assert result is False, f"Token secret '{desc}' was NOT rejected by Redis write!"
+        assert redis_service.build_key(f"test_{desc}", "cache") not in mock_client.storage
+        assert redis_service.is_available is True
+
+    # 3. Key containing token is also blocked
     token_key = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
     result_key = await redis_service.set(token_key, {"safe": "value"}, namespace="cache")
     assert result_key is False, "GitHub PAT in key was NOT rejected!"
+    assert redis_service.build_key(token_key, "cache") not in mock_client.storage
+    assert redis_service.is_available is True
 
-    # Safe payload should succeed
-    safe_result = await redis_service.set("safe_key", {"data": "no secrets here"}, namespace="cache")
+    # 4. Safe payload should succeed
+    safe_result = await redis_service.set("safe_key", {"project": "RepoLens", "stars": 42}, namespace="cache")
     assert safe_result is True
+    assert redis_service.build_key("safe_key", "cache") in mock_client.storage
+    assert redis_service.is_available is True
 
 
 # ------------------------------------------------------------------------------
@@ -372,7 +399,44 @@ async def test_probe_health_returns_false_when_no_client():
 
 
 # ------------------------------------------------------------------------------
-# Test 13: Optional Live Redis Cloud Integration Test
+# Test 13: Canonical contains_sensitive_material helper
+# ------------------------------------------------------------------------------
+def test_contains_sensitive_material_canonical():
+    """Direct verification of canonical structural and token sensitive material detection."""
+    # Primitive types
+    assert contains_sensitive_material(None) is False
+    assert contains_sensitive_material(123) is False
+    assert contains_sensitive_material(True) is False
+    assert contains_sensitive_material("clean string") is False
+
+    # Strings with known token formats
+    assert contains_sensitive_material("Bearer eyJhbGciOiJSUzI1NiJ9token") is True
+    assert contains_sensitive_material("sk-proj-123456789012345678901234567890") is True
+
+    # Dicts with sensitive field keys (opaque values)
+    assert contains_sensitive_material({"api_key": "opaque-random-value"}) is True
+    assert contains_sensitive_material({"token": "opaque-random-value"}) is True
+    assert contains_sensitive_material({"credentials": {"value": "opaque-random-value"}}) is True
+    assert contains_sensitive_material({"nested": {"authorization": "opaque-random-value"}}) is True
+    assert contains_sensitive_material({"items": [{"password": "opaque-random-value"}]}) is True
+
+    # Pydantic model with sensitive field
+    class ModelWithSecret(BaseModel):
+        token: str
+        name: str
+
+    assert contains_sensitive_material(ModelWithSecret(token="xyz", name="safe")) is True
+
+    # Pydantic model without sensitive field
+    class ModelSafe(BaseModel):
+        title: str
+        count: int
+
+    assert contains_sensitive_material(ModelSafe(title="RepoLens", count=5)) is False
+
+
+# ------------------------------------------------------------------------------
+# Test 14: Optional Live Redis Cloud Integration Test
 # ------------------------------------------------------------------------------
 @pytest.mark.integration
 @pytest.mark.asyncio

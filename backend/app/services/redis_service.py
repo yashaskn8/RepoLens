@@ -1,4 +1,4 @@
-"""Redis service abstraction providing namespaced caching, provider health sync, and exact-response caching with graceful degradation.
+"""Redis service abstraction providing namespaced caching, provider health state cache primitives, and exact-response caching with graceful degradation.
 
 Never serves as a single point of failure: all operations fail silently, returning None or False
 when Redis is unavailable or unconfigured. Enforces strict key namespacing, scoped exact-response
@@ -24,7 +24,7 @@ from redis.exceptions import (
 
 from app.core.config import get_settings
 from app.core.redis import RedisManager, get_redis_manager
-from app.security.redaction import contains_secrets
+from app.security.redaction import contains_secrets, contains_sensitive_material
 
 logger = logging.getLogger(__name__)
 
@@ -95,9 +95,9 @@ class RedisService:
         return f"repolens:{ns}:{cleaned_key}"
 
     @staticmethod
-    def _contains_secrets(text: str) -> bool:
-        """Check if text contains secrets using canonical RepoLens redaction rules."""
-        return contains_secrets(text)
+    def _contains_secrets(val: Any) -> bool:
+        """Check if value or data structure contains secrets using canonical RepoLens rules."""
+        return contains_sensitive_material(val)
 
     async def get(self, key: str, namespace: str = "cache") -> Optional[Any]:
         """Fetch a value from Redis; returns None if missing or if Redis is unavailable."""
@@ -134,12 +134,19 @@ class RedisService:
         if client is None:
             return False
 
+        # Zero Secrets Invariant: structural and token secret inspection on logical key
+        # and Python value before serialization, plus serialized content as defense-in-depth.
+        # Secret rejection returns False, logs no secrets, writes nothing, and does NOT degrade Redis.
+        if contains_sensitive_material(key) or contains_sensitive_material(value):
+            logger.warning("SECURITY ALERT: Attempted to cache credentials or sensitive tokens in Redis! Write blocked.")
+            return False
+
         namespaced_key = self.build_key(key, namespace)
         serialized = _serialize(value)
 
-        # Zero Secrets Invariant
-        if self._contains_secrets(namespaced_key) or self._contains_secrets(serialized):
-            logger.error("SECURITY ALERT: Attempted to cache credentials or sensitive tokens in Redis! Write blocked.")
+        # Defense-in-depth checks
+        if contains_sensitive_material(namespaced_key) or contains_sensitive_material(serialized):
+            logger.warning("SECURITY ALERT: Attempted to cache credentials or sensitive tokens in Redis! Write blocked.")
             return False
 
         effective_ttl = ttl if ttl is not None else get_settings().REDIS_DEFAULT_CACHE_TTL_SECONDS

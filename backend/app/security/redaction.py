@@ -62,6 +62,72 @@ def contains_secrets(text: Optional[str]) -> bool:
     return False
 
 
+# Keys and identifiers representing credentials, auth tokens, or secrets
+_CREDENTIAL_KEY_IDENTIFIERS = (
+    "api_key",
+    "apikey",
+    "token",
+    "secret",
+    "password",
+    "credential",
+    "authorization",
+    "auth",
+)
+
+
+def contains_sensitive_material(val: Any, depth: int = 0) -> bool:
+    """Recursively inspect whether a value, dictionary key, or nested data structure
+    contains sensitive credentials, tokens, or known secret patterns.
+
+    Detects:
+    1. Known token/credential patterns in strings (via contains_secrets).
+    2. Structural credential field names in dict keys (e.g. api_key, apikey, token,
+       secret, password, credential, authorization, auth).
+    3. Nested dicts, lists, tuples, sets, and Pydantic models containing credentials.
+    """
+    if depth > MAX_METADATA_DEPTH:
+        return False
+
+    if val is None or isinstance(val, (int, float, bool)):
+        return False
+
+    if isinstance(val, str):
+        return contains_secrets(val)
+
+    if hasattr(val, "model_dump") and callable(val.model_dump):
+        try:
+            val = val.model_dump()
+        except Exception:
+            pass
+    elif hasattr(val, "dict") and callable(val.dict):
+        try:
+            val = val.dict()
+        except Exception:
+            pass
+
+    if isinstance(val, dict):
+        for k, v in val.items():
+            k_str = str(k).lower()
+            if any(ident in k_str for ident in _CREDENTIAL_KEY_IDENTIFIERS):
+                return True
+            if contains_secrets(str(k)):
+                return True
+            if contains_sensitive_material(v, depth + 1):
+                return True
+        return False
+
+    if isinstance(val, (list, tuple, set)):
+        for item in val:
+            if contains_sensitive_material(item, depth + 1):
+                return True
+        return False
+
+    try:
+        return contains_secrets(str(val))
+    except Exception:
+        return False
+
+
 def _sanitize_value(val: Any, depth: int = 0) -> Any:
     """Recursively sanitize, redact, and bound a JSON-like value."""
     if depth > MAX_METADATA_DEPTH:
