@@ -41,6 +41,7 @@ class TelemetryReport(BaseModel):
     status: str
     environment: str
     database: str
+    redis: Optional[str] = "disabled"
     providers: List[ProviderTelemetry] = Field(default_factory=list)
     storage: StorageTelemetry
     metrics: MetricsTelemetry

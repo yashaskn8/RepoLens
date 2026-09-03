@@ -53,6 +53,10 @@ async def lifespan(app: FastAPI):
     from app.llm.router import configure_persistent_llm_router
 
     available_tables = set(inspect(engine).get_table_names())
+    from app.core.redis import get_redis_manager
+    redis_mgr = get_redis_manager()
+    await redis_mgr.initialize()
+
     try:
         if "ai_executions" in available_tables:
             configure_persistent_llm_router(
@@ -78,6 +82,7 @@ async def lifespan(app: FastAPI):
     await ArtifactLifecycleRuntime.stop()
     RelationalOutboxRelay.stop()
     await DurableWorkDispatcher.stop()
+    await redis_mgr.close()
 
 
 def _record_request_duration(

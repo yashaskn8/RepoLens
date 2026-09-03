@@ -98,6 +98,13 @@ class Settings(BaseSettings):
     # LangGraph Checkpoint Settings
     CHECKPOINT_DB_FILE: str = "checkpoints.db"
 
+    # Redis Runtime Infrastructure (Phase 1)
+    REDIS_URL: Optional[str] = None
+    REDIS_MAX_CONNECTIONS: int = 10
+    REDIS_TIMEOUT_SECONDS: float = 2.0
+    REDIS_DEFAULT_CACHE_TTL_SECONDS: int = 3600
+    REDIS_ENABLED: bool = True
+
     # PostgreSQL pgvector Settings
     ENABLE_PGVECTOR: bool = False
 

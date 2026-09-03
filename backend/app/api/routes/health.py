@@ -47,12 +47,22 @@ def check_health(db: Session = Depends(get_db)) -> Dict[str, Any]:
         logger.error(f"Database health check failed: {exc}", exc_info=True)
         db_status = "unhealthy"
 
+    from app.core.redis import get_redis_manager
+    redis_mgr = get_redis_manager()
+    if not redis_mgr.is_configured:
+        redis_status = "disabled"
+    elif redis_mgr.is_available:
+        redis_status = "connected"
+    else:
+        redis_status = "degraded"
+
     return {
         "status": "healthy" if db_status == "connected" else "degraded",
         "service": settings.PROJECT_NAME,
         "version": settings.VERSION,
         "environment": settings.ENVIRONMENT,
         "database": db_status,
+        "redis": redis_status,
         "timestamp": _utc_now().isoformat(),
     }
 
@@ -154,12 +164,22 @@ def _build_telemetry_report(db: Session) -> TelemetryReport:
 
     overall_status = "healthy" if db_status == "connected" and snapshot_writable else "degraded"
 
+    from app.core.redis import get_redis_manager
+    redis_mgr = get_redis_manager()
+    if not redis_mgr.is_configured:
+        redis_status = "disabled"
+    elif redis_mgr.is_available:
+        redis_status = "connected"
+    else:
+        redis_status = "degraded"
+
     return TelemetryReport(
         service=settings.PROJECT_NAME,
         version=settings.VERSION,
         status=overall_status,
         environment=settings.ENVIRONMENT,
         database=db_status,
+        redis=redis_status,
         providers=providers,
         storage=storage,
         metrics=metrics,
