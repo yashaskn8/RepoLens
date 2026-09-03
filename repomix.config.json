@@ -1,7 +1,8 @@
 {
   "output": {
     "filePath": "repomix-output.txt",
-    "style": "markdown"
+    "style": "markdown",
+    "compress": true
   },
   "ignore": {
     "customPatterns": [
