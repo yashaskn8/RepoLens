@@ -51,6 +51,17 @@ def redact_secrets(text: Optional[str]) -> str:
     return result
 
 
+def contains_secrets(text: Optional[str]) -> bool:
+    """Check if text matches any canonical secret pattern (API keys, JWTs, tokens)."""
+    if not text:
+        return False
+    text_str = str(text)
+    for pattern, _ in _SECRET_PATTERNS:
+        if pattern.search(text_str):
+            return True
+    return False
+
+
 def _sanitize_value(val: Any, depth: int = 0) -> Any:
     """Recursively sanitize, redact, and bound a JSON-like value."""
     if depth > MAX_METADATA_DEPTH:

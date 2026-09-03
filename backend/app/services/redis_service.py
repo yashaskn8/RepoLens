@@ -12,7 +12,6 @@ from enum import Enum
 import hashlib
 import json
 import logging
-import re
 from typing import Any, Dict, List, Optional, Set, Union
 from uuid import UUID
 
@@ -21,6 +20,7 @@ from redis.exceptions import RedisError
 
 from app.core.config import get_settings
 from app.core.redis import RedisManager, get_redis_manager
+from app.security.redaction import contains_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +37,8 @@ ALLOWLISTED_CACHE_TASK_TYPES: Set[str] = {
     "ast_analysis",
 }
 
-# Regex patterns to detect credential leakage in values/keys
-_SECRET_PATTERNS = re.compile(
-    r"(?i)(sk-[a-zA-Z0-9_-]{20,}|ghp_[a-zA-Z0-9]{36,}|ghs_[a-zA-Z0-9]{36,}|bearer\s+[a-zA-Z0-9._-]{20,})"
-)
+# Secret detection delegates to the canonical security layer in
+# app.security.redaction.contains_secrets — no duplicate patterns here.
 
 
 class SafeJSONEncoder(json.JSONEncoder):
@@ -92,9 +90,10 @@ class RedisService:
         cleaned_key = key.strip().strip(":")
         return f"repolens:{ns}:{cleaned_key}"
 
-    def _contains_secrets(self, text: str) -> bool:
-        """Check if text contains recognizable secret tokens."""
-        return bool(_SECRET_PATTERNS.search(text))
+    @staticmethod
+    def _contains_secrets(text: str) -> bool:
+        """Check if text contains secrets using canonical RepoLens redaction rules."""
+        return contains_secrets(text)
 
     async def get(self, key: str, namespace: str = "cache") -> Optional[Any]:
         """Fetch a value from Redis; returns None if missing or if Redis is unavailable."""
@@ -253,7 +252,15 @@ class RedisService:
         return await self.set(cache_sub_key, response, ttl=ttl, namespace="cache")
 
     # --------------------------------------------------------------------------
-    # Provider Health & Circuit-Breaker State Persistence
+    # Provider Health State Cache Primitives
+    #
+    # These methods provide low-level Redis persistence primitives for provider
+    # health snapshots. They are NOT active distributed synchronization — the
+    # authoritative multi-worker provider-state source of truth remains
+    # SQLAlchemyProviderHealthRegistry (backed by PostgreSQL with row locking).
+    #
+    # Future phases may wire these primitives into a read-through cache layer
+    # in front of the SQL registry to reduce database polling frequency.
     # --------------------------------------------------------------------------
 
     async def save_provider_state(
@@ -263,7 +270,11 @@ class RedisService:
         state_data: Dict[str, Any],
         ttl: int = 86400,
     ) -> bool:
-        """Save provider health snapshot to repolens:provider:{provider}:{model}."""
+        """Cache a provider health snapshot to repolens:provider:{provider}:{model}.
+
+        This is a cache primitive only. SQLAlchemyProviderHealthRegistry remains
+        the authoritative source for multi-worker circuit-breaker state.
+        """
         clean_provider = provider.strip().lower()
         clean_model = model.strip().lower().replace("/", "_")
         sub_key = f"{clean_provider}:{clean_model}"
@@ -274,7 +285,11 @@ class RedisService:
         provider: str,
         model: str,
     ) -> Optional[Dict[str, Any]]:
-        """Retrieve provider health snapshot from repolens:provider:{provider}:{model}."""
+        """Retrieve cached provider health snapshot from repolens:provider:{provider}:{model}.
+
+        Returns the cached snapshot if available, or None. This does not replace
+        the authoritative SQL-backed provider health registry.
+        """
         clean_provider = provider.strip().lower()
         clean_model = model.strip().lower().replace("/", "_")
         sub_key = f"{clean_provider}:{clean_model}"
@@ -322,7 +337,12 @@ class RedisService:
     # --------------------------------------------------------------------------
 
     async def get_health_status(self) -> Dict[str, Any]:
-        """Collect operational health and latency for health & telemetry endpoints."""
+        """Collect operational health and latency for health & telemetry endpoints.
+
+        When Redis is in degraded state, this method uses probe_health() to attempt
+        automatic recovery, enabling the transition:
+        CONNECTED → transient failure → DEGRADED → probe succeeds → CONNECTED.
+        """
         if not self._manager.is_configured:
             return {
                 "status": "disabled",
@@ -330,19 +350,10 @@ class RedisService:
                 "latency_ms": None,
             }
 
-        client = self._manager.get_client()
-        if client is None:
-            return {
-                "status": "degraded",
-                "configured": True,
-                "latency_ms": None,
-            }
-
-        start = datetime.now(timezone.utc)
         try:
             import time
             t0 = time.perf_counter()
-            alive = await self._manager.ping()
+            alive = await self._manager.probe_health()
             latency_ms = round((time.perf_counter() - t0) * 1000, 2)
             return {
                 "status": "connected" if alive else "degraded",

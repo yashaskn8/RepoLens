@@ -280,26 +280,102 @@ async def test_exception_resilience():
 
 
 # ------------------------------------------------------------------------------
-# Test 10: Secrets are never stored in Redis
+# Test 10: Secrets are never stored in Redis (canonical redaction patterns)
 # ------------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_secrets_never_stored_in_redis(redis_service: RedisService):
-    # Attempting to store API key or token is blocked
-    secret_payload = {
-        "api_key": "sk-proj-123456789012345678901234567890",
-        "service": "openai",
-    }
-    result = await redis_service.set("secret_key", secret_payload, namespace="cache")
-    assert result is False
+    """Verify Redis rejects writes containing representative secrets from canonical redaction."""
+
+    # Each tuple: (description, key_or_value_containing_secret)
+    secret_samples = [
+        ("OpenAI sk- key", {"api_key": "sk-proj-123456789012345678901234567890"}),
+        ("Groq gsk_ key", {"token": "gsk_abcdefghij1234567890"}),
+        ("HuggingFace hf_ key", {"auth": "hf_abcdefghijklmnop1234"}),
+        ("NVIDIA nvapi- key", {"key": "nvapi-abcdefghijklmnop1234"}),
+        ("Google AIza key", {"gcp_key": "AIzaSyD1234567890abcdefghij"}),
+        ("GitHub PAT ghp_", {"token": "ghp_abcdefghijklmnopqrstuvwxyz0123456789"}),
+        ("JWT token", {"jwt": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"}),
+        ("Cloudflare cfut_ key", {"cf_token": "cfut_abcdefghijklmnop1234"}),
+        ("Cohere API key", {"cohere_key": "cohere_abcdefghijklmnop1234"}),
+        ("Bearer token", {"auth_header": "Bearer eyJhbGciOiJSUzI1NiJ9token"}),
+        ("Generic api_key='...'", {"raw": "api_key='my_secret_value_here'"}),
+        ("OpenRouter sk-or-v1 key", {"key": "sk-or-v1-abcdefghijklmnop1234"}),
+    ]
+
+    for desc, payload in secret_samples:
+        result = await redis_service.set(f"test_{desc}", payload, namespace="cache")
+        assert result is False, f"Secret type '{desc}' was NOT rejected by Redis write!"
 
     # Key containing token is also blocked
-    token_key = "ghp_123456789012345678901234567890123456"
+    token_key = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
     result_key = await redis_service.set(token_key, {"safe": "value"}, namespace="cache")
-    assert result_key is False
+    assert result_key is False, "GitHub PAT in key was NOT rejected!"
+
+    # Safe payload should succeed
+    safe_result = await redis_service.set("safe_key", {"data": "no secrets here"}, namespace="cache")
+    assert safe_result is True
 
 
 # ------------------------------------------------------------------------------
-# Test 11: Optional Live Redis Cloud Integration Test
+# Test 11: Recovery after transient Redis outage
+# ------------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_recovery_after_transient_outage():
+    """Verify lifecycle: CONNECTED → transient failure → DEGRADED → probe → CONNECTED."""
+
+    # Step 1: Initial connection success
+    mock_client = MockAsyncRedis()
+    manager = RedisManager()
+    manager.set_client(mock_client, available=True)
+    service = RedisService(manager=manager)
+
+    assert manager.is_available is True
+    result = await service.set("key1", {"val": 1}, namespace="cache")
+    assert result is True
+
+    # Step 2: Simulate transient network failure
+    mock_client.simulate_network_failure = True
+
+    # Operations fail gracefully
+    assert await service.get("key1", namespace="cache") is None
+    assert await service.set("key2", {"val": 2}, namespace="cache") is False
+
+    # Step 3: Mark degraded (as runtime error handlers would)
+    manager.mark_degraded()
+    assert manager.is_available is False
+
+    # Service reports unavailable
+    assert service.is_available is False
+    assert await service.get("key1", namespace="cache") is None
+
+    # Step 4: Redis comes back online
+    mock_client.simulate_network_failure = False
+
+    # Step 5: probe_health() restores availability
+    recovered = await manager.probe_health()
+    assert recovered is True
+    assert manager.is_available is True
+
+    # Step 6: Normal operations work again
+    result = await service.set("key3", {"val": 3}, namespace="cache")
+    assert result is True
+    retrieved = await service.get("key3", namespace="cache")
+    assert retrieved == {"val": 3}
+
+
+# ------------------------------------------------------------------------------
+# Test 12: probe_health returns False when unconfigured
+# ------------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_probe_health_returns_false_when_no_client():
+    """probe_health returns False if there is no client and Redis is unconfigured."""
+    manager = RedisManager()
+    # No client, not configured
+    assert await manager.probe_health() is False
+
+
+# ------------------------------------------------------------------------------
+# Test 13: Optional Live Redis Cloud Integration Test
 # ------------------------------------------------------------------------------
 @pytest.mark.integration
 @pytest.mark.asyncio
@@ -321,3 +397,4 @@ async def test_live_redis_cloud_connectivity():
         await service.delete(test_key, namespace="cache")
     finally:
         await manager.close()
+
