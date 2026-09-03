@@ -308,28 +308,11 @@ class RepoLensChatModel(BaseChatModel):
         )
 
         async def _parse_and_validate(input_val: Any) -> Any:
-            raw_message: AIMessage = await bound_model.ainvoke(input_val, **kwargs)
-
+            raw_message: Optional[AIMessage] = None
             try:
-                gateway = StructuredOutputGateway()
-                provider_val = LLMProvider.MISTRAL
-                model_name = "structured-gateway"
-                if raw_message.response_metadata.get("provider"):
-                    try:
-                        provider_val = LLMProvider(raw_message.response_metadata["provider"])
-                    except Exception:
-                        pass
-                if raw_message.response_metadata.get("model"):
-                    model_name = str(raw_message.response_metadata["model"])
-
-                validation = gateway.validate(
-                    raw_message.content,
-                    schema=json_schema,
-                    confidence_threshold=self.confidence_threshold,
-                    provider=provider_val,
-                    model=model_name,
-                )
-                parsed_val = validation.value
+                raw_message = await bound_model.ainvoke(input_val, **kwargs)
+                normalized = StructuredOutputGateway._unwrap_json_fence(raw_message.content)
+                parsed_val = json.loads(normalized)
 
                 if pydantic_cls is not None:
                     final_parsed = pydantic_cls.model_validate(parsed_val)

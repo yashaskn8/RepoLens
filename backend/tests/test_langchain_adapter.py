@@ -38,6 +38,7 @@ from app.llm.prompts import (
     create_structured_extraction_prompt,
 )
 from app.llm.router import LLMRouter
+from app.llm.structured import StructuredOutputGateway
 from app.llm.types import (
     LLMMessage,
     LLMProvider,
@@ -252,9 +253,12 @@ def test_sync_invoke_works_outside_running_event_loop():
 # ------------------------------------------------------------------------------
 # Test 6: Structured Output Integration with Pydantic BaseModel
 # ------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# Test 6: Structured Output Integration with Pydantic BaseModel
+# ------------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_with_structured_output_pydantic():
-    """Verify with_structured_output parses into target Pydantic class via StructuredOutputGateway."""
+async def test_with_structured_output_pydantic_no_duplicate_validation():
+    """Verify with_structured_output calls router once and does NOT re-run StructuredOutputGateway.validate()."""
     valid_json_content = '{"summary": "Secure authentication module", "risk_level": "low", "findings_count": 0}'
 
     mock_router = MagicMock(spec=LLMRouter)
@@ -263,14 +267,19 @@ async def test_with_structured_output_pydantic():
     model = RepoLensChatModel(router=mock_router)
     structured_model = model.with_structured_output(SampleAnalysisOutput)
 
-    parsed_result = await structured_model.ainvoke("Analyze the auth module")
+    with patch.object(StructuredOutputGateway, "validate") as mock_gateway_validate:
+        parsed_result = await structured_model.ainvoke("Analyze the auth module")
+
+        # Proves Problem 1 fix: LangChain layer does NOT create an independent validation pass
+        mock_gateway_validate.assert_not_called()
 
     assert isinstance(parsed_result, SampleAnalysisOutput)
     assert parsed_result.summary == "Secure authentication module"
     assert parsed_result.risk_level == "low"
     assert parsed_result.findings_count == 0
 
-    # Verify request carried output_schema into LLMRouter
+    # Verify router called exactly once with structured schema and json_mode
+    mock_router.generate.assert_awaited_once()
     called_request: LLMRequest = mock_router.generate.call_args[0][0]
     assert called_request.output_schema is not None
     assert "properties" in called_request.output_schema
@@ -304,30 +313,61 @@ async def test_with_structured_output_json_schema_dict():
     assert isinstance(result, dict)
     assert result["status"] == "healthy"
     assert result["score"] == 95
+    mock_router.generate.assert_awaited_once()
 
 
 # ------------------------------------------------------------------------------
-# Test 8: Invalid Structured Output fails through StructuredOutputGateway
+# Test 8: Structured Output Error Handling (include_raw=False vs include_raw=True)
 # ------------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_invalid_structured_output_fails_validation():
-    """Verify invalid JSON or schema violations fail through StructuredOutputGateway."""
-    # Invalid JSON: missing closing brace
-    malformed_json = '{"summary": "Broken JSON"'
-
+async def test_invalid_structured_output_fails_fast_when_include_raw_false():
+    """Verify include_raw=False propagates validation errors immediately without swallowing."""
     mock_router = MagicMock(spec=LLMRouter)
-    mock_router.generate = AsyncMock(return_value=create_dummy_llm_response(content=malformed_json))
+    mock_router.generate = AsyncMock(
+        side_effect=LLMResponseValidationError(
+            "Gateway rejected invalid schema",
+            provider=LLMProvider.MISTRAL,
+            model="mistral-large",
+        )
+    )
 
     model = RepoLensChatModel(router=mock_router)
-    structured_model = model.with_structured_output(SampleAnalysisOutput)
+    structured_model = model.with_structured_output(SampleAnalysisOutput, include_raw=False)
 
-    with pytest.raises(LLMResponseValidationError, match="not valid JSON"):
+    with pytest.raises(LLMResponseValidationError, match="Gateway rejected invalid schema"):
         await structured_model.ainvoke("Generate analysis")
+
+    mock_router.generate.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_structured_output_include_raw():
-    """Verify include_raw=True returns dict with 'raw', 'parsed', and 'parsing_error'."""
+async def test_structured_output_include_raw_on_gateway_rejection():
+    """Verify include_raw=True returns safe dictionary when gateway rejects structured output."""
+    mock_router = MagicMock(spec=LLMRouter)
+    validation_err = LLMResponseValidationError(
+        "Structured model output failed schema validation",
+        provider=LLMProvider.MISTRAL,
+        model="mistral-large",
+    )
+    mock_router.generate = AsyncMock(side_effect=validation_err)
+
+    model = RepoLensChatModel(router=mock_router)
+    structured_model = model.with_structured_output(SampleAnalysisOutput, include_raw=True)
+
+    result = await structured_model.ainvoke("Analyze")
+
+    assert isinstance(result, dict)
+    assert result["raw"] is None
+    assert result["parsed"] is None
+    assert result["parsing_error"] is validation_err
+    # Exactly one router attempt, no second raw retrieval call made
+    mock_router.generate.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_structured_output_include_raw_success_and_parse_error():
+    """Verify include_raw=True returns raw AIMessage on success, and raw AIMessage if Pydantic parsing fails."""
+    # 1. Success case
     valid_json = '{"summary": "Fine", "risk_level": "low", "findings_count": 1}'
     mock_router = MagicMock(spec=LLMRouter)
     mock_router.generate = AsyncMock(return_value=create_dummy_llm_response(content=valid_json))
@@ -338,12 +378,18 @@ async def test_structured_output_include_raw():
     result = await structured_model.ainvoke("Analyze")
 
     assert isinstance(result, dict)
-    assert "raw" in result
-    assert "parsed" in result
-    assert "parsing_error" in result
     assert isinstance(result["raw"], AIMessage)
     assert isinstance(result["parsed"], SampleAnalysisOutput)
     assert result["parsing_error"] is None
+
+    # 2. Pydantic model validation failure on returned JSON (e.g. wrong type for findings_count)
+    bad_type_json = '{"summary": "Fine", "risk_level": "low", "findings_count": "not_an_int"}'
+    mock_router.generate = AsyncMock(return_value=create_dummy_llm_response(content=bad_type_json))
+
+    result_bad = await structured_model.ainvoke("Analyze")
+    assert isinstance(result_bad["raw"], AIMessage)
+    assert result_bad["parsed"] is None
+    assert result_bad["parsing_error"] is not None
 
 
 # ------------------------------------------------------------------------------
