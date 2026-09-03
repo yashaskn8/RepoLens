@@ -1498,4 +1498,47 @@ async def test_mcp_executor_symbols_boundary_truncation(mcp_executor_fixture):
     )
     assert truncated_over is True
 
+# =============================================================================
+# 20. Symbol Collection Boundary Regression (2026-09-03)
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_server_repo_get_related_symbols_truthful_truncation(temp_repo, evidence_store_fixture):
+    """Verify repo_get_related_symbols truncated flag is only True if > 50 eligible relations exist."""
+    from app.mcp.constants import MAX_MCP_SERVER_COLLECTION_ITEMS
+    from app.graph.repository_graph import RepositoryGraph
+    from app.graph.schemas import NodeKind, EdgeKind
+    from app.mcp.server import MCPRepositoryServer
+
+    def create_server_with_symbols(count):
+        graph = RepositoryGraph()
+        graph.add_node("sym:center", NodeKind.SYMBOL, "target_func")
+        for i in range(count):
+            graph.add_node(f"sym:neighbor_{i}", NodeKind.SYMBOL, f"func_{i}")
+            graph.add_edge("sym:center", f"sym:neighbor_{i}", EdgeKind.CALLS)
+        return MCPRepositoryServer(evidence_store=evidence_store_fixture, repo_dir=temp_repo, repository_graph=graph)
+
+    # Case 1: Exactly 50 -> truncated=False
+    server_50 = create_server_with_symbols(50)
+    res_50 = await server_50.call_tool("repo_get_related_symbols", {"symbol_name": "target_func"})
+    assert res_50.is_error is False
+    assert len(res_50.content["related_symbols"]) == 50
+    assert res_50.content["returned_count"] == 50
+    assert res_50.content["truncated"] is False
+
+    # Case 2: 51 -> truncated=True
+    server_51 = create_server_with_symbols(51)
+    res_51 = await server_51.call_tool("repo_get_related_symbols", {"symbol_name": "target_func"})
+    assert res_51.is_error is False
+    assert len(res_51.content["related_symbols"]) == 50
+    assert res_51.content["returned_count"] == 50
+    assert res_51.content["truncated"] is True
+
+    # Case 3: Below 50 -> truncated=False
+    server_10 = create_server_with_symbols(10)
+    res_10 = await server_10.call_tool("repo_get_related_symbols", {"symbol_name": "target_func"})
+    assert res_10.is_error is False
+    assert len(res_10.content["related_symbols"]) == 10
+    assert res_10.content["truncated"] is False
+
 

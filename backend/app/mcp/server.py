@@ -347,26 +347,31 @@ class MCPRepositoryServer:
                 is_truncated = False
                 if self.repository_graph:
                     for node in self.repository_graph.get_nodes_by_kind(NodeKind.SYMBOL):
-                        if len(related) >= MAX_MCP_SERVER_COLLECTION_ITEMS:
-                            is_truncated = True
-                            break
                         if node.label == sym_name or sym_name in node.label:
                             if not f_path or (node.file_path and f_path in node.file_path):
                                 # Gather connected neighbors
                                 for edge in self.repository_graph.get_outgoing_edges(node.id):
-                                    if len(related) >= MAX_MCP_SERVER_COLLECTION_ITEMS:
-                                        is_truncated = True
-                                        break
                                     tgt = self.repository_graph.get_node(edge.target)
                                     if tgt:
                                         related.append({"relationship": edge.kind.value, "target": tgt.model_dump()})
+                                        if len(related) > MAX_MCP_SERVER_COLLECTION_ITEMS:
+                                            is_truncated = True
+                                            related = related[:MAX_MCP_SERVER_COLLECTION_ITEMS]
+                                            break
+                                if is_truncated:
+                                    break
                                 for edge in self.repository_graph.get_incoming_edges(node.id):
-                                    if len(related) >= MAX_MCP_SERVER_COLLECTION_ITEMS:
-                                        is_truncated = True
-                                        break
                                     src = self.repository_graph.get_node(edge.source)
                                     if src:
                                         related.append({"relationship": f"INCOMING_{edge.kind.value}", "source": src.model_dump()})
+                                        if len(related) > MAX_MCP_SERVER_COLLECTION_ITEMS:
+                                            is_truncated = True
+                                            related = related[:MAX_MCP_SERVER_COLLECTION_ITEMS]
+                                            break
+                                if is_truncated:
+                                    break
+                        if is_truncated:
+                            break
 
                 return MCPToolCallResponse(
                     tool_name=tool_name,
