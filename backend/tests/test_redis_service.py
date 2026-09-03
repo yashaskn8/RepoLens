@@ -321,7 +321,7 @@ async def test_secrets_never_stored_in_redis(redis_service: RedisService):
 # ------------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_recovery_after_transient_outage():
-    """Verify lifecycle: CONNECTED → transient failure → DEGRADED → probe → CONNECTED."""
+    """Verify lifecycle: CONNECTED → operation failure auto-degrades → probe → CONNECTED."""
 
     # Step 1: Initial connection success
     mock_client = MockAsyncRedis()
@@ -336,17 +336,14 @@ async def test_recovery_after_transient_outage():
     # Step 2: Simulate transient network failure
     mock_client.simulate_network_failure = True
 
-    # Operations fail gracefully
+    # Step 3: Operation failure automatically marks manager as degraded
+    # (no manual mark_degraded() call — the RedisService error handler does it)
     assert await service.get("key1", namespace="cache") is None
+    assert manager.is_available is False, "Manager should be auto-degraded after connectivity failure"
+
+    # Further operations also fail gracefully
     assert await service.set("key2", {"val": 2}, namespace="cache") is False
-
-    # Step 3: Mark degraded (as runtime error handlers would)
-    manager.mark_degraded()
-    assert manager.is_available is False
-
-    # Service reports unavailable
     assert service.is_available is False
-    assert await service.get("key1", namespace="cache") is None
 
     # Step 4: Redis comes back online
     mock_client.simulate_network_failure = False

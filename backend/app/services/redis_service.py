@@ -16,7 +16,11 @@ from typing import Any, Dict, List, Optional, Set, Union
 from uuid import UUID
 
 from pydantic import BaseModel
-from redis.exceptions import RedisError
+from redis.exceptions import (
+    ConnectionError as RedisConnectionError,
+    RedisError,
+    TimeoutError as RedisTimeoutError,
+)
 
 from app.core.config import get_settings
 from app.core.redis import RedisManager, get_redis_manager
@@ -107,6 +111,10 @@ class RedisService:
             if raw is None:
                 return None
             return _deserialize(raw)
+        except (RedisConnectionError, RedisTimeoutError) as exc:
+            self._manager.mark_degraded()
+            logger.warning("Redis GET connectivity error on key %s (%s): %s", namespaced_key, type(exc).__name__, exc)
+            return None
         except RedisError as exc:
             logger.warning("Redis GET error on key %s (%s): %s", namespaced_key, type(exc).__name__, exc)
             return None
@@ -141,6 +149,10 @@ class RedisService:
             else:
                 await client.set(namespaced_key, serialized)
             return True
+        except (RedisConnectionError, RedisTimeoutError) as exc:
+            self._manager.mark_degraded()
+            logger.warning("Redis SET connectivity error on key %s (%s): %s", namespaced_key, type(exc).__name__, exc)
+            return False
         except RedisError as exc:
             logger.warning("Redis SET error on key %s (%s): %s", namespaced_key, type(exc).__name__, exc)
             return False
@@ -158,6 +170,10 @@ class RedisService:
         try:
             deleted_count = await client.delete(namespaced_key)
             return bool(deleted_count > 0)
+        except (RedisConnectionError, RedisTimeoutError) as exc:
+            self._manager.mark_degraded()
+            logger.warning("Redis DELETE connectivity error on %s (%s): %s", namespaced_key, type(exc).__name__, exc)
+            return False
         except RedisError as exc:
             logger.warning("Redis DELETE error on %s (%s): %s", namespaced_key, type(exc).__name__, exc)
             return False
@@ -175,6 +191,10 @@ class RedisService:
         try:
             count = await client.exists(namespaced_key)
             return bool(count > 0)
+        except (RedisConnectionError, RedisTimeoutError) as exc:
+            self._manager.mark_degraded()
+            logger.warning("Redis EXISTS connectivity error on %s (%s): %s", namespaced_key, type(exc).__name__, exc)
+            return False
         except RedisError as exc:
             logger.warning("Redis EXISTS error on %s (%s): %s", namespaced_key, type(exc).__name__, exc)
             return False
