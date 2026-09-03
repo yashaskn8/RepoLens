@@ -21,6 +21,17 @@ from app.llm.types import (
     ModelCapability,
 )
 
+from app.llm.langchain_adapter import (
+    RepoLensChatModel,
+    convert_langchain_to_repolens_messages,
+    convert_repolens_to_aimessage,
+)
+from app.llm.prompts import (
+    create_repository_analysis_prompt,
+    create_security_review_prompt,
+    create_structured_extraction_prompt,
+)
+
 __all__ = [
     "LLMProvider",
     "TaskPolicy",
@@ -40,4 +51,10 @@ __all__ = [
     "CapabilityAIGateway",
     "configure_persistent_llm_router",
     "get_llm_router",
+    "RepoLensChatModel",
+    "convert_langchain_to_repolens_messages",
+    "convert_repolens_to_aimessage",
+    "create_repository_analysis_prompt",
+    "create_security_review_prompt",
+    "create_structured_extraction_prompt",
 ]

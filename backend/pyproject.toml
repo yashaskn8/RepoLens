@@ -21,6 +21,7 @@ dependencies = [
     "tree-sitter-python>=0.23.0",
     "tree-sitter-javascript>=0.23.0",
     "tree-sitter-typescript>=0.23.0",
+    "langchain-core>=1.6.0,<2.0.0",
     "langgraph>=0.2.0",
     "langgraph-checkpoint-sqlite>=2.0.0",
     "aiosqlite>=0.20.0",
