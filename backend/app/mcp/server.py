@@ -1,5 +1,4 @@
-"""Read-only Model Context Protocol (MCP) server exposing repository intelligence."""
-
+import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -16,6 +15,9 @@ from app.mcp.types import (
     MCPToolDefinition,
 )
 from app.schemas.enums import Severity
+from app.security.redaction import redact_secrets
+
+logger = logging.getLogger(__name__)
 
 
 class MCPRepositoryServer:
@@ -49,7 +51,8 @@ class MCPRepositoryServer:
             full_path_obj = resolve_safe_path(self.repo_dir, relative_path)
             return str(full_path_obj)
         except (PathTraversalError, ValueError) as err:
-            raise PermissionError(f"Access denied: {str(err)}")
+            logger.warning("Access denied in path resolution: %s", redact_secrets(str(err))[:256])
+            raise PermissionError("Access denied: repository path is not permitted.")
 
     def list_tools(self) -> List[MCPToolDefinition]:
         """Return the definitions of all available MCP tools."""
@@ -228,26 +231,42 @@ class MCPRepositoryServer:
                 return MCPToolCallResponse(tool_name=tool_name, content={"matches": matches, "count": len(matches)})
 
             elif tool_name == "repo_read_file":
-                file_path = arguments.get("file_path", "")
+                file_path = str(arguments.get("file_path", "")).strip()
+                if not file_path:
+                    return MCPToolCallResponse(tool_name=tool_name, is_error=True, error_message="Parameter 'file_path' must be a non-empty string.")
+
                 abs_path = self._resolve_safe_path(file_path)
 
                 if not os.path.exists(abs_path) or os.path.isdir(abs_path):
                     return MCPToolCallResponse(tool_name=tool_name, is_error=True, error_message=f"File not found: '{file_path}'")
 
+                start_line = max(int(arguments.get("start_line", 1)), 1) if arguments.get("start_line") else 1
+                requested_end = int(arguments["end_line"]) if arguments.get("end_line") is not None else None
+
+                file_entry = next((fe for fe in self.evidence_store.manifest.files if fe.path == file_path.replace("\\", "/")), None)
+                known_total = file_entry.lines_count if file_entry and getattr(file_entry, "lines_count", None) is not None else None
+
+                lines_collected = []
+                current_line = 0
                 try:
                     with open(abs_path, "r", encoding="utf-8", errors="ignore") as f:
-                        lines = f.readlines()
+                        for line in f:
+                            current_line += 1
+                            if current_line >= start_line and (requested_end is None or current_line <= requested_end):
+                                lines_collected.append(line)
+                            if requested_end is not None and current_line >= requested_end and known_total is not None:
+                                break
                 except Exception as exc:
-                    return MCPToolCallResponse(tool_name=tool_name, is_error=True, error_message=f"Could not read file: {str(exc)}")
+                    safe_msg = redact_secrets(str(exc))[:256]
+                    return MCPToolCallResponse(tool_name=tool_name, is_error=True, error_message=f"Could not read file: {safe_msg}")
 
-                total_lines = len(lines)
-                start_line = max(int(arguments.get("start_line", 1)), 1) if arguments.get("start_line") else 1
-                end_line = min(int(arguments.get("end_line", total_lines)), total_lines) if arguments.get("end_line") else total_lines
+                total_lines = known_total if known_total is not None else current_line
+                end_line = requested_end if requested_end is not None else total_lines
 
                 if start_line > total_lines:
                     slice_content = ""
                 else:
-                    slice_content = "".join(lines[start_line - 1:end_line])
+                    slice_content = "".join(lines_collected)
 
                 return MCPToolCallResponse(
                     tool_name=tool_name,
@@ -392,8 +411,11 @@ class MCPRepositoryServer:
                 )
 
         except PermissionError as exc:
-            return MCPToolCallResponse(tool_name=tool_name, is_error=True, error_message=str(exc))
+            logger.warning("Access denied in MCP tool %s: %s", tool_name, redact_secrets(str(exc))[:2048])
+            return MCPToolCallResponse(tool_name=tool_name, is_error=True, error_message="Access denied: repository path is not permitted.")
         except ValueError as exc:
-            return MCPToolCallResponse(tool_name=tool_name, is_error=True, error_message=str(exc))
+            safe_msg = redact_secrets(str(exc))[:256]
+            return MCPToolCallResponse(tool_name=tool_name, is_error=True, error_message=f"Invalid arguments for tool '{tool_name}': {safe_msg}")
         except Exception as exc:
-            return MCPToolCallResponse(tool_name=tool_name, is_error=True, error_message=f"Execution error: {str(exc)}")
+            logger.error("Unexpected MCP execution error in %s: %s", tool_name, redact_secrets(str(exc))[:2048])
+            return MCPToolCallResponse(tool_name=tool_name, is_error=True, error_message="MCP tool execution failed.")

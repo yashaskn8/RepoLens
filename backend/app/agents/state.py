@@ -46,6 +46,11 @@ class AnalysisState(TypedDict, total=False):
     verification_decision: Optional[str]
     revision_target_ids: List[str]
 
+    # Runtime MCP enrichment tracking (serializable dicts, never runtime objects)
+    mcp_revision_evidence: Dict[str, List[Dict[str, Any]]]
+    mcp_tool_events: Annotated[List[Dict[str, Any]], operator.add]
+    mcp_call_count: int
+
     # Checkpoint execution tracking
     completed_nodes: Annotated[List[str], operator.add]
 

@@ -323,11 +323,15 @@ def get_scan_context_engine(scan_id: str) -> Optional[ContextEngine]:
     return rt.context_engine if rt else None
 
 
+from app.mcp.executor import MCPToolExecutor
+
+
 @dataclass(frozen=True)
 class AnalysisRuntimeContext:
     """Transient repository intelligence runtime context. Never checkpointed."""
 
     scan_runtime: ScanIntelligenceRuntime
+    mcp_executor: Optional[MCPToolExecutor] = None
 
     @property
     def context_engine(self) -> ContextEngine:

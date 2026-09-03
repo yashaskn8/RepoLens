@@ -55,6 +55,7 @@ yarn-error.log*
 
 # Scratch & Artifacts
 scratch/
+artifacts/
 backend/artifacts/
 output/
 *.png

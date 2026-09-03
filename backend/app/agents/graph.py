@@ -10,6 +10,7 @@ from app.agents.bug import run_bug_agent
 from app.agents.checkpointer import get_sqlite_checkpointer
 from app.agents.integration import run_integration_agent
 from app.agents.mapper import run_repository_mapper
+from app.agents.mcp_enrichment import run_mcp_enrichment_node
 from app.agents.revision import run_revision_agent
 from app.agents.security import run_security_agent
 from app.agents.state import AnalysisState
@@ -24,6 +25,9 @@ from app.context.runtime import (
     unregister_scan_runtime,
 )
 from app.graph.repository_graph import RepositoryGraph
+from app.mcp.executor import MCPToolExecutor
+from app.mcp.runtime_client import MCPRuntimeClient
+from app.mcp.server import MCPRepositoryServer
 from app.security.redaction import redact_secrets
 
 logger = logging.getLogger(__name__)
@@ -73,6 +77,7 @@ def build_analysis_graph(checkpointer: Optional[Any] = None) -> Any:
     workflow.add_node("security", run_security_agent)
     workflow.add_node("bug", run_bug_agent)
     workflow.add_node("verifier", run_verifier_agent)
+    workflow.add_node("mcp_enrich", run_mcp_enrichment_node)
     workflow.add_node("revise", run_revision_agent)
     workflow.add_node("finalize", run_finalize_node)
     workflow.add_node("finalize_uncertain", run_finalize_uncertain_node)
@@ -89,18 +94,19 @@ def build_analysis_graph(checkpointer: Optional[Any] = None) -> Any:
     workflow.add_edge("security", "verifier")
     workflow.add_edge("bug", "verifier")
 
-    # 3. Conditional routing from verifier
+    # 3. Conditional routing from verifier (route key "revise" enters bounded mcp_enrich)
     workflow.add_conditional_edges(
         "verifier",
         route_after_verifier,
         {
             "finalize": "finalize",
-            "revise": "revise",
+            "revise": "mcp_enrich",
             "finalize_uncertain": "finalize_uncertain",
         },
     )
 
-    # 4. Loop revise back to verifier (bounded to at most 1 attempt by route_after_verifier and revision_count)
+    # 4. Loop mcp_enrich -> revise -> verifier (bounded to at most 1 attempt by route_after_verifier and revision_count)
+    workflow.add_edge("mcp_enrich", "revise")
     workflow.add_edge("revise", "verifier")
 
     # 5. Terminal edges
@@ -169,7 +175,20 @@ async def run_analysis_workflow(
         )
         register_scan_runtime(scan_id, runtime)
 
-    runtime_context = AnalysisRuntimeContext(scan_runtime=runtime)
+    # Lazily initialized MCP runtime client & executor (connection opened only if mcp_enrich executes)
+    mcp_server = MCPRepositoryServer(
+        evidence_store=evidence_store,
+        repo_dir=repo_dir,
+        repository_graph=runtime.repository_graph,
+        context_engine=runtime.context_engine,
+    )
+    mcp_client = MCPRuntimeClient(repo_server=mcp_server)
+    mcp_executor = MCPToolExecutor(client=mcp_client)
+
+    runtime_context = AnalysisRuntimeContext(
+        scan_runtime=runtime,
+        mcp_executor=mcp_executor,
+    )
 
     try:
         # Check for existing checkpoint state for this scan_id thread
@@ -222,6 +241,9 @@ async def run_analysis_workflow(
             "revision_count": 0,
             "verification_decision": None,
             "revision_target_ids": [],
+            "mcp_revision_evidence": {},
+            "mcp_tool_events": [],
+            "mcp_call_count": 0,
             "completed_nodes": [],
             "model_executions": [],
             "errors": [],
@@ -238,4 +260,8 @@ async def run_analysis_workflow(
             initial_state.setdefault("errors", []).append(f"Terminal execution failure: {safe_msg}")
             return initial_state
     finally:
+        try:
+            await mcp_executor.aclose()
+        except Exception as exc:
+            logger.warning("Error closing MCP executor for scan %s: %s", scan_id, redact_secrets(str(exc))[:256])
         unregister_scan_runtime(scan_id)
