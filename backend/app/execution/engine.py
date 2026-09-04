@@ -949,6 +949,78 @@ class DurableExecutionEngine:
             self._rollback_on_error()
             raise
 
+    def fail_orphaned(
+        self,
+        work_item_id: str,
+        *,
+        public_message: str = "The referenced domain resource no longer exists; the work was stopped safely.",
+    ) -> bool:
+        """Fail safe-recomputation work whose domain resource was deleted.
+
+        This is an internal reconciliation transition used by the dispatcher. It
+        deliberately refuses external side-effect work because a missing local
+        record cannot prove that a remote write did not happen. Releasing the
+        lease through the same reservation ledger as normal completion prevents a
+        deleted finding/scan from pinning worker capacity until lease expiry.
+        """
+        now = self.clock()
+        try:
+            work = (
+                self.db.query(WorkItemModel)
+                .filter(WorkItemModel.id == work_item_id)
+                .with_for_update()
+                .first()
+            )
+            if work is None or work.side_effect_class != SideEffectClass.SAFE_RECOMPUTATION.value:
+                return False
+            if ExecutionState(work.state) not in ACTIVE_STATES:
+                return False
+            lease = (
+                self.db.query(WorkLeaseModel)
+                .filter(
+                    WorkLeaseModel.work_item_id == work.id,
+                    WorkLeaseModel.state == LeaseState.ACTIVE.value,
+                )
+                .with_for_update()
+                .first()
+            )
+            if lease is None:
+                return False
+            attempt = (
+                self.db.query(WorkAttemptModel)
+                .filter(WorkAttemptModel.id == lease.attempt_id)
+                .with_for_update()
+                .first()
+            )
+            if attempt is None:
+                raise ExecutionInvariantViolation("active orphan lease has no attempt")
+
+            failure_code = FailureCode.INTERNAL_INVARIANT_VIOLATION
+            work.state = ExecutionState.FAILED.value
+            work.terminal_at = now
+            work.updated_at = now
+            work.version += 1
+            attempt.state = ExecutionState.FAILED.value
+            attempt.failure_code = failure_code.value
+            attempt.finished_at = now
+            self._add_failure(
+                work,
+                attempt,
+                failure_code,
+                retryable=False,
+                public_message=public_message[:512],
+                infrastructure_state=ExecutionState.FAILED,
+                failure_metadata={"orphaned_domain_resource": True},
+            )
+            self._release_resources(lease, ReservationState.RELEASED, now)
+            lease.state = LeaseState.RELEASED.value
+            lease.released_at = now
+            self._persist()
+            return True
+        except Exception:
+            self._rollback_on_error()
+            raise
+
     def resolve_external_reconciliation(
         self,
         work_item_id: str,

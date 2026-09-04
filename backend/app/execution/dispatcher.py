@@ -27,12 +27,13 @@ from app.execution.types import (
     FailureCode,
     RequestBudget,
     ResourceProfile,
+    SideEffectClass,
     WorkKind,
 )
 from app.governance.events import AuditLedger, DomainOutbox
 from app.governance.taxonomy import AnalysisCoverage, CoverageState, CoverageUnit
 from app.governance.telemetry import TelemetryRecorder
-from app.models.execution import FailureRecordModel, WorkItemModel
+from app.models.execution import FailureRecordModel, WorkItemModel, WorkLeaseModel
 
 
 logger = logging.getLogger(__name__)
@@ -80,6 +81,7 @@ class DurableWorkDispatcher:
     _loop_task: asyncio.Task | None = None
     _wake_event: asyncio.Event | None = None
     _active_tasks: dict[str, asyncio.Task] = {}
+    _inline_active: set[str] = set()
     _worker_prefix = f"{socket.gethostname()}:{os.getpid()}:{uuid4()}"
     _stopping = False
 
@@ -118,6 +120,7 @@ class DurableWorkDispatcher:
             factory_token = bind_execution_session_factory(session_factory)
             db = SessionLocal()
             try:
+                cls._reconcile_missing_active_work(db, limit=100)
                 claim = DurableExecutionEngine(
                     db,
                     lease_seconds=get_settings().EXECUTION_LEASE_SECONDS,
@@ -125,7 +128,11 @@ class DurableWorkDispatcher:
             finally:
                 db.close()
             if claim is not None:
-                await cls._run_claim(claim)
+                cls._inline_active.add(claim.work_item_id)
+                try:
+                    await cls._run_claim(claim)
+                finally:
+                    cls._inline_active.discard(claim.work_item_id)
             result_db = SessionLocal()
             try:
                 work = result_db.query(WorkItemModel).filter(WorkItemModel.id == work_item_id).first()
@@ -169,6 +176,7 @@ class DurableWorkDispatcher:
         if cls._loop_task is not None:
             await asyncio.gather(cls._loop_task, return_exceptions=True)
         cls._active_tasks.clear()
+        cls._inline_active.clear()
         cls._loop_task = None
         cls._wake_event = None
 
@@ -219,6 +227,7 @@ class DurableWorkDispatcher:
         try:
             if not inspect(db.get_bind()).has_table("execution_work_items"):
                 return None
+            cls._reconcile_missing_active_work(db, limit=100)
             engine = DurableExecutionEngine(
                 db,
                 lease_seconds=get_settings().EXECUTION_LEASE_SECONDS,
@@ -230,6 +239,104 @@ class DurableWorkDispatcher:
             return engine.claim_next(cls._worker_prefix)
         finally:
             db.close()
+
+    @classmethod
+    def _reconcile_missing_active_work(cls, db, *, limit: int) -> int:
+        """Release safe-work leases whose tenant-owned domain row disappeared.
+
+        Domain rows can be rolled back or deleted independently of an execution
+        lease (for example, after a worker crash). Such a lease must not hold the
+        global WORKER/AI/PATCH pools until its normal timeout. Unknown resource
+        types and all external side-effect work are intentionally left alone.
+        """
+        if limit <= 0:
+            return 0
+        candidates = (
+            db.query(WorkItemModel, WorkLeaseModel)
+            .join(WorkLeaseModel, WorkLeaseModel.work_item_id == WorkItemModel.id)
+            .filter(
+                WorkLeaseModel.state == "ACTIVE",
+                WorkItemModel.state.in_((ExecutionState.LEASED.value, ExecutionState.RUNNING.value)),
+                WorkItemModel.side_effect_class == SideEffectClass.SAFE_RECOMPUTATION.value,
+                WorkItemModel.resource_type.in_(
+                    ("SCAN", "FINDING", "CHANGE_ANALYSIS", "REPORT", "PATCH", "PATCH_REVISION")
+                ),
+            )
+            .order_by(WorkItemModel.updated_at.asc())
+            .limit(limit)
+            .all()
+        )
+        reconciled = 0
+        for work, lease in candidates:
+            local_worker_abandoned = (
+                lease.worker_id.startswith(cls._worker_prefix)
+                and work.id not in cls._active_tasks
+                and work.id not in cls._inline_active
+            )
+            if not local_worker_abandoned and cls._domain_resource_exists(db, work):
+                continue
+            try:
+                if DurableExecutionEngine(
+                    db,
+                    lease_seconds=get_settings().EXECUTION_LEASE_SECONDS,
+                ).fail_orphaned(work.id):
+                    reconciled += 1
+                    logger.warning(
+                        "Failed orphaned durable work %s (%s/%s) and released its reservations.",
+                        work.id,
+                        work.work_kind,
+                        work.resource_id,
+                    )
+            except Exception:
+                db.rollback()
+                logger.exception("Orphaned durable work reconciliation failed for %s.", work.id)
+        return reconciled
+
+    @staticmethod
+    def _domain_resource_exists(db, work: WorkItemModel) -> bool:
+        """Check a known domain resource under the work item's tenant boundary."""
+        if work.resource_type == "SCAN":
+            from app.models.scan import ScanModel
+
+            return db.query(ScanModel.id).filter(
+                ScanModel.id == work.resource_id,
+                ScanModel.owner_user_id == work.tenant_id,
+            ).first() is not None
+        if work.resource_type == "FINDING":
+            from app.models.finding import FindingModel
+            from app.models.scan import ScanModel
+
+            return db.query(FindingModel.id).join(
+                ScanModel, ScanModel.id == FindingModel.scan_id
+            ).filter(
+                FindingModel.id == work.resource_id,
+                ScanModel.owner_user_id == work.tenant_id,
+            ).first() is not None
+        if work.resource_type == "CHANGE_ANALYSIS":
+            from app.models.change_analysis import ChangeAnalysisModel
+
+            return db.query(ChangeAnalysisModel.id).filter(
+                ChangeAnalysisModel.id == work.resource_id,
+                ChangeAnalysisModel.owner_user_id == work.tenant_id,
+            ).first() is not None
+        if work.resource_type == "REPORT":
+            from app.models.report import ReportModel
+
+            return db.query(ReportModel.id).filter(
+                ReportModel.id == work.resource_id,
+                ReportModel.owner_user_id == work.tenant_id,
+            ).first() is not None
+        if work.resource_type in {"PATCH", "PATCH_REVISION"}:
+            from app.models.patch import PatchModel
+            from app.models.scan import ScanModel
+
+            return db.query(PatchModel.id).join(
+                ScanModel, ScanModel.id == PatchModel.scan_id
+            ).filter(
+                PatchModel.id == work.resource_id,
+                ScanModel.owner_user_id == work.tenant_id,
+            ).first() is not None
+        return True
 
     @classmethod
     def _reconcile_expired_ai_quota(cls, *, limit: int) -> int:

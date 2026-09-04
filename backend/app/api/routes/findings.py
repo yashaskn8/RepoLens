@@ -138,6 +138,13 @@ async def _submit_remediation(
             detail=str(execution["failure_message"]),
         )
     if execution["state"] != "SUCCEEDED" or not execution["output_artifact_id"]:
+        logger.warning(
+            "Inline remediation did not complete: job=%s state=%s failure_code=%s failure=%s",
+            job_id,
+            execution["state"],
+            execution.get("failure_code"),
+            execution.get("failure_message"),
+        )
         response.status_code = status.HTTP_202_ACCEPTED
         DurableWorkDispatcher.nudge()
         accepted.state = str(execution["state"])

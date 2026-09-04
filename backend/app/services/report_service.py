@@ -81,13 +81,38 @@ class ScanReportService:
             return None
 
         all_finding_models = db.query(FindingModel).filter(FindingModel.scan_id == str(scan_id)).all()
-        finding_models = [
+        all_patch_models = db.query(PatchModel).filter(PatchModel.scan_id == str(scan_id)).all()
+        all_delivery_models = db.query(DeliveryModel).filter(DeliveryModel.scan_id == str(scan_id)).all()
+        canonical_finding_models = [
             finding
             for finding in all_finding_models
             if is_canonical_confirmed_finding(
                 finding,
                 expected_commit_sha=scan.commit_hash or "__missing_commit__",
             )
+        ]
+        canonical_finding_ids = {finding.id for finding in canonical_finding_models}
+        delivered_patch_ids = {delivery.patch_id for delivery in all_delivery_models}
+        delivered_finding_ids = {
+            patch.finding_id
+            for patch in all_patch_models
+            if patch.id in delivered_patch_ids
+        }
+        # A persisted delivery is an authoritative audit event even when its
+        # legacy/synthetic finding lacks deterministic evidence. Project that
+        # finding as explicitly unverified, but never count it as canonical or
+        # let it elevate a model hypothesis into verified truth.
+        delivery_audit_finding_ids = {
+            finding.id
+            for finding in all_finding_models
+            if finding.id in delivered_finding_ids
+            and finding.id not in canonical_finding_ids
+            and str(finding.verification_verdict or "").upper() == "CONFIRMED"
+        }
+        finding_models = [
+            finding
+            for finding in all_finding_models
+            if finding.id in canonical_finding_ids or finding.id in delivery_audit_finding_ids
         ]
         meta = scan.model_metadata or {}
         verification_summary = meta.get("verification_summary") if isinstance(meta, dict) else {}
@@ -99,17 +124,16 @@ class ScanReportService:
         if not isinstance(recorded_excluded, int) or isinstance(recorded_excluded, bool):
             recorded_excluded = 0
         excluded_noncanonical_findings = max(0, recorded_excluded) + (
-            len(all_finding_models) - len(finding_models)
+            len(all_finding_models) - len(canonical_finding_models)
         )
-        canonical_finding_ids = {finding.id for finding in finding_models}
-        all_patch_models = db.query(PatchModel).filter(PatchModel.scan_id == str(scan_id)).all()
         patch_models = [
-            patch for patch in all_patch_models if patch.finding_id in canonical_finding_ids
+            patch
+            for patch in all_patch_models
+            if patch.finding_id in canonical_finding_ids or patch.id in delivered_patch_ids
         ]
-        canonical_patch_ids = {patch.id for patch in patch_models}
-        all_delivery_models = db.query(DeliveryModel).filter(DeliveryModel.scan_id == str(scan_id)).all()
+        report_patch_ids = {patch.id for patch in patch_models}
         delivery_models = [
-            delivery for delivery in all_delivery_models if delivery.patch_id in canonical_patch_ids
+            delivery for delivery in all_delivery_models if delivery.patch_id in report_patch_ids
         ]
         event_models = (
             db.query(WorkflowEventModel)
@@ -189,6 +213,9 @@ class ScanReportService:
                 verification_reason=_redact_secrets(fm.verification_reason) if fm.verification_reason else None,
                 source_tool=fm.source_tool,
                 detector_id=fm.detector_id,
+                grounding_status=(
+                    "GROUNDED" if fm.id in canonical_finding_ids else "DELIVERY_AUDIT_UNVERIFIED"
+                ),
                 evidences=evidences,
                 patches=patches_by_finding.get(fm.id, []),
                 created_at=fm.created_at,
@@ -197,12 +224,12 @@ class ScanReportService:
 
         # Build summary metrics
         summary = ReportSummary(
-            total_findings=len(report_findings),
-            critical_findings=sum(1 for f in report_findings if f.severity == "CRITICAL"),
-            high_findings=sum(1 for f in report_findings if f.severity == "HIGH"),
-            medium_findings=sum(1 for f in report_findings if f.severity == "MEDIUM"),
-            low_findings=sum(1 for f in report_findings if f.severity == "LOW"),
-            confirmed_findings=sum(1 for f in report_findings if f.verification_verdict == "CONFIRMED"),
+            total_findings=len(canonical_finding_models),
+            critical_findings=sum(1 for f in canonical_finding_models if f.severity == "CRITICAL"),
+            high_findings=sum(1 for f in canonical_finding_models if f.severity == "HIGH"),
+            medium_findings=sum(1 for f in canonical_finding_models if f.severity == "MEDIUM"),
+            low_findings=sum(1 for f in canonical_finding_models if f.severity == "LOW"),
+            confirmed_findings=sum(1 for f in canonical_finding_models if f.verification_verdict == "CONFIRMED"),
             excluded_noncanonical_findings=excluded_noncanonical_findings,
             total_patches=len(patch_models),
             approved_patches=sum(1 for p in patch_models if p.status == "APPROVED"),
@@ -388,7 +415,7 @@ class ScanReportService:
             lines.append("")
 
         # Detailed Findings & Evidences
-        lines.append(f"## Verified Grounded Findings ({len(report.findings)})")
+        lines.append(f"## Findings & Delivery Audit ({len(report.findings)})")
         lines.append("")
         if not report.findings:
             lines.append("*No security or architectural findings were identified in this scan.*")
@@ -400,6 +427,10 @@ class ScanReportService:
                 lines.append("")
                 lines.append(f"- **Finding ID**: {_safe_inline_code(f.id)}")
                 lines.append(f"- **Category**: {_safe_inline_code(f.category or 'General')}")
+                if f.grounding_status != "GROUNDED":
+                    lines.append(
+                        "- **Grounding**: Delivery audit only; this finding is excluded from canonical verified counts."
+                    )
                 if f.rule_id:
                     lines.append(f"- **Rule ID**: {_safe_inline_code(f.rule_id)}")
                 if f.source_tool:

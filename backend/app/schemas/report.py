@@ -58,7 +58,7 @@ class ReportPatch(BaseModel):
 
 
 class ReportFinding(BaseModel):
-    """Verified finding with attached evidences and generated patches."""
+    """Finding projection with attached evidence, patches, and grounding status."""
     id: str
     title: str
     description: str
@@ -71,6 +71,7 @@ class ReportFinding(BaseModel):
     verification_reason: Optional[str] = None
     source_tool: Optional[str] = None
     detector_id: Optional[str] = None
+    grounding_status: str = "GROUNDED"
     evidences: List[ReportEvidence] = Field(default_factory=list)
     patches: List[ReportPatch] = Field(default_factory=list)
     created_at: datetime
