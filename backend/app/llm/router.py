@@ -243,6 +243,14 @@ class LLMRouter:
 
     async def generate(self, request: LLMRequest) -> LLMResponse:
         """Run one evidence-scoped request through cache, single-flight, then routing."""
+        # Explicit local-provider overrides must retain the same low-risk
+        # boundary as capability/task-policy routing.  Keep this check before
+        # cache lookup so a previously cached local response can never bypass
+        # the safety policy for a newly submitted request.
+        if request.provider == LLMProvider.OLLAMA and not TaskClassifier.local_model_eligible(request):
+            raise ValueError(
+                "Ollama is restricted to low-risk classification/extraction requests."
+            )
         if request.capability in {ModelCapability.EMBEDDING, ModelCapability.RERANKING}:
             raise ValueError(
                 "Embedding and reranking requests must use the canonical EmbeddingProvider/retrieval boundary."

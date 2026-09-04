@@ -13,7 +13,14 @@ from app.llm.base import BaseLLMAdapter
 from app.llm.capabilities import ModelCapabilityRegistry
 from app.llm.exceptions import LLMError
 from app.llm.router import LLMRouter
-from app.llm.types import LLMMessage, LLMProvider, LLMRequest, LLMResponse, ModelCapability
+from app.llm.types import (
+    LLMMessage,
+    LLMProvider,
+    LLMRequest,
+    LLMResponse,
+    ModelCapability,
+    TaskPolicy,
+)
 from app.schemas.metadata import ModelExecutionMetadata
 
 
@@ -145,6 +152,23 @@ async def test_ollama_failure_falls_back_once_to_existing_cloud_route(monkeypatc
     assert local_post.await_count == 1
     cloud.generate.assert_awaited_once()
     fallback.generate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_explicit_ollama_rejects_risky_policy_before_cache_or_network() -> None:
+    local = OllamaAdapter(enabled=True)
+    router = LLMRouter(adapters={LLMProvider.OLLAMA: local})
+    request = LLMRequest(
+        messages=[LLMMessage(role="user", content="classify these facts")],
+        provider=LLMProvider.OLLAMA,
+        task_policy=TaskPolicy.SECURITY_REASONING,
+    )
+
+    with patch("httpx.AsyncClient.post", new=AsyncMock()) as local_post:
+        with pytest.raises(ValueError, match="low-risk"):
+            await router.generate(request)
+
+    local_post.assert_not_awaited()
 
 
 def test_sensitive_simple_prompt_is_not_local_model_eligible() -> None:
