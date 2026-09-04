@@ -127,6 +127,20 @@ def _decode_cursor(value: str) -> tuple[datetime, str]:
         ) from exc
 
 
+def _materialize_result(envelope: Any) -> dict[str, Any]:
+    """Unwrap the durable artifact envelope into the public domain result contract."""
+    result = envelope.get("result") if isinstance(envelope, dict) else None
+    if not isinstance(result, dict):
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error_code": "JOB_RESULT_INVALID",
+                "message": "The stored job result is unavailable or invalid.",
+            },
+        )
+    return result
+
+
 @router.get("", response_model=JobCollection)
 def list_jobs(
     limit: int = Query(20, ge=1, le=100),
@@ -178,11 +192,12 @@ def get_job_result(
         )
     from app.remediation.service import RemediationExecutionService
 
-    return RemediationExecutionService.load_result(
+    envelope = RemediationExecutionService.load_result(
         db,
         tenant_id=current_user.id,
         artifact_id=model.output_artifact_id,
     )
+    return _materialize_result(envelope)
 
 
 @router.post("/{job_id}/cancel", response_model=JobResource, status_code=status.HTTP_202_ACCEPTED)

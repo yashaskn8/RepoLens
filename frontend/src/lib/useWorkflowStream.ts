@@ -120,7 +120,7 @@ export function useWorkflowStream(
       const streamUrl = changeAnalysisId
         ? `${API_BASE_URL}/api/v1/change-analyses/${changeAnalysisId}/events?after_id=${lastEventIdRef.current}`
         : `${API_BASE_URL}/api/v1/scans/${scanId}/events?after_id=${lastEventIdRef.current}`;
-      const es = new EventSource(streamUrl);
+      const es = new EventSource(streamUrl, { withCredentials: true });
       eventSourceRef.current = es;
 
 
@@ -176,7 +176,7 @@ export function useWorkflowStream(
         eventSourceRef.current = null;
       }
     };
-  }, [scanId, enabled]);
+  }, [scanId, changeAnalysisId, targetId, enabled]);
 
   return {
     events,
@@ -186,4 +186,3 @@ export function useWorkflowStream(
     clearEvents,
   };
 }
-

@@ -10,7 +10,7 @@ import { Badge } from '@/components/ui/Badge';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { useAuth } from '@/context/AuthContext';
-import { listChangeAnalyses, fetchHealth } from '@/lib/api';
+import { listChangeAnalyses, fetchHealth, listScans } from '@/lib/api';
 import { ChangeAnalysisSummary, HealthResponse, Scan } from '@/types/domain';
 import {
   Scan as ScanIcon,
@@ -44,24 +44,15 @@ export default function DashboardPage() {
   useEffect(() => {
     async function loadDashboardData() {
       try {
-        const [healthRes, changesRes] = await Promise.allSettled([
+        const [healthRes, changesRes, scansRes] = await Promise.allSettled([
           fetchHealth(),
           listChangeAnalyses(undefined, 10, 0),
+          listScans(10),
         ]);
 
         if (healthRes.status === 'fulfilled') setHealth(healthRes.value);
         if (changesRes.status === 'fulfilled') setChangeAnalyses(changesRes.value || []);
-
-        if (typeof window !== 'undefined') {
-          const savedScans = localStorage.getItem('repolens_recent_scans');
-          if (savedScans) {
-            try {
-              setRecentScans(JSON.parse(savedScans));
-            } catch {
-              // ignore
-            }
-          }
-        }
+        if (scansRes.status === 'fulfilled') setRecentScans(scansRes.value || []);
       } finally {
         setIsLoading(false);
       }
@@ -148,7 +139,7 @@ export default function DashboardPage() {
             icon={<Cpu size={18} />}
             badge={
               <Badge variant={health?.status === 'healthy' ? 'success' : 'warning'} size="sm">
-                {health?.status || 'Online'}
+                {health?.status || 'Unavailable'}
               </Badge>
             }
           />
@@ -161,11 +152,11 @@ export default function DashboardPage() {
             onClick={() => router.push('/change-analysis')}
           />
           <StatCard
-            label="Verified Evidence"
-            value="100%"
-            subtext="Strict AST citations required"
+            label="Verified Findings"
+            value={recentScans.reduce((total, scan) => total + scan.findings_count, 0)}
+            subtext="Grounded findings in recent scans"
             icon={<ShieldCheck size={18} />}
-            badge={<Badge variant="cyan" size="sm">Zero Hallucinations</Badge>}
+            badge={<Badge variant="cyan" size="sm">Evidence required</Badge>}
             onClick={() => router.push('/findings')}
           />
           <StatCard

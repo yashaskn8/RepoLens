@@ -470,6 +470,46 @@ export interface PatchWorkflowResult {
   final_verdict: MachineVerdict;
 }
 
+export interface RemediationAccepted {
+  job_id: string;
+  state: string;
+  status_url: string;
+  result_url: string;
+  reused: boolean;
+}
+
+export interface JobFailure {
+  code: string;
+  category: string;
+  stage?: string | null;
+  retryable: boolean;
+  message: string;
+  created_at: string;
+}
+
+export interface JobResource {
+  id: string;
+  work_kind: string;
+  resource_type: string;
+  resource_id: string;
+  state: string;
+  domain_outcome?: string | null;
+  coverage_summary: Record<string, unknown>;
+  outcome_detail: Record<string, unknown>;
+  attempt_count: number;
+  max_attempts: number;
+  cancel_requested: boolean;
+  reconciliation_required: boolean;
+  output_artifact_id?: string | null;
+  policy_snapshot_id: string;
+  created_at: string;
+  started_at?: string | null;
+  terminal_at?: string | null;
+  status_url: string;
+  cancel_url?: string | null;
+  failures: JobFailure[];
+}
+
 export interface PatchReviewRequest {
   approved_by?: string;
   notes?: string;

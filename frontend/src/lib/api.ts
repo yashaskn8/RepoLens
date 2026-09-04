@@ -18,6 +18,7 @@ import {
   FixPlan,
   Finding,
   HealthResponse,
+  JobResource,
   PatchProposal,
   PatchRejectRequest,
   PatchResponse,
@@ -25,6 +26,7 @@ import {
   PatchReviseRequest,
   PatchWorkflowResult,
   ResearchResult,
+  RemediationAccepted,
   ReviewPublicationApproveRequest,
   ReviewPublicationPreviewResponse,
   ReviewPublicationPublishResponse,
@@ -232,6 +234,19 @@ export async function fetchScanFindings(scanId: string): Promise<Finding[]> {
   return response.json();
 }
 
+export async function listScans(limit = 20, offset = 0): Promise<Scan[]> {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  const response = await apiFetch(`/api/v1/scans?${params.toString()}`, {
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch repository scans (${response.status})`);
+  }
+
+  return response.json();
+}
+
 export async function fetchScanTelemetry(scanId: string): Promise<ScanTelemetry> {
   const response = await apiFetch(`/api/v1/scans/${scanId}/telemetry`, {
     cache: 'no-store',
@@ -260,43 +275,76 @@ export async function fetchFinding(findingId: string): Promise<Finding> {
   return response.json();
 }
 
+const REMEDIATION_POLL_INTERVAL_MS = 1000;
+const REMEDIATION_POLL_ATTEMPTS = 300;
+const TERMINAL_JOB_STATES = new Set(['SUCCEEDED', 'FAILED', 'CANCELLED', 'TIMED_OUT']);
+
+function isRemediationAccepted(value: unknown): value is RemediationAccepted {
+  return Boolean(
+    value &&
+      typeof value === 'object' &&
+      'job_id' in value &&
+      typeof (value as RemediationAccepted).job_id === 'string'
+  );
+}
+
+export async function fetchJob(jobId: string): Promise<JobResource> {
+  const response = await apiFetch(`/api/v1/jobs/${jobId}`, { cache: 'no-store' });
+  if (!response.ok) throw new Error(`Failed to fetch job status (${response.status})`);
+  return response.json();
+}
+
+export async function fetchJobResult<T>(jobId: string): Promise<T> {
+  const response = await apiFetch(`/api/v1/jobs/${jobId}/result`, { cache: 'no-store' });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail?.message || error.detail || `Failed to fetch job result (${response.status})`);
+  }
+  return response.json();
+}
+
+async function resolveRemediationResponse<T>(response: Response, failureLabel: string): Promise<T> {
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail?.message || error.detail || `${failureLabel} (${response.status})`);
+  }
+  const value: unknown = await response.json();
+  if (!isRemediationAccepted(value)) return value as T;
+
+  for (let attempt = 0; attempt < REMEDIATION_POLL_ATTEMPTS; attempt += 1) {
+    const job = await fetchJob(value.job_id);
+    if (job.state === 'SUCCEEDED') return fetchJobResult<T>(job.id);
+    if (TERMINAL_JOB_STATES.has(job.state)) {
+      const failure = job.failures.at(-1)?.message;
+      throw new Error(failure || `${failureLabel}: job ended in ${job.state.toLowerCase()}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, REMEDIATION_POLL_INTERVAL_MS));
+  }
+  throw new Error(`${failureLabel}: job is still running; retry to restore its durable result`);
+}
+
 export async function requestFindingResearch(findingId: string): Promise<ResearchResult> {
   const response = await apiFetch(`/api/v1/findings/${findingId}/research`, {
     method: 'POST',
+    headers: { Prefer: 'respond-async' },
   });
-
-  if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.detail?.message || err.detail || `Failed to research finding (${response.status})`);
-  }
-
-  return response.json();
+  return resolveRemediationResponse<ResearchResult>(response, 'Failed to research finding');
 }
 
 export async function requestFixPlan(findingId: string): Promise<FixPlan> {
   const response = await apiFetch(`/api/v1/findings/${findingId}/plan`, {
     method: 'POST',
+    headers: { Prefer: 'respond-async' },
   });
-
-  if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.detail?.message || err.detail || `Failed to generate fix plan (${response.status})`);
-  }
-
-  return response.json();
+  return resolveRemediationResponse<FixPlan>(response, 'Failed to generate fix plan');
 }
 
 export async function requestPatchGeneration(findingId: string): Promise<PatchWorkflowResult> {
   const response = await apiFetch(`/api/v1/findings/${findingId}/patch`, {
     method: 'POST',
+    headers: { Prefer: 'respond-async' },
   });
-
-  if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.detail?.message || err.detail || `Failed to generate patch (${response.status})`);
-  }
-
-  return response.json();
+  return resolveRemediationResponse<PatchWorkflowResult>(response, 'Failed to generate patch');
 }
 
 /* ========================================================================= */

@@ -64,6 +64,30 @@ def test_get_scan_by_id(client, db_session):
     assert data["commit_hash"] == "1234567890abcdef"
 
 
+def test_list_scans_returns_only_current_users_scans(client, db_session):
+    """GET /api/v1/scans returns a tenant-scoped durable scan history."""
+    owned_scan = ScanModel(
+        id=str(uuid4()),
+        repository_url="https://github.com/org/owned.git",
+        status=ScanStatus.COMPLETED.value,
+    )
+    other_scan = ScanModel(
+        id=str(uuid4()),
+        owner_user_id=str(uuid4()),
+        repository_url="https://github.com/org/other.git",
+        status=ScanStatus.COMPLETED.value,
+    )
+    db_session.add_all([owned_scan, other_scan])
+    db_session.commit()
+
+    response = client.get("/api/v1/scans")
+
+    assert response.status_code == 200
+    returned_ids = {scan["id"] for scan in response.json()}
+    assert owned_scan.id in returned_ids
+    assert other_scan.id not in returned_ids
+
+
 def test_get_scan_not_found(client):
     """GET /api/v1/scans/{id} with unknown ID returns 404."""
     random_id = str(uuid4())

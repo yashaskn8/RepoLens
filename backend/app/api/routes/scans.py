@@ -790,6 +790,25 @@ async def create_scan(
     return _scan_resource(db, scan_model)
 
 
+@router.get("", response_model=List[Scan])
+def list_scans(
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> List[Scan]:
+    """List the authenticated user's most recent repository scans."""
+    rows = (
+        db.query(ScanModel)
+        .filter(ScanModel.owner_user_id == get_user_id(current_user))
+        .order_by(ScanModel.created_at.desc(), ScanModel.id.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    return [_scan_resource(db, row) for row in rows]
+
+
 @router.get("/{scan_id}", response_model=Scan)
 def get_scan(
     scan_id: UUID,
