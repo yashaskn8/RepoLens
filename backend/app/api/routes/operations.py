@@ -126,6 +126,9 @@ def get_platform_telemetry(
         .all()
     )
     now = datetime.now(timezone.utc)
+    local_ai = TelemetryRecorder.aggregate(db, "ai.execution.local")
+    cloud_ai = TelemetryRecorder.aggregate(db, "ai.execution.cloud")
+    total_ai_calls = local_ai["sum"] + cloud_ai["sum"]
     return {
         "outbox": {str(key): int(value) for key, value in outbox_counts.items()},
         "reconciliation": {
@@ -157,6 +160,34 @@ def get_platform_telemetry(
         "report_generation": TelemetryRecorder.aggregate(db, "report.generation_duration"),
         "external_reconciliation": TelemetryRecorder.aggregate(db, "external.reconciliation"),
         "ai_quota_recovery": TelemetryRecorder.aggregate(db, "ai.quota_reservations_reclaimed"),
+        "ai_efficiency": {
+            "local_calls": local_ai,
+            "cloud_calls": cloud_ai,
+            "local_call_ratio": (
+                local_ai["sum"] / total_ai_calls if total_ai_calls else 0.0
+            ),
+            "exact_cache_hits": TelemetryRecorder.aggregate(db, "ai.cache.exact_hit"),
+            "exact_cache_misses": TelemetryRecorder.aggregate(db, "ai.cache.exact_miss"),
+            "semantic_cache_hits": TelemetryRecorder.aggregate(db, "ai.cache.semantic_hit"),
+            "semantic_cache_misses": TelemetryRecorder.aggregate(db, "ai.cache.semantic_miss"),
+            "singleflight_coalesced": TelemetryRecorder.aggregate(
+                db, "ai.cache.singleflight_coalesced"
+            ),
+            "context": {
+                "retrieved_tokens": TelemetryRecorder.aggregate(
+                    db, "ai.context.retrieved_tokens"
+                ),
+                "packed_tokens": TelemetryRecorder.aggregate(
+                    db, "ai.context.packed_tokens"
+                ),
+                "deduplicated_items": TelemetryRecorder.aggregate(
+                    db, "ai.context.deduplicated_items"
+                ),
+                "deduplicated_bytes": TelemetryRecorder.aggregate(
+                    db, "ai.context.deduplicated_bytes"
+                ),
+            },
+        },
     }
 
 

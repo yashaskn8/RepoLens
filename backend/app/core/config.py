@@ -49,6 +49,15 @@ class Settings(BaseSettings):
     COHERE_BASE_URL: str = "https://api.cohere.com/v1"
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
 
+    # Optional operator-managed, loopback-only local generation
+    LOCAL_LLM_ENABLED: bool = False
+    OLLAMA_BASE_URL: str = "http://127.0.0.1:11434"
+    OLLAMA_MODEL: str = "qwen2.5:3b"
+    OLLAMA_TIMEOUT: float = 10.0
+    OLLAMA_FAILURE_COOLDOWN_SECONDS: float = 30.0
+    OLLAMA_CONTEXT_WINDOW_TOKENS: int = 8192
+    OLLAMA_MAX_OUTPUT_TOKENS: int = 2048
+
     # Canonical Policy Model IDs
     MODEL_ARCHITECTURE: str = "gemini-3.7-flash"
     MODEL_INTEGRATION_CODE: str = "Qwen/Qwen3-Coder-Next"
@@ -99,6 +108,7 @@ class Settings(BaseSettings):
     LOCAL_EMBEDDING_ENABLED: bool = True
     LOCAL_EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
     LOCAL_EMBEDDING_DEVICE: str = "cpu"
+    LOCAL_EMBEDDING_ALLOW_DOWNLOAD: bool = False
 
     # LangGraph Checkpoint Settings
     CHECKPOINT_DB_FILE: str = "checkpoints.db"
@@ -109,6 +119,14 @@ class Settings(BaseSettings):
     REDIS_TIMEOUT_SECONDS: float = 2.0
     REDIS_DEFAULT_CACHE_TTL_SECONDS: int = 3600
     REDIS_ENABLED: bool = True
+
+    # Evidence-scoped AI response reuse and bounded in-process coalescing
+    AI_EXACT_CACHE_TTL_SECONDS: int = 1800
+    AI_SEMANTIC_CACHE_ENABLED: bool = True
+    AI_SEMANTIC_CACHE_TTL_SECONDS: int = 900
+    AI_SEMANTIC_CACHE_SIMILARITY_THRESHOLD: float = 0.985
+    AI_SEMANTIC_CACHE_MAX_ENTRIES: int = 32
+    AI_SINGLEFLIGHT_MAX_ENTRIES: int = 256
 
     # PostgreSQL pgvector Settings
     ENABLE_PGVECTOR: bool = False
@@ -207,6 +225,23 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_production_and_cookie_invariants(self) -> "Settings":
         """Enforce strict fail-closed production security and cookie invariants."""
+        if not 0.0 <= self.AI_SEMANTIC_CACHE_SIMILARITY_THRESHOLD <= 1.0:
+            raise ValueError(
+                "AI_SEMANTIC_CACHE_SIMILARITY_THRESHOLD must be between 0 and 1"
+            )
+        if min(
+            self.AI_EXACT_CACHE_TTL_SECONDS,
+            self.AI_SEMANTIC_CACHE_TTL_SECONDS,
+            self.AI_SEMANTIC_CACHE_MAX_ENTRIES,
+            self.AI_SINGLEFLIGHT_MAX_ENTRIES,
+        ) < 1:
+            raise ValueError("AI cache TTL, bucket, and single-flight limits must be positive")
+        if min(
+            self.OLLAMA_TIMEOUT,
+            self.OLLAMA_CONTEXT_WINDOW_TOKENS,
+            self.OLLAMA_MAX_OUTPUT_TOKENS,
+        ) <= 0 or self.OLLAMA_FAILURE_COOLDOWN_SECONDS < 0:
+            raise ValueError("Ollama timeouts and token limits must be positive")
         if self.ENABLE_API_DOCS is None:
             self.ENABLE_API_DOCS = not self.is_production
 

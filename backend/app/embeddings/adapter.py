@@ -40,6 +40,7 @@ class LocalEmbeddingAdapter(EmbeddingProvider):
             self._service = LocalEmbeddingService(
                 model_name=settings.LOCAL_EMBEDDING_MODEL,
                 device=settings.LOCAL_EMBEDDING_DEVICE,
+                allow_download=settings.LOCAL_EMBEDDING_ALLOW_DOWNLOAD,
             )
 
     @property

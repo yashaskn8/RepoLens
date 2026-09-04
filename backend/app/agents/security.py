@@ -10,7 +10,7 @@ from app.context.prompt import pack_repository_context
 from app.agents.grounding import build_evidence_index
 from app.llm.budgets import REPOSITORY_ANALYSIS_BUDGET
 from app.llm.router import get_llm_router
-from app.llm.types import LLMMessage, LLMRequest, ModelCapability, TaskPolicy
+from app.llm.types import AIContextMetrics, LLMMessage, LLMRequest, ModelCapability, TaskPolicy
 from app.llm.workflow_contracts import FINDINGS_OUTPUT_SCHEMA, lineage_for_scan
 from app.security.redaction import redact_secrets
 
@@ -34,6 +34,7 @@ async def run_security_agent(
     packed_context = ""
     evidence_index = build_evidence_index({})
     context_evidence: Dict[str, Any] = {}
+    context_metrics = None
     if context_engine:
         bundle = await context_engine.build_context_bundle(
             scan_id=str(scan_id),
@@ -50,7 +51,18 @@ async def run_security_agent(
             "included": packed.included,
             "available": packed.available,
             "truncated": packed.truncated,
+            "estimated_tokens": packed.estimated_tokens,
+            "deduplicated": packed.deduplicated,
+            "deduplicated_bytes": packed.deduplicated_bytes,
+            "packed_bytes": packed.packed_bytes,
         }
+        context_metrics = AIContextMetrics(
+            retrieved_context_tokens=bundle.estimated_tokens,
+            packed_context_tokens=packed.estimated_tokens,
+            packed_context_bytes=packed.packed_bytes,
+            deduplicated_items=sum(packed.deduplicated.values()),
+            deduplicated_bytes=packed.deduplicated_bytes,
+        )
 
     system_prompt = (
         "You are the Security Specialist AI Agent for RepoLens. "
@@ -118,6 +130,7 @@ async def run_security_agent(
             max_tokens=1800,
             confidence_threshold=0.75,
             budget=REPOSITORY_ANALYSIS_BUDGET,
+            context_metrics=context_metrics,
         )
         response = await router.generate(request)
         model_executions.append(response.metadata)

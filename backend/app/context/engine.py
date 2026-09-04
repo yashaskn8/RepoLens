@@ -160,6 +160,7 @@ class ContextEngine:
             static_pool,
             key=lambda finding: (
                 severity_rank.get(str(getattr(finding.severity, "value", finding.severity)), 5),
+                -float(finding.confidence or 0.0),
                 finding.evidence.file_path,
                 finding.evidence.start_line or 0,
                 finding.tool,

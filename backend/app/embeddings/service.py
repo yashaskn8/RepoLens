@@ -34,11 +34,15 @@ class LocalEmbeddingError(Exception):
     """Raised when local embedding inference fails."""
 
 
-def _load_sentence_transformer(model_name: str, device: str):
+def _load_sentence_transformer(model_name: str, device: str, allow_download: bool):
     """Import and construct the optional local-ML dependency lazily."""
     from sentence_transformers import SentenceTransformer
 
-    return SentenceTransformer(model_name, device=device)
+    return SentenceTransformer(
+        model_name,
+        device=device,
+        local_files_only=not allow_download,
+    )
 
 
 class LocalEmbeddingService:
@@ -54,9 +58,11 @@ class LocalEmbeddingService:
         self,
         model_name: str = DEFAULT_LOCAL_EMBEDDING_MODEL,
         device: str = DEFAULT_LOCAL_EMBEDDING_DEVICE,
+        allow_download: bool = False,
     ) -> None:
         self.model_name = model_name
         self.device = device
+        self.allow_download = allow_download
         self._model: SentenceTransformer | None = None
         self._lock = threading.Lock()
         self._dimensions: int | None = None
@@ -160,7 +166,11 @@ class LocalEmbeddingService:
             if self._model is not None:
                 return
             try:
-                model = _load_sentence_transformer(self.model_name, self.device)
+                model = _load_sentence_transformer(
+                    self.model_name,
+                    self.device,
+                    self.allow_download,
+                )
                 if hasattr(model, "get_embedding_dimension"):
                     dim = model.get_embedding_dimension()
                 else:

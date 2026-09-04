@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import json
 import math
@@ -20,6 +20,9 @@ class PackedRepositoryContext:
     available: dict[str, int]
     truncated: bool
     evidence_index: dict[str, dict[str, Any]]
+    deduplicated: dict[str, int] = field(default_factory=dict)
+    deduplicated_bytes: int = 0
+    packed_bytes: int = 0
 
 
 def _json_bytes(value: object) -> bytes:
@@ -54,7 +57,7 @@ def pack_repository_context(
         raise ValueError("bytes_per_token must be positive")
 
     max_bytes = int(token_budget * bytes_per_token)
-    available = {
+    input_available = {
         "chunks": len(bundle.relevant_chunks),
         "graph_edges": len(bundle.graph_relationships),
         "contracts": len(bundle.routes_and_contracts),
@@ -66,8 +69,9 @@ def pack_repository_context(
         "intent": bundle.analysis_intent[:64],
         "query": bundle.query[:512],
         "coverage": {
-            "available": available,
-            "included": {key: 0 for key in available},
+            "available": dict(input_available),
+            "included": {key: 0 for key in input_available},
+            "deduplicated": {key: 0 for key in input_available},
             "truncated": False,
         },
         "facts": {
@@ -179,6 +183,68 @@ def pack_repository_context(
         for finding in bundle.static_findings
     ]
 
+    def deduplicate(
+        items: list[dict[str, Any]],
+        identity: Callable[[dict[str, Any]], object],
+    ) -> list[dict[str, Any]]:
+        unique: list[dict[str, Any]] = []
+        seen: set[object] = set()
+        for item in items:
+            key = identity(item)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(item)
+        return unique
+
+    raw_fact_bytes = sum(
+        len(_json_bytes(item))
+        for items in (chunks, graph_edges, contracts, static_findings)
+        for item in items
+    )
+    chunks = deduplicate(
+        chunks,
+        lambda item: (
+            item["commit"],
+            item["file"],
+            tuple(item["lines"]),
+            item["source_content_hash"],
+        ),
+    )
+    graph_edges = deduplicate(
+        graph_edges,
+        lambda item: (item["source"], item["kind"], item["target"]),
+    )
+    contracts = deduplicate(contracts, lambda item: item["request_id"])
+    static_findings = deduplicate(
+        static_findings,
+        lambda item: (
+            item["tool"],
+            item["rule_id"],
+            item["file"],
+            tuple(item["lines"]),
+            item["code_snippet"],
+        ),
+    )
+    unique_by_kind = {
+        "chunks": chunks,
+        "graph_edges": graph_edges,
+        "contracts": contracts,
+        "static_findings": static_findings,
+    }
+    available = {kind: len(items) for kind, items in unique_by_kind.items()}
+    deduplicated = {
+        kind: input_available[kind] - available[kind]
+        for kind in input_available
+    }
+    unique_fact_bytes = sum(
+        len(_json_bytes(item)) for items in unique_by_kind.values() for item in items
+    )
+    deduplicated_bytes = max(0, raw_fact_bytes - unique_fact_bytes)
+    payload["coverage"]["available"] = available
+    payload["coverage"]["deduplicated"] = deduplicated
+    payload["coverage"]["deduplicated_bytes"] = deduplicated_bytes
+
     appenders: dict[str, tuple[list[dict[str, Any]], Callable[[str, dict[str, Any]], bool]]] = {
         "chunks": (chunks, lambda kind, item: append_excerpt(kind, item, "content")),
         "graph_edges": (graph_edges, append_if_fits),
@@ -267,6 +333,9 @@ def pack_repository_context(
         available=available,
         truncated=truncated,
         evidence_index=evidence_index,
+        deduplicated=deduplicated,
+        deduplicated_bytes=deduplicated_bytes,
+        packed_bytes=len(text.encode("utf-8")),
     )
 
 

@@ -188,6 +188,23 @@ class CanonicalSQLAlchemyAIExecutionStore:
                 tenant_id=record.tenant_id,
                 request_id=record.request_id,
                 work_item_id=record.work_item_id,
+                metric_name=(
+                    "ai.execution.local"
+                    if record.provider == LLMProvider.OLLAMA
+                    else "ai.execution.cloud"
+                ),
+                value=1,
+                unit="count",
+                dimensions={
+                    "capability": record.capability.value,
+                    "success": record.success,
+                },
+            )
+            TelemetryRecorder.record(
+                db,
+                tenant_id=record.tenant_id,
+                request_id=record.request_id,
+                work_item_id=record.work_item_id,
                 metric_name="provider.latency",
                 value=record.latency_ms,
                 unit="milliseconds",
@@ -203,6 +220,27 @@ class CanonicalSQLAlchemyAIExecutionStore:
                 unit="tokens",
                 dimensions=dimensions,
             )
+            context_metrics = record.generation_settings.get("context_metrics")
+            if isinstance(context_metrics, dict):
+                for metric_name, field_name, unit in (
+                    ("ai.context.retrieved_tokens", "retrieved_context_tokens", "tokens"),
+                    ("ai.context.packed_tokens", "packed_context_tokens", "tokens"),
+                    ("ai.context.packed_bytes", "packed_context_bytes", "bytes"),
+                    ("ai.context.deduplicated_items", "deduplicated_items", "count"),
+                    ("ai.context.deduplicated_bytes", "deduplicated_bytes", "bytes"),
+                ):
+                    value = context_metrics.get(field_name)
+                    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                        TelemetryRecorder.record(
+                            db,
+                            tenant_id=record.tenant_id,
+                            request_id=record.request_id,
+                            work_item_id=record.work_item_id,
+                            metric_name=metric_name,
+                            value=value,
+                            unit=unit,
+                            dimensions={"capability": record.capability.value},
+                        )
 
 
 class AIExecutionRecorder:
@@ -246,6 +284,10 @@ class AIExecutionRecorder:
             "max_tokens": request.max_tokens,
             "json_mode": request.json_mode,
         }
+        if request.context_metrics is not None:
+            generation_settings["context_metrics"] = request.context_metrics.model_dump(
+                mode="json"
+            )
         lineage = request.lineage
         payload = {
             "schema_version": "1.0",

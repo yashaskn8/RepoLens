@@ -86,6 +86,21 @@ class ModelCapabilityRegistry:
         return cls(
             (
                 ModelCapabilitySpec(
+                    provider=LLMProvider.OLLAMA,
+                    model=configured.OLLAMA_MODEL,
+                    capabilities=frozenset(
+                        {
+                            ModelCapability.CLASSIFICATION,
+                            ModelCapability.STRUCTURED_EXTRACTION,
+                        }
+                    ),
+                    cost_tier=ModelCostTier.FREE,
+                    quality_rank=1,
+                    context_window_tokens=configured.OLLAMA_CONTEXT_WINDOW_TOKENS,
+                    max_output_tokens=configured.OLLAMA_MAX_OUTPUT_TOKENS,
+                    enabled=configured.LOCAL_LLM_ENABLED,
+                ),
+                ModelCapabilitySpec(
                     provider=LLMProvider.GROQ,
                     model=configured.MODEL_LIGHTWEIGHT_CLASSIFICATION,
                     capabilities=frozenset(

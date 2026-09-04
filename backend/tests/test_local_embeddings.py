@@ -396,6 +396,17 @@ class TestSettingsOverride:
         service = LocalEmbeddingService()
         assert service.model_name == DEFAULT_LOCAL_EMBEDDING_MODEL
         assert service.device == DEFAULT_LOCAL_EMBEDDING_DEVICE
+        assert service.allow_download is False
+
+    @patch(_ST_PATCH, side_effect=lambda *a, **kw: _make_normalized_mock_model())
+    def test_model_loading_is_offline_by_default(self, mock_loader):
+        service = LocalEmbeddingService()
+        service.embed_text("already-cached model")
+        mock_loader.assert_called_once_with(
+            DEFAULT_LOCAL_EMBEDDING_MODEL,
+            DEFAULT_LOCAL_EMBEDDING_DEVICE,
+            False,
+        )
 
 
 # ===========================================================================

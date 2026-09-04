@@ -7,6 +7,7 @@ from app.analysis.schemas import ScannerResult, StaticFinding, ToolStatus
 from app.analysis.store import EvidenceStore
 from app.context.engine import ContextEngine
 from app.context.prompt import pack_repository_context
+from app.context.schemas import ContextBundle
 from app.graph.builder import build_repository_graph
 from app.indexing.schemas import ChunkSymbolKind, CodeChunk, INDEX_VERSION, content_hash
 from app.ingestion.schemas import (
@@ -193,3 +194,38 @@ async def test_context_engine_budget_enforcement():
     assert len(packed.text.encode("utf-8")) <= 900
     assert packed.estimated_tokens <= 300
     assert packed.digest
+
+
+def test_prompt_packing_deduplicates_identical_source_ranges() -> None:
+    chunk = CodeChunk(
+        chunk_id="chunk:duplicate",
+        commit_sha="a" * 40,
+        file_path="app/service.py",
+        symbol="service",
+        symbol_kind=ChunkSymbolKind.FUNCTION,
+        start_line=5,
+        end_line=8,
+        content="def service():\n    return True",
+        content_hash=content_hash("def service():\n    return True"),
+        index_version=INDEX_VERSION,
+    )
+    result = RetrievalResult(
+        chunk_id=chunk.chunk_id,
+        score=0.9,
+        source_channels=[RetrievalChannel.EXACT],
+        chunk=chunk,
+    )
+    bundle = ContextBundle(
+        scan_id="scan-dedupe",
+        query="service",
+        analysis_intent="general",
+        relevant_chunks=[result, result.model_copy(deep=True)],
+    )
+
+    packed = pack_repository_context(bundle, token_budget=512)
+
+    assert packed.available["chunks"] == 1
+    assert packed.included["chunks"] == 1
+    assert packed.deduplicated["chunks"] == 1
+    assert packed.deduplicated_bytes > 0
+    assert packed.packed_bytes == len(packed.text.encode("utf-8"))

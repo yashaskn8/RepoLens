@@ -19,6 +19,7 @@ class LLMProvider(str, Enum):
     MISTRAL = "mistral"
     COHERE = "cohere"
     OPENROUTER = "openrouter"
+    OLLAMA = "ollama"
 
 
 class TaskPolicy(str, Enum):
@@ -101,6 +102,18 @@ class AIExecutionLineage(BaseModel):
     policy_snapshot_id: Optional[str] = Field(default=None, max_length=36)
 
 
+class AIContextMetrics(BaseModel):
+    """Bounded, content-free measurements for deterministic prompt packing."""
+
+    model_config = ConfigDict(frozen=True)
+
+    retrieved_context_tokens: int = Field(default=0, ge=0)
+    packed_context_tokens: int = Field(default=0, ge=0)
+    packed_context_bytes: int = Field(default=0, ge=0)
+    deduplicated_items: int = Field(default=0, ge=0)
+    deduplicated_bytes: int = Field(default=0, ge=0)
+
+
 class LLMMessage(BaseModel):
     """Normalized chat message structure."""
 
@@ -137,7 +150,12 @@ class LLMRequest(BaseModel):
     allow_escalation: bool = Field(default=True, description="Permit a stronger sequential candidate when needed")
     budget: AIRequestBudget = Field(default_factory=AIRequestBudget)
     lineage: AIExecutionLineage = Field(default_factory=AIExecutionLineage)
+    context_metrics: Optional[AIContextMetrics] = None
     timeout_seconds: Optional[float] = Field(default=None, ge=1.0, description="Request timeout override in seconds")
+    cache_mode: Literal["auto", "disabled", "exact", "semantic"] = "auto"
+    cache_task: Optional[
+        Literal["classification", "summary", "explanation", "query_rewrite", "informational"]
+    ] = None
     extra_params: Dict[str, Any] = Field(default_factory=dict, description="Additional provider-specific parameters")
 
     @model_validator(mode="after")

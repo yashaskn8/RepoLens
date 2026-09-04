@@ -12,9 +12,11 @@ from app.llm.adapters import (
     HuggingFaceAdapter,
     MistralAdapter,
     NvidiaAdapter,
+    OllamaAdapter,
     OpenRouterAdapter,
 )
 from app.llm.base import BaseLLMAdapter
+from app.llm.cache import AIResponseCache, SingleFlight
 from app.llm.classifier import TaskCategory, TaskClassifier
 from app.llm.exceptions import (
     LLMAllFallbacksFailedError,
@@ -24,7 +26,7 @@ from app.llm.exceptions import (
 )
 from app.llm.gateway import CapabilityAIGateway
 from app.llm.health import ProviderHealthRegistry
-from app.llm.types import LLMProvider, LLMRequest, LLMResponse, TaskPolicy
+from app.llm.types import LLMProvider, LLMRequest, LLMResponse, ModelCapability, TaskPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +64,8 @@ class LLMRouter:
         adapters: Optional[Dict[LLMProvider, BaseLLMAdapter]] = None,
         capability_gateway: Optional[CapabilityAIGateway] = None,
         health: Optional[ProviderHealthRegistry] = None,
+        response_cache: Optional[AIResponseCache] = None,
+        singleflight: Optional[SingleFlight[LLMResponse]] = None,
     ):
         self._health = health or ProviderHealthRegistry()
         self._adapters: Dict[LLMProvider, BaseLLMAdapter] = adapters or {
@@ -72,11 +76,16 @@ class LLMRouter:
             LLMProvider.CLOUDFLARE: CloudflareAdapter(),
             LLMProvider.MISTRAL: MistralAdapter(),
             LLMProvider.OPENROUTER: OpenRouterAdapter(),
+            LLMProvider.OLLAMA: OllamaAdapter(),
         }
         self._capability_gateway = capability_gateway or CapabilityAIGateway(
             self._adapters,
             max_retries=max(0, get_settings().LLM_MAX_RETRIES),
             health=self._health,
+        )
+        self._response_cache = response_cache or AIResponseCache()
+        self._singleflight = singleflight or SingleFlight[LLMResponse](
+            max_entries=get_settings().AI_SINGLEFLIGHT_MAX_ENTRIES
         )
 
     def get_adapter(self, provider: LLMProvider) -> BaseLLMAdapter:
@@ -127,10 +136,19 @@ class LLMRouter:
                 ],
             ),
             TaskPolicy.LIGHTWEIGHT_CLASSIFICATION: (
-                (LLMProvider.GROQ, settings.MODEL_LIGHTWEIGHT_CLASSIFICATION),
-                [
-                    (LLMProvider.GEMINI, settings.MODEL_ARCHITECTURE),
-                ],
+                (
+                    (LLMProvider.OLLAMA, settings.OLLAMA_MODEL)
+                    if settings.LOCAL_LLM_ENABLED
+                    else (LLMProvider.GROQ, settings.MODEL_LIGHTWEIGHT_CLASSIFICATION)
+                ),
+                (
+                    [
+                        (LLMProvider.GROQ, settings.MODEL_LIGHTWEIGHT_CLASSIFICATION),
+                        (LLMProvider.GEMINI, settings.MODEL_ARCHITECTURE),
+                    ]
+                    if settings.LOCAL_LLM_ENABLED
+                    else [(LLMProvider.GEMINI, settings.MODEL_ARCHITECTURE)]
+                ),
             ),
             TaskPolicy.VERIFICATION: (
                 (LLMProvider.NVIDIA, settings.MODEL_VERIFICATION),
@@ -204,22 +222,83 @@ class LLMRouter:
             return primary, fallbacks
 
         elif cat == TaskCategory.RETRIEVAL:
-            # Cohere primary for semantic search / retrieval embeddings
-            primary = (LLMProvider.COHERE, getattr(settings, "COHERE_EMBEDDING_MODEL", "embed-english-v3.0"))
-            fallbacks = [
-                (LLMProvider.NVIDIA, getattr(settings, "EMBEDDING_MODEL_PRIMARY", "nvidia/nv-embedcode-7b-v1")),
-            ]
-            return primary, fallbacks
+            raise ValueError(
+                "Embedding and reranking requests must use the canonical EmbeddingProvider/retrieval boundary."
+            )
 
         else:  # SIMPLE_GENERATION (Default general-purpose)
-            primary = (LLMProvider.CLOUDFLARE, settings.CLOUDFLARE_DEFAULT_MODEL)
-            fallbacks = [
-                (LLMProvider.MISTRAL, settings.MISTRAL_DEFAULT_MODEL),
-                (LLMProvider.OPENROUTER, settings.OPENROUTER_DEFAULT_MODEL),
-            ]
+            if settings.LOCAL_LLM_ENABLED and TaskClassifier.local_model_eligible(request):
+                primary = (LLMProvider.OLLAMA, settings.OLLAMA_MODEL)
+                fallbacks = [
+                    (LLMProvider.CLOUDFLARE, settings.CLOUDFLARE_DEFAULT_MODEL),
+                    (LLMProvider.MISTRAL, settings.MISTRAL_DEFAULT_MODEL),
+                ]
+            else:
+                primary = (LLMProvider.CLOUDFLARE, settings.CLOUDFLARE_DEFAULT_MODEL)
+                fallbacks = [
+                    (LLMProvider.MISTRAL, settings.MISTRAL_DEFAULT_MODEL),
+                    (LLMProvider.OPENROUTER, settings.OPENROUTER_DEFAULT_MODEL),
+                ]
             return primary, fallbacks
 
     async def generate(self, request: LLMRequest) -> LLMResponse:
+        """Run one evidence-scoped request through cache, single-flight, then routing."""
+        if request.capability in {ModelCapability.EMBEDDING, ModelCapability.RERANKING}:
+            raise ValueError(
+                "Embedding and reranking requests must use the canonical EmbeddingProvider/retrieval boundary."
+            )
+        routing_identity = self._routing_identity(request)
+        cached = await self._response_cache.lookup(request, routing_identity)
+        if cached is not None:
+            return cached.response.model_copy(deep=True)
+
+        async def execute() -> LLMResponse:
+            response = await self._generate_uncached(request)
+            await self._response_cache.store_response(request, routing_identity, response)
+            return response
+
+        if not self._response_cache.can_coalesce(request):
+            return await execute()
+        try:
+            singleflight_key = self._response_cache.request_key(
+                request, routing_identity
+            )
+        except Exception:
+            # Non-canonical provider parameters make reuse unsafe, but never
+            # make execution unavailable.
+            return await execute()
+        response, coalesced = await self._singleflight.run(
+            singleflight_key, execute
+        )
+        result = response.model_copy(deep=True)
+        if coalesced:
+            extra = dict(result.metadata.extra_metadata or {})
+            extra.update({"singleflight_coalesced": True, "provider_call_avoided": True})
+            result.metadata.extra_metadata = extra
+            await self._response_cache.record_event("singleflight_coalesced", request)
+        return result
+
+    def _routing_identity(self, request: LLMRequest) -> str:
+        """Version cache/coalescing identity by the selected router policy."""
+        if request.capability is not None:
+            return (
+                f"capability:{self._capability_gateway.routing_policy.version}:"
+                f"{self._capability_gateway.registry.version}"
+            )
+        if request.provider is not None:
+            return f"explicit:{request.provider.value}:{request.model or 'provider-default'}"
+        if request.task_policy is not None:
+            primary, fallbacks = self.get_policy_routes(request.task_policy)
+        else:
+            primary, fallbacks = self.get_task_aware_routes(
+                request, category=TaskClassifier.classify(request)
+            )
+        chain = [primary, *fallbacks]
+        return "router/2.0:" + ",".join(
+            f"{provider.value}/{model}" for provider, model in chain
+        )
+
+    async def _generate_uncached(self, request: LLMRequest) -> LLMResponse:
         """Route request according to task classification/policy/overrides with circuit breaking and fallback."""
         import asyncio
         settings = get_settings()
@@ -363,6 +442,8 @@ def configure_persistent_llm_router(
     while AI execution lineage remains durable in both profiles.
     """
     from app.governance.policies import OperationalPolicy, OperationalPolicyService
+    from app.governance.telemetry import TelemetryRecorder
+    from app.llm.cache import AIResponseCache
     from app.llm.execution import AIExecutionRecorder, CanonicalSQLAlchemyAIExecutionStore
     from app.llm.gateway import AIRoutingLimits
     from app.llm.health import ProviderHealthRegistry, SQLAlchemyProviderHealthRegistry
@@ -396,8 +477,26 @@ def configure_persistent_llm_router(
             disabled_models=frozenset(policy.disabled_models),
         )
 
+    def record_cache_event(event: str, request: LLMRequest) -> None:
+        """Persist bounded cache/coalescing counters without provider-call inflation."""
+        with session_factory() as db, db.begin():
+            TelemetryRecorder.record(
+                db,
+                metric_name=f"ai.cache.{event}",
+                value=1,
+                unit="count",
+                tenant_id=request.lineage.tenant_id,
+                request_id=request.lineage.request_id,
+                work_item_id=request.lineage.work_item_id,
+                dimensions={
+                    "capability": request.capability.value if request.capability else None,
+                    "task_policy": request.task_policy.value if request.task_policy else None,
+                    "cache_task": request.cache_task,
+                },
+            )
+
     global _default_router
-    router = LLMRouter()
+    router = LLMRouter(response_cache=AIResponseCache(event_sink=record_cache_event))
     health = (
         SQLAlchemyProviderHealthRegistry(session_factory)
         if database_authoritative

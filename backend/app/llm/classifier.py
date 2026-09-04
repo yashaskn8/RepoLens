@@ -30,10 +30,10 @@ _SIMPLE_SIGNALS = re.compile(
     r"(?i)\b(summarize|summary|briefly|short explanation|rewrite|classify|classification|extract|intent|ping|hello)\b"
 )
 
-_RETRIEVAL_SIGNALS = re.compile(
-    r"(?i)\b(search|find documents?|semantic similarity|retrieve|rank|rerank|embeddings?)\b"
+_LOCAL_DENY_SIGNALS = re.compile(
+    r"(?i)\b(auth(?:entication|orization)?|permission|quota|approval|approve|"
+    r"github write|publish|security finding|vulnerability|patch|remediation|final judgment)\b"
 )
-
 
 class TaskClassifier:
     """Deterministic classifier routing LLM requests without recursive LLM overhead."""
@@ -47,7 +47,7 @@ class TaskClassifier:
         """Deterministically classify an LLMRequest into a TaskCategory.
 
         Rules:
-        1. Explicit retrieval capabilities/signals -> RETRIEVAL
+        1. Explicit embedding/reranking capabilities -> RETRIEVAL
         2. Escalation from previous simple provider failure -> COMPLEX_REASONING
         3. Strict reasoning policies (Bug, Security, Fix Planning, Patch) -> COMPLEX_REASONING
         4. Heavy context (> ROUTER_COMPLEXITY_CONTEXT_THRESHOLD tokens/chars) -> COMPLEX_REASONING
@@ -118,8 +118,6 @@ class TaskClassifier:
 
         # 6. Prompt text heuristic signals
         all_text = " ".join(m.content for m in request.messages)
-        if _RETRIEVAL_SIGNALS.search(all_text):
-            return TaskCategory.RETRIEVAL
         if _COMPLEX_SIGNALS.search(all_text):
             return TaskCategory.COMPLEX_REASONING
         if _SIMPLE_SIGNALS.search(all_text):
@@ -127,3 +125,18 @@ class TaskClassifier:
 
         # 7. Default to lightweight simple generation (Cloudflare Workers AI)
         return TaskCategory.SIMPLE_GENERATION
+
+    @classmethod
+    def local_model_eligible(cls, request: LLMRequest) -> bool:
+        """Select only deterministic, low-risk local-generation request classes."""
+        if request.task_policy is not None:
+            return request.task_policy == TaskPolicy.LIGHTWEIGHT_CLASSIFICATION
+        if request.capability is not None:
+            return request.capability in {
+                ModelCapability.CLASSIFICATION,
+                ModelCapability.STRUCTURED_EXTRACTION,
+            }
+        text = " ".join(message.content for message in request.messages)
+        if _LOCAL_DENY_SIGNALS.search(text) or _COMPLEX_SIGNALS.search(text):
+            return False
+        return bool(request.cache_task or _SIMPLE_SIGNALS.search(text))
