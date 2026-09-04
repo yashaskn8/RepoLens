@@ -25,6 +25,11 @@ from app.context.runtime import (
     unregister_scan_runtime,
 )
 from app.graph.repository_graph import RepositoryGraph
+from app.llm.economy import (
+    WorkflowCloudBudget,
+    bind_workflow_cloud_budget,
+    reset_workflow_cloud_budget,
+)
 from app.mcp.executor import MCPToolExecutor
 from app.mcp.runtime_client import MCPRuntimeClient
 from app.mcp.server import MCPRepositoryServer
@@ -189,6 +194,17 @@ async def run_analysis_workflow(
         scan_runtime=runtime,
         mcp_executor=mcp_executor,
     )
+    cloud_budget = WorkflowCloudBudget.from_settings()
+
+    async def invoke_with_cloud_budget(payload: Any) -> AnalysisState:
+        token = bind_workflow_cloud_budget(cloud_budget)
+        try:
+            result = await app.ainvoke(payload, config=config, context=runtime_context)
+        finally:
+            reset_workflow_cloud_budget(token)
+        result = dict(result)
+        result["ai_cloud_budget"] = cloud_budget.snapshot().as_dict()
+        return result
 
     try:
         # Check for existing checkpoint state for this scan_id thread
@@ -204,12 +220,14 @@ async def run_analysis_workflow(
                 # If all nodes already finished, return the completed state directly
                 if not current_state.next:
                     logger.info("Scan %s already completed in checkpointer. Returning cached result.", scan_id)
-                    return current_state.values
+                    completed_state = dict(current_state.values)
+                    completed_state.setdefault("ai_cloud_budget", cloud_budget.snapshot().as_dict())
+                    return completed_state
 
                 # Interrupted scan: resume execution from last completed super-step
                 logger.info("Resuming scan %s from checkpoint (next nodes: %s)...", scan_id, current_state.next)
                 try:
-                    resumed_result = await app.ainvoke(None, config=config, context=runtime_context)
+                    resumed_result = await invoke_with_cloud_budget(None)
                     return resumed_result
                 except Exception as exc:
                     safe_msg = redact_secrets(str(exc))[:2048]
@@ -217,6 +235,7 @@ async def run_analysis_workflow(
                     failed_state = dict(current_state.values)
                     failed_state["status"] = "FAILED"
                     failed_state.setdefault("errors", []).append(f"Terminal execution failure on resume: {safe_msg}")
+                    failed_state["ai_cloud_budget"] = cloud_budget.snapshot().as_dict()
                     return failed_state
 
         # Fresh scan initialization (strictly JSON/msgpack serializable for checkpoints)
@@ -234,6 +253,8 @@ async def run_analysis_workflow(
             "routes": [r.model_dump() for r in evidence_store.get_routes()],
             "frontend_calls": [c.model_dump() for c in evidence_store.get_http_calls()],
             "static_findings": [f.model_dump() for f in evidence_store.all_findings],
+            "ai_admission": {},
+            "ai_cloud_budget": {},
             "candidate_findings": [],
             "revision_candidates": [],
             "verified_findings": [],
@@ -251,13 +272,14 @@ async def run_analysis_workflow(
         }
 
         try:
-            final_state = await app.ainvoke(initial_state, config=config, context=runtime_context)
+            final_state = await invoke_with_cloud_budget(initial_state)
             return final_state
         except Exception as exc:
             safe_msg = redact_secrets(str(exc))[:2048]
             logger.error("Terminal workflow failure for scan %s: %s", scan_id, safe_msg)
             initial_state["status"] = "FAILED"
             initial_state.setdefault("errors", []).append(f"Terminal execution failure: {safe_msg}")
+            initial_state["ai_cloud_budget"] = cloud_budget.snapshot().as_dict()
             return initial_state
     finally:
         try:

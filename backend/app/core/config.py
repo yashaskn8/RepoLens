@@ -81,6 +81,16 @@ class Settings(BaseSettings):
     LLM_DEFAULT_TIMEOUT: float = 30.0
     LLM_MAX_RETRIES: int = 2
 
+    # Shared workflow cloud-use governor.  Local Ollama, cache hits, and
+    # deterministic work never consume these limits.
+    AI_ECONOMY_MODE: Literal["auto", "strict", "quality"] = "auto"
+    AI_ECONOMY_STRICT_MAX_CLOUD_CALLS: int = 3
+    AI_ECONOMY_STRICT_MAX_CLOUD_TOKENS: int = 12_000
+    AI_ECONOMY_AUTO_MAX_CLOUD_CALLS: int = 8
+    AI_ECONOMY_AUTO_MAX_CLOUD_TOKENS: int = 40_000
+    AI_ECONOMY_QUALITY_MAX_CLOUD_CALLS: int = 16
+    AI_ECONOMY_QUALITY_MAX_CLOUD_TOKENS: int = 100_000
+
     # Repository Ingestion Limits
     CLONE_TIMEOUT_SECONDS: int = 120
     MAX_REPO_FILES: int = 5000
@@ -242,6 +252,15 @@ class Settings(BaseSettings):
             self.OLLAMA_MAX_OUTPUT_TOKENS,
         ) <= 0 or self.OLLAMA_FAILURE_COOLDOWN_SECONDS < 0:
             raise ValueError("Ollama timeouts and token limits must be positive")
+        if min(
+            self.AI_ECONOMY_STRICT_MAX_CLOUD_CALLS,
+            self.AI_ECONOMY_STRICT_MAX_CLOUD_TOKENS,
+            self.AI_ECONOMY_AUTO_MAX_CLOUD_CALLS,
+            self.AI_ECONOMY_AUTO_MAX_CLOUD_TOKENS,
+            self.AI_ECONOMY_QUALITY_MAX_CLOUD_CALLS,
+            self.AI_ECONOMY_QUALITY_MAX_CLOUD_TOKENS,
+        ) < 1:
+            raise ValueError("AI economy cloud ceilings must be positive")
         if self.ENABLE_API_DOCS is None:
             self.ENABLE_API_DOCS = not self.is_production
 

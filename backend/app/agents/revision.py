@@ -64,8 +64,24 @@ async def run_revision_agent(
             "status": "REVISED",
         }
 
+    # A revision is valuable only for material unresolved claims.  Low-value
+    # uncertainty remains explicit in the report instead of consuming another
+    # cloud request merely to rewrite wording.
     all_candidates = state.get("candidate_findings", [])
     candidate_map = {str(c.id): c for c in all_candidates}
+    material_ids = {
+        target_id
+        for target_id in target_ids
+        if not str(getattr(candidate_map.get(target_id), "severity", "")).upper().endswith(("LOW", "INFO"))
+    }
+    if not material_ids:
+        return {
+            "revision_candidates": [],
+            "revision_count": current_revision_count + 1,
+            "completed_nodes": ["revise"],
+            "status": "REVISED",
+        }
+
     rejection_map = {str(rf.get("finding_id")): rf for rf in state.get("rejected_findings", [])}
 
     scan_id = safe_to_uuid(state.get("scan_id", ""))
@@ -74,7 +90,7 @@ async def run_revision_agent(
     errors = []
     revised_findings: List[Finding] = []
 
-    for target_id in sorted(target_ids):
+    for target_id in sorted(material_ids):
         original = candidate_map.get(target_id)
         if not original:
             continue
@@ -125,7 +141,7 @@ async def run_revision_agent(
                 capability=ModelCapability.DEEP_REASONING,
                 output_schema=FINDINGS_OUTPUT_SCHEMA,
                 temperature=0.1,
-                max_tokens=2000,
+                max_tokens=min(2_000, 700 + len(material_ids) * 400),
                 confidence_threshold=0.75,
                 budget=REPOSITORY_ANALYSIS_BUDGET,
                 lineage=lineage_for_scan(

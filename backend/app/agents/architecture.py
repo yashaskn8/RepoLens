@@ -7,6 +7,7 @@ from app.agents.state import AnalysisState
 from app.context.runtime import AnalysisRuntimeContext, get_scan_context_engine
 from app.context.prompt import pack_repository_context
 from app.agents.grounding import build_evidence_index
+from app.llm.admission import AdmissionDecision, admission_for_state
 from app.llm.budgets import REPOSITORY_ANALYSIS_BUDGET
 from app.llm.router import get_llm_router
 from app.llm.types import AIContextMetrics, LLMMessage, LLMRequest, ModelCapability, TaskPolicy
@@ -20,6 +21,14 @@ async def run_architecture_agent(
 ) -> Dict[str, Any]:
     """Analyze high-level architecture, module boundaries, and design patterns using targeted ContextBundle."""
     scan_id = safe_to_uuid(state["scan_id"])
+    admission = admission_for_state(state, "architecture")
+    if admission.decision != AdmissionDecision.CLOUD_REQUIRED:
+        return {
+            "candidate_findings": [],
+            "completed_nodes": ["architecture"],
+            "model_executions": [],
+            "errors": [],
+        }
     manifest = state.get("manifest_summary", {})
     languages = state.get("languages", {})
     frameworks = state.get("frameworks", [])
@@ -37,14 +46,16 @@ async def run_architecture_agent(
     context_evidence: Dict[str, Any] = {}
     context_metrics = None
     if context_engine:
+        context_budget = min(5_500, max(1_500, admission.max_output_tokens * 2))
+        packed_budget = min(4_800, max(1_024, admission.max_output_tokens * 2))
         bundle = await context_engine.build_context_bundle(
             scan_id=str(scan_id),
             query=f"architecture layer module structure {overview[:80]}",
             analysis_intent="architecture",
-            context_budget=5_500,
+            context_budget=context_budget,
             max_chunks=8,
         )
-        packed = pack_repository_context(bundle, token_budget=4_800)
+        packed = pack_repository_context(bundle, token_budget=packed_budget)
         packed_context = packed.text
         evidence_index = build_evidence_index(packed)
         context_evidence = {
@@ -129,7 +140,7 @@ async def run_architecture_agent(
                 evidence={"manifest": manifest, "languages": languages, "frameworks": frameworks, **context_evidence},
             ),
             temperature=0.1,
-            max_tokens=1800,
+            max_tokens=admission.max_output_tokens,
             confidence_threshold=0.72,
             budget=REPOSITORY_ANALYSIS_BUDGET,
             context_metrics=context_metrics,

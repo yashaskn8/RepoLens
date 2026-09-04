@@ -582,6 +582,8 @@ async def execute_background_scan(
             "total_files": evidence_store.manifest.total_files,
             "total_size_bytes": evidence_store.manifest.total_size_bytes,
             "analysis_scope": evidence_store.manifest.analysis_scope.model_dump() if getattr(evidence_store.manifest, "analysis_scope", None) else None,
+            "ai_admission": final_state.get("ai_admission", {}),
+            "ai_cloud_budget": final_state.get("ai_cloud_budget", {}),
             "verification_summary": {
                 "canonical_confirmed_findings": existing_canonical_count + len(newly_persisted_findings),
                 "excluded_noncanonical_findings": len(excluded_candidate_keys),

@@ -2,6 +2,7 @@
 
 from typing import Any, Dict
 from app.agents.state import AnalysisState
+from app.llm.admission import build_admission_map
 
 
 def _repository_archetype(
@@ -64,6 +65,11 @@ async def run_repository_mapper(state: AnalysisState) -> Dict[str, Any]:
 
     return {
         "architecture_overview": overview,
+        "ai_admission": build_admission_map({
+            **state,
+            "frameworks": frameworks,
+            "architecture_overview": overview,
+        }),
         "completed_nodes": ["mapper"],
         "model_executions": [],
         "errors": [],

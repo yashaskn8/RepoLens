@@ -21,10 +21,12 @@ from app.llm.classifier import TaskCategory, TaskClassifier
 from app.llm.exceptions import (
     LLMAllFallbacksFailedError,
     LLMError,
+    LLMQuotaExhaustedError,
     LLMRateLimitError,
     ProviderFailureCode,
 )
 from app.llm.gateway import CapabilityAIGateway
+from app.llm.economy import current_workflow_cloud_budget
 from app.llm.health import ProviderHealthRegistry
 from app.llm.types import LLMProvider, LLMRequest, LLMResponse, ModelCapability, TaskPolicy
 
@@ -310,7 +312,24 @@ class LLMRouter:
         """Route request according to task classification/policy/overrides with circuit breaking and fallback."""
         import asyncio
         settings = get_settings()
-        max_retries = max(0, settings.LLM_MAX_RETRIES)
+        workflow_budget = current_workflow_cloud_budget()
+        max_retries = 0 if workflow_budget is not None and workflow_budget.strict else max(0, settings.LLM_MAX_RETRIES)
+
+        def reserve_cloud_attempt(provider: LLMProvider, model: str) -> None:
+            if workflow_budget is None or provider == LLMProvider.OLLAMA:
+                return
+            input_tokens = max(1, sum(len(message.content) for message in request.messages) // 4)
+            output_tokens = max(1, min(request.max_tokens or request.budget.max_output_tokens, 2_400))
+            if not workflow_budget.reserve(
+                provider,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            ):
+                raise LLMQuotaExhaustedError(
+                    "The workflow cloud-use budget was exhausted; deterministic results remain available.",
+                    provider=provider,
+                    model=model or None,
+                )
 
         # Capability requests use the governed cheap-first control plane.
         if request.capability is not None:
@@ -322,6 +341,7 @@ class LLMRouter:
             model_target = request.model or ""
             for attempt in range(max_retries + 1):
                 try:
+                    reserve_cloud_attempt(request.provider, model_target)
                     response = await adapter.generate(request)
                     if model_target:
                         self._health.record_success(request.provider, model_target)
@@ -369,6 +389,7 @@ class LLMRouter:
 
             for attempt in range(route_max_retries + 1):
                 try:
+                    reserve_cloud_attempt(provider, model)
                     response = await adapter.generate(attempt_request)
                     self._health.record_success(provider, model)
                     if attempt > 0 or attempted_errors:

@@ -17,6 +17,7 @@ from app.core.database import SessionLocal
 from app.ingestion.comparison_snapshot import get_comparison_snapshot_service
 from app.models.change_analysis import ChangeAnalysisModel, ChangeImpactModel
 from app.governance.taxonomy import FailureCode, safe_failure
+from app.llm.economy import WorkflowCloudBudget, bind_workflow_cloud_budget, reset_workflow_cloud_budget
 from app.schemas.change_analysis import (
     BlastRadiusReport,
     ChangeAnalysisStatus,
@@ -126,7 +127,14 @@ async def execute_background_change_analysis(
             async with get_sqlite_checkpointer(db_path=checkpoint_db_path) as checkpointer:
                 graph = build_change_analysis_graph(checkpointer=checkpointer)
                 config = {"configurable": {"thread_id": f"change-analysis:{analysis_id}"}}
-                final_state = await graph.ainvoke(initial_state, config=config)
+                cloud_budget = WorkflowCloudBudget.from_settings()
+                budget_token = bind_workflow_cloud_budget(cloud_budget)
+                try:
+                    final_state = await graph.ainvoke(initial_state, config=config)
+                finally:
+                    reset_workflow_cloud_budget(budget_token)
+                final_state = dict(final_state)
+                final_state["ai_cloud_budget"] = cloud_budget.snapshot().as_dict()
 
             # Extract results from final state
             diff_res: Optional[StructuralDiffResult] = final_state.get("diff_result")
@@ -205,6 +213,7 @@ async def execute_background_change_analysis(
                 meta["review_report"] = review_rep.model_dump(mode="json")
                 if review_rep.overall_risk_level != ChangeRiskLevel.LOW:
                     analysis_model.risk_level = review_rep.overall_risk_level.value
+            meta["ai_cloud_budget"] = final_state.get("ai_cloud_budget", {})
             analysis_model.model_metadata = meta
 
             # 6. Mark COMPLETED

@@ -31,6 +31,10 @@ class AnalysisState(TypedDict, total=False):
     frontend_calls: List[Dict[str, Any]]
     static_findings: List[Dict[str, Any]]
 
+    # Deterministic admission decisions for specialist model work.
+    ai_admission: Dict[str, Dict[str, Any]]
+    ai_cloud_budget: Dict[str, Any]
+
     # Candidate findings aggregated from parallel specialists (uses operator.add for fan-in)
     candidate_findings: Annotated[List[Finding], operator.add]
 

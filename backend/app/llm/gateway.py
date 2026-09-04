@@ -21,6 +21,7 @@ from app.llm.exceptions import (
     LLMResponseValidationError,
     ProviderFailureCode,
 )
+from app.llm.economy import current_workflow_cloud_budget
 from app.llm.execution import AIExecutionRecorder
 from app.llm.health import ProviderHealth, ProviderHealthRegistry
 from app.llm.quota import LocalProviderQuotaLedger, ProviderQuotaLedger
@@ -129,6 +130,9 @@ class CapabilityAIGateway:
         parent_execution_id = request.lineage.parent_execution_id
         best_uncertain_response: LLMResponse | None = None
         best_uncertain_confidence = -1.0
+        cloud_budget_exhausted = False
+        workflow_budget = current_workflow_cloud_budget()
+        effective_retries = 0 if workflow_budget is not None and workflow_budget.strict else self.max_retries
         for candidate_index, candidate in enumerate(candidates):
             if not self.health.allow_request(candidate.provider, candidate.model):
                 attempted.append(LLMProviderUnavailableError(
@@ -142,7 +146,7 @@ class CapabilityAIGateway:
                 ))
                 continue
 
-            for retry_number in range(self.max_retries + 1):
+            for retry_number in range(effective_retries + 1):
                 if call_count >= request.budget.max_ai_calls:
                     attempted.append(LLMQuotaExhaustedError("The request AI-call budget was exhausted."))
                     break
@@ -197,6 +201,25 @@ class CapabilityAIGateway:
                         provider=candidate.provider,
                         model=candidate.model,
                     ))
+                    break
+
+                if workflow_budget is not None and not workflow_budget.reserve(
+                    candidate.provider,
+                    input_tokens=estimate.input_tokens,
+                    output_tokens=reserved_output_tokens,
+                ):
+                    self.quota.settle(
+                        reservation,
+                        consume=False,
+                        actual_input_tokens=None,
+                        actual_output_tokens=None,
+                    )
+                    attempted.append(LLMQuotaExhaustedError(
+                        "The workflow cloud-use budget was exhausted; deterministic results remain available.",
+                        provider=candidate.provider,
+                        model=candidate.model,
+                    ))
+                    cloud_budget_exhausted = True
                     break
 
                 attempt_request = request.model_copy(update={
@@ -366,7 +389,7 @@ class CapabilityAIGateway:
                     retry_call_limit = request.budget.max_ai_calls - int(reserve_escalation_slot)
                     if (
                         exc.retryable
-                        and retry_number < self.max_retries
+                        and retry_number < effective_retries
                         and call_count < retry_call_limit
                     ):
                         await asyncio.sleep(min(2.0, 0.2 * (2 ** retry_number)))
@@ -417,6 +440,9 @@ class CapabilityAIGateway:
                     attempted.append(normalized)
                     logger.exception("Unexpected AI gateway error: %s", type(exc).__name__)
                     break
+
+            if cloud_budget_exhausted:
+                break
 
         if best_uncertain_response is not None:
             return self._retained_uncertain_response(

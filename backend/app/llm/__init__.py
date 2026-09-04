@@ -12,6 +12,8 @@ from app.llm.exceptions import (
 )
 from app.llm.router import LLMRouter, configure_persistent_llm_router, get_llm_router
 from app.llm.gateway import CapabilityAIGateway
+from app.llm.admission import AdmissionDecision, AIAdmissionPlan, AIWorkPlan
+from app.llm.economy import CloudBudgetSnapshot, WorkflowCloudBudget
 from app.llm.types import (
     LLMMessage,
     LLMProvider,
@@ -49,6 +51,11 @@ __all__ = [
     "LLMAllFallbacksFailedError",
     "LLMRouter",
     "CapabilityAIGateway",
+    "AdmissionDecision",
+    "AIAdmissionPlan",
+    "AIWorkPlan",
+    "CloudBudgetSnapshot",
+    "WorkflowCloudBudget",
     "configure_persistent_llm_router",
     "get_llm_router",
     "RepoLensChatModel",

@@ -8,6 +8,7 @@ from app.agents.state import AnalysisState
 from app.context.runtime import AnalysisRuntimeContext, get_scan_context_engine
 from app.context.prompt import pack_repository_context
 from app.agents.grounding import build_evidence_index
+from app.llm.admission import AdmissionDecision, admission_for_state
 from app.llm.budgets import REPOSITORY_ANALYSIS_BUDGET
 from app.llm.router import get_llm_router
 from app.llm.types import AIContextMetrics, LLMMessage, LLMRequest, ModelCapability, TaskPolicy
@@ -21,12 +22,22 @@ async def run_security_agent(
 ) -> Dict[str, Any]:
     """Analyze security posture, vulnerability findings, and critical code risks using targeted ContextBundle."""
     scan_id = safe_to_uuid(state["scan_id"])
+    admission = admission_for_state(state, "security")
     context_engine = None
     if runtime is not None and getattr(runtime, "context", None) is not None:
         context_engine = runtime.context.context_engine
     if context_engine is None:
         context_engine = get_scan_context_engine(str(scan_id))
     static_findings = state.get("static_findings", [])
+
+    deterministic_candidates = scanner_candidates(static_findings, scan_id=scan_id)
+    if admission.decision != AdmissionDecision.CLOUD_REQUIRED:
+        return {
+            "candidate_findings": deterministic_candidates if admission.decision == AdmissionDecision.DETERMINISTIC_ONLY else [],
+            "completed_nodes": ["security"],
+            "model_executions": [],
+            "errors": [],
+        }
 
     languages = state.get("languages", {})
     frameworks = state.get("frameworks", [])
@@ -36,14 +47,16 @@ async def run_security_agent(
     context_evidence: Dict[str, Any] = {}
     context_metrics = None
     if context_engine:
+        context_budget = min(5_500, max(1_500, admission.max_output_tokens * 2))
+        packed_budget = min(4_800, max(1_024, admission.max_output_tokens * 2))
         bundle = await context_engine.build_context_bundle(
             scan_id=str(scan_id),
             query="security vulnerability injection secrets authentication sanitization",
             analysis_intent="security",
-            context_budget=5_500,
+            context_budget=context_budget,
             max_chunks=8,
         )
-        packed = pack_repository_context(bundle, token_budget=4_800)
+        packed = pack_repository_context(bundle, token_budget=packed_budget)
         packed_context = packed.text
         evidence_index = build_evidence_index(packed)
         context_evidence = {
@@ -100,7 +113,7 @@ async def run_security_agent(
 
     model_executions = []
     errors = []
-    candidate_findings = scanner_candidates(static_findings, scan_id=scan_id)
+    candidate_findings = deterministic_candidates
 
     if not any(anchor.is_locatable for anchor in evidence_index.values()):
         return {
@@ -127,7 +140,7 @@ async def run_security_agent(
                 evidence={"static_finding_count": len(static_findings), "languages": languages, "frameworks": frameworks, **context_evidence},
             ),
             temperature=0.0,
-            max_tokens=1800,
+            max_tokens=admission.max_output_tokens,
             confidence_threshold=0.75,
             budget=REPOSITORY_ANALYSIS_BUDGET,
             context_metrics=context_metrics,
