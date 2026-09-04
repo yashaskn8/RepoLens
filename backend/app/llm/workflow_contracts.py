@@ -31,6 +31,7 @@ FINDINGS_OUTPUT_SCHEMA: dict[str, Any] = {
                     "evidence_refs",
                 ],
                 "properties": {
+                    "candidate_id": {"type": "string", "minLength": 1, "maxLength": 256},
                     "title": {"type": "string", "minLength": 1, "maxLength": 300},
                     "description": {"type": "string", "minLength": 1, "maxLength": 8_000},
                     "severity": {
@@ -46,6 +47,15 @@ FINDINGS_OUTPUT_SCHEMA: dict[str, Any] = {
                         "items": {"type": "string", "minLength": 1, "maxLength": 1_024},
                     },
                     "mitigation_guidance": {"type": ["string", "null"], "maxLength": 8_000},
+                    "source_behavior": {"type": "string", "maxLength": 4_000},
+                    "trigger_condition": {"type": "string", "maxLength": 4_000},
+                    "failure_mechanism": {"type": "string", "maxLength": 4_000},
+                    "impact_claim": {"type": "string", "maxLength": 4_000},
+                    "counter_evidence_considered": {
+                        "type": "array",
+                        "maxItems": 16,
+                        "items": {"type": "string", "maxLength": 1_000},
+                    },
                 },
             },
         }
@@ -66,6 +76,25 @@ VERIFICATION_OUTPUT_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "index": {"type": "integer", "minimum": 0},
                     "verdict": {"type": "string", "enum": ["CONFIRMED", "POSSIBLE", "REJECTED"]},
+                    "claims": {
+                        "type": "array",
+                        "maxItems": 8,
+                        "items": {
+                            "type": "object",
+                            "required": ["claim_type", "state"],
+                            "properties": {
+                                "claim_type": {
+                                    "type": "string",
+                                    "enum": ["SOURCE_BEHAVIOR", "TRIGGER", "MECHANISM", "IMPACT", "SEVERITY", "MITIGATION"],
+                                },
+                                "state": {
+                                    "type": "string",
+                                    "enum": ["SUPPORTED", "CONTRADICTED", "INSUFFICIENT"],
+                                },
+                                "reason": {"type": "string", "maxLength": 2_000},
+                            },
+                        },
+                    },
                 },
             },
         }

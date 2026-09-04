@@ -10,10 +10,18 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from app.agents.graph import build_analysis_graph, run_analysis_workflow
 from app.analysis.store import EvidenceStore
-from app.ingestion.schemas import FileEntry, ParsedSymbol, RepositoryManifest, SymbolKind
+from app.ingestion.schemas import FileEntry, ParsedCall, ParsedSymbol, RepositoryManifest, SymbolKind
 from app.llm.types import LLMProvider, LLMRequest, LLMResponse, ModelCapability, ModelExecutionMetadata, TaskPolicy
 from app.schemas.enums import Severity
 from app.schemas.finding import Finding
+
+
+def _specialist_candidate_id(request: LLMRequest) -> str:
+    content = request.messages[1].content
+    payload = content.split("<UNTRUSTED_REPOSITORY_DATA>", 1)[1].split(
+        "</UNTRUSTED_REPOSITORY_DATA>", 1
+    )[0]
+    return json.loads(payload)["hypotheses"][0]["candidate_id"]
 
 
 @pytest.fixture
@@ -27,8 +35,8 @@ def sample_analysis_environment():
                 "from fastapi import FastAPI\n"
                 "app = FastAPI()\n\n"
                 "@app.get('/items')\n"
-                "def list_items():\n"
-                "    return []\n"
+                "def list_items(path):\n"
+                "    return open(path).read()\n"
             )
 
         manifest = RepositoryManifest(
@@ -50,7 +58,15 @@ def sample_analysis_environment():
                             kind=SymbolKind.FASTAPI_ROUTE,
                             start_line=4,
                             end_line=6,
-                            details={"http_method": "GET", "path": "/items"},
+                            details={"http_method": "GET", "path": "/items", "handler": "list_items"},
+                        )
+                    ],
+                    calls=[
+                        ParsedCall(
+                            callee="open",
+                            callee_name="open",
+                            line_number=6,
+                            caller_name="list_items",
                         )
                     ],
                 )
@@ -122,8 +138,9 @@ async def test_langgraph_full_workflow_mocked_execution(sample_analysis_environm
             payload = {
                 "confidence": 0.9,
                 "findings": [
-                    {
-                        "title": "Missing Authentication on Route",
+                        {
+                            "candidate_id": _specialist_candidate_id(request),
+                            "title": "Missing Authentication on Route",
                         "description": "Endpoint /items lacks authentication dependency.",
                         "severity": "HIGH",
                         "category": "security",
@@ -193,13 +210,13 @@ async def test_langgraph_full_workflow_mocked_execution(sample_analysis_environm
     assert "revise" not in final_state["completed_nodes"]
 
     # 2. Candidate findings collected
-    assert len(final_state["candidate_findings"]) == 2
+    assert len(final_state["candidate_findings"]) == 1
 
     # 3. Grounding Verification assertions
     verified = final_state["verified_findings"]
     rejected = final_state["rejected_findings"]
 
-    assert len(verified) >= 2
+    assert len(verified) == 1
     for vf in verified:
         assert isinstance(vf, Finding)
         assert vf.evidences[0].file_path == "server.py"
@@ -237,8 +254,9 @@ async def test_langgraph_revision_path_when_possible_verdict(sample_analysis_env
             payload = {
                 "confidence": 0.9,
                 "findings": [
-                    {
-                        "title": "Missing Authorization Check",
+                        {
+                            "candidate_id": _specialist_candidate_id(request),
+                            "title": "Missing Authorization Check",
                         "description": "Endpoint has no auth decorator.",
                         "severity": "HIGH",
                         "category": "security",
@@ -254,23 +272,20 @@ async def test_langgraph_revision_path_when_possible_verdict(sample_analysis_env
 
         elif policy == TaskPolicy.BUG_REASONING:
             bug_reasoning_call_count += 1
-            if bug_reasoning_call_count == 1:
-                # Bug specialist: no findings
-                return LLMResponse(content=json.dumps({"findings": []}), model="m", provider=LLMProvider.GEMINI, metadata=metadata)
-            else:
-                # Revision agent call
-                payload = {
-                    "findings": [
-                        {
-                            "title": "Refined Missing Auth Check",
-                            "description": "Refined description: route GET /items lacks auth.",
-                            "severity": "HIGH",
-                            "category": "security",
-                            "evidence_refs": ["chunk:abcdef123456:server.py:GET /items:4"],
-                        }
-                    ]
-                }
-                return LLMResponse(content=json.dumps(payload), model="m", provider=LLMProvider.GEMINI, metadata=metadata)
+            # Candidate-first bug analysis skips when no deterministic bug
+            # hypothesis exists, so this policy invocation is the revision.
+            payload = {
+                "findings": [
+                    {
+                        "title": "Refined Missing Auth Check",
+                        "description": "Refined description: route GET /items lacks auth.",
+                        "severity": "HIGH",
+                        "category": "security",
+                        "evidence_refs": ["chunk:abcdef123456:server.py:GET /items:4"],
+                    }
+                ]
+            }
+            return LLMResponse(content=json.dumps(payload), model="m", provider=LLMProvider.GEMINI, metadata=metadata)
 
         elif policy == TaskPolicy.VERIFICATION:
             verifier_call_count += 1
@@ -344,8 +359,9 @@ async def test_langgraph_revision_exhaustion_routes_to_finalize_uncertain(sample
             payload = {
                 "confidence": 0.9,
                 "findings": [
-                    {
-                        "title": "Ambiguous Auth Issue",
+                        {
+                            "candidate_id": _specialist_candidate_id(request),
+                            "title": "Ambiguous Auth Issue",
                         "description": "Auth may be missing.",
                         "severity": "MEDIUM",
                         "category": "security",
@@ -426,8 +442,9 @@ async def test_langgraph_verifier_failure_routes_to_uncertain_without_revision(s
             payload = {
                 "confidence": 0.9,
                 "findings": [
-                    {
-                        "title": "Auth Issue",
+                        {
+                            "candidate_id": _specialist_candidate_id(request),
+                            "title": "Auth Issue",
                         "description": "Auth check.",
                         "severity": "HIGH",
                         "category": "security",
@@ -837,8 +854,9 @@ async def test_finalize_uncertain_graph_reducer_integration(sample_analysis_envi
             payload = {
                 "confidence": 0.9,
                 "findings": [
-                    {
-                        "title": "Auth Issue",
+                        {
+                            "candidate_id": _specialist_candidate_id(request),
+                            "title": "Auth Issue",
                         "description": "Auth check.",
                         "severity": "HIGH",
                         "category": "security",
@@ -878,4 +896,3 @@ async def test_finalize_uncertain_graph_reducer_integration(sample_analysis_envi
 
     uncertain_errors = [e for e in errors if "unconfirmed findings or exhausted" in e.lower()]
     assert len(uncertain_errors) == 1, f"Expected 1 uncertainty error, got {uncertain_errors}"
-

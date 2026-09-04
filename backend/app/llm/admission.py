@@ -136,7 +136,13 @@ def build_admission_plan(state: Mapping[str, Any], specialist: str) -> AIAdmissi
             max_output_tokens=0,
         )
 
-    if specialist == "security" and static_findings and all(_deterministic_finding(item) for item in static_findings):
+    security_flow_candidates = state.get("deterministic_security_flow_candidates") or []
+    if (
+        specialist == "security"
+        and static_findings
+        and all(_deterministic_finding(item) for item in static_findings)
+        and not security_flow_candidates
+    ):
         return AIAdmissionPlan(
             specialist=specialist,
             decision=AdmissionDecision.DETERMINISTIC_ONLY,
@@ -155,7 +161,8 @@ def build_admission_plan(state: Mapping[str, Any], specialist: str) -> AIAdmissi
         state.get("unresolved_graph_relationships", graph_coverage.get("unresolved_graph_relationships", 0))
         or 0
     )
-    if specialist == "architecture" and graph_complete and unresolved_graph == 0:
+    architecture_candidates = state.get("deterministic_architecture_candidates") or []
+    if specialist == "architecture" and graph_complete and unresolved_graph == 0 and not architecture_candidates:
         return AIAdmissionPlan(
             specialist=specialist,
             decision=AdmissionDecision.DETERMINISTIC_ONLY,

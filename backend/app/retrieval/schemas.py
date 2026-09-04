@@ -22,6 +22,10 @@ class RetrievalQuery(BaseModel):
     query: str = Field(..., min_length=1, description="Natural language or code search query")
     top_k: int = Field(default=10, ge=1, le=100, description="Maximum number of fused results to return")
     use_reranker: bool = Field(default=True, description="Whether to apply neural reranking if available")
+    analysis_intent: str = Field(
+        default="general",
+        description="Deterministic graph-priority profile: general, bug, security, architecture, or integration",
+    )
     file_path_filter: Optional[str] = Field(default=None, description="Optional path substring filter")
     symbol_kind_filter: Optional[str] = Field(default=None, description="Optional symbol kind filter")
 

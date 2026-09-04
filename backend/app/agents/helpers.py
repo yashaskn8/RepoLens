@@ -2,7 +2,7 @@
 
 import json
 import re
-from typing import Any, List
+from typing import Any, List, Mapping, Set
 import uuid
 from uuid import UUID
 
@@ -11,6 +11,7 @@ from app.schemas.evidence import Evidence
 from app.schemas.finding import Finding
 from app.schemas.metadata import ModelExecutionMetadata
 from app.agents.grounding import EvidenceIndex, ground_model_findings
+from app.atomic_claims import claims_from_model_item
 
 
 def safe_to_uuid(val: Any) -> UUID:
@@ -38,6 +39,7 @@ def parse_llm_findings(
     default_category: str,
     model_metadata: ModelExecutionMetadata,
     evidence_index: EvidenceIndex,
+    candidate_evidence: Mapping[str, Set[str]] | None = None,
 ) -> List[Finding]:
     """Parse only exactly cited, deterministically grounded model findings."""
     findings: List[Finding] = []
@@ -52,6 +54,23 @@ def parse_llm_findings(
     raw_items = data.get("findings", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
     if not isinstance(raw_items, list):
         return findings
+    if candidate_evidence is not None:
+        candidate_bound_items = []
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            candidate_id = item.get("candidate_id")
+            references = item.get("evidence_refs")
+            allowed = candidate_evidence.get(candidate_id) if isinstance(candidate_id, str) else None
+            if (
+                not allowed
+                or not isinstance(references, list)
+                or not references
+                or any(not isinstance(ref, str) or ref not in allowed for ref in references)
+            ):
+                continue
+            candidate_bound_items.append(item)
+        raw_items = candidate_bound_items
     grounded_items = ground_model_findings(raw_items, evidence_index)
 
     for item in grounded_items:
@@ -85,6 +104,14 @@ def parse_llm_findings(
                 ),
             )
 
+            execution_metadata = model_metadata.model_copy(deep=True)
+            atomic_claims = claims_from_model_item(item)
+            if atomic_claims:
+                execution_metadata.extra_metadata = {
+                    **execution_metadata.extra_metadata,
+                    "atomic_claims": [claim.model_dump(mode="json") for claim in atomic_claims],
+                }
+
             finding = Finding(
                 scan_id=clean_scan_id,
                 title=title,
@@ -98,7 +125,7 @@ def parse_llm_findings(
                 source_tool=item.get("source_tool"),
                 detector_id=item.get("detector_id"),
                 detector_kind=item.get("detector_kind"),
-                model_metadata=model_metadata,
+                model_metadata=execution_metadata,
             )
             findings.append(finding)
         except Exception:

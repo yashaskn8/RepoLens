@@ -129,3 +129,32 @@ def test_legacy_ownerless_rows_inaccessible(client: TestClient, db_session: Sess
     # User attempts to query legacy resources -> 404
     assert user["client"].get(f"/api/v1/scans/{legacy_scan.id}").status_code == 404
     assert user["client"].get(f"/api/v1/change-analyses/{legacy_ca.id}").status_code == 404
+
+
+def test_cross_tenant_finding_and_scan_report_isolation_returns_404(client: TestClient, db_session: Session):
+    """Direct finding and scan-report lookups must preserve tenant masking."""
+    user_a = _login_user(client, "finding_report_owner@example.com")
+    user_b = _login_user(client, "finding_report_reader@example.com")
+
+    scan = ScanModel(
+        id=str(uuid4()),
+        repository_url="https://github.com/tenant-a/report-repo",
+        commit_hash="a" * 40,
+        status="COMPLETED",
+        owner_user_id=user_a["id"],
+    )
+    finding = FindingModel(
+        id=str(uuid4()),
+        scan_id=scan.id,
+        title="Tenant-scoped finding",
+        description="Only the owning tenant may retrieve this finding.",
+        severity="HIGH",
+        status="OPEN",
+        verification_verdict="POSSIBLE",
+    )
+    db_session.add_all([scan, finding])
+    db_session.commit()
+
+    assert user_a["client"].get(f"/api/v1/findings/{finding.id}").status_code == 200
+    assert user_b["client"].get(f"/api/v1/findings/{finding.id}").status_code == 404
+    assert user_b["client"].get(f"/api/v1/scans/{scan.id}/report").status_code == 404

@@ -144,10 +144,17 @@ class EvaluationHarness:
 
         for gt_issue in fixture.ground_truth_issues:
             start_time = time.perf_counter()
+            analysis_intent = {
+                "security": "security",
+                "correctness": "bug",
+                "route_mismatch": "integration",
+                "method_mismatch": "integration",
+            }.get(gt_issue.category.value, "general")
             query = RetrievalQuery(
                 query=gt_issue.query,
                 top_k=k,
                 use_reranker=(variant == RetrievalVariant.HYBRID_GRAPH_RERANKER),
+                analysis_intent=analysis_intent,
             )
             results = await service.retrieve(query)
             elapsed_ms = (time.perf_counter() - start_time) * 1000.0

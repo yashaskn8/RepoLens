@@ -21,3 +21,23 @@ class ContextBundle(BaseModel):
     provenance: Dict[str, Any] = Field(default_factory=dict, description="Context bundle origin and budget telemetry")
     retrieval_scores: Dict[str, float] = Field(default_factory=dict, description="Retrieval score per chunk ID")
     estimated_tokens: int = Field(default=0, ge=0, description="Approximate token count of bundle content")
+
+
+class EvidenceSlice(BaseModel):
+    """Bounded, commit-bound hypothesis context referencing canonical evidence IDs."""
+
+    schema_version: str = "evidence-slice/1.0"
+    scan_id: str
+    commit_sha: str
+    candidate_id: str
+    candidate_kind: str
+    deterministic_reason: str
+    strength: str
+    primary_evidence_refs: List[str] = Field(default_factory=list, max_length=6)
+    supporting_evidence_refs: List[str] = Field(default_factory=list, max_length=6)
+    counter_evidence_refs: List[str] = Field(default_factory=list, max_length=4)
+    graph_evidence_refs: List[str] = Field(default_factory=list, max_length=20)
+    contract_evidence_refs: List[str] = Field(default_factory=list, max_length=8)
+    scanner_evidence_refs: List[str] = Field(default_factory=list, max_length=10)
+    candidate_metadata: Dict[str, Any] = Field(default_factory=dict)
+    bounds: Dict[str, int] = Field(default_factory=dict)

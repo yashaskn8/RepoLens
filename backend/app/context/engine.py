@@ -35,6 +35,7 @@ class ContextEngine:
         context_budget: int = 4000,
         max_chunks: int = 5,
         use_neural_reranker: bool = False,
+        required_chunk_ids: Optional[List[str]] = None,
     ) -> ContextBundle:
         """Assemble a bounded, evidence-grounded ContextBundle for a specific query and intent."""
         relevant_chunks: List[RetrievalResult] = []
@@ -46,6 +47,7 @@ class ContextEngine:
                 query=query,
                 top_k=max_chunks,
                 use_reranker=use_neural_reranker,
+                analysis_intent=analysis_intent,
             )
             raw_results = await self.retrieval_service.retrieve(retrieval_query)
             if not raw_results:
@@ -76,12 +78,47 @@ class ContextEngine:
                     )
                     for chunk in fallback_chunks
                 ]
+
+            # Hypothesis anchors are deterministic requirements, not ranking
+            # suggestions. Put them first so a weak lexical score cannot evict
+            # the source fact that created the candidate.
+            required_results: List[RetrievalResult] = []
+            for chunk_id in dict.fromkeys(required_chunk_ids or []):
+                chunk = self.retrieval_service.chunks_by_id.get(chunk_id)
+                if chunk is None and chunk_id.startswith("chunk:"):
+                    chunk = self.retrieval_service.chunks_by_id.get(chunk_id[len("chunk:"):])
+                if chunk is None:
+                    continue
+                required_results.append(
+                    RetrievalResult(
+                        chunk_id=chunk.chunk_id,
+                        score=1.0,
+                        source_channels=[],
+                        chunk=chunk,
+                        provenance={
+                            "commit_sha": chunk.commit_sha,
+                            "file_path": chunk.file_path,
+                            "symbol": chunk.symbol,
+                            "symbol_kind": chunk.symbol_kind.value,
+                            "start_line": chunk.start_line,
+                            "end_line": chunk.end_line,
+                            "content_hash": chunk.content_hash,
+                            "selection": "deterministic_candidate_anchor",
+                        },
+                    )
+                )
+            required_ids = {result.chunk_id for result in required_results}
+            raw_results = required_results + [
+                result for result in raw_results if result.chunk_id not in required_ids
+            ]
             
             # Enforce context budget (approx 4 chars per token)
             current_chars = 0
             max_chars = context_budget * 4
 
             for res in raw_results:
+                if len(relevant_chunks) >= max_chunks:
+                    break
                 chunk_len = len(res.chunk.content)
                 if current_chars + chunk_len > max_chars and relevant_chunks:
                     break

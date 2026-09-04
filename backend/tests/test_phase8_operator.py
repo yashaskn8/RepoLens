@@ -11,18 +11,23 @@ Verifies:
 - Confused-Deputy defense: `GitHubPRResolver` uses unauthenticated transport without ambient GITHUB_TOKEN.
 """
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.cli.create_operator import create_or_elevate_operator
+from app.api.routes.deliveries import get_delivery_service
+from app.delivery.provider import RepositoryDeliveryProvider
+from app.delivery.service import DeliveryService
 from app.ingestion.github_pr import GitHubPRResolver, get_github_pr_resolver
+from app.main import app
 from app.models.change_analysis import ChangeAnalysisModel
 from app.models.finding import FindingModel
 from app.models.patch import PatchModel
 from app.models.scan import ScanModel
+from app.models.user import UserModel
 
 
 def _create_and_login_user(client: TestClient, email: str, password: str = "SecurePass12345!"):
@@ -165,3 +170,55 @@ def test_confused_deputy_defense_credential_free_transport(monkeypatch):
     # Verify get_github_pr_resolver singleton factory also uses empty token
     singleton_resolver = get_github_pr_resolver()
     assert singleton_resolver._token == ""
+
+
+def test_unapproved_patch_never_invokes_github_mutations(client: TestClient, db_session: Session):
+    """An operator request without human approval must stop before any remote write."""
+    owner = db_session.query(UserModel).filter_by(email="default_test_user@example.com").one()
+    scan = ScanModel(
+        id=str(uuid4()),
+        repository_url="https://github.com/org/repo",
+        owner_user_id=owner.id,
+        status="COMPLETED",
+        branch="main",
+        commit_hash="a" * 40,
+    )
+    finding = FindingModel(
+        id=str(uuid4()),
+        scan_id=scan.id,
+        title="Pending approval finding",
+        description="Requires explicit human approval before delivery.",
+        severity="HIGH",
+        status="OPEN",
+    )
+    patch_obj = PatchModel(
+        id=str(uuid4()),
+        finding_id=finding.id,
+        scan_id=scan.id,
+        status="DRAFT",
+        unified_diff="diff --git a/app.py b/app.py\n",
+        files_modified=["app.py"],
+        explanation="pending",
+        expected_behavior_change="none",
+    )
+    db_session.add_all([scan, finding, patch_obj])
+    db_session.commit()
+
+    provider = MagicMock(spec=RepositoryDeliveryProvider)
+    provider.is_configured = True
+    service = DeliveryService(provider=provider)
+    app.dependency_overrides[get_delivery_service] = lambda: service
+    try:
+        response = client.post(f"/api/v1/patches/{patch_obj.id}/deliver")
+    finally:
+        app.dependency_overrides.pop(get_delivery_service, None)
+
+    assert response.status_code == 409
+    for method_name in (
+        "create_blob",
+        "create_tree",
+        "create_commit",
+        "create_branch",
+        "create_pull_request",
+    ):
+        assert getattr(provider, method_name).await_count == 0

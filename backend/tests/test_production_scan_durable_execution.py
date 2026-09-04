@@ -1,6 +1,7 @@
 """Integration tests for Phase 3.5G: Durable LangGraph execution connected to production scans."""
 
 import asyncio
+import json
 import os
 import tempfile
 from unittest.mock import AsyncMock, patch
@@ -73,7 +74,16 @@ async def test_production_scan_interruption_resume_and_deduplication():
     async def mock_llm_generate(request):
         if request.capability == ModelCapability.VERIFICATION:
             return verifier_response
-        return mock_llm_resp
+        content = request.messages[1].content
+        if "<UNTRUSTED_REPOSITORY_DATA>" not in content:
+            return mock_llm_resp
+        payload = content.split("<UNTRUSTED_REPOSITORY_DATA>", 1)[1].split(
+            "</UNTRUSTED_REPOSITORY_DATA>", 1
+        )[0]
+        candidate_id = json.loads(payload)["hypotheses"][0]["candidate_id"]
+        response_payload = json.loads(mock_llm_resp.content)
+        response_payload["findings"][0]["candidate_id"] = candidate_id
+        return mock_llm_resp.model_copy(update={"content": json.dumps(response_payload)})
 
     with tempfile.TemporaryDirectory(prefix="durable_scan_integration_") as shared_dir:
         # Create a persistent SQLite checkpoint DB file for cross-process simulation

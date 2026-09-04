@@ -58,6 +58,14 @@ def _hash_directory(dir_path: str) -> Dict[str, str]:
     return hashes
 
 
+def _specialist_candidate_id(request) -> str:
+    content = request.messages[1].content
+    payload = content.split("<UNTRUSTED_REPOSITORY_DATA>", 1)[1].split(
+        "</UNTRUSTED_REPOSITORY_DATA>", 1
+    )[0]
+    return json.loads(payload)["hypotheses"][0]["candidate_id"]
+
+
 @pytest.fixture
 def e2e_fixture_git_repo():
     """Create a real local git repository fixture with deterministic defects and surrounding code."""
@@ -207,12 +215,13 @@ async def test_repolens_end_to_end_correctness_acceptance_gate(e2e_client, e2e_f
             )
 
         # 2. Security Specialist Agent
-        elif "Security Specialist" in system_content or "security" in system_content.lower():
+        elif "Security Specialist" in system_content:
             return LLMResponse(
                 content=json.dumps({
                     "confidence": 0.95,
                     "findings": [
                         {
+                            "candidate_id": _specialist_candidate_id(req),
                             "title": "Insecure Session Cookie in routes.py",
                             "description": "Session cookie is set without Secure, HttpOnly, and SameSite flags.",
                             "severity": "HIGH",

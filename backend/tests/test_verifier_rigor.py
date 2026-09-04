@@ -8,7 +8,8 @@ from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 import pytest
 
-from app.agents.verifier import _select_verifier_policy, run_verifier_agent
+from app.agents.verifier import _apply_atomic_claim_constraints, _select_verifier_policy, run_verifier_agent
+from app.atomic_claims import AtomicClaim, AtomicClaimType
 from app.llm.types import LLMProvider, LLMResponse, ModelExecutionMetadata, TaskPolicy
 from app.schemas.enums import Severity, VerificationVerdict
 from app.schemas.evidence import Evidence
@@ -40,6 +41,103 @@ def test_verifier_provider_diversity_selection():
     assert _select_verifier_policy("nvidia") == TaskPolicy.SECURITY_REASONING  # Groq
     assert _select_verifier_policy("groq") == TaskPolicy.VERIFICATION         # NVIDIA
     assert _select_verifier_policy("huggingface") == TaskPolicy.VERIFICATION  # NVIDIA
+
+
+def _finding_with_atomic_claims() -> Finding:
+    evidence_ref = "chunk:repo:auth.py:verify:1"
+    claims = [
+        AtomicClaim(
+            claim_id=f"claim:{claim_type.value.lower()}",
+            claim_type=claim_type,
+            claim_text=f"{claim_type.value} claim",
+            evidence_refs=[evidence_ref],
+        )
+        for claim_type in (
+            AtomicClaimType.SOURCE_BEHAVIOR,
+            AtomicClaimType.TRIGGER,
+            AtomicClaimType.MECHANISM,
+            AtomicClaimType.IMPACT,
+            AtomicClaimType.SEVERITY,
+        )
+    ]
+    return Finding(
+        scan_id=uuid4(),
+        title="Atomic finding",
+        description="A candidate with independently verifiable claims.",
+        severity=Severity.CRITICAL,
+        evidences=[Evidence(file_path="auth.py", start_line=1, end_line=2)],
+        model_metadata=ModelExecutionMetadata(
+            provider="gemini",
+            model_name="candidate-model",
+            extra_metadata={"atomic_claims": [claim.model_dump(mode="json") for claim in claims]},
+        ),
+    )
+
+
+def test_atomic_verifier_blocks_confirmation_when_trigger_is_unsupported():
+    finding = _finding_with_atomic_claims()
+    claim_results = [
+        {"claim_type": claim_type.value, "state": "SUPPORTED"}
+        for claim_type in (
+            AtomicClaimType.SOURCE_BEHAVIOR,
+            AtomicClaimType.MECHANISM,
+            AtomicClaimType.IMPACT,
+            AtomicClaimType.SEVERITY,
+        )
+    ] + [{"claim_type": "TRIGGER", "state": "INSUFFICIENT"}]
+
+    verdict, severity, _ = _apply_atomic_claim_constraints(
+        finding,
+        {"claims": claim_results},
+        raw_verdict="CONFIRMED",
+        justified_severity="HIGH",
+        reason="Candidate appears plausible.",
+    )
+
+    assert verdict == "POSSIBLE"
+    assert severity == "HIGH"
+
+
+def test_atomic_verifier_caps_severity_when_impact_is_unsupported():
+    finding = _finding_with_atomic_claims()
+    claim_results = [
+        {"claim_type": claim_type.value, "state": "SUPPORTED"}
+        for claim_type in (
+            AtomicClaimType.SOURCE_BEHAVIOR,
+            AtomicClaimType.TRIGGER,
+            AtomicClaimType.MECHANISM,
+            AtomicClaimType.SEVERITY,
+        )
+    ] + [{"claim_type": "IMPACT", "state": "INSUFFICIENT"}]
+
+    verdict, severity, reason = _apply_atomic_claim_constraints(
+        finding,
+        {"claims": claim_results},
+        raw_verdict="CONFIRMED",
+        justified_severity="CRITICAL",
+        reason="Underlying mechanism is supported.",
+    )
+
+    assert verdict == "CONFIRMED"
+    assert severity == "MEDIUM"
+    assert "impact" in reason.lower()
+
+
+def test_malformed_atomic_contract_cannot_confirm_or_retain_high_severity():
+    finding = _finding_with_atomic_claims()
+    finding.model_metadata.extra_metadata["atomic_claims"] = [{"claim_type": "TRIGGER"}]
+
+    verdict, severity, reason = _apply_atomic_claim_constraints(
+        finding,
+        {"claims": []},
+        raw_verdict="CONFIRMED",
+        justified_severity="HIGH",
+        reason="Verifier returned a broad approval.",
+    )
+
+    assert verdict == "POSSIBLE"
+    assert severity == "MEDIUM"
+    assert "malformed" in reason.lower()
 
 
 @pytest.mark.asyncio

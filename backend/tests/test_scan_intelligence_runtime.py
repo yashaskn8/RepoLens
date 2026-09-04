@@ -353,8 +353,8 @@ async def test_scan_intelligence_runtime_reuses_unchanged_embeddings():
 
 
 @pytest.mark.asyncio
-async def test_langgraph_workflow_with_real_runtime_delivers_chunks_to_agents():
-    """Verify run_analysis_workflow with real assembled ContextEngine delivers retrieved chunks to agents."""
+async def test_langgraph_workflow_with_real_runtime_avoids_unnecessary_specialist_context():
+    """A fully deterministic case must not send broad repository chunks to a specialist model."""
     evidence_store, files_content = _build_test_evidence_store()
     mock_embedder = DeterministicMockEmbeddingProvider()
 
@@ -402,16 +402,14 @@ async def test_langgraph_workflow_with_real_runtime_delivers_chunks_to_agents():
         assert "bug" in final_state["completed_nodes"]
         assert "verifier" in final_state["completed_nodes"]
 
-        # 3. Prove at least one agent received real retrieved chunks in its prompt
+        # 3. Deterministic coverage avoids broad model discovery/context payloads.
         prompts_with_chunks = [
             p for p in received_prompts
             if '"file":"app/routes/items.py"' in p
             or '"file":"frontend/src/api/items.ts"' in p
             or '"file":"app/db/connection.py"' in p
         ]
-        assert len(prompts_with_chunks) >= 1, (
-            "Expected at least one agent to receive targeted code chunks in its prompt."
-        )
+        assert prompts_with_chunks == []
 
 
 @pytest.mark.asyncio

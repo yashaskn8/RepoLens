@@ -57,6 +57,8 @@ class AnalysisState(TypedDict, total=False):
     static_findings: List[Dict[str, Any]]
     graph_coverage: Dict[str, Any]
     deterministic_correctness_candidates: List[Dict[str, Any]]
+    deterministic_security_flow_candidates: List[Dict[str, Any]]
+    deterministic_architecture_candidates: List[Dict[str, Any]]
     route_contract_coverage: Dict[str, Any]
     source_evidence_available: bool
     tool_coverage: Dict[str, Any]

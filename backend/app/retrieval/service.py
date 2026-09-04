@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.core.config import get_settings
 from app.graph.repository_graph import RepositoryGraph
+from app.graph.schemas import EdgeKind
 from app.indexing.embeddings import CohereEmbeddingAdapter, EmbeddingProvider
 from app.indexing.schemas import CodeChunk, EmbeddingRequest
 from app.retrieval.fusion import reciprocal_rank_fusion
@@ -22,6 +23,54 @@ from app.retrieval.vector_index import InMemoryVectorIndex, VectorIndex
 class RetrievalService:
     """Canonical hybrid retrieval service combining multi-channel search and neural reranking."""
 
+    RERANK_CANDIDATE_MULTIPLIER = 4
+    MAX_RERANK_CANDIDATES = 100
+    MAX_GRAPH_SEEDS = 8
+    MAX_GRAPH_NODES_PER_SEED = 8
+    MAX_GRAPH_EDGES_PER_NODE = 40
+    MAX_GRAPH_RESULTS = 100
+
+    _GRAPH_EDGE_WEIGHTS: Dict[str, Dict[EdgeKind, float]] = {
+        "general": {
+            EdgeKind.CALLS: 0.90,
+            EdgeKind.IMPORTS: 0.80,
+            EdgeKind.DEPENDS_ON: 0.80,
+            EdgeKind.TESTS: 0.75,
+            EdgeKind.CONTAINS: 0.60,
+        },
+        "bug": {
+            EdgeKind.CALLS: 1.00,
+            EdgeKind.TESTS: 0.90,
+            EdgeKind.CONTAINS: 0.70,
+            EdgeKind.IMPORTS: 0.60,
+            EdgeKind.DEPENDS_ON: 0.55,
+        },
+        "security": {
+            EdgeKind.CALLS: 1.00,
+            EdgeKind.EXPOSES_ROUTE: 0.95,
+            EdgeKind.REQUESTS_ROUTE: 0.95,
+            EdgeKind.MATCHES_ROUTE: 0.90,
+            EdgeKind.DEPENDS_ON: 0.75,
+            EdgeKind.IMPORTS: 0.65,
+            EdgeKind.CONTAINS: 0.60,
+        },
+        "architecture": {
+            EdgeKind.DEPENDS_ON: 1.00,
+            EdgeKind.IMPORTS: 0.95,
+            EdgeKind.CALLS: 0.75,
+            EdgeKind.CONTAINS: 0.60,
+            EdgeKind.TESTS: 0.45,
+        },
+        "integration": {
+            EdgeKind.MATCHES_ROUTE: 1.00,
+            EdgeKind.REQUESTS_ROUTE: 1.00,
+            EdgeKind.EXPOSES_ROUTE: 1.00,
+            EdgeKind.CALLS: 0.80,
+            EdgeKind.DEPENDS_ON: 0.70,
+            EdgeKind.IMPORTS: 0.60,
+        },
+    }
+
     def __init__(
         self,
         chunks: List[CodeChunk],
@@ -32,6 +81,9 @@ class RetrievalService:
     ):
         settings = get_settings()
         self.chunks_by_id: Dict[str, CodeChunk] = {c.chunk_id: c for c in chunks}
+        self.chunk_ids_by_file: Dict[str, List[str]] = {}
+        for chunk in sorted(chunks, key=lambda item: item.chunk_id):
+            self.chunk_ids_by_file.setdefault(chunk.file_path, []).append(chunk.chunk_id)
         self.vector_index = vector_index or InMemoryVectorIndex()
 
         if embedding_provider is None:
@@ -146,51 +198,106 @@ class RetrievalService:
     # =========================================================================
     # Channel 4: RepositoryGraph Neighborhood Expansion
     # =========================================================================
-    def _search_graph(self, exact_matches: List[Tuple[str, float]]) -> List[Tuple[str, float]]:
-        """Traverse relationship graph neighbors for matched symbols and files."""
-        if not self.repository_graph or not exact_matches:
-            return []
+    def _graph_seeds(
+        self,
+        rankings: List[Tuple[RetrievalChannel, List[Tuple[str, float]]]],
+    ) -> List[Tuple[str, RetrievalChannel]]:
+        """Build a stable, bounded union of exact, lexical, and dense seeds."""
+        seeds: List[Tuple[str, RetrievalChannel]] = []
+        seen: Set[str] = set()
+        # Round-robin prevents a long exact list from starving lexical or dense
+        # evidence while retaining deterministic channel/rank ordering.
+        for rank_index in range(self.MAX_GRAPH_SEEDS):
+            for channel, ranking in rankings:
+                if rank_index >= len(ranking):
+                    continue
+                chunk_id, _ = ranking[rank_index]
+                if chunk_id in self.chunks_by_id and chunk_id not in seen:
+                    seeds.append((chunk_id, channel))
+                    seen.add(chunk_id)
+                if len(seeds) >= self.MAX_GRAPH_SEEDS:
+                    return seeds
+        return seeds
+
+    def _graph_weight(self, intent: str, edge_kind: EdgeKind) -> float:
+        profile = self._GRAPH_EDGE_WEIGHTS.get(intent.lower(), self._GRAPH_EDGE_WEIGHTS["general"])
+        return profile.get(edge_kind, 0.40)
+
+    def _search_graph(
+        self,
+        seeds: List[Tuple[str, RetrievalChannel]],
+        *,
+        analysis_intent: str,
+    ) -> Tuple[List[Tuple[str, float]], Dict[str, Dict[str, Any]]]:
+        """Expand one graph hop from bounded multi-channel seeds with intent-aware weights."""
+        if not self.repository_graph or not seeds:
+            return [], {}
+
+        seed_ids = {chunk_id for chunk_id, _ in seeds}
+        seed_channel = {chunk_id: channel for chunk_id, channel in seeds}
+        nodes = self.repository_graph.get_nodes()
+        nodes_by_file: Dict[str, List[str]] = {}
+        nodes_by_file_symbol: Dict[Tuple[str, str], List[str]] = {}
+        for node in sorted(nodes, key=lambda item: item.id):
+            if not node.file_path:
+                continue
+            nodes_by_file.setdefault(node.file_path, []).append(node.id)
+            nodes_by_file_symbol.setdefault((node.file_path, node.label), []).append(node.id)
 
         neighbor_chunks: Dict[str, float] = {}
-        top_exact_ids = {cid for cid, _ in exact_matches[:5]}
+        graph_provenance: Dict[str, Dict[str, Any]] = {}
+        for chunk_id, channel in seeds:
+            chunk = self.chunks_by_id[chunk_id]
+            symbol_nodes = nodes_by_file_symbol.get((chunk.file_path, chunk.symbol), [])
+            seed_node_ids = (symbol_nodes or nodes_by_file.get(chunk.file_path, []))[
+                : self.MAX_GRAPH_NODES_PER_SEED
+            ]
+            for seed_node_id in seed_node_ids:
+                adjacent = [
+                    (edge, edge.target, "outgoing")
+                    for edge in self.repository_graph.get_outgoing_edges(seed_node_id)
+                ] + [
+                    (edge, edge.source, "incoming")
+                    for edge in self.repository_graph.get_incoming_edges(seed_node_id)
+                ]
+                for edge, neighbor_id, direction in sorted(
+                    adjacent,
+                    key=lambda item: (item[0].kind.value, item[1], item[2]),
+                )[: self.MAX_GRAPH_EDGES_PER_NODE]:
+                    neighbor = self.repository_graph.get_node(neighbor_id)
+                    if not neighbor or not neighbor.file_path:
+                        continue
+                    direction_factor = 1.0 if direction == "outgoing" else 0.95
+                    score = self._graph_weight(analysis_intent, edge.kind) * direction_factor
+                    for candidate_id in self.chunk_ids_by_file.get(neighbor.file_path, []):
+                        if candidate_id in seed_ids:
+                            continue
+                        existing = neighbor_chunks.get(candidate_id, -1.0)
+                        candidate_provenance = {
+                            "seed_chunk_id": chunk_id,
+                            "seed_reason": channel.value,
+                            "graph_distance": 1,
+                            "graph_edge_type": edge.kind.value,
+                            "effective_graph_weight": score,
+                            "graph_direction": direction,
+                        }
+                        current = graph_provenance.get(candidate_id)
+                        if score > existing or (
+                            score == existing
+                            and tuple(candidate_provenance.values()) < tuple((current or {}).values())
+                        ):
+                            neighbor_chunks[candidate_id] = score
+                            graph_provenance[candidate_id] = candidate_provenance
 
-        # Map exact match chunks to file paths and symbol names
-        seed_files: Set[str] = set()
-        seed_symbols: Set[str] = set()
-        for cid in top_exact_ids:
-            chunk = self.chunks_by_id.get(cid)
-            if chunk:
-                seed_files.add(chunk.file_path)
-                seed_symbols.add(chunk.symbol)
-
-        # Find nodes in graph matching seed files or symbols
-        seed_node_ids: Set[str] = set()
-        for f in seed_files:
-            seed_node_ids.add(f"file:{f}")
-            seed_node_ids.add(f"test:{f}")
-
-        # Traverse outgoing and incoming edges for each seed node
-        for seed_id in seed_node_ids:
-            # Outgoing neighbors (imports, calls, exposes_route, depends_on, tests)
-            for edge in self.repository_graph.get_outgoing_edges(seed_id):
-                target_node = self.repository_graph.get_node(edge.target)
-                if target_node and target_node.file_path:
-                    # Find chunks in target file
-                    for c_id, c in self.chunks_by_id.items():
-                        if c.file_path == target_node.file_path and c_id not in top_exact_ids:
-                            neighbor_chunks[c_id] = max(neighbor_chunks.get(c_id, 0.0), 0.7)
-
-            # Incoming neighbors (callers, importers, tests)
-            for edge in self.repository_graph.get_incoming_edges(seed_id):
-                src_node = self.repository_graph.get_node(edge.source)
-                if src_node and src_node.file_path:
-                    for c_id, c in self.chunks_by_id.items():
-                        if c.file_path == src_node.file_path and c_id not in top_exact_ids:
-                            neighbor_chunks[c_id] = max(neighbor_chunks.get(c_id, 0.0), 0.6)
-
-        scored = list(neighbor_chunks.items())
-        scored.sort(key=lambda item: (-item[1], item[0]))
-        return scored
+        scored = sorted(neighbor_chunks.items(), key=lambda item: (-item[1], item[0]))[
+            : self.MAX_GRAPH_RESULTS
+        ]
+        retained = {chunk_id for chunk_id, _ in scored}
+        return scored, {
+            chunk_id: provenance
+            for chunk_id, provenance in graph_provenance.items()
+            if chunk_id in retained
+        }
 
     # =========================================================================
     # Hybrid Retrieval Execution
@@ -210,12 +317,23 @@ class RetrievalService:
             channel_rankings[RetrievalChannel.LEXICAL] = lexical_results
 
         # 3. Dense semantic retrieval channel
-        dense_results = await self._search_dense(query.query, top_k=query.top_k * 2)
+        dense_results = await self._search_dense(
+            query.query,
+            top_k=min(self.MAX_RERANK_CANDIDATES, query.top_k * 2),
+        )
         if dense_results:
             channel_rankings[RetrievalChannel.DENSE] = dense_results
 
         # 4. Graph neighborhood channel
-        graph_results = self._search_graph(exact_results)
+        graph_seeds = self._graph_seeds([
+            (RetrievalChannel.EXACT, exact_results),
+            (RetrievalChannel.LEXICAL, lexical_results),
+            (RetrievalChannel.DENSE, dense_results),
+        ])
+        graph_results, graph_provenance = self._search_graph(
+            graph_seeds,
+            analysis_intent=query.analysis_intent,
+        )
         if graph_results:
             channel_rankings[RetrievalChannel.GRAPH] = graph_results
 
@@ -236,7 +354,14 @@ class RetrievalService:
 
             filtered_fused.append((chunk, rrf_score, channels))
 
-        candidate_slice = filtered_fused[: query.top_k]
+        rerank_pool_size = min(
+            len(filtered_fused),
+            max(
+                query.top_k,
+                min(self.MAX_RERANK_CANDIDATES, query.top_k * self.RERANK_CANDIDATE_MULTIPLIER),
+            ),
+        )
+        candidate_slice = filtered_fused[:rerank_pool_size]
         if not candidate_slice:
             return []
 
@@ -251,12 +376,15 @@ class RetrievalService:
                 )
                 for chunk, rrf_score, _ in candidate_slice
             ]
-            rerank_results = await self.reranker.rerank(query.query, rerank_candidates)
-            rerank_map = dict(rerank_results)
+            try:
+                rerank_results = await self.reranker.rerank(query.query, rerank_candidates)
+                rerank_map = dict(rerank_results)
+            except Exception:
+                rerank_map = {}
 
         # Build final RetrievalResults
         final_results: List[RetrievalResult] = []
-        for chunk, rrf_score, channels in candidate_slice:
+        for initial_position, (chunk, rrf_score, channels) in enumerate(candidate_slice, start=1):
             rerank_score = rerank_map.get(chunk.chunk_id)
             provenance = {
                 "commit_sha": chunk.commit_sha,
@@ -267,7 +395,9 @@ class RetrievalService:
                 "end_line": chunk.end_line,
                 "language": chunk.language,
                 "content_hash": chunk.content_hash,
+                "reranked_from_position": initial_position,
             }
+            provenance.update(graph_provenance.get(chunk.chunk_id, {}))
             final_results.append(
                 RetrievalResult(
                     chunk_id=chunk.chunk_id,
@@ -281,4 +411,7 @@ class RetrievalService:
 
         # Sort final results by effective score descending
         final_results.sort(key=lambda r: (-r.score, r.chunk_id))
+        final_results = final_results[: query.top_k]
+        for final_position, result in enumerate(final_results, start=1):
+            result.provenance["final_position"] = final_position
         return final_results

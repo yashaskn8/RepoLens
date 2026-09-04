@@ -18,7 +18,6 @@ from app.agents.state import AnalysisState
 from app.agents.verifier import run_verifier_agent
 from app.agents.helpers import safe_to_uuid
 from app.analysis.store import EvidenceStore
-from app.agents.deterministic import scanner_candidates
 from app.llm.admission import build_admission_map
 
 from app.context.engine import ContextEngine
@@ -39,6 +38,11 @@ from app.mcp.executor import MCPToolExecutor
 from app.mcp.runtime_client import MCPRuntimeClient
 from app.mcp.server import MCPRepositoryServer
 from app.security.redaction import redact_secrets
+from app.specialist_candidates import (
+    build_architecture_candidates,
+    build_bug_candidates,
+    build_security_flow_candidates,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -296,6 +300,7 @@ async def run_analysis_workflow(
         summary = evidence_store.get_summary()
         graph_data = runtime.repository_graph.to_domain_data()
         graph_coverage = dict(graph_data.coverage or {})
+        graph_coverage["complete"] = bool(graph_data.complete)
         contract_report = graph_data.contract_report
         contract_coverage = {
             "total_frontend_requests": getattr(contract_report, "total_frontend_requests", 0),
@@ -305,19 +310,15 @@ async def run_analysis_workflow(
             "method_mismatch_count": getattr(contract_report, "method_mismatch_count", 0),
             "ambiguous_count": getattr(contract_report, "ambiguous_count", 0),
         }
-        deterministic_candidates = scanner_candidates(
-            [f.model_dump(mode="json") for f in evidence_store.all_findings],
-            scan_id=safe_to_uuid(scan_id),
+        deterministic_correctness = build_bug_candidates(runtime.chunks)
+        deterministic_security_flows = build_security_flow_candidates(
+            evidence_store.manifest,
+            runtime.chunks,
         )
-        deterministic_correctness = [
-            item.model_dump(mode="json") if hasattr(item, "model_dump") else dict(item)
-            for item in deterministic_candidates
-            if str(getattr(item, "category", "")).lower() in {"correctness", "bug", "quality"}
-        ]
-        # No dedicated deterministic correctness detector ran in the mapper;
-        # keep this unset so admission reports NOT_ANALYZED rather than
-        # falsely asserting that zero bugs were proven.
-        deterministic_correctness_value = deterministic_correctness or None
+        deterministic_architecture = build_architecture_candidates(
+            runtime.repository_graph,
+            runtime.chunks,
+        )
         summary = {
             **summary,
             "graph_coverage": graph_coverage,
@@ -340,7 +341,15 @@ async def run_analysis_workflow(
             "frontend_calls": [c.model_dump() for c in evidence_store.get_http_calls()],
             "static_findings": [f.model_dump() for f in evidence_store.all_findings],
             "graph_coverage": graph_coverage,
-            "deterministic_correctness_candidates": deterministic_correctness_value,
+            "deterministic_correctness_candidates": [
+                candidate.model_dump(mode="json") for candidate in deterministic_correctness
+            ],
+            "deterministic_security_flow_candidates": [
+                candidate.model_dump(mode="json") for candidate in deterministic_security_flows
+            ],
+            "deterministic_architecture_candidates": [
+                candidate.model_dump(mode="json") for candidate in deterministic_architecture
+            ],
             "route_contract_coverage": contract_coverage,
             "source_evidence_available": bool(evidence_store.manifest.files),
             "tool_coverage": summary.get("scanners_executed", {}),

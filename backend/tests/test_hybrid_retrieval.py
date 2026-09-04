@@ -301,3 +301,113 @@ async def test_hybrid_retrieval_service_all_channels():
     assert top_result.provenance["start_line"] == 10
     assert top_result.provenance["end_line"] == 25
     assert top_result.provenance["language"] == "python"
+
+
+@pytest.mark.asyncio
+async def test_reranker_can_promote_candidate_below_requested_top_k():
+    """Reranking sees a bounded expansion pool before the final top-k cut."""
+    chunks = [
+        CodeChunk(
+            chunk_id=f"chunk:{index}",
+            commit_sha="a" * 40,
+            file_path=f"src/file_{index}.py",
+            language="python",
+            symbol=f"fn_{index}",
+            symbol_kind=ChunkSymbolKind.FUNCTION,
+            start_line=1,
+            end_line=1,
+            content=f"def fn_{index}(): pass",
+            content_hash=content_hash(f"fn_{index}"),
+            index_version=INDEX_VERSION,
+        )
+        for index in range(1, 6)
+    ]
+    reranker = MagicMock()
+    reranker.rerank = AsyncMock(
+        return_value=[
+            ("chunk:4", 0.99),
+            ("chunk:1", 0.20),
+            ("chunk:2", 0.10),
+            ("chunk:3", 0.05),
+        ]
+    )
+    service = RetrievalService(chunks=chunks, reranker=reranker)
+    service._search_exact = MagicMock(
+        return_value=[(f"chunk:{index}", 1.0 / index) for index in range(1, 6)]
+    )
+    service._search_lexical = MagicMock(return_value=[])
+    service._search_dense = AsyncMock(return_value=[])
+
+    results = await service.retrieve(RetrievalQuery(query="target", top_k=1))
+
+    assert [result.chunk_id for result in results] == ["chunk:4"]
+    rerank_candidates = reranker.rerank.await_args.args[1]
+    assert [candidate.chunk_id for candidate in rerank_candidates] == [
+        "chunk:1",
+        "chunk:2",
+        "chunk:3",
+        "chunk:4",
+    ]
+    assert results[0].provenance["reranked_from_position"] == 4
+    assert results[0].provenance["final_position"] == 1
+
+
+@pytest.mark.asyncio
+async def test_graph_expansion_uses_lexical_seed_and_intent_weight():
+    """A lexical-only seed can retrieve a bounded architecture neighbor."""
+    chunks = [
+        CodeChunk(
+            chunk_id="chunk:seed",
+            commit_sha="b" * 40,
+            file_path="src/seed.py",
+            language="python",
+            symbol="entrypoint",
+            symbol_kind=ChunkSymbolKind.FUNCTION,
+            start_line=1,
+            end_line=2,
+            content="def entrypoint():\n    needle = True",
+            content_hash=content_hash("seed"),
+            index_version=INDEX_VERSION,
+        ),
+        CodeChunk(
+            chunk_id="chunk:dependency",
+            commit_sha="b" * 40,
+            file_path="src/dependency.py",
+            language="python",
+            symbol="dependency",
+            symbol_kind=ChunkSymbolKind.FUNCTION,
+            start_line=1,
+            end_line=1,
+            content="def dependency(): pass",
+            content_hash=content_hash("dependency"),
+            index_version=INDEX_VERSION,
+        ),
+    ]
+    graph = RepositoryGraph()
+    graph.add_node("file:src/seed.py", NodeKind.FILE, "src/seed.py", "src/seed.py")
+    graph.add_node(
+        "file:src/dependency.py",
+        NodeKind.FILE,
+        "src/dependency.py",
+        "src/dependency.py",
+    )
+    graph.add_edge("file:src/seed.py", "file:src/dependency.py", EdgeKind.IMPORTS)
+    service = RetrievalService(chunks=chunks, repository_graph=graph)
+
+    results = await service.retrieve(
+        RetrievalQuery(
+            query="needle",
+            top_k=2,
+            use_reranker=False,
+            analysis_intent="architecture",
+        )
+    )
+
+    by_id = {result.chunk_id: result for result in results}
+    expanded = by_id["chunk:dependency"]
+    assert expanded.source_channels == [RetrievalChannel.GRAPH]
+    assert expanded.provenance["seed_chunk_id"] == "chunk:seed"
+    assert expanded.provenance["seed_reason"] == "lexical"
+    assert expanded.provenance["graph_distance"] == 1
+    assert expanded.provenance["graph_edge_type"] == "IMPORTS"
+    assert expanded.provenance["effective_graph_weight"] == 0.95
