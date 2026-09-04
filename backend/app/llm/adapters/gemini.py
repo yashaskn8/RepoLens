@@ -15,8 +15,8 @@ class GeminiAdapter(BaseLLMAdapter):
 
     def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None):
         settings = get_settings()
-        self.api_key = api_key or settings.GEMINI_API_KEY
-        self.base_url = (base_url or settings.GEMINI_BASE_URL).rstrip("/")
+        self.api_key = settings.GEMINI_API_KEY if api_key is None else api_key
+        self.base_url = (settings.GEMINI_BASE_URL if base_url is None else base_url).rstrip("/")
 
     @property
     def provider(self) -> LLMProvider:

@@ -21,7 +21,7 @@ RepoLens treats all submitted codebases as untrusted data, enforcing strict cont
 3. **Cross-Layer Contract Parity**: Frontend HTTP client calls, backend API routes, Pydantic schemas, database models, and migration steps are cross-referenced across architectural boundaries to detect contract breaks.
 4. **Guarded GitHub Boundaries**: Public repository and PR analyses operate credential-free. Remote GitHub writes require server `GITHUB_TOKEN`, `OPERATOR` privileges, resource ownership, human approval, explicit feature flags, and remote branch drift checks.
 5. **Human-in-the-Loop Authority**: Remediation patches pause at human approval boundaries (`VERIFIED` / `NEEDS_REVIEW`). Machine systems never mark patches as `APPROVED`.
-6. **Zero External Worker Overhead**: Operates entirely in-process without requiring external daemon infrastructure such as Docker, Redis, Celery, or Kafka for local execution.
+6. **Optional Infrastructure**: The deterministic core operates in-process without Docker, Redis, Celery, or Kafka. Redis can improve cache reuse and loopback Ollama can handle eligible low-risk generation, but neither is required.
 
 ---
 
@@ -53,7 +53,7 @@ flowchart TB
         ScanWorkflow["Scan Orchestrator<br/>(LangGraph State Machine)"]
         ChangeWorkflow["Change Analysis Engine<br/>(Dual AST Diff & Blast Radius)"]
         RepoGraph["RepositoryGraph<br/>(NetworkX Structural Graph)"]
-        LLMRouter["Resilient LLMRouter<br/>(Gemini, Groq, NVIDIA, HF)"]
+        LLMRouter["Canonical LLMRouter<br/>(cache + local/cheap-first + bounded cloud fallback)"]
 
         Router -->|Dispatch Scan| ScanWorkflow
         Router -->|Dispatch PR Review| ChangeWorkflow
@@ -78,7 +78,7 @@ flowchart TB
         GitHubPublic["GitHub REST API<br/>(Public Read / Credential-Free)"]
         GitHubWrite["GitHub Git Data API<br/>(Operator Write / Guarded by Flags)"]
         ScannerCLIs["Static Scanners<br/>(Semgrep, Trivy, OSV / Graceful Degradation)"]
-        ModelProviders["Model Providers<br/>(Google, Groq, NVIDIA, HuggingFace)"]
+        ModelProviders["Model Providers<br/>(Ollama loopback + configured cloud providers)"]
 
         ScanWorkflow -->|Git Shallow Clone| GitHubPublic
         ChangeWorkflow -->|PR Metadata & Dual Snapshot| GitHubPublic
@@ -231,10 +231,13 @@ RepoLens cleanly separates unauthenticated public reads from privileged operator
 
 Model interactions are managed by a centralized `LLMRouter`:
 
-- **Policy Mapping**: Distinct analytical tasks map to optimal model tiers (`MODEL_ARCHITECTURE`, `MODEL_BUG_REASONING`, `MODEL_SECURITY_REASONING`, `MODEL_VERIFICATION`).
-- **Multi-Provider Support**: Pluggable adapters for Gemini, Groq, NVIDIA, and HuggingFace.
-- **Fault Tolerance**: Automatic retries with exponential backoff and transparent fallback to secondary providers upon timeout or rate limit.
-- **Degradation**: If no LLM keys are configured, deterministic AST parsing, static scanners, and structural blast radius computations continue to operate normally.
+- **Single Routing Authority**: Task classification, provider policy, retry, fallback, health, quota, and explicit overrides remain owned by `LLMRouter`; embedding generation uses the separate `EmbeddingProvider` boundary.
+- **Deterministic and Cheap First**: Machine evidence and early exits precede optional low-risk local generation, then cheap/free configured cloud models, with stronger models reserved for complex work.
+- **Evidence-Scoped Reuse**: Exact cache identity includes tenant, capability, prompt/schema/policy versions, repository evidence hashes, and route identity. Semantic reuse is explicit, conservative, non-authoritative, and denied for security verification, patching, authorization, and writes.
+- **Bounded Coalescing**: Concurrent identical deterministic requests share one in-process provider execution without durable locks or cross-tenant reuse.
+- **Optional Local Models**: Local Sentence Transformers load lazily and fail back to exact/lexical/graph retrieval. Ollama is disabled by default, restricted to loopback, limited to low-risk capabilities, and enters a cooldown after connection failure.
+- **Fault Tolerance**: Provider attempts, retries, and fallback are bounded; cache/local failures preserve deterministic artifacts and the existing cloud path.
+- **Zero-Key Degradation**: With no API keys, local model, or Redis, Tree-sitter, static analyzers, repository graphs, exact/lexical retrieval, contract analysis, deterministic verification, and reports remain available.
 
 ---
 
@@ -254,6 +257,9 @@ The core technical differentiator of RepoLens is its ability to reason across ar
 | Failure Mode | System Response |
 |---|---|
 | External Scanner CLI Missing | Logs diagnostic note; proceeds with Tree-sitter AST analysis without crashing. |
+| Local embedding dependency/model missing | Records degradation and continues with exact, lexical, graph, and deterministic analysis; normal CI never downloads a model. |
+| Ollama unavailable | Stops repeated loopback attempts for a bounded cooldown and continues through the router's eligible configured path. |
+| Redis/cache unavailable | Cache reads/writes fail open; the underlying model request remains available. |
 | LLM Provider Outage / 429 | Retries with backoff; switches to configured fallback provider; if all fail, records LLM stage failure while preserving deterministic scan artifacts. |
 | Ingestion Budget Exceeded | Clones fail-closed if repository exceeds 50MB, 5,000 files, or 120s timeout. |
 | Server Crash Mid-Scan | On restart, `ScanRecoveryService` detects unfinished scans in database and marks them as failed/cancelled without corrupting state. |

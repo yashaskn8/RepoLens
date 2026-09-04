@@ -60,6 +60,8 @@ backend/artifacts/
 output/
 *.png
 skills-lock.json
+# Accidental machine-local Codex/Claude plan exports
+C*Usersprana.claudeplans*.md
 
 # Repomix
 repomix-output.*

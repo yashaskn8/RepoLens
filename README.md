@@ -14,6 +14,7 @@ RepoLens treats all submitted codebases as untrusted passive data, enforcing hos
 - **Cross-Layer Contract Intelligence**: Statically reconstructs the full dependency and route graph between frontend client endpoints (`fetch`/`axios`) and backend route handlers (FastAPI), identifying breaking contract mismatches and orphaned schemas.
 - **Pull Request & Change Intelligence**: Analyzes dual-revision AST diffs across commit ranges or public GitHub PRs, deterministically computing upstream caller blast radius with NetworkX graph traversal.
 - **Evidence-Grounded AI Reasoning**: Specialist agents operate only on verified machine evidence (AST nodes, line citations, and scanner findings). Claims lacking direct source citations are discarded by the finding verifier.
+- **Local-First, Cost-Aware AI**: Exact and semantic caching, duplicate-request coalescing, optional local embeddings, and an opt-in loopback Ollama adapter reduce cloud calls without changing the verifier's authority.
 - **Guarded Remediation & Safe Delivery**: Generates scoped candidate patches with 12-check AST verification. Remediation pauses at human approval boundaries; optional delivery to GitHub is restricted to isolated branch PRs by authenticated operators.
 
 ---
@@ -49,6 +50,8 @@ RepoLens/
 │   │   ├── cli/             # Operator creation and administrative CLI utilities
 │   │   ├── core/            # Pydantic Settings, database engine, security middlewares
 │   │   ├── delivery/        # Safe GitHub Git Data API provider, PR body generator, drift checker
+│   │   ├── embeddings/      # Optional lazy local Sentence Transformers adapter
+│   │   ├── execution/       # Durable jobs, leases, budgets, artifacts, and recovery
 │   │   ├── graph/           # RepositoryGraph (NetworkX), node/edge builders, contract matcher
 │   │   ├── ingestion/       # Tree-sitter parsers, dual snapshot acquisition, PR resolver
 │   │   ├── llm/             # Resilient LLMRouter with provider fallbacks & telemetry
@@ -91,7 +94,7 @@ For complete threat evaluations and defense-in-depth matrices, see [Security & T
 - **Persistence**: SQLAlchemy 2.0 ORM, Alembic migrations (revisions 001–010), SQLite default (portable to PostgreSQL / pgvector).
 - **Static Analysis**: Tree-sitter AST parsers (Python, JS, TS, TSX, JSX), NetworkX graph engine, optional CLI adapters for Semgrep, Trivy, and OSV-Scanner.
 - **Agent Orchestration**: LangGraph state machine with durable SQLite checkpointing.
-- **LLM Abstraction**: Centralized `LLMRouter` with dynamic task-to-model mapping and fallback support across Gemini, Groq, NVIDIA, and HuggingFace.
+- **LLM Abstraction**: One `LLMRouter` owns capability policy, cheap-first selection, bounded retry/fallback, evidence-scoped caching, and optional low-risk Ollama execution across configured providers.
 - **Integrations**: GitHub Git Data API & REST API, Model Context Protocol (MCP) stdio adapters.
 
 ---
@@ -117,6 +120,10 @@ source .venv/bin/activate
 
 # Install dependencies in editable mode
 python -m pip install -e ".[dev]"
+
+# Optional: enable local Sentence Transformers retrieval support.
+# No model is downloaded by normal installation or CI.
+python -m pip install -e ".[local-ml]"
 
 # Apply database migrations (001 through 010)
 alembic upgrade head
@@ -151,6 +158,9 @@ Key configuration areas:
 - `AUTH_COOKIE_SECURE`: Must be `true` in production over HTTPS.
 - `CORS_ORIGINS` & `TRUSTED_HOSTS`: Explicit comma-separated allowed origins/hosts.
 - `GEMINI_API_KEY`, `GROQ_API_KEY`, `NVIDIA_API_KEY`, `HUGGINGFACE_API_KEY`: Optional provider keys for AI-assisted reasoning.
+- `LOCAL_EMBEDDING_*`: Optional lazy local embeddings; downloads are denied by default and failure preserves exact/lexical/graph retrieval.
+- `LOCAL_LLM_ENABLED` and `OLLAMA_*`: Opt-in loopback-only local generation for low-risk tasks; RepoLens never starts or pulls Ollama models.
+- `AI_EXACT_CACHE_*`, `AI_SEMANTIC_CACHE_*`, `AI_SINGLEFLIGHT_*`: Bounded, tenant/evidence-scoped AI reuse controls. Semantic reuse is never authoritative for verification, patches, authorization, or GitHub writes.
 - `GITHUB_DELIVERY_ENABLED` & `GITHUB_PR_REVIEW_WRITE_ENABLED`: Guarded write flags (default: `false`).
 
 ---

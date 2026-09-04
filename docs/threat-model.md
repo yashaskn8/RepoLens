@@ -90,6 +90,8 @@ RepoLens protects the following primary assets:
 2. **Deterministic-First Pipeline**: Static AST and scanner evidence are captured before LLM engagement, preventing models from fabricating structural facts.
 3. **Strict Human Approval Gate**: Patches remain in `VERIFIED` or `NEEDS_REVIEW` until a human explicitly reviews the diff and approves it. The API ignores machine-generated approval flags.
 4. **Fail-Closed Production Security**: In `ENVIRONMENT=production`, the application raises a startup error if `AUTH_COOKIE_SECURE=False`, if `CORS_ORIGINS` contains wildcards or is empty, or if `TRUSTED_HOSTS` contains wildcards.
+5. **Scoped AI Reuse**: Exact and semantic cache identities include tenant and evidence lineage. Semantic responses are non-authoritative and cannot decide authentication, authorization, security verification, patch acceptance, or GitHub writes.
+6. **Local Model Containment**: Ollama traffic is restricted to loopback endpoints, is disabled by default, and remains subject to canonical validation and independent verification.
 
 ---
 

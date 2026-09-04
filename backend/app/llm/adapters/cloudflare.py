@@ -20,9 +20,9 @@ class CloudflareAdapter(BaseLLMAdapter):
         base_url: Optional[str] = None,
     ):
         settings = get_settings()
-        self.api_token = api_token or settings.CLOUDFLARE_API_TOKEN
-        self.account_id = account_id or settings.CLOUDFLARE_ACCOUNT_ID
-        self.base_url = (base_url or settings.CLOUDFLARE_BASE_URL).rstrip("/")
+        self.api_token = settings.CLOUDFLARE_API_TOKEN if api_token is None else api_token
+        self.account_id = settings.CLOUDFLARE_ACCOUNT_ID if account_id is None else account_id
+        self.base_url = (settings.CLOUDFLARE_BASE_URL if base_url is None else base_url).rstrip("/")
 
     @property
     def provider(self) -> LLMProvider:
