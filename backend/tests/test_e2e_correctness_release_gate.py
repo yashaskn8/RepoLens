@@ -230,6 +230,11 @@ async def test_repolens_end_to_end_correctness_acceptance_gate(e2e_client, e2e_f
                             "evidence_refs": [
                                 f"chunk:{original_commit_sha[:12]}:backend/app/routes.py:set_session_cookie:17"
                             ],
+                            "source_behavior": "The session cookie is created without hardened attributes.",
+                            "trigger_condition": "A session cookie is issued.",
+                            "failure_mechanism": "Browser security attributes are omitted.",
+                            "impact_claim": "The cookie receives weaker browser-side protection.",
+                            "counter_evidence_considered": [],
                             "mitigation_guidance": "Add httponly=True, secure=True, and samesite='lax' to response.set_cookie.",
                         }
                     ]
@@ -249,7 +254,11 @@ async def test_repolens_end_to_end_correctness_acceptance_gate(e2e_client, e2e_f
                             "index": 0,
                             "verdict": "CONFIRMED",
                             "justified_severity": "HIGH",
-                            "reason": "The response.set_cookie call in backend/app/routes.py line 20 lacks required security flags.",
+                                "reason": "The response.set_cookie call in backend/app/routes.py line 20 lacks required security flags.",
+                                "claims": [
+                                    {"claim_type": claim_type, "state": "SUPPORTED", "reason": "Supported by source."}
+                                    for claim_type in ("SOURCE_BEHAVIOR", "TRIGGER", "MECHANISM", "IMPACT", "SEVERITY")
+                                ],
                         }
                     ]
                 }),

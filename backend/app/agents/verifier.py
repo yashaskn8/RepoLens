@@ -21,6 +21,7 @@ from app.atomic_claims import (
     AtomicClaimType,
     ClaimVerificationState,
     claims_from_metadata,
+    has_complete_atomic_contract,
 )
 from langgraph.runtime import Runtime
 
@@ -75,15 +76,22 @@ def _apply_atomic_claim_constraints(
     """Convert per-claim verifier output into deterministic publication constraints."""
     claims = claims_from_metadata(candidate.model_metadata)
     extra_metadata = getattr(candidate.model_metadata, "extra_metadata", None)
-    has_atomic_contract = (
-        isinstance(extra_metadata, dict) and "atomic_claims" in extra_metadata
-    )
-    if has_atomic_contract and not claims:
+    has_atomic_contract = isinstance(extra_metadata, dict) and "atomic_claims" in extra_metadata
+    atomic_contract_required = has_atomic_contract or bool(
+        isinstance(extra_metadata, dict)
+        and (
+            extra_metadata.get("atomic_contract_required") is True
+            or extra_metadata.get("candidate_id")
+        )
+    ) or candidate.detector_kind == "semantic_candidate"
+    if atomic_contract_required and (
+        not has_atomic_contract or not has_complete_atomic_contract(claims)
+    ):
         constrained_verdict = "POSSIBLE" if raw_verdict == "CONFIRMED" else raw_verdict
         constrained_severity = (
             "MEDIUM" if justified_severity in {"CRITICAL", "HIGH"} else justified_severity
         )
-        detail = "Malformed or empty atomic claim contract prevented confirmation."
+        detail = "Missing, malformed, or incomplete mandatory atomic claim contract prevented confirmation."
         return constrained_verdict, constrained_severity, f"{reason} {detail}".strip()
     if not claims:
         return raw_verdict, justified_severity, reason
@@ -111,9 +119,14 @@ def _apply_atomic_claim_constraints(
             )
 
     if candidate.model_metadata is not None:
+        mitigation = allowed.get(AtomicClaimType.MITIGATION)
         candidate.model_metadata.extra_metadata = {
             **candidate.model_metadata.extra_metadata,
             "atomic_claims": [claim.model_dump(mode="json") for claim in claims],
+            "remediation_uncertain": bool(
+                mitigation
+                and mitigation.verification_state != ClaimVerificationState.SUPPORTED
+            ),
         }
 
     essential_types = {

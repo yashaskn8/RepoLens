@@ -11,7 +11,13 @@ from app.context.runtime import AnalysisRuntimeContext
 from app.llm.budgets import REPOSITORY_ANALYSIS_BUDGET
 from app.llm.router import get_llm_router
 from app.llm.types import LLMMessage, LLMRequest, ModelCapability, TaskPolicy
-from app.llm.workflow_contracts import FINDINGS_OUTPUT_SCHEMA, lineage_for_scan
+from app.atomic_claims import (
+    AtomicClaimType,
+    ClaimVerificationState,
+    claims_from_metadata,
+    has_complete_atomic_contract,
+)
+from app.llm.workflow_contracts import REVISION_OUTPUT_SCHEMA, lineage_for_scan
 from app.schemas.enums import FindingStatus, Severity, VerificationVerdict
 from app.schemas.finding import Finding
 from app.security.redaction import redact_secrets
@@ -38,6 +44,46 @@ def _contains_unsupported_new_claims(raw_finding: Any) -> bool:
         return True
     new_claims = raw_finding.get("new_claims", [])
     return not isinstance(new_claims, list) or bool(new_claims)
+
+
+def _apply_claim_delta(original: Finding, raw_revision: Dict[str, Any]) -> list[dict] | None:
+    """Apply a claim-text-only revision while preserving IDs, evidence, and DAG edges."""
+    claims = claims_from_metadata(original.model_metadata)
+    extra = getattr(original.model_metadata, "extra_metadata", None)
+    required = isinstance(extra, dict) and extra.get("atomic_contract_required") is True
+    if required and not has_complete_atomic_contract(claims):
+        return None
+    by_id = {claim.claim_id: claim for claim in claims}
+    mandatory_types = {
+        AtomicClaimType.SOURCE_BEHAVIOR,
+        AtomicClaimType.TRIGGER,
+        AtomicClaimType.MECHANISM,
+        AtomicClaimType.IMPACT,
+        AtomicClaimType.SEVERITY,
+    }
+    removed = raw_revision.get("removed_claims")
+    modified = raw_revision.get("modified_claims")
+    if not isinstance(removed, list) or not isinstance(modified, list):
+        return None
+    for claim_id in removed:
+        claim = by_id.get(claim_id)
+        if claim is None or claim.claim_type in mandatory_types:
+            return None
+        by_id.pop(claim_id)
+    for change in modified:
+        if not isinstance(change, dict):
+            return None
+        claim = by_id.get(change.get("claim_id"))
+        revised_text = change.get("revised_text")
+        if claim is None or not isinstance(revised_text, str) or not revised_text.strip():
+            return None
+        claim.claim_text = revised_text.strip()[:4_000]
+        claim.verification_state = ClaimVerificationState.INSUFFICIENT
+        claim.verification_reason = None
+    revised = list(by_id.values())
+    if required and not has_complete_atomic_contract(revised):
+        return None
+    return [claim.model_dump(mode="json") for claim in revised]
 
 
 async def run_revision_agent(
@@ -135,10 +181,12 @@ async def run_revision_agent(
             f"Category: {original.category}\n"
             f"Original Description: {original.description}\n"
             f"Verifier Feedback / Defect: {verifier_reason}\n\n"
+            f"Finding ID: {original.id}\n"
+            f"Atomic Claim DAG: {json.dumps([claim.model_dump(mode='json') for claim in claims_from_metadata(original.model_metadata)], separators=(',', ':'))}\n\n"
             f"Attested Evidence:\n" + "\n".join(evidence_summary)
             + mcp_evidence_block + "\n\n"
-            "Provide a revised, evidence-grounded title and description addressing the feedback strictly within the attested evidence."
-            " Return removed_claims and modified_claims for auditability, and return new_claims=[] because no new canonical evidence was supplied."
+            "Return the dedicated revision object. Preserve finding_id exactly. modified_claims may only reference supplied claim IDs. "
+            "Return new_claims=[] because no new canonical evidence was supplied."
         )
 
         try:
@@ -149,7 +197,7 @@ async def run_revision_agent(
                 ],
                 task_policy=TaskPolicy.BUG_REASONING,
                 capability=ModelCapability.DEEP_REASONING,
-                output_schema=FINDINGS_OUTPUT_SCHEMA,
+                output_schema=REVISION_OUTPUT_SCHEMA,
                 temperature=0.1,
                 max_tokens=min(2_000, 700 + len(material_ids) * 400),
                 confidence_threshold=0.75,
@@ -157,7 +205,7 @@ async def run_revision_agent(
                 lineage=lineage_for_scan(
                     str(scan_id),
                     prompt_template_version="revision-agent/1.0",
-                    output_schema_version="finding-revision/1.0",
+                    output_schema_version="finding-revision/2.0",
                     evidence=[{"finding_id": target_id, "verifier_feedback": verifier_reason}],
                 ),
             )
@@ -165,27 +213,59 @@ async def run_revision_agent(
             model_executions.append(response.metadata)
 
             parsed_data = json.loads(extract_json_block(response.content))
-            raw_findings = parsed_data.get("findings", [])
-            if raw_findings:
-                rf = raw_findings[0]
+            if isinstance(parsed_data, dict) and parsed_data.get("finding_id") == target_id:
+                rf = parsed_data
                 if _contains_unsupported_new_claims(rf):
                     errors.append(
                         f"Revision rejected for finding {target_id}: new claims lacked new canonical evidence."
                     )
                     revised_findings.append(original)
                     continue
+                revised_claims = _apply_claim_delta(original, rf)
+                if revised_claims is None:
+                    errors.append(
+                        f"Revision rejected for finding {target_id}: atomic claim continuity failed."
+                    )
+                    revised_findings.append(original)
+                    continue
+                original_metadata = original.model_metadata.model_copy(deep=True) if original.model_metadata else None
+                if original_metadata is not None:
+                    original_creator = original_metadata.model_dump(mode="json")
+                    original_metadata = response.metadata.model_copy(deep=True)
+                    original_metadata.extra_metadata = {
+                        **(getattr(original.model_metadata, "extra_metadata", {}) or {}),
+                        "atomic_claims": revised_claims,
+                        "creator_lineage": original_creator,
+                        "revision_execution": response.metadata.model_dump(mode="json"),
+                        "revision_claim_delta": {
+                            "removed_claims": rf.get("removed_claims", []),
+                            "modified_claim_ids": [
+                                item.get("claim_id")
+                                for item in rf.get("modified_claims", [])
+                                if isinstance(item, dict)
+                            ],
+                        },
+                    }
                 revised_finding = Finding(
                     id=original.id,  # Preserve identity
                     scan_id=original.scan_id,
-                    title=rf.get("title") or original.title,
-                    description=rf.get("description") or original.description,
+                    title=rf.get("revised_title") or original.title,
+                    description=rf.get("revised_description") or original.description,
                     category=original.category,
-                    severity=Severity(rf["severity"]) if rf.get("severity") in Severity._value2member_map_ else original.severity,
+                    severity=original.severity,
                     status=FindingStatus.OPEN,
-                    source_tool="revision_agent",
+                    source_tool=original.source_tool,
                     rule_id=original.rule_id,
+                    detector_id=original.detector_id,
+                    detector_kind=original.detector_kind,
                     evidences=original.evidences,  # Retain attested repository locators
-                    mitigation_guidance=rf.get("mitigation_guidance") or original.mitigation_guidance,
+                    mitigation_guidance=(
+                        rf.get("revised_mitigation")
+                        if "revised_mitigation" in rf
+                        else original.mitigation_guidance
+                    ),
+                    model_metadata=original_metadata,
+                    created_at=original.created_at,
                 )
                 revised_findings.append(revised_finding)
             else:

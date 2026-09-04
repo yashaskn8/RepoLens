@@ -62,6 +62,74 @@ FINDINGS_OUTPUT_SCHEMA: dict[str, Any] = {
     },
 }
 
+_CANDIDATE_FINDING_ITEM_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": [
+        "candidate_id",
+        "title",
+        "description",
+        "severity",
+        "category",
+        "evidence_refs",
+        "source_behavior",
+        "trigger_condition",
+        "failure_mechanism",
+        "impact_claim",
+        "counter_evidence_considered",
+    ],
+    "properties": FINDINGS_OUTPUT_SCHEMA["properties"]["findings"]["items"]["properties"],
+}
+
+CANDIDATE_FINDINGS_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["confidence", "findings"],
+    "properties": {
+        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "findings": {
+            "type": "array",
+            "maxItems": 12,
+            "items": _CANDIDATE_FINDING_ITEM_SCHEMA,
+        },
+    },
+}
+
+REVISION_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": [
+        "finding_id",
+        "removed_claims",
+        "modified_claims",
+        "new_claims",
+        "revised_title",
+        "revised_description",
+        "revised_mitigation",
+    ],
+    "properties": {
+        "finding_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "removed_claims": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {"type": "string", "minLength": 1, "maxLength": 128},
+        },
+        "modified_claims": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+                "type": "object",
+                "required": ["claim_id", "revised_text"],
+                "properties": {
+                    "claim_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "revised_text": {"type": "string", "minLength": 1, "maxLength": 4_000},
+                },
+            },
+        },
+        "new_claims": {"type": "array", "maxItems": 0},
+        "revised_title": {"type": "string", "minLength": 1, "maxLength": 300},
+        "revised_description": {"type": "string", "minLength": 1, "maxLength": 8_000},
+        "revised_mitigation": {"type": ["string", "null"], "maxLength": 8_000},
+    },
+}
+
 VERIFICATION_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "required": ["confidence", "evaluations"],
@@ -224,9 +292,11 @@ def lineage_for_finding(
 
 
 __all__ = [
+    "CANDIDATE_FINDINGS_OUTPUT_SCHEMA",
     "CHANGE_REVIEW_OUTPUT_SCHEMA",
     "FINDINGS_OUTPUT_SCHEMA",
     "OBJECT_OUTPUT_SCHEMA",
+    "REVISION_OUTPUT_SCHEMA",
     "VERIFICATION_OUTPUT_SCHEMA",
     "evidence_digest",
     "lineage_for_change_analysis",

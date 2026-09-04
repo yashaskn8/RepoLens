@@ -11,7 +11,8 @@ from app.schemas.evidence import Evidence
 from app.schemas.finding import Finding
 from app.schemas.metadata import ModelExecutionMetadata
 from app.agents.grounding import EvidenceIndex, ground_model_findings
-from app.atomic_claims import claims_from_model_item
+from app.atomic_claims import claims_from_model_item, has_complete_atomic_contract
+from app.finding_identity import canonical_issue_fingerprint
 
 
 def safe_to_uuid(val: Any) -> UUID:
@@ -62,11 +63,22 @@ def parse_llm_findings(
             candidate_id = item.get("candidate_id")
             references = item.get("evidence_refs")
             allowed = candidate_evidence.get(candidate_id) if isinstance(candidate_id, str) else None
+            mandatory_atomic_fields = (
+                "source_behavior",
+                "trigger_condition",
+                "failure_mechanism",
+                "impact_claim",
+            )
             if (
                 not allowed
                 or not isinstance(references, list)
                 or not references
                 or any(not isinstance(ref, str) or ref not in allowed for ref in references)
+                or any(
+                    not isinstance(item.get(field), str) or not item[field].strip()
+                    for field in mandatory_atomic_fields
+                )
+                or not isinstance(item.get("counter_evidence_considered"), list)
             ):
                 continue
             candidate_bound_items.append(item)
@@ -106,10 +118,22 @@ def parse_llm_findings(
 
             execution_metadata = model_metadata.model_copy(deep=True)
             atomic_claims = claims_from_model_item(item)
+            if candidate_evidence is not None and not has_complete_atomic_contract(atomic_claims):
+                continue
             if atomic_claims:
+                candidate_id = str(item.get("candidate_id") or "")
                 execution_metadata.extra_metadata = {
                     **execution_metadata.extra_metadata,
                     "atomic_claims": [claim.model_dump(mode="json") for claim in atomic_claims],
+                    "atomic_contract_required": candidate_evidence is not None,
+                    "candidate_id": candidate_id or None,
+                    "issue_fingerprint": canonical_issue_fingerprint(
+                        category=str(category or default_category),
+                        detector_identity=candidate_id,
+                        file_path=file_path,
+                        start_line=evidence.start_line,
+                        end_line=evidence.end_line,
+                    ),
                 }
 
             finding = Finding(
@@ -123,8 +147,10 @@ def parse_llm_findings(
                 evidences=[evidence],
                 mitigation_guidance=mitigation,
                 source_tool=item.get("source_tool"),
-                detector_id=item.get("detector_id"),
-                detector_kind=item.get("detector_kind"),
+                detector_id=item.get("detector_id") or item.get("candidate_id"),
+                detector_kind=item.get("detector_kind") or (
+                    "semantic_candidate" if candidate_evidence is not None else None
+                ),
                 model_metadata=execution_metadata,
             )
             findings.append(finding)

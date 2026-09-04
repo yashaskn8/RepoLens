@@ -48,6 +48,11 @@ async def test_production_scan_interruption_resume_and_deduplication():
                     "category": "security",
                     "rule_id": "semgrep.py-sql",
                     "evidence_refs": ["chunk:e1a2b3c4d5e6:app/main.py:get_user:1"],
+                    "source_behavior": "The query is constructed with an f-string.",
+                    "trigger_condition": "get_user receives a user identifier.",
+                    "failure_mechanism": "The identifier is interpolated into SQL text.",
+                    "impact_claim": "The query structure may be altered by input.",
+                    "counter_evidence_considered": [],
                     "mitigation_guidance": "Use parameterized queries."
                 }
             ]
@@ -64,6 +69,13 @@ async def test_production_scan_interruption_resume_and_deduplication():
                 "verdict": "CONFIRMED",
                 "justified_severity": "HIGH",
                 "reason": "The attested source constructs a SQL query from user input."
+                ,"claims": [
+                    {"claim_type": "SOURCE_BEHAVIOR", "state": "SUPPORTED"},
+                    {"claim_type": "TRIGGER", "state": "SUPPORTED"},
+                    {"claim_type": "MECHANISM", "state": "SUPPORTED"},
+                    {"claim_type": "IMPACT", "state": "SUPPORTED"},
+                    {"claim_type": "SEVERITY", "state": "SUPPORTED"}
+                ]
             }]
         }''',
         model="mock-verifier",

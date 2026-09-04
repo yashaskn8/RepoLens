@@ -271,6 +271,7 @@ def test_candidate_grounding_rejects_cross_hypothesis_evidence():
         "trigger_condition": "the path executes",
         "failure_mechanism": "danger fails",
         "impact_claim": "the request fails",
+        "counter_evidence_considered": [],
     }
 
     rejected = parse_llm_findings(

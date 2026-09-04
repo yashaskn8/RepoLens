@@ -11,7 +11,7 @@ from app.llm.admission import AdmissionDecision, admission_for_state
 from app.llm.budgets import REPOSITORY_ANALYSIS_BUDGET
 from app.llm.router import get_llm_router
 from app.llm.types import AIContextMetrics, LLMMessage, LLMRequest, ModelCapability, TaskPolicy
-from app.llm.workflow_contracts import FINDINGS_OUTPUT_SCHEMA, lineage_for_scan
+from app.llm.workflow_contracts import CANDIDATE_FINDINGS_OUTPUT_SCHEMA, lineage_for_scan
 from app.security.redaction import redact_secrets
 from app.specialist_candidates import AnalysisCandidate, build_architecture_candidates
 
@@ -150,7 +150,7 @@ async def run_architecture_agent(
             ],
             task_policy=TaskPolicy.ARCHITECTURE,
             capability=ModelCapability.REPOSITORY_ANALYSIS,
-            output_schema=FINDINGS_OUTPUT_SCHEMA,
+            output_schema=CANDIDATE_FINDINGS_OUTPUT_SCHEMA,
             lineage=lineage_for_scan(
                 str(scan_id),
                 prompt_template_version="architecture-agent/3.0",

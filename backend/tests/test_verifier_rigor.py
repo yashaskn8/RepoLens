@@ -9,7 +9,7 @@ from uuid import uuid4
 import pytest
 
 from app.agents.verifier import _apply_atomic_claim_constraints, _select_verifier_policy, run_verifier_agent
-from app.atomic_claims import AtomicClaim, AtomicClaimType
+from app.atomic_claims import AtomicClaimType, claims_from_model_item
 from app.llm.types import LLMProvider, LLMResponse, ModelExecutionMetadata, TaskPolicy
 from app.schemas.enums import Severity, VerificationVerdict
 from app.schemas.evidence import Evidence
@@ -45,21 +45,14 @@ def test_verifier_provider_diversity_selection():
 
 def _finding_with_atomic_claims() -> Finding:
     evidence_ref = "chunk:repo:auth.py:verify:1"
-    claims = [
-        AtomicClaim(
-            claim_id=f"claim:{claim_type.value.lower()}",
-            claim_type=claim_type,
-            claim_text=f"{claim_type.value} claim",
-            evidence_refs=[evidence_ref],
-        )
-        for claim_type in (
-            AtomicClaimType.SOURCE_BEHAVIOR,
-            AtomicClaimType.TRIGGER,
-            AtomicClaimType.MECHANISM,
-            AtomicClaimType.IMPACT,
-            AtomicClaimType.SEVERITY,
-        )
-    ]
+    claims = claims_from_model_item({
+        "evidence_refs": [evidence_ref],
+        "source_behavior": "Source behavior claim",
+        "trigger_condition": "Trigger claim",
+        "failure_mechanism": "Mechanism claim",
+        "impact_claim": "Impact claim",
+        "severity": "CRITICAL",
+    })
     return Finding(
         scan_id=uuid4(),
         title="Atomic finding",

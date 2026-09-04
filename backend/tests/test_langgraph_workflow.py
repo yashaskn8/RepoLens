@@ -24,6 +24,26 @@ def _specialist_candidate_id(request: LLMRequest) -> str:
     return json.loads(payload)["hypotheses"][0]["candidate_id"]
 
 
+def _revision_payload(request: LLMRequest, *, title: str, description: str) -> dict:
+    content = request.messages[1].content
+    finding_id = content.split("Finding ID: ", 1)[1].splitlines()[0]
+    return {
+        "finding_id": finding_id,
+        "removed_claims": [],
+        "modified_claims": [],
+        "new_claims": [],
+        "revised_title": title,
+        "revised_description": description,
+        "revised_mitigation": None,
+    }
+
+
+_SUPPORTED_ATOMIC_CLAIMS = [
+    {"claim_type": claim_type, "state": "SUPPORTED", "reason": "Supported by attested source."}
+    for claim_type in ("SOURCE_BEHAVIOR", "TRIGGER", "MECHANISM", "IMPACT", "SEVERITY")
+]
+
+
 @pytest.fixture
 def sample_analysis_environment():
     """Create a temporary workspace and pre-populated EvidenceStore for LangGraph execution."""
@@ -145,6 +165,11 @@ async def test_langgraph_full_workflow_mocked_execution(sample_analysis_environm
                         "severity": "HIGH",
                         "category": "security",
                         "evidence_refs": ["chunk:abcdef123456:server.py:GET /items:4"],
+                        "source_behavior": "The route passes its path value to open.",
+                        "trigger_condition": "A request supplies a path.",
+                        "failure_mechanism": "The supplied path reaches filesystem access.",
+                        "impact_claim": "The route may read an unintended file.",
+                        "counter_evidence_considered": [],
                         "mitigation_guidance": "Add Depends(get_current_user).",
                     },
                     {
@@ -175,8 +200,13 @@ async def test_langgraph_full_workflow_mocked_execution(sample_analysis_environm
             payload = {
                 "confidence": 0.9,
                 "evaluations": [
-                    {"index": 0, "verdict": "CONFIRMED", "justified_severity": "LOW", "reason": "Valid architectural observation."},
-                    {"index": 1, "verdict": "CONFIRMED", "justified_severity": "HIGH", "reason": "Endpoint lacks authentication."},
+                    {
+                        "index": 0,
+                        "verdict": "CONFIRMED",
+                        "justified_severity": "HIGH",
+                        "reason": "Endpoint lacks authentication.",
+                        "claims": _SUPPORTED_ATOMIC_CLAIMS,
+                    },
                 ],
             }
             return LLMResponse(
@@ -261,6 +291,11 @@ async def test_langgraph_revision_path_when_possible_verdict(sample_analysis_env
                         "severity": "HIGH",
                         "category": "security",
                         "evidence_refs": ["chunk:abcdef123456:server.py:GET /items:4"],
+                        "source_behavior": "The route passes its path value to open.",
+                        "trigger_condition": "A request supplies a path.",
+                        "failure_mechanism": "The supplied path reaches filesystem access.",
+                        "impact_claim": "The route may read an unintended file.",
+                        "counter_evidence_considered": [],
                         "mitigation_guidance": "Add security dependency.",
                     }
                 ],
@@ -274,17 +309,11 @@ async def test_langgraph_revision_path_when_possible_verdict(sample_analysis_env
             bug_reasoning_call_count += 1
             # Candidate-first bug analysis skips when no deterministic bug
             # hypothesis exists, so this policy invocation is the revision.
-            payload = {
-                "findings": [
-                    {
-                        "title": "Refined Missing Auth Check",
-                        "description": "Refined description: route GET /items lacks auth.",
-                        "severity": "HIGH",
-                        "category": "security",
-                        "evidence_refs": ["chunk:abcdef123456:server.py:GET /items:4"],
-                    }
-                ]
-            }
+            payload = _revision_payload(
+                request,
+                title="Refined Missing Auth Check",
+                description="Refined description: route GET /items lacks auth.",
+            )
             return LLMResponse(content=json.dumps(payload), model="m", provider=LLMProvider.GEMINI, metadata=metadata)
 
         elif policy == TaskPolicy.VERIFICATION:
@@ -302,7 +331,13 @@ async def test_langgraph_revision_path_when_possible_verdict(sample_analysis_env
                 payload = {
                     "confidence": 0.95,
                     "evaluations": [
-                        {"index": 0, "verdict": "CONFIRMED", "justified_severity": "HIGH", "reason": "Revised rationale is clear."}
+                        {
+                            "index": 0,
+                            "verdict": "CONFIRMED",
+                            "justified_severity": "HIGH",
+                            "reason": "Revised rationale is clear.",
+                            "claims": _SUPPORTED_ATOMIC_CLAIMS,
+                        }
                     ],
                 }
             return LLMResponse(content=json.dumps(payload), model="m", provider=LLMProvider.GEMINI, metadata=metadata)
@@ -366,6 +401,11 @@ async def test_langgraph_revision_exhaustion_routes_to_finalize_uncertain(sample
                         "severity": "MEDIUM",
                         "category": "security",
                         "evidence_refs": ["chunk:abcdef123456:server.py:GET /items:4"],
+                        "source_behavior": "The route passes its path value to open.",
+                        "trigger_condition": "A request supplies a path.",
+                        "failure_mechanism": "The supplied path reaches filesystem access.",
+                        "impact_claim": "The route may read an unintended file.",
+                        "counter_evidence_considered": [],
                     }
                 ],
             }
@@ -381,17 +421,11 @@ async def test_langgraph_revision_exhaustion_routes_to_finalize_uncertain(sample
                 return LLMResponse(content=json.dumps({"findings": []}), model="m", provider=LLMProvider.GEMINI, metadata=metadata)
             else:
                 # Revision agent
-                payload = {
-                    "findings": [
-                        {
-                            "title": "Ambiguous Auth Issue v2",
-                            "description": "Still somewhat ambiguous.",
-                            "severity": "MEDIUM",
-                            "category": "security",
-                            "evidence_refs": ["chunk:abcdef123456:server.py:GET /items:4"],
-                        }
-                    ]
-                }
+                payload = _revision_payload(
+                    request,
+                    title="Ambiguous Auth Issue v2",
+                    description="Still somewhat ambiguous.",
+                )
                 return LLMResponse(content=json.dumps(payload), model="m", provider=LLMProvider.GEMINI, metadata=metadata)
 
         elif policy == TaskPolicy.VERIFICATION:
@@ -449,6 +483,11 @@ async def test_langgraph_verifier_failure_routes_to_uncertain_without_revision(s
                         "severity": "HIGH",
                         "category": "security",
                         "evidence_refs": ["chunk:abcdef123456:server.py:GET /items:4"],
+                        "source_behavior": "The route passes its path value to open.",
+                        "trigger_condition": "A request supplies a path.",
+                        "failure_mechanism": "The supplied path reaches filesystem access.",
+                        "impact_claim": "The route may read an unintended file.",
+                        "counter_evidence_considered": [],
                     }
                 ],
             }
@@ -861,6 +900,11 @@ async def test_finalize_uncertain_graph_reducer_integration(sample_analysis_envi
                         "severity": "HIGH",
                         "category": "security",
                         "evidence_refs": ["chunk:abcdef123456:server.py:GET /items:4"],
+                        "source_behavior": "The route passes its path value to open.",
+                        "trigger_condition": "A request supplies a path.",
+                        "failure_mechanism": "The supplied path reaches filesystem access.",
+                        "impact_claim": "The route may read an unintended file.",
+                        "counter_evidence_considered": [],
                     }
                 ],
             }
