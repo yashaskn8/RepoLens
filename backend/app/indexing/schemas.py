@@ -70,6 +70,15 @@ class EmbeddingResponse(BaseModel):
     provider: str = Field(..., description="Provider name")
     dimensions: int = Field(..., ge=1, description="Vector dimensions")
     total_tokens: Optional[int] = Field(default=None, description="Total tokens consumed")
+    preprocessing_version: Optional[str] = Field(
+        default=None,
+        description="Versioned preprocessing/window policy used for the embeddings",
+    )
+    max_input_tokens: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Maximum untruncated model input window when known",
+    )
 
 
 class EmbeddingIndexMetadata(BaseModel):
@@ -83,4 +92,5 @@ class EmbeddingIndexMetadata(BaseModel):
     provider: str = Field(..., description="Provider name")
     dimensions: int = Field(..., ge=1, description="Vector dimensionality")
     index_version: int = Field(default=INDEX_VERSION, description="Chunking logic version")
+    preprocessing_version: Optional[str] = Field(default=None)
     total_chunks: int = Field(default=0, ge=0)

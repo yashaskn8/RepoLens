@@ -26,7 +26,7 @@ from app.indexing.schemas import EmbeddingRequest
 
 # The correct patch target: SentenceTransformer is imported inside
 # _ensure_loaded() via `from sentence_transformers import SentenceTransformer`
-_ST_PATCH = "sentence_transformers.SentenceTransformer"
+_ST_PATCH = "app.embeddings.service._load_sentence_transformer"
 
 
 # ---------------------------------------------------------------------------
@@ -409,7 +409,7 @@ class TestAdapterAsyncDispatch:
     async def test_adapter_uses_to_thread(self, _):
         from app.embeddings.adapter import LocalEmbeddingAdapter
         adapter = LocalEmbeddingAdapter()
-        req = EmbeddingRequest(texts=["hello"], input_type="query", model="test")
+        req = EmbeddingRequest(texts=["hello"], input_type="query", model=adapter.default_model)
         with patch("app.embeddings.adapter.asyncio.to_thread", wraps=asyncio.to_thread) as mock_thread:
             resp = await adapter.embed(req)
             mock_thread.assert_called_once()
@@ -440,17 +440,34 @@ class TestAdapterQueryVsPassage:
     async def test_single_query_uses_embed_query(self, _):
         from app.embeddings.adapter import LocalEmbeddingAdapter
         adapter = LocalEmbeddingAdapter()
-        req = EmbeddingRequest(texts=["search term"], input_type="query", model="test")
-        with patch.object(adapter._service, "embed_query", wraps=adapter._service.embed_query) as mock_q:
+        req = EmbeddingRequest(texts=["search term"], input_type="query", model=adapter.default_model)
+        with patch.object(adapter._service, "embed_queries", wraps=adapter._service.embed_queries) as mock_q:
             resp = await adapter.embed(req)
-            mock_q.assert_called_once_with("search term")
+            mock_q.assert_called_once_with(["search term"])
+
+    @pytest.mark.asyncio
+    @patch(_ST_PATCH, side_effect=lambda *a, **kw: _make_normalized_mock_model())
+    async def test_multiple_queries_keep_query_semantics(self, _):
+        from app.embeddings.adapter import LocalEmbeddingAdapter
+        adapter = LocalEmbeddingAdapter()
+        req = EmbeddingRequest(
+            texts=["first query", "second query"],
+            input_type="query",
+            model=adapter.default_model,
+        )
+        with patch.object(adapter._service, "embed_queries", wraps=adapter._service.embed_queries) as mock_q, \
+             patch.object(adapter._service, "embed_documents", wraps=adapter._service.embed_documents) as mock_d:
+            response = await adapter.embed(req)
+        mock_q.assert_called_once_with(["first query", "second query"])
+        mock_d.assert_not_called()
+        assert len(response.embeddings) == 2
 
     @pytest.mark.asyncio
     @patch(_ST_PATCH, side_effect=lambda *a, **kw: _make_normalized_mock_model())
     async def test_passage_uses_embed_documents(self, _):
         from app.embeddings.adapter import LocalEmbeddingAdapter
         adapter = LocalEmbeddingAdapter()
-        req = EmbeddingRequest(texts=["doc1", "doc2"], input_type="passage", model="test")
+        req = EmbeddingRequest(texts=["doc1", "doc2"], input_type="passage", model=adapter.default_model)
         with patch.object(adapter._service, "embed_documents", wraps=adapter._service.embed_documents) as mock_d:
             resp = await adapter.embed(req)
             mock_d.assert_called_once()
@@ -468,7 +485,7 @@ class TestAdapterResponseSchema:
     async def test_response_has_correct_fields(self, _):
         from app.embeddings.adapter import LocalEmbeddingAdapter
         adapter = LocalEmbeddingAdapter()
-        req = EmbeddingRequest(texts=["test"], input_type="passage", model="test-model")
+        req = EmbeddingRequest(texts=["test"], input_type="passage", model=adapter.default_model)
         resp = await adapter.embed(req)
         assert resp.provider == "local"
         assert resp.dimensions == 384
@@ -476,6 +493,62 @@ class TestAdapterResponseSchema:
         assert len(resp.embeddings) == 1
         assert resp.embeddings[0].index == 0
         assert resp.embeddings[0].dimensions == 384
+        assert resp.model == adapter.default_model
+        assert resp.preprocessing_version == adapter.preprocessing_version
+        assert resp.max_input_tokens == 256
+
+    @pytest.mark.asyncio
+    async def test_incompatible_model_override_is_rejected_truthfully(self):
+        from app.embeddings.adapter import LocalEmbeddingAdapter
+        adapter = LocalEmbeddingAdapter(service=LocalEmbeddingService(model_name="actual/model"))
+        request = EmbeddingRequest(texts=["test"], input_type="passage", model="other/model")
+        with pytest.raises(ValueError, match="does not match loaded model"):
+            await adapter.embed(request)
+
+
+class TestSequenceWindowTruthfulness:
+
+    @patch(_ST_PATCH)
+    def test_input_that_exceeds_model_token_window_is_rejected(self, mock_loader):
+        model = _make_normalized_mock_model()
+        model.tokenizer.encode.return_value = list(range(257))
+        mock_loader.return_value = model
+        service = LocalEmbeddingService()
+        with pytest.raises(LocalEmbeddingError, match="sequence window"):
+            service.embed_text("bounded by the tokenizer, not only characters")
+
+
+class TestSentenceTransformerRoleSemantics:
+
+    @patch(_ST_PATCH)
+    def test_v6_query_and_document_encoders_are_distinct(self, mock_loader):
+        class RoleAwareModel:
+            max_seq_length = 256
+
+            def __init__(self):
+                self.tokenizer = MagicMock()
+                self.tokenizer.encode.return_value = [1, 2, 3]
+                self.query_calls = 0
+                self.document_calls = 0
+
+            def get_embedding_dimension(self):
+                return 3
+
+            def encode_query(self, inputs, **kwargs):
+                self.query_calls += 1
+                return np.array([[1.0, 0.0, 0.0] for _ in inputs])
+
+            def encode_document(self, inputs, **kwargs):
+                self.document_calls += 1
+                return np.array([[0.0, 1.0, 0.0] for _ in inputs])
+
+        model = RoleAwareModel()
+        mock_loader.return_value = model
+        service = LocalEmbeddingService()
+        service.embed_queries(["find caller", "find route"])
+        service.embed_documents(["def caller(): pass"])
+        assert model.query_calls == 1
+        assert model.document_calls == 1
 
 
 # ===========================================================================

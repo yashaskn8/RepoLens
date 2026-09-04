@@ -261,6 +261,43 @@ async def test_scan_intelligence_runtime_embedding_failure_graceful_degradation(
 
 
 @pytest.mark.asyncio
+async def test_scan_runtime_survives_embedding_model_load_failure():
+    """Provider metadata discovery must remain inside the degradation boundary."""
+    evidence_store, files_content = _build_test_evidence_store()
+
+    class LoadFailingProvider(EmbeddingProvider):
+        @property
+        def provider_name(self) -> str:
+            return "unavailable_local"
+
+        @property
+        def default_model(self) -> str:
+            return "missing-model"
+
+        @property
+        def dimensions(self) -> int:
+            raise RuntimeError("local model unavailable")
+
+        async def embed(self, request: EmbeddingRequest) -> EmbeddingResponse:
+            raise AssertionError("embed must not run after metadata discovery fails")
+
+    runtime = await ScanIntelligenceRuntime.build(
+        evidence_store=evidence_store,
+        file_contents=files_content,
+        embedding_provider=LoadFailingProvider(),
+    )
+
+    assert runtime.embedding_provider is None
+    assert runtime.vector_index.count() == 0
+    bundle = await runtime.context_engine.build_context_bundle(
+        scan_id="test-load-failure",
+        query="list_items",
+        analysis_intent="architecture",
+    )
+    assert any(item.chunk.symbol == "list_items" for item in bundle.relevant_chunks)
+
+
+@pytest.mark.asyncio
 async def test_scan_intelligence_runtime_reuses_unchanged_embeddings():
     """A prepopulated index skips unchanged chunks and embeds only stale content."""
     evidence_store, files_content = _build_test_evidence_store()

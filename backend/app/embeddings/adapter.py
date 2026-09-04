@@ -14,6 +14,7 @@ from typing import Optional
 
 from app.core.config import get_settings
 from app.embeddings.service import LocalEmbeddingService
+from app.embeddings.constants import LOCAL_EMBEDDING_PREPROCESSING_VERSION
 from app.indexing.embeddings import EmbeddingProvider
 from app.indexing.schemas import (
     EmbeddingRequest,
@@ -53,6 +54,10 @@ class LocalEmbeddingAdapter(EmbeddingProvider):
     def dimensions(self) -> int:  # noqa: D102
         return self._service.dimensions
 
+    @property
+    def preprocessing_version(self) -> str:
+        return LOCAL_EMBEDDING_PREPROCESSING_VERSION
+
     async def embed(self, request: EmbeddingRequest) -> EmbeddingResponse:
         """Generate embeddings locally using Sentence Transformers.
 
@@ -60,38 +65,33 @@ class LocalEmbeddingAdapter(EmbeddingProvider):
         between ``embed_query`` (for ``"query"`` / ``"search_query"``)
         and ``embed_documents`` (for everything else).
         """
+        if request.model != self.default_model:
+            raise ValueError(
+                f"Local embedding model override '{request.model}' does not match loaded model "
+                f"'{self.default_model}'."
+            )
+
         is_query = request.input_type in ("query", "search_query")
 
-        if is_query and len(request.texts) == 1:
-            # Single query — use dedicated query method
-            vec = await asyncio.to_thread(
-                self._service.embed_query, request.texts[0]
+        if is_query:
+            vectors = await asyncio.to_thread(
+                self._service.embed_queries, request.texts
             )
-            results = [
-                EmbeddingResult(
-                    index=0,
-                    vector=vec,
-                    dimensions=len(vec),
-                )
-            ]
         else:
-            # Batch passage / multi-query — use documents method
             vectors = await asyncio.to_thread(
                 self._service.embed_documents, request.texts
             )
-            results = [
-                EmbeddingResult(
-                    index=i,
-                    vector=vec,
-                    dimensions=len(vec),
-                )
-                for i, vec in enumerate(vectors)
-            ]
+        results = [
+            EmbeddingResult(index=i, vector=vec, dimensions=len(vec))
+            for i, vec in enumerate(vectors)
+        ]
 
         return EmbeddingResponse(
             embeddings=results,
-            model=request.model or self.default_model,
+            model=self.default_model,
             provider=self.provider_name,
             dimensions=results[0].dimensions if results else self._service.dimensions,
             total_tokens=None,  # local inference — no token billing
+            preprocessing_version=self.preprocessing_version,
+            max_input_tokens=self._service.max_seq_length,
         )

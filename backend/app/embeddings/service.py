@@ -34,6 +34,13 @@ class LocalEmbeddingError(Exception):
     """Raised when local embedding inference fails."""
 
 
+def _load_sentence_transformer(model_name: str, device: str):
+    """Import and construct the optional local-ML dependency lazily."""
+    from sentence_transformers import SentenceTransformer
+
+    return SentenceTransformer(model_name, device=device)
+
+
 class LocalEmbeddingService:
     """Thread-safe local embedding service backed by Sentence Transformers.
 
@@ -113,7 +120,13 @@ class LocalEmbeddingService:
         """
         self._validate_batch(texts)
         self._ensure_loaded()
-        return self._encode_batch(texts)
+        return self._encode_batch(texts, role="document")
+
+    def embed_queries(self, queries: list[str]) -> list[list[float]]:
+        """Embed one or more search queries with query-specific semantics."""
+        self._validate_batch(queries)
+        self._ensure_loaded()
+        return self._encode_batch(queries, role="query")
 
     def embed_query(self, query: str) -> list[float]:
         """Embed a query string.
@@ -132,7 +145,7 @@ class LocalEmbeddingService:
         """
         self._validate_single_text(query)
         self._ensure_loaded()
-        return self._encode_single(query)
+        return self._encode_single(query, role="query")
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -147,9 +160,7 @@ class LocalEmbeddingService:
             if self._model is not None:
                 return
             try:
-                from sentence_transformers import SentenceTransformer
-
-                model = SentenceTransformer(self.model_name, device=self.device)
+                model = _load_sentence_transformer(self.model_name, self.device)
                 if hasattr(model, "get_embedding_dimension"):
                     dim = model.get_embedding_dimension()
                 else:
@@ -175,11 +186,13 @@ class LocalEmbeddingService:
                     f"Failed to load embedding model: {_sanitize_error(exc)}"
                 ) from None
 
-    def _encode_single(self, text: str) -> list[float]:
+    def _encode_single(self, text: str, *, role: str = "document") -> list[float]:
         """Encode a single text and validate the resulting vector."""
         assert self._model is not None
+        self._validate_model_window(text)
         try:
-            result = self._model.encode(
+            encoder = self._encoder_for(role)
+            result = encoder(
                 text,
                 normalize_embeddings=True,
                 convert_to_numpy=True,
@@ -192,11 +205,14 @@ class LocalEmbeddingService:
         self._validate_vector(vec)
         return vec
 
-    def _encode_batch(self, texts: list[str]) -> list[list[float]]:
+    def _encode_batch(self, texts: list[str], *, role: str) -> list[list[float]]:
         """Encode a batch of texts and validate all resulting vectors."""
         assert self._model is not None
+        for text in texts:
+            self._validate_model_window(text)
         try:
-            results = self._model.encode(
+            encoder = self._encoder_for(role)
+            results = encoder(
                 texts,
                 batch_size=min(len(texts), 32),
                 normalize_embeddings=True,
@@ -215,6 +231,35 @@ class LocalEmbeddingService:
         for vec in vectors:
             self._validate_vector(vec)
         return vectors
+
+    def _encoder_for(self, role: str):
+        """Use Sentence Transformers 6 query/document methods when supported."""
+        assert self._model is not None
+        method_name = "encode_query" if role == "query" else "encode_document"
+        # Inspect the concrete class so permissive test doubles do not appear to
+        # implement methods that the real model lacks.
+        if callable(getattr(type(self._model), method_name, None)):
+            return getattr(self._model, method_name)
+        return self._model.encode
+
+    def _validate_model_window(self, text: str) -> None:
+        """Reject text the loaded tokenizer would silently truncate."""
+        assert self._model is not None
+        tokenizer = getattr(self._model, "tokenizer", None)
+        encode = getattr(tokenizer, "encode", None)
+        if not callable(encode) or self._max_seq_length is None:
+            return
+        try:
+            token_ids = encode(text, add_special_tokens=True, truncation=False)
+        except Exception as exc:
+            raise LocalEmbeddingError(
+                f"Tokenization failed: {_sanitize_error(exc)}"
+            ) from None
+        if isinstance(token_ids, (list, tuple)) and len(token_ids) > self._max_seq_length:
+            raise LocalEmbeddingError(
+                "Input exceeds the local embedding model sequence window "
+                f"({len(token_ids)} tokens > {self._max_seq_length}); chunk it before embedding."
+            )
 
     def _validate_single_text(self, text: str) -> None:
         """Validate a single input text."""

@@ -32,6 +32,7 @@ def _vector_is_current(
     model_name: str,
     dimensions: int,
     vector_index_version: str,
+    preprocessing_version: str,
 ) -> bool:
     """Return whether a stored vector is safe to reuse for this exact chunk."""
     if not entry:
@@ -56,6 +57,7 @@ def _vector_is_current(
         stored_dimensions == dimensions
         and metadata.get("content_hash") == chunk.content_hash
         and metadata.get("model") == model_name
+        and metadata.get("preprocessing_version") == preprocessing_version
         and (stored_dimensions_metadata is None or stored_dimensions_metadata == dimensions)
         and metadata.get("index_version") == chunk.index_version
         and (
@@ -74,6 +76,7 @@ def _embedding_provenance(
     response_model: str,
     dimensions: int,
     vector_index: VectorIndex,
+    preprocessing_version: str,
 ) -> Dict[str, Any]:
     """Build durable provenance needed to validate incremental vector reuse."""
     return {
@@ -88,6 +91,7 @@ def _embedding_provenance(
         "model": model_name,
         "response_provider": response_provider,
         "response_model": response_model,
+        "preprocessing_version": preprocessing_version,
         "dimensions": dimensions,
         "index_version": chunk.index_version,
         "vector_index_version": str(getattr(vector_index, "index_version", "v1")),
@@ -201,8 +205,27 @@ class ScanIntelligenceRuntime:
                 provider = HuggingFaceEmbeddingAdapter()
 
         # 5. Initialize VectorIndex via canonical factory and populate embeddings if provider available
-        dim = provider.dimensions if provider else 1536
-        model_name = getattr(provider, "default_model", "text-embedding-3-large") if provider else "text-embedding-3-large"
+        try:
+            dim = provider.dimensions if provider else 1536
+            model_name = (
+                getattr(provider, "default_model", "text-embedding-3-large")
+                if provider
+                else "text-embedding-3-large"
+            )
+            preprocessing_version = (
+                str(getattr(provider, "preprocessing_version", "provider-default-v1"))
+                if provider
+                else "none"
+            )
+        except Exception as exc:
+            logger.warning(
+                "Embedding provider initialization failed: %s. Gracefully degraded to exact + lexical + graph retrieval.",
+                str(exc),
+            )
+            provider = None
+            dim = 1536
+            model_name = "none"
+            preprocessing_version = "none"
         namespace = f"scan:{manifest.commit_sha or 'default'}"
         from app.retrieval.vector_index import create_vector_index
         v_index = vector_index or create_vector_index(
@@ -226,6 +249,7 @@ class ScanIntelligenceRuntime:
                         model_name=model_name,
                         dimensions=dim,
                         vector_index_version=vector_index_version,
+                        preprocessing_version=preprocessing_version,
                     )
                 ]
 
@@ -262,6 +286,9 @@ class ScanIntelligenceRuntime:
                                     response_model=resp.model,
                                     dimensions=emb_res.dimensions,
                                     vector_index=v_index,
+                                    preprocessing_version=(
+                                        resp.preprocessing_version or preprocessing_version
+                                    ),
                                 ),
                             )
                         )
@@ -347,4 +374,3 @@ class AnalysisRuntimeContext:
     @property
     def evidence_store(self) -> EvidenceStore:
         return self.scan_runtime.evidence_store
-
