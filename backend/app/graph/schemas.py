@@ -97,3 +97,8 @@ class RepositoryGraphData(BaseModel):
     node_counts_by_kind: Dict[str, int] = Field(default_factory=dict)
     edge_counts_by_kind: Dict[str, int] = Field(default_factory=dict)
     contract_report: Optional[ContractMatchReport] = None
+    # Deterministic completeness projection.  ``complete`` is true only when
+    # every recorded call/relationship resolved; it never means semantic
+    # correctness was proven.
+    complete: bool = False
+    coverage: Dict[str, Any] = Field(default_factory=dict)

@@ -1,6 +1,7 @@
 """Durable LangGraph multi-agent workflow construction, SQLite checkpointer integration, and execution."""
 
 import asyncio
+import inspect
 import logging
 from typing import Any, Dict, List, Optional
 from langgraph.graph import END, START, StateGraph
@@ -15,7 +16,10 @@ from app.agents.revision import run_revision_agent
 from app.agents.security import run_security_agent
 from app.agents.state import AnalysisState
 from app.agents.verifier import run_verifier_agent
+from app.agents.helpers import safe_to_uuid
 from app.analysis.store import EvidenceStore
+from app.agents.deterministic import scanner_candidates
+from app.llm.admission import build_admission_map
 
 from app.context.engine import ContextEngine
 from app.context.runtime import (
@@ -28,6 +32,7 @@ from app.graph.repository_graph import RepositoryGraph
 from app.llm.economy import (
     WorkflowCloudBudget,
     bind_workflow_cloud_budget,
+    current_workflow_cloud_budget,
     reset_workflow_cloud_budget,
 )
 from app.mcp.executor import MCPToolExecutor
@@ -71,19 +76,64 @@ def route_after_verifier(state: AnalysisState) -> str:
     return "finalize_uncertain"
 
 
+async def _budgeted_node(fn: Any, state: AnalysisState, runtime: Any = None) -> Dict[str, Any]:
+    """Attach the current economy snapshot to every durable checkpoint write."""
+    if len(inspect.signature(fn).parameters) > 1:
+        result = await fn(state, runtime)
+    else:
+        result = await fn(state)
+    result = dict(result or {})
+    budget = current_workflow_cloud_budget()
+    if budget is not None:
+        result["ai_cloud_budget"] = budget.snapshot().as_dict()
+    return result
+
+
+async def _mapper_node(state: AnalysisState) -> Dict[str, Any]:
+    return await _budgeted_node(run_repository_mapper, state)
+
+
+async def _architecture_node(state: AnalysisState, runtime: Any = None) -> Dict[str, Any]:
+    return await _budgeted_node(run_architecture_agent, state, runtime)
+
+
+async def _integration_node(state: AnalysisState, runtime: Any = None) -> Dict[str, Any]:
+    return await _budgeted_node(run_integration_agent, state, runtime)
+
+
+async def _security_node(state: AnalysisState, runtime: Any = None) -> Dict[str, Any]:
+    return await _budgeted_node(run_security_agent, state, runtime)
+
+
+async def _bug_node(state: AnalysisState, runtime: Any = None) -> Dict[str, Any]:
+    return await _budgeted_node(run_bug_agent, state, runtime)
+
+
+async def _verifier_node(state: AnalysisState, runtime: Any = None) -> Dict[str, Any]:
+    return await _budgeted_node(run_verifier_agent, state, runtime)
+
+
+async def _mcp_enrich_node(state: AnalysisState, runtime: Any = None) -> Dict[str, Any]:
+    return await _budgeted_node(run_mcp_enrichment_node, state, runtime)
+
+
+async def _revise_node(state: AnalysisState, runtime: Any = None) -> Dict[str, Any]:
+    return await _budgeted_node(run_revision_agent, state, runtime)
+
+
 def build_analysis_graph(checkpointer: Optional[Any] = None) -> Any:
     """Construct and compile the parallel specialist LangGraph analysis workflow with optional checkpointer."""
     workflow = StateGraph(AnalysisState, context_schema=AnalysisRuntimeContext)
 
     # 1. Register specialist and lifecycle nodes
-    workflow.add_node("mapper", run_repository_mapper)
-    workflow.add_node("architecture", run_architecture_agent)
-    workflow.add_node("integration", run_integration_agent)
-    workflow.add_node("security", run_security_agent)
-    workflow.add_node("bug", run_bug_agent)
-    workflow.add_node("verifier", run_verifier_agent)
-    workflow.add_node("mcp_enrich", run_mcp_enrichment_node)
-    workflow.add_node("revise", run_revision_agent)
+    workflow.add_node("mapper", _mapper_node)
+    workflow.add_node("architecture", _architecture_node)
+    workflow.add_node("integration", _integration_node)
+    workflow.add_node("security", _security_node)
+    workflow.add_node("bug", _bug_node)
+    workflow.add_node("verifier", _verifier_node)
+    workflow.add_node("mcp_enrich", _mcp_enrich_node)
+    workflow.add_node("revise", _revise_node)
     workflow.add_node("finalize", run_finalize_node)
     workflow.add_node("finalize_uncertain", run_finalize_uncertain_node)
 
@@ -217,6 +267,10 @@ async def run_analysis_workflow(
                 logger.warning("Failed to retrieve existing checkpoint state for %s: %s", scan_id, safe_msg)
 
             if current_state and current_state.values:
+                # Hydrate usage before any resumed node can reserve capacity;
+                # checkpoint snapshots are authoritative and usage is merged
+                # monotonically.
+                cloud_budget.hydrate(current_state.values.get("ai_cloud_budget"))
                 # If all nodes already finished, return the completed state directly
                 if not current_state.next:
                     logger.info("Scan %s already completed in checkpointer. Returning cached result.", scan_id)
@@ -240,6 +294,38 @@ async def run_analysis_workflow(
 
         # Fresh scan initialization (strictly JSON/msgpack serializable for checkpoints)
         summary = evidence_store.get_summary()
+        graph_data = runtime.repository_graph.to_domain_data()
+        graph_coverage = dict(graph_data.coverage or {})
+        contract_report = graph_data.contract_report
+        contract_coverage = {
+            "total_frontend_requests": getattr(contract_report, "total_frontend_requests", 0),
+            "total_backend_routes": getattr(contract_report, "total_backend_routes", 0),
+            "matched_count": getattr(contract_report, "matched_count", 0),
+            "unmatched_count": getattr(contract_report, "unmatched_count", 0),
+            "method_mismatch_count": getattr(contract_report, "method_mismatch_count", 0),
+            "ambiguous_count": getattr(contract_report, "ambiguous_count", 0),
+        }
+        deterministic_candidates = scanner_candidates(
+            [f.model_dump(mode="json") for f in evidence_store.all_findings],
+            scan_id=safe_to_uuid(scan_id),
+        )
+        deterministic_correctness = [
+            item.model_dump(mode="json") if hasattr(item, "model_dump") else dict(item)
+            for item in deterministic_candidates
+            if str(getattr(item, "category", "")).lower() in {"correctness", "bug", "quality"}
+        ]
+        # No dedicated deterministic correctness detector ran in the mapper;
+        # keep this unset so admission reports NOT_ANALYZED rather than
+        # falsely asserting that zero bugs were proven.
+        deterministic_correctness_value = deterministic_correctness or None
+        summary = {
+            **summary,
+            "graph_coverage": graph_coverage,
+            "unresolved_graph_relationships": graph_coverage.get("unresolved_graph_relationships", 0),
+            "route_contract_coverage": contract_coverage,
+            "source_evidence_available": bool(evidence_store.manifest.files),
+            "tool_coverage": summary.get("scanners_executed", {}),
+        }
         initial_state: AnalysisState = {
             "scan_id": scan_id,
             "repository_url": evidence_store.manifest.repository_url,
@@ -253,8 +339,13 @@ async def run_analysis_workflow(
             "routes": [r.model_dump() for r in evidence_store.get_routes()],
             "frontend_calls": [c.model_dump() for c in evidence_store.get_http_calls()],
             "static_findings": [f.model_dump() for f in evidence_store.all_findings],
+            "graph_coverage": graph_coverage,
+            "deterministic_correctness_candidates": deterministic_correctness_value,
+            "route_contract_coverage": contract_coverage,
+            "source_evidence_available": bool(evidence_store.manifest.files),
+            "tool_coverage": summary.get("scanners_executed", {}),
             "ai_admission": {},
-            "ai_cloud_budget": {},
+            "ai_cloud_budget": cloud_budget.snapshot().as_dict(),
             "candidate_findings": [],
             "revision_candidates": [],
             "verified_findings": [],
@@ -270,6 +361,18 @@ async def run_analysis_workflow(
             "errors": [],
             "status": "RUNNING",
         }
+        initial_state["ai_admission"] = build_admission_map(initial_state)
+        policy_keys = {
+            "architecture": "architecture",
+            "integration": "integration_code",
+            "security": "security_reasoning",
+            "bug": "bug_reasoning",
+        }
+        cloud_budget.set_schedule({
+            policy_keys.get(name, name): int(plan.get("priority", 0))
+            for name, plan in initial_state["ai_admission"].items()
+            if str(plan.get("decision")) == "CLOUD_REQUIRED"
+        } | {"verification": 95})
 
         try:
             final_state = await invoke_with_cloud_budget(initial_state)

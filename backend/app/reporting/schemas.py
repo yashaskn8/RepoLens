@@ -120,6 +120,15 @@ class ReportFinding(FrozenReportModel):
     cve: Optional[str] = None
     package: Optional[str] = None
     affected_version: Optional[str] = None
+    claim_class: Literal[
+        "DETERMINISTIC_FACT",
+        "VERIFIED_FINDING",
+        "VERIFIED_REUSED_FINDING",
+        "AI_EXPLANATION_GROUNDED",
+        "UNCERTAIN",
+        "LIMITATION",
+    ] = "VERIFIED_FINDING"
+    provenance: Dict[str, object] = Field(default_factory=dict)
 
 
 class ReportPriorityItem(FrozenReportModel):
@@ -218,4 +227,3 @@ class ReportResource(BaseModel):
     page_count: Optional[int] = None
     download_url: Optional[str] = None
     reused: bool = False
-

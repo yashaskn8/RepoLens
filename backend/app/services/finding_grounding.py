@@ -208,3 +208,27 @@ def is_canonical_confirmed_finding(
         )
         for evidence in evidences
     )
+
+
+def reattest_evidence(
+    evidence: Any,
+    *,
+    repo_dir: str,
+    commit_sha: str,
+) -> bool:
+    """Re-read repository bytes and compare one evidence record exactly."""
+    canonical = canonicalize_repository_evidences(
+        repo_dir=repo_dir,
+        commit_sha=commit_sha,
+        evidences=[evidence],
+    )
+    if not canonical:
+        return False
+    expected = canonical[0]
+    return (
+        expected.file_path == _field(evidence, "file_path")
+        and expected.start_line == _field(evidence, "start_line")
+        and expected.end_line == _field(evidence, "end_line")
+        and expected.code_snippet == _field(evidence, "code_snippet")
+        and expected.context_notes == _field(evidence, "context_notes")
+    )

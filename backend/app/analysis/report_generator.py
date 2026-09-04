@@ -306,7 +306,11 @@ def generate_change_analysis_report(model: ChangeAnalysisModel) -> ChangeAnalysi
     review_findings: List[ChangeReviewFinding] = []
     for rf in review_data.get("findings", []):
         try:
-            review_findings.append(ChangeReviewFinding(**rf))
+            parsed = ChangeReviewFinding(**rf)
+            # Rejected candidates are diagnostics, never report findings.
+            # Supported inferences remain explicitly labeled by their verdict.
+            if parsed.verdict.value != "REJECTED":
+                review_findings.append(parsed)
         except Exception as exc:
             logger.warning(f"Failed to deserialize review finding in report: {str(exc)}")
 

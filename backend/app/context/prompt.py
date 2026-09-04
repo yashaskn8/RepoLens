@@ -249,7 +249,10 @@ def pack_repository_context(
         "chunks": (chunks, lambda kind, item: append_excerpt(kind, item, "content")),
         "graph_edges": (graph_edges, append_if_fits),
         "contracts": (contracts, append_if_fits),
-        "static_findings": (static_findings, append_if_fits),
+        # Scanner snippets are repository bytes, but can still be very large
+        # (for example, a minified or generated line).  Truncate only the
+        # excerpt while retaining detector identity and source coordinates.
+        "static_findings": (static_findings, lambda kind, item: append_excerpt(kind, item, "code_snippet")),
     }
     order_by_intent = {
         "security": ("static_findings", "chunks", "graph_edges", "contracts"),

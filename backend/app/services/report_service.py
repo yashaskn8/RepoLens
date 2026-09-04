@@ -37,6 +37,33 @@ logger = logging.getLogger(__name__)
 _redact_secrets = redact_secrets
 
 
+def _attestation_fields(notes: Any) -> dict[str, Any]:
+    """Project only machine-verifiable fields from grounding notes."""
+    if not isinstance(notes, str):
+        return {}
+    try:
+        value = json.loads(notes)
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(value, dict) or value.get("schema_version") != "repository-evidence/1.0":
+        return {}
+    fields = {
+        "commit_sha": value.get("commit_sha"),
+        "file_sha256": value.get("file_sha256"),
+        "snippet_sha256": value.get("snippet_sha256"),
+    }
+    if (
+        not isinstance(fields["commit_sha"], str)
+        or not re.fullmatch(r"[0-9a-fA-F]{40}", fields["commit_sha"])
+        or not isinstance(fields["file_sha256"], str)
+        or not re.fullmatch(r"[0-9a-fA-F]{64}", fields["file_sha256"])
+        or not isinstance(fields["snippet_sha256"], str)
+        or not re.fullmatch(r"[0-9a-fA-F]{64}", fields["snippet_sha256"])
+    ):
+        return {}
+    return fields
+
+
 def _normalize_count(value: Any) -> Optional[int]:
     """Safely normalize a metadata value to an integer count.
 
@@ -54,6 +81,27 @@ def _normalize_count(value: Any) -> Optional[int]:
         return len(value)
     # Unsupported type — do not crash, do not fabricate
     return None
+
+
+def _safe_nonnegative_int(value: Any) -> int:
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, normalized)
+
+
+def _finding_provenance(metadata: Any) -> dict[str, Any]:
+    """Read provenance from both legacy and structured model metadata."""
+    if not isinstance(metadata, dict):
+        return {}
+    direct = metadata.get("provenance")
+    if isinstance(direct, dict):
+        return direct
+    extra = metadata.get("extra_metadata")
+    if isinstance(extra, dict) and isinstance(extra.get("provenance"), dict):
+        return extra["provenance"]
+    return {}
 
 
 from app.security.markdown import (
@@ -189,17 +237,24 @@ class ScanReportService:
         # Build findings list with secret-sanitized content
         report_findings: List[ReportFinding] = []
         for fm in finding_models:
-            evidences = [
-                ReportEvidence(
-                    id=em.id,
-                    file_path=em.file_path,
-                    start_line=em.start_line,
-                    end_line=em.end_line,
-                    code_snippet=_redact_secrets(em.code_snippet) if em.code_snippet else None,
-                    context_notes=_redact_secrets(em.context_notes) if em.context_notes else None,
+            provenance = _finding_provenance(fm.model_metadata)
+            evidences = []
+            for em in fm.evidences:
+                attestation = _attestation_fields(em.context_notes)
+                evidences.append(
+                    ReportEvidence(
+                        id=em.id,
+                        file_path=em.file_path,
+                        start_line=em.start_line,
+                        end_line=em.end_line,
+                        code_snippet=_redact_secrets(em.code_snippet) if em.code_snippet else None,
+                        context_notes=_redact_secrets(em.context_notes) if em.context_notes else None,
+                        verification_status=(
+                            "VERIFIED_SOURCE_BYTES" if attestation else "UNVERIFIED"
+                        ),
+                        **attestation,
+                    )
                 )
-                for em in fm.evidences
-            ]
             rf = ReportFinding(
                 id=fm.id,
                 title=_redact_secrets(fm.title),
@@ -219,6 +274,12 @@ class ScanReportService:
                 evidences=evidences,
                 patches=patches_by_finding.get(fm.id, []),
                 created_at=fm.created_at,
+                claim_class=(
+                    "VERIFIED_REUSED_FINDING"
+                    if provenance.get("reuse_type") in {"exact", "incremental"}
+                    else ("VERIFIED_FINDING" if fm.id in canonical_finding_ids else "LIMITATION")
+                ),
+                provenance=provenance,
             )
             report_findings.append(rf)
 
@@ -287,7 +348,7 @@ class ScanReportService:
                         ReportScannerCoverage(
                             tool=safe_tool,
                             status=str(sc.get("status") or "UNKNOWN"),
-                            findings_count=int(sc.get("findings_count", 0)),
+                            findings_count=_safe_nonnegative_int(sc.get("findings_count", 0)),
                             execution_time_ms=sc.get("execution_time_ms"),
                             failure_reason=safe_reason,
                         )
@@ -299,7 +360,7 @@ class ScanReportService:
                 if te.tool_name not in seen_tools:
                     seen_tools.add(te.tool_name)
                     st = "COMPLETED" if te.event_type == "TOOL_COMPLETED" else ("UNAVAILABLE" if te.event_type == "TOOL_UNAVAILABLE" else "FAILED")
-                    fc = (te.metadata_payload or {}).get("findings_count", 0)
+                    fc = _safe_nonnegative_int((te.metadata_payload or {}).get("findings_count", 0))
                     et = (te.metadata_payload or {}).get("execution_time_ms")
                     raw_reason = (te.metadata_payload or {}).get("reason") or (te.metadata_payload or {}).get("status")
                     safe_reason = _redact_secrets(str(raw_reason))[:512] if raw_reason is not None and st != "COMPLETED" else None
@@ -312,6 +373,24 @@ class ScanReportService:
                             failure_reason=safe_reason,
                         )
                     )
+
+        graph_coverage = meta.get("graph_coverage") if isinstance(meta.get("graph_coverage"), dict) else {}
+        route_contract_coverage = meta.get("route_contract_coverage") if isinstance(meta.get("route_contract_coverage"), dict) else {}
+        ai_admission = meta.get("ai_admission") if isinstance(meta.get("ai_admission"), dict) else {}
+        ai_economy = meta.get("ai_cloud_budget") if isinstance(meta.get("ai_cloud_budget"), dict) else {}
+        uncertainty: list[str] = []
+        if any(str(row.status).upper() in {"UNAVAILABLE", "FAILED", "TIMEOUT", "INVALID_OUTPUT"} for row in scanner_coverage):
+            uncertainty.append("One or more deterministic scanners were unavailable or failed; zero findings is not inferred.")
+        if graph_coverage.get("status") == "PARTIAL":
+            uncertainty.append("Repository graph coverage is partial; unresolved relationships remain unanalyzed.")
+        elif graph_coverage.get("status") == "UNAVAILABLE":
+            uncertainty.append("Repository graph extraction was unavailable; architecture relationships were not analyzed.")
+        if not scanner_coverage:
+            uncertainty.append("Deterministic scanner coverage was not recorded; zero findings is not inferred.")
+        if isinstance(meta, dict) and meta.get("source_evidence_available") is False:
+            uncertainty.append("Source evidence was unavailable; model-derived absence claims are not made.")
+        if excluded_noncanonical_findings:
+            uncertainty.append(f"{excluded_noncanonical_findings} candidate finding(s) were excluded from canonical verified results.")
 
         return ScanReport(
             scan_id=scan.id,
@@ -330,6 +409,12 @@ class ScanReportService:
             summary=summary,
             findings=report_findings,
             events_audit_trail=events_audit,
+            analysis_version=(meta.get("analysis_authority_fingerprint") or meta.get("analysis_version")),
+            graph_coverage=graph_coverage,
+            route_contract_coverage=route_contract_coverage,
+            ai_admission=ai_admission,
+            ai_economy=ai_economy,
+            uncertainty=uncertainty,
         )
 
     @staticmethod
@@ -348,6 +433,30 @@ class ScanReportService:
         lines.append(f"**Generated At**: {_safe_inline_code(datetime.now(timezone.utc).isoformat())}  ")
         lines.append("")
         lines.append("---")
+        lines.append("")
+
+        # Truth and economy metadata are deterministic projections, never AI
+        # narrative.  Empty values remain explicitly absent.
+        lines.append("## Analysis Truth & Economy")
+        lines.append("")
+        lines.append(f"- **Truth Contract**: {_escape_markdown_text(report.truth_contract)}")
+        if report.analysis_version:
+            lines.append(f"- **Analysis Authority**: {_safe_inline_code(report.analysis_version)}")
+        if report.graph_coverage:
+            lines.append(f"- **Graph Coverage**: {_escape_markdown_text(json.dumps(report.graph_coverage, sort_keys=True))}")
+        if report.ai_economy:
+            lines.append(f"- **Cloud Budget**: {_escape_markdown_text(json.dumps(report.ai_economy, sort_keys=True))}")
+        if report.ai_admission:
+            decisions = ", ".join(
+                f"{name}={value.get('decision', 'UNKNOWN')}"
+                for name, value in sorted(report.ai_admission.items())
+                if isinstance(value, dict)
+            )
+            if decisions:
+                lines.append(f"- **AI Admission**: {_escape_markdown_text(decisions)}")
+        if report.uncertainty:
+            lines.append("- **Limitations**:")
+            lines.extend(f"  - {_escape_markdown_text(item)}" for item in report.uncertainty)
         lines.append("")
 
         # Executive Summary Table
@@ -418,7 +527,9 @@ class ScanReportService:
         lines.append(f"## Findings & Delivery Audit ({len(report.findings)})")
         lines.append("")
         if not report.findings:
-            lines.append("*No security or architectural findings were identified in this scan.*")
+            lines.append("*No confirmed findings were produced within the executed analysis coverage.*")
+            if report.uncertainty:
+                lines.append("*This is not a claim that the repository is secure; see Analysis Truth & Economy for coverage limitations.*")
             lines.append("")
         else:
             for idx, f in enumerate(report.findings, start=1):
@@ -436,6 +547,9 @@ class ScanReportService:
                 if f.source_tool:
                     lines.append(f"- **Detector / Source**: {_safe_inline_code(f.source_tool)} ({_safe_inline_code(f.detector_id or 'default')})")
                 lines.append(f"- **Verdict**: {_safe_inline_code(f.verification_verdict or 'N/A')}")
+                lines.append(f"- **Truth Class**: {_safe_inline_code(f.claim_class)}")
+                if f.provenance:
+                    lines.append(f"- **Provenance**: {_escape_markdown_text(json.dumps(f.provenance, sort_keys=True))}")
                 if f.verification_reason:
                     lines.append(f"- **Verdict Reason**: {_escape_markdown_text(f.verification_reason)}")
                 lines.append("")

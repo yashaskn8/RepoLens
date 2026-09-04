@@ -258,6 +258,24 @@ class RepositoryGraph:
                 )
             )
 
+        unresolved_calls = 0
+        files_with_unresolved = 0
+        for _, data in self._graph.nodes(data=True):
+            unresolved = (data.get("metadata") or {}).get("unresolved_calls") or []
+            if unresolved:
+                files_with_unresolved += 1
+                unresolved_calls += len(unresolved)
+        total_files = sum(1 for _, data in self._graph.nodes(data=True) if data.get("kind") == NodeKind.FILE.value)
+        graph_status = "COMPLETE" if nodes and unresolved_calls == 0 else ("PARTIAL" if nodes else "UNAVAILABLE")
+        coverage = {
+            "status": graph_status,
+            "total_files": total_files,
+            "total_nodes": len(nodes),
+            "total_edges": len(edges),
+            "unresolved_graph_relationships": unresolved_calls,
+            "files_with_unresolved_relationships": files_with_unresolved,
+        }
+
         return RepositoryGraphData(
             nodes=nodes,
             edges=edges,
@@ -266,4 +284,9 @@ class RepositoryGraph:
             node_counts_by_kind=dict(node_counts),
             edge_counts_by_kind=dict(edge_counts),
             contract_report=contract_report,
+            # An empty graph is not proof of complete architecture coverage;
+            # it is an unavailable extraction result and must remain visible
+            # to admission/reporting as such.
+            complete=bool(nodes) and unresolved_calls == 0,
+            coverage=coverage,
         )

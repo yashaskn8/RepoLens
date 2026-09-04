@@ -374,6 +374,8 @@ class LLMRouter:
 
         execution_chain = [primary] + fallbacks
         attempted_errors: List[LLMError] = []
+        strict_alternate_used = False
+        strict_halt = False
 
         for provider, model in execution_chain:
             # Check circuit breaker health state
@@ -422,6 +424,21 @@ class LLMRouter:
                             f"Attempting fallback..."
                         )
                         attempted_errors.append(exc)
+                        if workflow_budget is not None and workflow_budget.strict:
+                            if exc.failure_code in {
+                                ProviderFailureCode.QUOTA_EXHAUSTED,
+                                ProviderFailureCode.RATE_LIMITED,
+                                ProviderFailureCode.AUTH_FAILURE,
+                            }:
+                                strict_halt = True
+                                break
+                            if exc.failure_code not in {
+                                ProviderFailureCode.UNAVAILABLE,
+                                ProviderFailureCode.TIMEOUT,
+                            } or strict_alternate_used:
+                                strict_halt = True
+                                break
+                            strict_alternate_used = True
                         break
 
                     delay = _calculate_retry_delay(attempt, exc)
@@ -437,7 +454,16 @@ class LLMRouter:
                     attempted_errors.append(
                         LLMError(f"Unexpected execution failure: {str(exc)}", provider=provider, model=model, retryable=False)
                     )
+                    if workflow_budget is not None and workflow_budget.strict:
+                        if strict_alternate_used:
+                            strict_halt = True
+                        else:
+                            strict_alternate_used = True
+                        break
                     break
+
+            if strict_halt:
+                break
 
         # If all routes in the execution chain failed
         error_summary = "; ".join([f"[{err.provider.value if err.provider else 'unknown'}]: {err.message}" for err in attempted_errors])

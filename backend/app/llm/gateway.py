@@ -133,6 +133,21 @@ class CapabilityAIGateway:
         cloud_budget_exhausted = False
         workflow_budget = current_workflow_cloud_budget()
         effective_retries = 0 if workflow_budget is not None and workflow_budget.strict else self.max_retries
+        workflow_task_key = (
+            request.task_policy.value
+            if request.task_policy is not None
+            else request.capability.value
+        )
+        workflow_priority = {
+            "security_reasoning": 100,
+            "verification": 95,
+            "bug_reasoning": 90,
+            "integration_code": 80,
+            "deep_reasoning": 75,
+            "architecture": 40,
+        }.get(workflow_task_key, 50)
+        strict_alternate_used = False
+        strict_halt = False
         for candidate_index, candidate in enumerate(candidates):
             if not self.health.allow_request(candidate.provider, candidate.model):
                 attempted.append(LLMProviderUnavailableError(
@@ -159,32 +174,6 @@ class CapabilityAIGateway:
                     candidate.max_output_tokens,
                     request.budget.max_output_tokens,
                 )
-                allowed = await asyncio.to_thread(
-                    consume_current_budget,
-                    BudgetConsumption(
-                        ai_calls=1,
-                        input_tokens=estimate.input_tokens,
-                        output_tokens=reserved_output_tokens,
-                        escalation_tier=candidate.cost_tier.value,
-                    ),
-                    coverage_explanation=(
-                        "AI reasoning stopped at its explicit request budget; deterministic results remain available."
-                    ),
-                )
-                if not allowed:
-                    budget_error = LLMQuotaExhaustedError(
-                        "The durable work-item AI budget was exhausted.",
-                        provider=candidate.provider,
-                        model=candidate.model,
-                    )
-                    if best_uncertain_response is not None:
-                        attempted.append(budget_error)
-                        return self._retained_uncertain_response(
-                            best_uncertain_response,
-                            attempted=attempted,
-                            reason="escalation_budget_exhausted",
-                        )
-                    raise budget_error
                 execution_id = str(uuid4())
                 reservation = self.quota.reserve(
                     execution_id=execution_id,
@@ -207,6 +196,8 @@ class CapabilityAIGateway:
                     candidate.provider,
                     input_tokens=estimate.input_tokens,
                     output_tokens=reserved_output_tokens,
+                    task_key=workflow_task_key,
+                    priority=workflow_priority,
                 ):
                     self.quota.settle(
                         reservation,
@@ -221,6 +212,48 @@ class CapabilityAIGateway:
                     ))
                     cloud_budget_exhausted = True
                     break
+
+                # Consume the durable work-item budget only after both provider
+                # and workflow reservations succeed. This prevents a denied
+                # cloud slot from being counted as an actual invocation.
+                allowed = await asyncio.to_thread(
+                    consume_current_budget,
+                    BudgetConsumption(
+                        ai_calls=1,
+                        input_tokens=estimate.input_tokens,
+                        output_tokens=reserved_output_tokens,
+                        escalation_tier=candidate.cost_tier.value,
+                    ),
+                    coverage_explanation=(
+                        "AI reasoning stopped at its explicit request budget; deterministic results remain available."
+                    ),
+                )
+                if not allowed:
+                    if workflow_budget is not None:
+                        workflow_budget.release(
+                            candidate.provider,
+                            input_tokens=estimate.input_tokens,
+                            output_tokens=reserved_output_tokens,
+                        )
+                    self.quota.settle(
+                        reservation,
+                        consume=False,
+                        actual_input_tokens=None,
+                        actual_output_tokens=None,
+                    )
+                    budget_error = LLMQuotaExhaustedError(
+                        "The durable work-item AI budget was exhausted.",
+                        provider=candidate.provider,
+                        model=candidate.model,
+                    )
+                    if best_uncertain_response is not None:
+                        attempted.append(budget_error)
+                        return self._retained_uncertain_response(
+                            best_uncertain_response,
+                            attempted=attempted,
+                            reason="escalation_budget_exhausted",
+                        )
+                    raise budget_error
 
                 attempt_request = request.model_copy(update={
                     "provider": candidate.provider,
@@ -383,6 +416,26 @@ class CapabilityAIGateway:
                         model_registry_version=self.registry.version,
                     )
                     attempted.append(exc)
+                    if workflow_budget is not None and workflow_budget.strict:
+                        if exc.failure_code in {
+                            ProviderFailureCode.QUOTA_EXHAUSTED,
+                            ProviderFailureCode.RATE_LIMITED,
+                            ProviderFailureCode.AUTH_FAILURE,
+                        }:
+                            strict_halt = True
+                            if exc.failure_code == ProviderFailureCode.QUOTA_EXHAUSTED:
+                                cloud_budget_exhausted = True
+                            break
+                        if exc.failure_code not in {
+                            ProviderFailureCode.UNAVAILABLE,
+                            ProviderFailureCode.TIMEOUT,
+                        } or strict_alternate_used:
+                            strict_halt = True
+                            break
+                        strict_alternate_used = True
+                        # One deterministic alternate provider is permitted
+                        # for a transport/provider-availability failure.
+                        break
                     reserve_escalation_slot = (
                         request.allow_escalation and candidate_index + 1 < len(candidates)
                     )
@@ -439,9 +492,17 @@ class CapabilityAIGateway:
                     )
                     attempted.append(normalized)
                     logger.exception("Unexpected AI gateway error: %s", type(exc).__name__)
+                    if workflow_budget is not None and workflow_budget.strict:
+                        if strict_alternate_used:
+                            strict_halt = True
+                        else:
+                            strict_alternate_used = True
+                        break
                     break
 
             if cloud_budget_exhausted:
+                break
+            if strict_halt:
                 break
 
         if best_uncertain_response is not None:

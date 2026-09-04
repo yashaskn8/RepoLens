@@ -17,11 +17,13 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.agents.checkpointer import get_sqlite_checkpointer
 from app.agents.graph import run_analysis_workflow
 from app.analysis.service import get_intelligence_service
+from app.analysis.authority import authority_digest, compatibility_digest, runtime_authorities
 from app.artifacts.scan_provenance import (
     publish_analysis_artifacts,
     publish_finding_provenance,
     publish_graph_artifacts,
     publish_repository_revision,
+    scan_policy_snapshot_id,
 )
 from app.api.dependencies import get_current_user, verify_csrf
 from app.api.idempotency import idempotency_identity
@@ -63,6 +65,7 @@ from app.services.finding_grounding import (
     is_canonical_confirmed_finding,
 )
 from app.services.quota_service import check_and_increment_quota
+from app.services.scan_reuse import copy_exact_verified_findings, find_exact_reusable_scan
 from app.services.workflow_event_service import WorkflowEventService
 
 logger = logging.getLogger(__name__)
@@ -332,16 +335,32 @@ async def execute_background_scan(
             evidence_store=evidence_store,
             repo_dir=workspace_dir,
         )
+        graph_data = runtime.repository_graph.to_domain_data()
         graph_projection = publish_graph_artifacts(
             db,
             scan=scan_model,
             commit_sha=commit_sha,
             revision_artifact_id=revision_artifact_id,
             analyzer_artifact_id=artifact_projection["analyzer_run_artifact_id"],
-            graph_data=runtime.repository_graph.to_domain_data(),
+            graph_data=graph_data,
         )
         graph_meta = dict(scan_model.model_metadata or {})
         graph_meta.update(graph_projection)
+        graph_meta["graph_coverage"] = graph_data.coverage
+        graph_meta["graph_complete"] = bool(graph_data.complete)
+        if graph_data.contract_report is not None:
+            graph_meta["route_contract_coverage"] = graph_data.contract_report.model_dump(mode="json")
+        tenant_id = str(scan_model.owner_user_id or "legacy-local")
+        authority_values = runtime_authorities(
+            repository_url=repo_url,
+            commit_sha=commit_sha,
+            tenant_id=tenant_id,
+            policy_snapshot_id=scan_policy_snapshot_id(db, scan_model),
+            scanner_summary=scanner_summary,
+        )
+        graph_meta["analysis_authority_fingerprint"] = authority_digest(authority_values)
+        graph_meta["analysis_compatibility_fingerprint"] = compatibility_digest(authority_values)
+        graph_meta["analysis_authorities"] = authority_values
         graph_meta["artifact_lineage"] = [
             *(graph_meta.get("artifact_lineage") or []),
             graph_projection["symbol_index_artifact_id"],
@@ -350,6 +369,65 @@ async def execute_background_scan(
         scan_model.model_metadata = graph_meta
         flag_modified(scan_model, "model_metadata")
         db.commit()
+
+        # Exact immutable analysis reuse is checked only after the canonical
+        # commit, scanner, graph, and authority fingerprints are known.  A
+        # miss falls through to the normal workflow; a hit copies only
+        # previously confirmed, attested findings and performs zero model work.
+        authority_fingerprint = graph_meta.get("analysis_authority_fingerprint")
+        reusable_scan = find_exact_reusable_scan(
+            db,
+            tenant_id=tenant_id,
+            repository_url=repo_url,
+            commit_sha=commit_sha,
+            authority_fingerprint=authority_fingerprint,
+            exclude_scan_id=scan_id,
+        )
+        if reusable_scan is not None and authority_fingerprint:
+            copied_count = copy_exact_verified_findings(
+                db,
+                source_scan=reusable_scan,
+                target_scan=scan_model,
+                authority_fingerprint=authority_fingerprint,
+            )
+            graph_meta["exact_analysis_reuse"] = {
+                "reused": True,
+                "origin_scan_id": reusable_scan.id,
+                "commit_sha": commit_sha,
+                "authority_fingerprint": authority_fingerprint,
+                "copied_verified_findings": copied_count,
+                "remote_provider_calls": 0,
+            }
+            graph_meta["verification_summary"] = {
+                "canonical_confirmed_findings": copied_count,
+                "excluded_noncanonical_findings": 0,
+            }
+            graph_meta["ai_cloud_budget"] = {
+                "used_cloud_calls": 0,
+                "used_cloud_tokens": 0,
+                "exhausted": False,
+                "reuse": True,
+            }
+            scan_model.model_metadata = graph_meta
+            scan_model.status = ScanStatus.COMPLETED.value
+            scan_model.completed_at = _utc_now()
+            flag_modified(scan_model, "model_metadata")
+            db.commit()
+            WorkflowEventService.emit(
+                db=db,
+                event=WorkflowEventCreate(
+                    event_type=WorkflowEventType.SCAN_COMPLETED,
+                    scan_id=UUID(scan_id),
+                    commit_sha=commit_sha,
+                    message="Exact verified analysis reused for immutable repository commit",
+                    metadata_payload={
+                        "reuse": "exact",
+                        "origin_scan_id": reusable_scan.id,
+                        "remote_provider_calls": 0,
+                    },
+                ),
+            )
+            return
 
         # 5. Run durable LangGraph multi-agent analysis workflow using canonical SQLite checkpointer
         WorkflowEventService.emit(

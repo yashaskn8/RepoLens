@@ -17,6 +17,10 @@ class ReportEvidence(BaseModel):
     end_line: Optional[int] = None
     code_snippet: Optional[str] = None
     context_notes: Optional[str] = None
+    commit_sha: Optional[str] = None
+    file_sha256: Optional[str] = None
+    snippet_sha256: Optional[str] = None
+    verification_status: str = "VERIFIED_SOURCE_BYTES"
 
 
 class ReportDelivery(BaseModel):
@@ -75,6 +79,8 @@ class ReportFinding(BaseModel):
     evidences: List[ReportEvidence] = Field(default_factory=list)
     patches: List[ReportPatch] = Field(default_factory=list)
     created_at: datetime
+    claim_class: str = "VERIFIED_FINDING"
+    provenance: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ReportSummary(BaseModel):
@@ -143,3 +149,10 @@ class ScanReport(BaseModel):
     summary: ReportSummary
     findings: List[ReportFinding] = Field(default_factory=list)
     events_audit_trail: List[ReportWorkflowEvent] = Field(default_factory=list)
+    analysis_version: Optional[str] = None
+    graph_coverage: Dict[str, Any] = Field(default_factory=dict)
+    route_contract_coverage: Dict[str, Any] = Field(default_factory=dict)
+    ai_admission: Dict[str, Any] = Field(default_factory=dict)
+    ai_economy: Dict[str, Any] = Field(default_factory=dict)
+    uncertainty: List[str] = Field(default_factory=list)
+    truth_contract: str = "deterministic_assembly; verified evidence only"

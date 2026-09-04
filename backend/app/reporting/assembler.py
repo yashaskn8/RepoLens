@@ -454,6 +454,17 @@ class ReportAssembler:
                     cve=cve,
                     package=_safe_text(row_meta.get("package"), 256) if row_meta.get("package") else None,
                     affected_version=_safe_text(row_meta.get("affected_version"), 128) if row_meta.get("affected_version") else None,
+                    claim_class=(
+                        "VERIFIED_REUSED_FINDING"
+                        if _safe_text(row.verification_verdict, 32).upper() == "CONFIRMED"
+                        and provenance.get("reuse_type") in {"exact", "incremental"}
+                        else (
+                            "VERIFIED_FINDING"
+                            if _safe_text(row.verification_verdict, 32).upper() == "CONFIRMED"
+                            else "UNCERTAIN"
+                        )
+                    ),
+                    provenance=provenance,
                 )
             )
 
@@ -485,6 +496,15 @@ class ReportAssembler:
         ]
 
         limitations = list(dict.fromkeys(coverage_limitations + unsupported + limits))
+        graph_meta = meta.get("graph_coverage") if isinstance(meta.get("graph_coverage"), dict) else {}
+        if graph_meta.get("status") == "PARTIAL":
+            limitations.append("Repository graph coverage is partial; unresolved relationships remain unanalyzed.")
+        elif graph_meta.get("status") == "UNAVAILABLE":
+            limitations.append("Repository graph extraction was unavailable; architecture relationships were not analyzed.")
+        if not coverage.analyzers:
+            limitations.append("Deterministic scanner coverage was not recorded; zero findings is not inferred.")
+        if meta.get("source_evidence_available") is False:
+            limitations.append("Source evidence was unavailable; model-derived absence claims are not made.")
         if omitted_findings:
             limitations.append(f"{omitted_findings} findings were omitted by the report budget of {maximum} findings.")
         if omitted_finding_details:

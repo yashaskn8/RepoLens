@@ -35,6 +35,7 @@ class AIAdmissionPlan:
     def as_dict(self) -> dict[str, Any]:
         value = asdict(self)
         value["decision"] = self.decision.value
+        value["cloud_authorized"] = self.decision == AdmissionDecision.CLOUD_REQUIRED
         return value
 
 
@@ -78,20 +79,36 @@ def build_admission_plan(state: Mapping[str, Any], specialist: str) -> AIAdmissi
     routes = list(state.get("routes") or [])
     frontend_calls = list(state.get("frontend_calls") or [])
     manifest = state.get("manifest_summary") or {}
+    graph_coverage = state.get("graph_coverage") or manifest.get("graph_coverage") or {}
+    source_available = bool(
+        state.get("source_evidence_available", manifest.get("source_evidence_available", False))
+    )
+    tool_coverage = state.get("tool_coverage") or manifest.get("scanners_executed") or {}
     # A non-empty repository still has source evidence available to the
     # context engine even when no route/scanner projection was produced yet.
     evidence_count = len(static_findings) + len(routes) + len(frontend_calls)
-    if not evidence_count and int(manifest.get("total_files", 0) or 0) > 0:
+    if not evidence_count and source_available and int(manifest.get("total_files", 0) or 0) > 0:
         evidence_count = 1
     explicit_unresolved = state.get(f"{specialist}_unresolved")
     unresolved = True if explicit_unresolved is None else bool(explicit_unresolved)
 
-    if specialist == "integration":
+    if specialist == "integration" and (routes or frontend_calls):
         return AIAdmissionPlan(
             specialist=specialist,
             decision=AdmissionDecision.DETERMINISTIC_ONLY,
             reason="Route and frontend contract facts are evaluated deterministically.",
             evidence_count=evidence_count,
+            unresolved=False,
+            priority=80,
+            max_output_tokens=0,
+        )
+
+    if specialist == "integration" and not source_available:
+        return AIAdmissionPlan(
+            specialist=specialist,
+            decision=AdmissionDecision.SKIP,
+            reason="Integration analysis is not available because source evidence was not ingested.",
+            evidence_count=0,
             unresolved=False,
             priority=80,
             max_output_tokens=0,
@@ -130,7 +147,15 @@ def build_admission_plan(state: Mapping[str, Any], specialist: str) -> AIAdmissi
             max_output_tokens=0,
         )
 
-    if specialist == "architecture" and manifest.get("graph_complete") and not state.get("unresolved_graph_relationships"):
+    graph_complete = bool(
+        manifest.get("graph_complete")
+        or graph_coverage.get("complete") is True
+    )
+    unresolved_graph = int(
+        state.get("unresolved_graph_relationships", graph_coverage.get("unresolved_graph_relationships", 0))
+        or 0
+    )
+    if specialist == "architecture" and graph_complete and unresolved_graph == 0:
         return AIAdmissionPlan(
             specialist=specialist,
             decision=AdmissionDecision.DETERMINISTIC_ONLY,
@@ -141,18 +166,29 @@ def build_admission_plan(state: Mapping[str, Any], specialist: str) -> AIAdmissi
             max_output_tokens=0,
         )
 
-    if specialist == "bug" and "correctness_candidates" in state and not state.get("correctness_candidates"):
+    correctness_key_present = "correctness_candidates" in state or "deterministic_correctness_candidates" in state
+    correctness_candidates = state.get("correctness_candidates", state.get("deterministic_correctness_candidates"))
+    if specialist == "bug" and correctness_key_present and correctness_candidates is not None and not correctness_candidates:
         return AIAdmissionPlan(
             specialist=specialist,
             decision=AdmissionDecision.SKIP,
-            reason="No evidence-backed unresolved correctness candidate exists.",
+            reason=(
+                "No candidate detected by the available deterministic correctness analysis."
+                if source_available
+                else "Correctness analysis not available; no clean-result claim is made."
+            ),
             evidence_count=evidence_count,
             unresolved=False,
             priority=90,
             max_output_tokens=0,
         )
 
-    priority = {"security": 100, "bug": 90, "architecture": 40}.get(specialist, 50)
+    priority = {"security": 100, "bug": 90, "integration": 80, "architecture": 40}.get(specialist, 50)
+    if specialist == "security" and any(
+        str(value).upper() in {"UNAVAILABLE", "FAILED", "TIMEOUT"}
+        for value in tool_coverage.values()
+    ):
+        priority = 95
     return AIAdmissionPlan(
         specialist=specialist,
         decision=AdmissionDecision.CLOUD_REQUIRED,
