@@ -379,6 +379,21 @@ def test_warm_projection_reuse_does_not_parse_or_read_source(indexed_repository)
     assert db.scalar(select(func.count()).select_from(IndexProjectionModel)) == count
 
 
+def test_cold_walk_avoids_impossible_entry_and_projection_reuse_probes(indexed_repository):
+    _, _, db, factory = indexed_repository
+    index = factory()
+    with patch.object(db, "get", wraps=db.get) as get:
+        assert len(index.build_manifest().files) == 2
+    entry_probes = [call.args[1][1] for call in get.call_args_list
+                    if call.args and call.args[0] is IndexEntryModel]
+    projection_probes = [call for call in get.call_args_list
+                         if call.args and call.args[0] is IndexProjectionModel]
+    assert entry_probes == ["vendor"]
+    # The only projection gets materialize the two manifest files; cold
+    # extraction does not issue two additional impossible reuse probes.
+    assert len(projection_probes) == 2
+
+
 def test_partial_projection_stays_partial_when_reused_in_changed_tree(indexed_repository):
     repo, git, _, factory = indexed_repository
     (repo / "a.py").write_text("def one():\n    return 1\ndef two():\n    return 2\n", encoding="utf-8")

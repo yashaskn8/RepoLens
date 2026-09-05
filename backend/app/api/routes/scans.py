@@ -758,6 +758,8 @@ async def execute_background_scan(
         except Exception:
             pass
     finally:
+        if persistent_index is not None:
+            persistent_index.close()
         if index_db is not None:
             index_db.close()
         db.close()

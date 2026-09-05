@@ -48,6 +48,7 @@ def persist_facts(index, projection, file, source: bytes, *, redactor=None) -> d
     redactor = redactor or ProjectionRedactionMemo()
     redact = redactor.redact_text
     stored_bytes = 0
+    rows = []
 
     def add(row):
         nonlocal stored_bytes
@@ -55,7 +56,7 @@ def persist_facts(index, projection, file, source: bytes, *, redactor=None) -> d
         stored_bytes += len(json.dumps(values, ensure_ascii=False, separators=(",", ":")).encode())
         if stored_bytes > index.limits.max_projection_bytes * 3:
             raise InventoryBound("projection_fact_byte_limit")
-        index.db.add(row)
+        rows.append(row)
     manifest = RepositoryManifest(repository_url=index.repository_url, commit_hash=ZERO_REVISION, files=[file])
     chunks = chunk_file(file, ZERO_REVISION, source.decode("utf-8", errors="ignore"),
         max_chunks=MAX_FILE_CHUNKS + 1, max_content_bytes=index.limits.max_projection_bytes)
@@ -199,6 +200,10 @@ def persist_facts(index, projection, file, source: bytes, *, redactor=None) -> d
             add(IndexSignalModel(**common, issue_id=issue, intent=intent, component=component,
                 priority=100 if payload["strength"] == "STRONG" else 50, payload=payload))
         counts[intent] = len(unique)
+    # Publish only a fully constructed, byte-bounded projection. Keeping rows
+    # detached until this point preserves per-projection rollback while letting
+    # the index page commit batch homogeneous inserts across multiple files.
+    index.db.add_all(rows)
     return {"status": "PARTIAL" if truncated else "FILE_LOCAL", "postings": postings, "stored_fact_bytes": stored_bytes,
             "behavior_digest": behavior_digest, "behavior_scope": behavior_authority["bounds"],
             "behavior_sections": behavior_sections,

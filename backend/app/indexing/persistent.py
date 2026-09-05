@@ -145,6 +145,7 @@ class PersistentIndex:
         self.producer = identity(producer, CLASSIFICATION_VERSION, *parser_versions, str(limits.max_file_bytes), str(limits.max_projection_bytes), str(limits.max_path_bytes))
         self.inventory = GitInventory(repo_dir)
         self._component_resolver = None
+        self._reuse_catalog_available = None
         self.snapshot_id = identity(tenant_id, self.repository_id, commit_sha, self.producer)
         self.base_snapshot_id = self.snapshot_id
         self.entry_limits = {}
@@ -157,6 +158,10 @@ class PersistentIndex:
         self.writer_id = identity(self.tenant_id, self.repository_id, "catalog-writer")
         self.writer_token = uuid4().hex
         self.writer_owned = False
+
+    def close(self) -> None:
+        """Release repository readers that may be reopened after indexing."""
+        self.inventory.close()
 
     def _acquire_writer(self):
         now = time.time()
@@ -351,7 +356,12 @@ class PersistentIndex:
         component = self._component_identity(path)
         projection_id = identity(self.tenant_id, self.repository_id, self.producer, path, entry.object_id,
             json.dumps(component, sort_keys=True))
-        prior = self.db.get(IndexProjectionModel, projection_id)
+        if self._reuse_catalog_available is None:
+            self._reuse_catalog_available = self.db.scalar(select(IndexProjectionModel.id).where(
+                IndexProjectionModel.tenant_id == self.tenant_id,
+                IndexProjectionModel.repository_id == self.repository_id,
+            ).limit(1)) is not None
+        prior = self.db.get(IndexProjectionModel, projection_id) if self._reuse_catalog_available else None
         if prior is not None:
             self.stats["reused_files"] += 1
             reason = "indexed_partial" if prior.payload.get("facts_coverage", {}).get("status") == "PARTIAL" else "indexed"
@@ -388,16 +398,14 @@ class PersistentIndex:
                     repository_id=self.repository_id, content_hash=digest,
                     producer_digest=self.producer, payload=payload, payload_bytes=payload_size)
         try:
-            with self.db.begin_nested():
-                self.db.add(projection)
-                self.db.flush()
-                from app.indexing.facts import persist_facts
-                facts_coverage = persist_facts(self, projection, file, source, redactor=redactor)
-                projection.payload = {**payload, "facts_coverage": facts_coverage}
+            from app.indexing.facts import persist_facts
+            facts_coverage = persist_facts(self, projection, file, source, redactor=redactor)
         except InventoryBound as exc:
             if str(exc) != "projection_fact_byte_limit":
                 raise
             return None, disposition.classification.value, "projection_fact_byte_limit", len(source)
+        projection.payload = {**payload, "facts_coverage": facts_coverage}
+        self.db.add(projection)
         self.stats["parsed_files"] += 1
         return projection_id, disposition.classification.value, "indexed_partial" if facts_coverage["status"] == "PARTIAL" else "indexed", len(source)
 
@@ -407,8 +415,10 @@ class PersistentIndex:
         tree = self._tree(object_id, path)
         if tree.complete:
             return
-        # Git output is streamed. Already committed entries are skipped by
-        # primary-key lookup; no extraction or counters are replayed twice.
+        # Git trees are immutable and ordered. File entries and their cursor are
+        # committed atomically, so every file after the cursor is new. Directory
+        # entries can be committed before recursion advances the parent cursor
+        # and therefore retain their recovery probe below.
         reached_cursor = not bool(tree.cursor)
         for item in self.inventory.entries(object_id):
             if not reached_cursor:
@@ -420,14 +430,13 @@ class PersistentIndex:
                 raise InventoryBound("sensitive_path_excluded")
             if len(item_path.encode("utf-8")) > self.limits.max_path_bytes:
                 raise InventoryBound("inventory_path_limit")
-            entry = self.db.get(IndexEntryModel, (tree.id, item.name))
-            if entry is None:
-                # Excluded files and directory-only trees also consume catalog
-                # space. Bound their pending page before creating metadata.
-                self._check_storage_capacity(reserve_bytes=max(16_384,
-                    self.limits.max_path_bytes * self.limits.page_size * 4))
+            # Excluded files and directory-only trees also consume catalog
+            # space. Bound their pending page before creating metadata.
+            self._check_storage_capacity(reserve_bytes=max(16_384,
+                self.limits.max_path_bytes * self.limits.page_size * 4))
             if item.kind == "tree":
                 child = self._tree(item.object_id, item_path)
+                entry = self.db.get(IndexEntryModel, (tree.id, item.name))
                 if entry is None:
                     tree.entry_count += 1
                     entry = IndexEntryModel(tree_id=tree.id, name=item.name, path=item_path,
@@ -446,19 +455,16 @@ class PersistentIndex:
                 tree.cursor = item.name
                 self._commit(force=True)
                 continue
-            if entry is None:
-                projection, category, reason, size = self._project(item, item_path)
-                tree.entry_count += 1
-                entry = IndexEntryModel(tree_id=tree.id, name=item.name, path=item_path,
-                    object_id=item.object_id, mode=item.mode, projection_id=projection,
-                    classification=category, reason=reason, size_bytes=size, ordinal=tree.entry_count)
-                self.db.add(entry)
-                tree.cursor = item.name
-                self.pending_entries += 1
-                self._commit()
-                self.new_entries += 1
-            elif entry.projection_id:
-                self.stats["reused_files"] += 1
+            projection, category, reason, size = self._project(item, item_path)
+            tree.entry_count += 1
+            entry = IndexEntryModel(tree_id=tree.id, name=item.name, path=item_path,
+                object_id=item.object_id, mode=item.mode, projection_id=projection,
+                classification=category, reason=reason, size_bytes=size, ordinal=tree.entry_count)
+            self.db.add(entry)
+            tree.cursor = item.name
+            self.pending_entries += 1
+            self._commit()
+            self.new_entries += 1
             self.stats["discovered_files"] += 1
             yield entry
         tree.complete = True
@@ -507,7 +513,7 @@ class PersistentIndex:
             self.stats["retention"] = collect_catalog(self)
             return self._build_manifest(branch=branch)
         finally:
-            self.inventory.close()
+            self.close()
             self._release_writer()
 
     def _build_manifest(self, *, branch: str | None = None) -> RepositoryManifest:
