@@ -162,6 +162,19 @@ def build_admission_plan(state: Mapping[str, Any], specialist: str) -> AIAdmissi
         or 0
     )
     architecture_candidates = state.get("deterministic_architecture_candidates") or []
+    if specialist == "architecture" and "deterministic_architecture_candidates" in state and not architecture_candidates:
+        return AIAdmissionPlan(
+            specialist=specialist, decision=AdmissionDecision.SKIP,
+            reason="No evidence-bound architecture candidate; missing graph coverage cannot be filled by generation.",
+            unresolved=False, max_output_tokens=0,
+        )
+    if specialist == "security" and "deterministic_security_flow_candidates" in state and not security_flow_candidates:
+        return AIAdmissionPlan(
+            specialist=specialist,
+            decision=AdmissionDecision.DETERMINISTIC_ONLY if static_findings else AdmissionDecision.SKIP,
+            reason="No unresolved flow candidate; preserve deterministic findings and unavailable-tool coverage.",
+            evidence_count=len(static_findings), unresolved=False, max_output_tokens=0,
+        )
     if specialist == "architecture" and graph_complete and unresolved_graph == 0 and not architecture_candidates:
         return AIAdmissionPlan(
             specialist=specialist,
@@ -191,6 +204,14 @@ def build_admission_plan(state: Mapping[str, Any], specialist: str) -> AIAdmissi
         )
 
     priority = {"security": 100, "bug": 90, "integration": 80, "architecture": 40}.get(specialist, 50)
+    candidate_keys = {"bug": "deterministic_correctness_candidates",
+                      "security": "deterministic_security_flow_candidates",
+                      "architecture": "deterministic_architecture_candidates"}
+    key = candidate_keys.get(specialist)
+    if key and key in state:
+        # Prompt/output allowances depend on the bounded candidate batch, not
+        # unrelated files, routes, scanner signals, or repository metadata.
+        evidence_count = min(3, len(state.get(key) or []))
     if specialist == "security" and any(
         str(value).upper() in {"UNAVAILABLE", "FAILED", "TIMEOUT"}
         for value in tool_coverage.values()

@@ -783,6 +783,17 @@ def parse_file_with_calls(
     return [], []
 
 
+def parse_syntax_tree(language: str, source_bytes: bytes) -> Optional[Node]:
+    """Return a Tree-sitter root for supported source without executing repository code."""
+    lang_obj = _get_language(language)
+    if not lang_obj:
+        return None
+    try:
+        return Parser(lang_obj).parse(source_bytes).root_node
+    except Exception:
+        return None
+
+
 def parse_file(file_path: str, language: str, source_bytes: bytes) -> List[ParsedSymbol]:
     """Parse source file using Tree-sitter and return list of extracted symbols (backward-compatible)."""
     symbols, _ = parse_file_with_calls(file_path, language, source_bytes)

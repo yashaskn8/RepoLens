@@ -31,6 +31,7 @@ class RepositoryIntelligenceService:
         branch: Optional[str] = None,
         requested_branch: Optional[str] = None,
         resolved_branch_or_ref: Optional[str] = None,
+        persistent_index=None,
     ) -> EvidenceStore:
         """Run structural ingestion parsing and all deterministic scanner adapters in parallel.
 
@@ -38,15 +39,20 @@ class RepositoryIntelligenceService:
         One scanner failure is recorded per-tool without falsely reporting a clean result.
         """
         # 1. Deterministic AST parsing and manifest building (CPU-bound)
-        manifest: RepositoryManifest = await asyncio.to_thread(
-            build_manifest,
-            repo_dir=repo_dir,
-            repository_url=repository_url,
-            commit_hash=commit_hash,
-            branch=branch,
-            requested_branch=requested_branch,
-            resolved_branch_or_ref=resolved_branch_or_ref,
-        )
+        if persistent_index is not None:
+            manifest = await asyncio.to_thread(persistent_index.build_manifest, branch=branch)
+            manifest.requested_branch = requested_branch
+            manifest.resolved_branch_or_ref = resolved_branch_or_ref
+        else:
+            manifest: RepositoryManifest = await asyncio.to_thread(
+                build_manifest,
+                repo_dir=repo_dir,
+                repository_url=repository_url,
+                commit_hash=commit_hash,
+                branch=branch,
+                requested_branch=requested_branch,
+                resolved_branch_or_ref=resolved_branch_or_ref,
+            )
 
         # 2. Run deterministic scanners concurrently — use return_exceptions=True
         #    so one scanner failure does not cancel the others.
@@ -72,7 +78,9 @@ class RepositoryIntelligenceService:
                 scanner_results[result_or_exc.tool] = result_or_exc
 
         # 3. Assemble unified EvidenceStore
-        return EvidenceStore(manifest=manifest, scanner_results=scanner_results)
+        store = EvidenceStore(manifest=manifest, scanner_results=scanner_results)
+        store.persistent_index = persistent_index
+        return store
 
 
 # Default singleton instance

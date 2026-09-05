@@ -29,6 +29,13 @@ class RetrievalVariant(str, Enum):
     HYBRID_GRAPH_RERANKER = "E. hybrid + graph + reranker"
 
 
+class BenchmarkExecutionStatus(str, Enum):
+    """Whether a reported metric set was actually exercised in this run."""
+
+    EXECUTED = "EXECUTED"
+    NOT_EXECUTED = "NOT_EXECUTED"
+
+
 class GroundTruthIssue(BaseModel):
     """Explicit ground-truth label for a documented repository issue."""
 
@@ -67,6 +74,7 @@ class FindingEvaluationResult(BaseModel):
     evidence_localization_accuracy: float = Field(..., ge=0.0, le=1.0, description="Fraction of findings with correct file/line bounds")
     verifier_rejection_rate: float = Field(..., ge=0.0, le=1.0, description="Rejected findings / total candidate findings")
     model_call_count: int = Field(default=0, ge=0)
+    execution_status: BenchmarkExecutionStatus = BenchmarkExecutionStatus.EXECUTED
 
 
 class BenchmarkReport(BaseModel):

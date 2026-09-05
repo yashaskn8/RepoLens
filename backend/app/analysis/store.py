@@ -19,6 +19,7 @@ class EvidenceStore:
         scanner_results: Optional[Dict[str, ScannerResult]] = None,
     ):
         self.manifest = manifest
+        self.persistent_index = None
         self.scanner_results: Dict[str, ScannerResult] = scanner_results or {}
         self._findings: List[StaticFinding] = []
 

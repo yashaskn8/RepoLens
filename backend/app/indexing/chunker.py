@@ -43,6 +43,9 @@ def chunk_file(
     file_entry: FileEntry,
     commit_sha: str,
     file_content: str,
+    *,
+    max_chunks: int | None = None,
+    max_content_bytes: int | None = None,
 ) -> List[CodeChunk]:
     """Generate CodeChunks from a single file's parsed symbols.
 
@@ -52,15 +55,25 @@ def chunk_file(
     """
     clean_path = file_entry.path.replace("\\", "/")
     chunks: List[CodeChunk] = []
+    if file_entry.skipped_reason or file_entry.is_binary:
+        return chunks
+    lines = file_content.split("\n")
+    content_bytes = 0
 
     chunkable_symbols = [s for s in file_entry.symbols if s.kind in _CHUNKABLE_KINDS]
 
     if chunkable_symbols:
         for sym in chunkable_symbols:
+            if max_chunks is not None and len(chunks) >= max_chunks:
+                break
             chunk_kind = _SYMBOL_KIND_MAP[sym.kind]
-            sym_content = _extract_content(file_content, sym.start_line, sym.end_line)
+            sym_content = "\n".join(lines[max(0, sym.start_line - 1):sym.end_line])
             if not sym_content.strip():
                 continue
+            size = len(sym_content.encode("utf-8"))
+            if max_content_bytes is not None and content_bytes + size > max_content_bytes:
+                continue
+            content_bytes += size
 
             c_hash = content_hash(sym_content)
             chunk_id = _make_chunk_id(commit_sha, clean_path, sym.name, sym.start_line)

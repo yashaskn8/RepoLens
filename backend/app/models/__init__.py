@@ -42,6 +42,7 @@ from app.models.report import ReportModel
 from app.models.scan import ScanModel
 from app.models.user import UsageCounterModel, UserModel, UserSessionModel
 from app.models.workflow_event import WorkflowEventModel
+from app.models.intelligence import IndexEntryModel, IndexPinModel, IndexProjectionModel, IndexSnapshotModel, IndexTreeModel
 
 __all__ = [
     "Base",

@@ -193,6 +193,6 @@ async def test_evaluation_harness_full_benchmark_report():
     assert "# RepoLens Evaluation Benchmark Report" in md
     assert "Retrieval Variant Comparison" in md
     assert "Multi-Agent Finding & Verification Quality" in md
-    assert "Precision" in md
-    assert "Recall" in md
-    assert "False Positive Rate" in md
+    assert "NOT EXECUTED" in md
+    assert report.finding_results.model_call_count == 0
+    assert report.finding_results.execution_status.value == "NOT_EXECUTED"

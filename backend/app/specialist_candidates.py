@@ -14,6 +14,7 @@ from app.graph.repository_graph import RepositoryGraph
 from app.graph.schemas import EdgeKind
 from app.indexing.schemas import CodeChunk
 from app.ingestion.schemas import RepositoryManifest, SymbolKind
+from app.semantics import SemanticCertainty, analyze_security_flows, build_semantic_program
 
 
 class CandidateStrength(str, Enum):
@@ -64,8 +65,15 @@ def _call_name(node: ast.Call) -> str:
     return ".".join(reversed(parts))
 
 
-def build_bug_candidates(chunks: Iterable[CodeChunk], *, limit: int = 12) -> list[AnalysisCandidate]:
-    """Find a small set of high-precision Python correctness hypotheses."""
+def build_bug_candidates(
+    chunks: Iterable[CodeChunk],
+    *,
+    manifest: RepositoryManifest | None = None,
+    limit: int = 12,
+    semantic_program=None,
+) -> list[AnalysisCandidate]:
+    """Find bounded cross-language correctness hypotheses from semantic facts."""
+    chunk_list = list(chunks)
     candidates: list[AnalysisCandidate] = []
     blocking_calls = {
         "time.sleep",
@@ -79,9 +87,69 @@ def build_bug_candidates(chunks: Iterable[CodeChunk], *, limit: int = 12) -> lis
         "requests.put",
         "requests.delete",
         "urllib.request.urlopen",
+        "fs.readfilesync",
+        "fs.writefilesync",
+        "child_process.execsync",
     }
 
-    for chunk in sorted(chunks, key=lambda item: item.chunk_id):
+    program = semantic_program if semantic_program is not None else build_semantic_program(manifest, chunk_list)
+    functions_by_symbol = {function.symbol: function for function in program.functions}
+    for guard in program.guards:
+        if (
+            guard.guard_kind == "EXCEPTION_HANDLER"
+            and guard.metadata.get("broad") is True
+            and guard.metadata.get("empty") is True
+        ):
+            reason = "A broad exception handler deterministically discards the exception without handling it."
+            candidates.append(AnalysisCandidate(
+                candidate_id=_candidate_id("BROAD_EXCEPTION_SWALLOW", [guard.evidence_id], reason),
+                candidate_kind="BROAD_EXCEPTION_SWALLOW",
+                deterministic_reason=reason,
+                evidence_refs=[guard.evidence_id],
+                related_symbol=guard.symbol,
+                strength=CandidateStrength.STRONG,
+                metadata={"source_line": guard.start_line, "semantic_fact_id": guard.fact_id},
+            ))
+    async_targets = {}
+    for function in program.functions:
+        if function.is_async:
+            async_targets.setdefault((function.file_path, function.name), {})[function.symbol] = function
+    for call in program.calls:
+        enclosing = functions_by_symbol.get(call.symbol)
+        callee = call.callee.lower()
+        if enclosing and enclosing.is_async and callee in blocking_calls:
+            reason = f"Async function {enclosing.name!r} structurally calls known blocking API {callee!r}."
+            candidates.append(AnalysisCandidate(
+                candidate_id=_candidate_id("ASYNC_BLOCKING_CALL", [call.evidence_id], reason),
+                candidate_kind="ASYNC_BLOCKING_CALL",
+                deterministic_reason=reason,
+                evidence_refs=[call.evidence_id],
+                related_symbol=enclosing.name,
+                strength=CandidateStrength.STRONG,
+                metadata={"callee": callee, "source_line": call.start_line, "semantic_fact_id": call.fact_id},
+            ))
+        short_callee = call.callee.rsplit(".", 1)[-1]
+        targets = list(async_targets.get((call.file_path, short_callee), {}).values())
+        if (len(targets) == 1 and "." not in call.callee and not call.awaited and call.result_discarded
+                and any(chunk.file_path == call.file_path and chunk.language == "python" for chunk in chunk_list)):
+            reason = f"The result of a call to same-file async function {short_callee!r} is discarded without awaiting."
+            refs = list(dict.fromkeys([call.evidence_id, targets[0].evidence_id]))
+            candidates.append(AnalysisCandidate(
+                candidate_id=_candidate_id("UNAWAITED_ASYNC_CALL", refs, reason),
+                candidate_kind="UNAWAITED_ASYNC_CALL",
+                deterministic_reason=reason,
+                evidence_refs=refs,
+                related_symbol=call.symbol,
+                strength=CandidateStrength.STRONG,
+                metadata={"callee": call.callee, "source_line": call.start_line, "semantic_fact_id": call.fact_id},
+            ))
+
+    # Retain the AST path only as a parser-unavailable fallback for Python.
+    if program.functions:
+        deduplicated = {candidate.candidate_id: candidate for candidate in candidates}
+        return [deduplicated[key] for key in sorted(deduplicated)][:limit]
+
+    for chunk in sorted(chunk_list, key=lambda item: item.chunk_id):
         if str(chunk.language or "").lower() not in {"python", "py"}:
             continue
         try:
@@ -183,6 +251,7 @@ def build_security_flow_candidates(
     chunks: Iterable[CodeChunk],
     *,
     limit: int = 12,
+    semantic_program=None,
 ) -> list[AnalysisCandidate]:
     """Build possible route-input-to-sink flows from parsed call-site facts."""
     chunk_list = list(chunks)
@@ -191,6 +260,58 @@ def build_security_flow_candidates(
         "authoriz", "permission", "validate", "sanit", "escape", "allowlist",
         "normalize", "resolve_safe_path", "is_relative_to", "parameter",
     )
+
+    program = semantic_program if semantic_program is not None else build_semantic_program(manifest, chunk_list)
+    flows = analyze_security_flows(program)
+    for flow in flows:
+        # Only framework-derived route sources are sufficiently authoritative
+        # to create a repository security hypothesis. Other parameters remain
+        # available as POSSIBLE facts for contextual reasoning.
+        if flow.source.certainty != SemanticCertainty.PROVEN:
+            continue
+        evidence_refs = list(dict.fromkeys(flow.evidence_refs))[:16]
+        guard_refs = list(dict.fromkeys(guard.evidence_id for guard in flow.guards))[:8]
+        sanitizer_refs = list(dict.fromkeys(item.evidence_id for item in flow.sanitizers))[:8]
+        counter_evidence = list(dict.fromkeys(
+            [item.name for item in flow.sanitizers] + [item.expression for item in flow.guards]
+        ))[:8]
+        certainty = (
+            FlowCertainty.PROVEN_EDGE
+            if flow.certainty == SemanticCertainty.PROVEN
+            else FlowCertainty.POSSIBLE_EDGE
+        )
+        reason = (
+            f"Route input {flow.source.name!r} has a bounded semantic flow to "
+            f"{flow.sink.name!r} ({flow.sink.sink_kind})."
+        )
+        candidates.append(AnalysisCandidate(
+            candidate_id=_candidate_id(flow.sink.sink_kind, evidence_refs, reason),
+            candidate_kind=flow.sink.sink_kind,
+            deterministic_reason=reason,
+            evidence_refs=evidence_refs,
+            related_symbol=flow.source.symbol,
+            strength=(
+                CandidateStrength.STRONG
+                if certainty == FlowCertainty.PROVEN_EDGE
+                else CandidateStrength.MODERATE
+            ),
+            counter_evidence=counter_evidence,
+            metadata={
+                "source": f"{flow.source.source_kind.lower()}:{flow.source.name}",
+                "sink": flow.sink.name,
+                "flow_certainty": certainty.value,
+                "source_line": flow.sink.start_line,
+                "flow_evidence_refs": evidence_refs,
+                "caller_evidence_refs": evidence_refs[:1],
+                "callee_evidence_refs": evidence_refs[1:],
+                "guard_evidence_refs": guard_refs,
+                "counter_evidence_refs": sanitizer_refs,
+                "transformations": flow.transformations,
+                "semantic_edges": [edge.model_dump(mode="json") for edge in flow.edges],
+                "call_depth": flow.call_depth,
+                "flow_coverage": flows.coverage,
+            },
+        ))
 
     # High-signal source patterns that do not require framework route metadata.
     for chunk in sorted(chunk_list, key=lambda item: item.chunk_id):
@@ -278,6 +399,12 @@ def build_security_flow_candidates(
         if len(candidates) >= limit:
             deduplicated = {candidate.candidate_id: candidate for candidate in candidates}
             return [deduplicated[key] for key in sorted(deduplicated)][:limit]
+
+    # The semantic flow engine supersedes call-presence-only route hypotheses.
+    # Preserve that legacy path only when Tree-sitter produced no flow facts.
+    if program.functions:
+        deduplicated = {candidate.candidate_id: candidate for candidate in candidates}
+        return [deduplicated[key] for key in sorted(deduplicated)][:limit]
 
     for file_entry in sorted(manifest.files, key=lambda item: item.path):
         route_handlers = {

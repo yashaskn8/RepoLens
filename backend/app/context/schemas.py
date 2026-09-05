@@ -26,7 +26,7 @@ class ContextBundle(BaseModel):
 class EvidenceSlice(BaseModel):
     """Bounded, commit-bound hypothesis context referencing canonical evidence IDs."""
 
-    schema_version: str = "evidence-slice/1.0"
+    schema_version: str = "evidence-slice/2.0"
     scan_id: str
     commit_sha: str
     candidate_id: str
@@ -39,5 +39,12 @@ class EvidenceSlice(BaseModel):
     graph_evidence_refs: List[str] = Field(default_factory=list, max_length=20)
     contract_evidence_refs: List[str] = Field(default_factory=list, max_length=8)
     scanner_evidence_refs: List[str] = Field(default_factory=list, max_length=10)
+    flow_evidence_refs: List[str] = Field(default_factory=list, max_length=16)
+    caller_evidence_refs: List[str] = Field(default_factory=list, max_length=8)
+    callee_evidence_refs: List[str] = Field(default_factory=list, max_length=8)
+    guard_evidence_refs: List[str] = Field(default_factory=list, max_length=8)
+    test_evidence_refs: List[str] = Field(default_factory=list, max_length=8)
+    config_evidence_refs: List[str] = Field(default_factory=list, max_length=8)
+    evidence_roles: Dict[str, List[str]] = Field(default_factory=dict)
     candidate_metadata: Dict[str, Any] = Field(default_factory=dict)
     bounds: Dict[str, int] = Field(default_factory=dict)

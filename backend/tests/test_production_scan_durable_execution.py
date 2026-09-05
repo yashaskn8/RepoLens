@@ -3,6 +3,8 @@
 import asyncio
 import json
 import os
+import shutil
+import subprocess
 import tempfile
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
@@ -15,6 +17,15 @@ from app.models.scan import ScanModel
 from app.schemas.enums import ScanStatus, Severity
 from app.schemas.metadata import ModelExecutionMetadata
 from tests.conftest import TestingSessionLocal
+
+
+def _commit_fixture(path):
+    """Create immutable objects for RepoLens-owned test input; execute no source."""
+    command = ["git", "-c", "core.hooksPath=" + os.devnull, "-c", "commit.gpgsign=false",
+        "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"]
+    for args in (("init", "-q"), ("add", "."), ("commit", "-qm", "fixture")):
+        subprocess.run([*command, *args], cwd=path, check=True, capture_output=True)
+    return subprocess.check_output([*command, "rev-parse", "HEAD"], cwd=path).decode().strip()
 
 
 @pytest.mark.asyncio
@@ -92,9 +103,10 @@ async def test_production_scan_interruption_resume_and_deduplication():
         payload = content.split("<UNTRUSTED_REPOSITORY_DATA>", 1)[1].split(
             "</UNTRUSTED_REPOSITORY_DATA>", 1
         )[0]
-        candidate_id = json.loads(payload)["hypotheses"][0]["candidate_id"]
+        candidate = json.loads(payload)["hypotheses"][0]
         response_payload = json.loads(mock_llm_resp.content)
-        response_payload["findings"][0]["candidate_id"] = candidate_id
+        response_payload["findings"][0]["candidate_id"] = candidate["candidate_id"]
+        response_payload["findings"][0]["evidence_refs"] = candidate["primary_evidence_refs"]
         return mock_llm_resp.model_copy(update={"content": json.dumps(response_payload)})
 
     with tempfile.TemporaryDirectory(prefix="durable_scan_integration_") as shared_dir:
@@ -106,6 +118,9 @@ async def test_production_scan_interruption_resume_and_deduplication():
         os.makedirs(os.path.join(repo_workspace, "app"), exist_ok=True)
         with open(os.path.join(repo_workspace, "app", "main.py"), "w", encoding="utf-8") as f:
             f.write("def get_user(user_id):\n    cursor.execute(f'SELECT * FROM users WHERE id={user_id}')\n")
+        commit_sha = _commit_fixture(repo_workspace)
+        fixture_origin = os.path.join(shared_dir, "origin")
+        shutil.copytree(repo_workspace, fixture_origin)
 
         # 1. Create DB record in PENDING status
         db = TestingSessionLocal()
@@ -167,9 +182,7 @@ async def test_production_scan_interruption_resume_and_deduplication():
             snapshot_materialize_called = True
             assert commit_hash == commit_sha
             rehydrated_dir = tempfile.mkdtemp(prefix="rehydrated_repo_")
-            os.makedirs(os.path.join(rehydrated_dir, "app"), exist_ok=True)
-            with open(os.path.join(rehydrated_dir, "app", "main.py"), "w", encoding="utf-8") as f:
-                f.write("def get_user(user_id):\n    cursor.execute(f'SELECT * FROM users WHERE id={user_id}')\n")
+            shutil.copytree(fixture_origin, rehydrated_dir, dirs_exist_ok=True)
             return rehydrated_dir
 
         # Track mapper calls during resume to prove already-completed nodes are NOT rerun
@@ -246,6 +259,7 @@ async def test_production_scan_terminal_workflow_failure_marks_scan_failed():
         os.makedirs(os.path.join(repo_workspace, "src"), exist_ok=True)
         with open(os.path.join(repo_workspace, "src", "index.py"), "w", encoding="utf-8") as f:
             f.write("x = 1\n")
+        commit_sha = _commit_fixture(repo_workspace)
 
         db = TestingSessionLocal()
         try:

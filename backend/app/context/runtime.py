@@ -108,7 +108,7 @@ def _read_file_contents_from_workspace(manifest: RepositoryManifest, repo_dir: s
         return file_contents
 
     for file_entry in manifest.files:
-        if file_entry.is_binary:
+        if file_entry.is_binary or file_entry.skipped_reason:
             continue
 
         clean_path = file_entry.path.replace("\\", "/").lstrip("/")
@@ -180,6 +180,18 @@ class ScanIntelligenceRuntime:
     ) -> "ScanIntelligenceRuntime":
         """Asynchronously assemble the complete repository intelligence runtime from EvidenceStore."""
         manifest = evidence_store.manifest
+        persistent_index = getattr(evidence_store, "persistent_index", None)
+        if persistent_index is not None:
+            # Durable file projections already contain deterministic facts.
+            # Source and optional embeddings are demanded by selected queries.
+            from app.graph.persistent import PersistentRepositoryGraph
+            repository_graph = PersistentRepositoryGraph(persistent_index)
+            retrieval_service = RetrievalService(chunks=[], repository_graph=repository_graph,
+                embedding_provider=embedding_provider, vector_index=vector_index,
+                reranker=reranker, persistent_index=persistent_index)
+            context_engine = ContextEngine(evidence_store, repository_graph, retrieval_service)
+            return cls(evidence_store, repository_graph, [], retrieval_service.vector_index,
+                retrieval_service.embedding_provider, retrieval_service, context_engine, repo_dir)
 
         # 1. Build RepositoryGraph
         repository_graph = build_repository_graph(manifest, evidence_store)

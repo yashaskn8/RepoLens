@@ -319,6 +319,16 @@ async def run_analysis_workflow(
             runtime.repository_graph,
             runtime.chunks,
         )
+        persistent_index = getattr(evidence_store, "persistent_index", None)
+        if persistent_index is not None:
+            from app.indexing.facts import select_candidates
+            deterministic_correctness = select_candidates(persistent_index, "bug")
+            bug_selection = dict(persistent_index.query_coverage)
+            deterministic_security_flows = select_candidates(persistent_index, "security")
+            summary["candidate_selection_coverage"] = {
+                "bug": bug_selection, "security": dict(persistent_index.query_coverage),
+            }
+            summary["index_coverage"] = dict(persistent_index.stats)
         summary = {
             **summary,
             "graph_coverage": graph_coverage,

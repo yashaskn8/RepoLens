@@ -1,5 +1,6 @@
 """Reproducible evaluation runner executing retrieval variants and multi-agent finding benchmarks."""
 
+import re
 import time
 from typing import Dict, List, Optional
 from unittest.mock import AsyncMock, patch
@@ -11,6 +12,7 @@ from app.evaluation.metrics import (
     compute_recall_at_k,
 )
 from app.evaluation.schemas import (
+    BenchmarkExecutionStatus,
     BenchmarkReport,
     FindingEvaluationResult,
     RetrievalVariant,
@@ -18,8 +20,7 @@ from app.evaluation.schemas import (
 )
 from app.indexing.embeddings import EmbeddingProvider
 from app.indexing.schemas import EmbeddingRequest, EmbeddingResponse, EmbeddingResult
-from app.retrieval.reranker import QwenReranker
-from app.retrieval.schemas import RetrievalChannel, RetrievalQuery
+from app.retrieval.schemas import RerankCandidate, RetrievalChannel, RetrievalQuery
 from app.retrieval.service import RetrievalService
 from app.retrieval.vector_index import InMemoryVectorIndex
 
@@ -57,6 +58,27 @@ class DeterministicMockEmbeddingProvider(EmbeddingProvider):
             provider=self.provider_name,
             dimensions=16,
         )
+
+
+class DeterministicEvaluationReranker:
+    """Network-free reranker whose execution is observable in benchmarks."""
+
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    async def rerank(
+        self,
+        query: str,
+        candidates: List[RerankCandidate],
+    ) -> list[tuple[str, float]]:
+        self.call_count += 1
+        query_tokens = set(re.findall(r"\w+", query.lower()))
+        scored: list[tuple[str, float]] = []
+        for candidate in candidates:
+            document_tokens = set(re.findall(r"\w+", candidate.content.lower()))
+            overlap = len(query_tokens.intersection(document_tokens)) / max(1, len(query_tokens))
+            scored.append((candidate.chunk_id, overlap + candidate.initial_score * 0.01))
+        return sorted(scored, key=lambda item: (-item[1], item[0]))
 
 
 class EvaluationHarness:
@@ -125,7 +147,7 @@ class EvaluationHarness:
                 vector_index=vector_index,
                 embedding_provider=self.embedding_provider,
                 repository_graph=fixture.repository_graph,
-                reranker=QwenReranker(api_key=""),  # Clean fallback to RRF
+                reranker=DeterministicEvaluationReranker(),
             )
         return RetrievalService(chunks=fixture.chunks)
 
@@ -202,6 +224,16 @@ class EvaluationHarness:
                 f"| **{res.variant.value}** | `{res.recall_at_k * 100:.1f}%` | `{res.mrr:.3f}` | `{res.avg_latency_ms:.2f} ms` | {res.total_queries} |"
             )
 
+        if finding_results.execution_status.value == "NOT_EXECUTED":
+            lines.extend([
+                "",
+                "## 2. Multi-Agent Finding & Verification Quality",
+                "",
+                "- **Status**: `NOT EXECUTED`",
+                "- No finding-quality metrics or model calls were measured in this run.",
+            ])
+            return "\n".join(lines)
+
         lines.extend([
             "",
             "## 2. Multi-Agent Finding & Verification Quality",
@@ -239,15 +271,17 @@ class EvaluationHarness:
             res = await self.evaluate_retrieval_variant(active_fixture, variant, k=k)
             retrieval_results[variant.name] = res
 
-        # Generate finding metrics based on fixture ground truth
+        # This runner exercises retrieval only. Never present zero-filled
+        # finding metrics as though an agent/verifier evaluation ran.
         finding_res = compute_finding_metrics(
             verified_findings=[],
             candidate_findings=[],
             ground_truth_issues=active_fixture.ground_truth_issues,
             rejected_findings=[],
             line_tolerance=5,
-            model_call_count=5,
+            model_call_count=0,
         )
+        finding_res.execution_status = BenchmarkExecutionStatus.NOT_EXECUTED
 
         md_summary = self.format_markdown_summary(
             fixture_name=active_fixture.name,

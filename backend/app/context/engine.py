@@ -50,7 +50,10 @@ class ContextEngine:
                 analysis_intent=analysis_intent,
             )
             raw_results = await self.retrieval_service.retrieve(retrieval_query)
-            if not raw_results:
+            candidate_verification = analysis_intent == "verification" or bool(required_chunk_ids) and analysis_intent in {
+                "verification", "bug", "security", "architecture", "integration"
+            }
+            if not raw_results and not candidate_verification:
                 # Exact/lexical/dense retrieval may legitimately yield no
                 # match (or the free embedding provider may be unavailable).
                 # A deterministic structural sample preserves scan coverage
@@ -221,6 +224,10 @@ class ContextEngine:
             "context_budget": context_budget,
             "estimated_tokens": estimated_tokens,
             "neural_reranker_used": use_neural_reranker,
+            "independent_context_available": any(
+                result.provenance.get("selection") != "deterministic_candidate_anchor"
+                for result in relevant_chunks
+            ),
         }
 
         return ContextBundle(

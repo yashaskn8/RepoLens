@@ -58,12 +58,12 @@ def _hash_directory(dir_path: str) -> Dict[str, str]:
     return hashes
 
 
-def _specialist_candidate_id(request) -> str:
+def _specialist_candidate_id(request, field="candidate_id"):
     content = request.messages[1].content
     payload = content.split("<UNTRUSTED_REPOSITORY_DATA>", 1)[1].split(
         "</UNTRUSTED_REPOSITORY_DATA>", 1
     )[0]
-    return json.loads(payload)["hypotheses"][0]["candidate_id"]
+    return json.loads(payload)["hypotheses"][0][field]
 
 
 @pytest.fixture
@@ -227,9 +227,7 @@ async def test_repolens_end_to_end_correctness_acceptance_gate(e2e_client, e2e_f
                             "severity": "HIGH",
                             "category": "security",
                             "rule_id": "fastapi.insecure-cookie",
-                            "evidence_refs": [
-                                f"chunk:{original_commit_sha[:12]}:backend/app/routes.py:set_session_cookie:17"
-                            ],
+                            "evidence_refs": _specialist_candidate_id(req, "primary_evidence_refs"),
                             "source_behavior": "The session cookie is created without hardened attributes.",
                             "trigger_condition": "A session cookie is issued.",
                             "failure_mechanism": "Browser security attributes are omitted.",

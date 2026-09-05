@@ -140,6 +140,7 @@ async def execute_background_scan(
     """Asynchronously execute repository cloning, intelligence analysis, and durable multi-agent workflow."""
     db: Session = SessionLocal()
     workspace_dir: Optional[str] = None
+    index_db = None
 
     try:
         # 1. Update status to RUNNING and emit SCAN_STARTED
@@ -216,6 +217,20 @@ async def execute_background_scan(
         )
 
         service = get_intelligence_service()
+        from app.indexing.persistent import IndexLimits, PersistentIndex
+        # The catalog must use the scan's database, including tenant/test binds;
+        # a global session factory can point at a different authority store.
+        index_db = Session(bind=db.get_bind(), expire_on_commit=False)
+        persistent_index = PersistentIndex(
+            index_db, tenant_id=str(scan_model.owner_user_id or "legacy-local"),
+            repository_url=repo_url, repo_dir=workspace_dir, commit_sha=commit_sha,
+            limits=IndexLimits(
+                max_files=get_settings().MAX_REPO_FILES,
+                max_source_bytes=get_settings().MAX_TOTAL_SOURCE_BYTES,
+                max_file_bytes=get_settings().MAX_FILE_SIZE_BYTES,
+                max_seconds=get_settings().MAX_SCAN_DURATION_SECONDS * 0.75,
+            ),
+        )
         evidence_store = await service.analyze_repository(
             repo_dir=workspace_dir,
             repository_url=repo_url,
@@ -223,7 +238,10 @@ async def execute_background_scan(
             branch=resolved_branch or requested_branch,
             requested_branch=requested_branch,
             resolved_branch_or_ref=resolved_branch,
+            persistent_index=persistent_index,
         )
+        if evidence_store.persistent_index is persistent_index:
+            persistent_index.pin(scan_id)
 
         # Build scanner summary and update scan metadata
         scanner_summary = []
@@ -279,6 +297,8 @@ async def execute_background_scan(
         # Update scan metadata with analysis scope and scanner coverage
         meta = dict(scan_model.model_metadata or {})
         meta["scanner_coverage"] = scanner_summary
+        if evidence_store.persistent_index is persistent_index:
+            meta["index_coverage"] = dict(persistent_index.stats)
         if evidence_store.manifest.analysis_scope:
             meta["analysis_scope"] = evidence_store.manifest.analysis_scope.model_dump()
         if evidence_store.manifest.languages:
@@ -726,6 +746,8 @@ async def execute_background_scan(
         except Exception:
             pass
     finally:
+        if index_db is not None:
+            index_db.close()
         db.close()
         # Clean up temporary workspace directory
         if workspace_dir and os.path.exists(workspace_dir):
