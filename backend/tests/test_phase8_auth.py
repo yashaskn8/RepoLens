@@ -25,6 +25,7 @@ from app.security.password import (
     verify_password,
 )
 from app.services.auth_service import AuthService
+from tests.request_helpers import cookie_headers
 
 
 def test_argon2id_hashing_and_verification():
@@ -89,7 +90,7 @@ def test_user_registration_and_login_flow(client: TestClient, db_session: Sessio
     session_cookie = login_resp.cookies["repolens_session"]
     me_resp = client.get(
         "/api/v1/auth/me",
-        cookies={"repolens_session": session_cookie},
+        headers=cookie_headers({"repolens_session": session_cookie}),
     )
     assert me_resp.status_code == 200
     me_data = me_resp.json()
@@ -158,15 +159,15 @@ def test_session_revocation_and_logout(client: TestClient, db_session: Session):
     # Logout
     logout_resp = client.post(
         "/api/v1/auth/logout",
-        cookies={"repolens_session": session_cookie, "repolens_csrf": csrf_cookie},
-        headers={"X-CSRF-Token": csrf_cookie},
+        headers=cookie_headers({"repolens_session": session_cookie, "repolens_csrf": csrf_cookie},
+                               {"X-CSRF-Token": csrf_cookie}),
     )
     assert logout_resp.status_code == 200
 
     # Subsequent /me request with old session is rejected
     me_resp = client.get(
         "/api/v1/auth/me",
-        cookies={"repolens_session": session_cookie},
+        headers=cookie_headers({"repolens_session": session_cookie}),
     )
     assert me_resp.status_code == 401
 

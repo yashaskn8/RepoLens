@@ -58,6 +58,7 @@ scratch/
 artifacts/
 backend/artifacts/
 output/
+scale-report.json
 *.png
 skills-lock.json
 # Accidental machine-local Codex/Claude plan exports

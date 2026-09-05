@@ -1,0 +1,157 @@
+name: Manual Production Validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      scale_preset:
+        description: Passive benchmark inventory
+        required: true
+        default: 1k
+        type: choice
+        options: [1k, 10k, 100k]
+      run_postgres:
+        description: Run PostgreSQL and pgvector integration against configured secrets
+        required: true
+        default: false
+        type: boolean
+      allow_schema_reset:
+        description: The configured PostgreSQL database is disposable; run downgrade/upgrade proof
+        required: true
+        default: false
+        type: boolean
+      run_live_providers:
+        description: Run bounded live-provider smoke tests using configured secrets
+        required: true
+        default: false
+        type: boolean
+      smoke_mode:
+        description: Deployment smoke mode
+        required: true
+        default: sandbox
+        type: choice
+        options: [sandbox, staging, skip]
+      run_redis:
+        description: Run optional configured Redis integration
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repolens-production-validation-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  scale:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+      - name: Install deterministic backend
+        working-directory: backend
+        run: pip install -e ".[dev]"
+      - name: Run passive scale benchmark
+        working-directory: backend
+        run: python -m app.benchmarks.scale --preset "${{ inputs.scale_preset }}" --vendor-ratio 0.2 --fanout 256 --scc-size 32 --workspace-depth 8 --output scale-report.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: repolens-scale-${{ inputs.scale_preset }}
+          path: backend/scale-report.json
+          if-no-files-found: error
+
+  postgres:
+    if: ${{ inputs.run_postgres }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      REPOLENS_POSTGRES_TEST_URL: ${{ secrets.REPOLENS_POSTGRES_TEST_URL }}
+      PGVECTOR_TEST_URL: ${{ secrets.REPOLENS_POSTGRES_TEST_URL }}
+      ENABLE_PGVECTOR: "true"
+      REPOLENS_POSTGRES_TEST_ALLOW_SCHEMA_RESET: ${{ inputs.allow_schema_reset && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+      - name: Require configured disposable integration database
+        run: test -n "$REPOLENS_POSTGRES_TEST_URL"
+      - name: Install PostgreSQL support
+        working-directory: backend
+        run: pip install -e ".[dev,postgres]"
+      - name: Run PostgreSQL and pgvector integration
+        working-directory: backend
+        run: python -m pytest tests/test_postgres_integration.py tests/test_pgvector_index.py -m integration -q
+
+  live-providers:
+    if: ${{ inputs.run_live_providers }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+      HUGGINGFACE_API_KEY: ${{ secrets.HUGGINGFACE_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install backend
+        working-directory: backend
+        run: pip install -e ".[dev]"
+      - name: Run configured provider smokes
+        working-directory: backend
+        run: python -m pytest tests/test_live_providers.py -q
+
+  redis:
+    if: ${{ inputs.run_redis }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      REDIS_URL: ${{ secrets.REPOLENS_REDIS_TEST_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Require configured Redis endpoint
+        run: test -n "$REDIS_URL"
+      - name: Install backend
+        working-directory: backend
+        run: pip install -e ".[dev]"
+      - name: Run Redis integration
+        working-directory: backend
+        run: python -m pytest tests/test_redis_service.py -m integration -q
+
+  deployment-smoke:
+    if: ${{ inputs.smoke_mode != 'skip' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      REPOLENS_SMOKE_BASE_URL: ${{ secrets.REPOLENS_SMOKE_BASE_URL }}
+      REPOLENS_SMOKE_EMAIL: ${{ secrets.REPOLENS_SMOKE_EMAIL }}
+      REPOLENS_SMOKE_PASSWORD: ${{ secrets.REPOLENS_SMOKE_PASSWORD }}
+      REPOLENS_SMOKE_REPOSITORY_URL: ${{ secrets.REPOLENS_SMOKE_REPOSITORY_URL }}
+      REPOLENS_SMOKE_PR_URL: ${{ secrets.REPOLENS_SMOKE_PR_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+      - name: Install backend
+        working-directory: backend
+        run: pip install -e ".[dev]"
+      - name: Run safe deployment smoke
+        working-directory: backend
+        run: python -m app.cli.deployment_smoke "${{ inputs.smoke_mode }}"

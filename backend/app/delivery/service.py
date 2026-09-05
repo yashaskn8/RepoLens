@@ -135,7 +135,7 @@ class DeliveryService:
             )
         if patch.machine_verdict == "REJECTED":
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="A machine-rejected patch cannot be delivered.",
             )
         finding = db.query(FindingModel).filter(FindingModel.id == str(patch.finding_id)).first()
@@ -214,7 +214,7 @@ class DeliveryService:
 
         if patch.machine_verdict == "REJECTED":
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Cannot deliver a patch whose machine verification verdict is REJECTED.",
             )
 

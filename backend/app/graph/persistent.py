@@ -1,6 +1,7 @@
 """Snapshot-pinned graph queries over persisted file projections."""
 
 from collections import OrderedDict
+import posixpath
 
 from sqlalchemy import select
 
@@ -24,11 +25,12 @@ class PersistentRepositoryGraph(RepositoryGraph):
         self.query_truncated = False
         self._cross_cache = OrderedDict()
         self.unresolved_frontier = {}
+        self._module_resolver = None
 
     def _unresolved(self, path, reason):
         self.query_truncated = True
         if len(self.unresolved_frontier) < 64:
-            self.unresolved_frontier[path] = reason
+            self.unresolved_frontier.setdefault(path, reason)
 
     def _facts(self, kind, *, lookup=None, target=None, limit=None):
         maximum = limit or self.edge_limit
@@ -85,8 +87,9 @@ class PersistentRepositoryGraph(RepositoryGraph):
             self._cross_cache.move_to_end(cache_key)
             return self._cross_cache[cache_key]
         from app.graph.builder import build_repository_graph
-        from app.graph.imports import import_paths
         from app.ingestion.schemas import FileEntry, RepositoryManifest
+        from app.graph.module_resolution import ModuleResolution, TypeScriptModuleResolver
+        from app.graph.imports import import_paths
         source = self.index.file_projection(path)
         if source is None:
             return []
@@ -94,13 +97,23 @@ class PersistentRepositoryGraph(RepositoryGraph):
         projections = {path: source}
         payload_bytes = source.payload_bytes
         targets = {}
-        references = import_paths(files[0])
-        for target in references:
+        if files[0].language == "python":
+            resolutions = [ModuleResolution(target, "PROVEN", target, "PYTHON_LITERAL")
+                           for target in import_paths(files[0])]
+        else:
+            if self._module_resolver is None:
+                self._module_resolver = TypeScriptModuleResolver(self.index)
+            resolutions = self._module_resolver.resolve_file(files[0])
+        proven = {result.target: result for result in resolutions if result.state == "PROVEN" and result.target}
+        for result in resolutions:
+            if result.state != "PROVEN":
+                self._unresolved(path, f"{result.state}:{result.method}:{result.reason or 'UNKNOWN'}")
+        for target in proven:
             projection = self.index.file_projection(target)
             if projection is None or target == path:
                 continue
             targets[target] = projection
-        if references and not targets:
+        if resolutions and not targets:
             self._unresolved(path, "IMPORT_TARGET_NOT_IN_SNAPSHOT")
         # Never choose one definition from ambiguous same-name module files.
         from collections import Counter
@@ -118,6 +131,21 @@ class PersistentRepositoryGraph(RepositoryGraph):
             files.append(FileEntry.model_validate(projection.payload["file"]))
             projections[target] = projection
             payload_bytes += projection.payload_bytes
+        # The canonical graph builder consumes relative source specifiers. Give
+        # it an immutable equivalent for proven aliases so CALLS edges share the
+        # same resolution authority as IMPORTS edges.
+        if files[0].language != "python" and proven:
+            rewritten = []
+            source_dir = posixpath.dirname(path)
+            for symbol in files[0].symbols:
+                details = dict(symbol.details)
+                resolution = next((item for item in resolutions
+                    if item.specifier == details.get("source") and item.state == "PROVEN" and item.target), None)
+                if resolution:
+                    relative = posixpath.relpath(resolution.target, source_dir or ".")
+                    details["source"] = relative if relative.startswith(".") else "./" + relative
+                rewritten.append(symbol.model_copy(update={"details": details}))
+            files[0] = files[0].model_copy(update={"symbols": rewritten})
         graph = build_repository_graph(RepositoryManifest(repository_url=self.index.repository_url,
             commit_hash=self.index.commit_sha, files=files))
         edges = []
@@ -125,7 +153,9 @@ class PersistentRepositoryGraph(RepositoryGraph):
             if target != path:
                 edges.append(GraphEdge(source=f"file:{path}", target=f"file:{target}", kind=EdgeKind.IMPORTS,
                     metadata={"dependency_certificate": {"snapshot_id": self.index.snapshot_id,
-                        "resolution": "EXPLICIT_IMPORT", "source_sha256": source.content_hash,
+                        "resolution": "PROVEN", "resolution_method": proven[target].method,
+                        "specifier": proven[target].specifier,
+                        "resolution_evidence": list(proven[target].evidence), "source_sha256": source.content_hash,
                         "target_sha256": projection.content_hash, "producer_digest": self.index.producer,
                         "source_behavior_digest": source.payload.get("facts_coverage", {}).get("behavior_digest"),
                         "target_behavior_digest": projection.payload.get("facts_coverage", {}).get("behavior_digest"),
@@ -139,7 +169,10 @@ class PersistentRepositoryGraph(RepositoryGraph):
             if len(edges) >= self.edge_limit:
                 self.query_truncated = True
                 break
-            certificate = {"snapshot_id": self.index.snapshot_id, "resolution": "EXPLICIT_IMPORT",
+            certificate = {"snapshot_id": self.index.snapshot_id, "resolution": "PROVEN",
+                "resolution_method": proven[right.file_path].method,
+                "specifier": proven[right.file_path].specifier,
+                "resolution_evidence": list(proven[right.file_path].evidence),
                 "source_sha256": source.content_hash,
                 "target_sha256": projections[right.file_path].content_hash,
                 "source_behavior_digest": source.payload.get("facts_coverage", {}).get("behavior_digest"),
@@ -176,8 +209,16 @@ class PersistentRepositoryGraph(RepositoryGraph):
         node = self.get_node(node_id)
         if node and node.file_path:
             refs = self._facts("IMPORT_REF", target=node.file_path, limit=16)
+            # Alias/package imports cannot be keyed by their eventual target at
+            # file-extraction time. Resolve a bounded source-spec frontier now.
+            refs.extend(self._facts("IMPORT_SPEC", limit=64))
+            seen = set()
             for ref in refs:
-                edges.extend(edge for edge in self._cross_edges(ref["source_path"]) if edge.target == node_id)
+                source_path = ref["source_path"]
+                if source_path in seen:
+                    continue
+                seen.add(source_path)
+                edges.extend(edge for edge in self._cross_edges(source_path) if edge.target == node_id)
         return edges[:self.edge_limit]
 
     def get_outgoing_edges(self, node_id):
@@ -233,7 +274,7 @@ class PersistentRepositoryGraph(RepositoryGraph):
             node_counts_by_kind=dict(Counter(node.kind.value for node in nodes)),
             edge_counts_by_kind=dict(Counter(edge.kind.value for edge in edges)), contract_report=contracts,
             complete=False, coverage={"status": "PARTIAL", "complete": False,
-                "reason": "bounded_active_graph; explicit imports only; global absence remains unknown",
+                "reason": "bounded_active_graph; statically proven imports only; global absence remains unknown",
                 "total_nodes": len(nodes), "total_edges": len(edges),
                 "query_truncated": self.query_truncated, "unresolved_graph_relationships": max(1, len(self.unresolved_frontier)),
                 "unresolved_frontier": dict(self.unresolved_frontier), "frontier_exhaustive": False,

@@ -11,10 +11,10 @@ RepoLens treats all submitted codebases as untrusted passive data, enforcing hos
 ## What RepoLens Does
 
 - **Passive Repository Security & Quality Scanning**: Ingests public repositories via ephemeral shallow clones, parses syntax trees with Tree-sitter, runs deterministic static analyzers (Semgrep, Trivy, OSV-Scanner), and maps relationships across backend and frontend code.
-- **Cross-Layer Contract Intelligence**: Statically reconstructs the full dependency and route graph between frontend client endpoints (`fetch`/`axios`) and backend route handlers (FastAPI), identifying breaking contract mismatches and orphaned schemas.
-- **Pull Request & Change Intelligence**: Analyzes dual-revision AST diffs across commit ranges or public GitHub PRs, deterministically computing upstream caller blast radius with NetworkX graph traversal.
+- **Cross-Layer Contract Intelligence**: Builds bounded, provenance-carrying dependency and route views between frontend client endpoints (`fetch`/`axios`) and backend route handlers (FastAPI). Repository-wide absence remains `UNKNOWN` whenever traversal is partial.
+- **Pull Request & Change Intelligence**: Uses immutable Git tree/object comparison to skip equal subtrees, analyzes only changed source regions, and checkpoints bounded upstream impact frontiers.
 - **Evidence-Grounded AI Reasoning**: Specialist agents operate only on verified machine evidence (AST nodes, line citations, and scanner findings). Claims lacking direct source citations are discarded by the finding verifier.
-- **Local-First, Cost-Aware AI**: Exact and semantic caching, duplicate-request coalescing, optional local embeddings, and an opt-in loopback Ollama adapter reduce cloud calls without changing the verifier's authority.
+- **Local-First, Cost-Aware AI**: Persistent fact/projection reuse, candidate deduplication, exact and semantic caching, targeted evidence-role retrieval, optional local embeddings, and opt-in loopback Ollama reduce model work without changing verifier authority.
 - **Guarded Remediation & Safe Delivery**: Generates scoped candidate patches with 12-check AST verification. Remediation pauses at human approval boundaries; optional delivery to GitHub is restricted to isolated branch PRs by authenticated operators.
 
 ---
@@ -46,6 +46,7 @@ RepoLens/
 │   ├── app/
 │   │   ├── agents/          # Multi-agent LangGraph workflows & checkpointer
 │   │   ├── analysis/        # Change intelligence, AST diff engine, blast radius & verifier
+│   │   ├── benchmarks/      # Manual passive large-repository benchmark harness
 │   │   ├── api/             # FastAPI REST & SSE routers (scans, findings, patches, analyses)
 │   │   ├── cli/             # Operator creation and administrative CLI utilities
 │   │   ├── core/            # Pydantic Settings, database engine, security middlewares
@@ -54,13 +55,14 @@ RepoLens/
 │   │   ├── execution/       # Durable jobs, leases, budgets, artifacts, and recovery
 │   │   ├── graph/           # RepositoryGraph (NetworkX), node/edge builders, contract matcher
 │   │   ├── ingestion/       # Tree-sitter parsers, dual snapshot acquisition, PR resolver
+│   │   ├── indexing/        # Persistent Git-tree projections, facts, retention, component identity
 │   │   ├── llm/             # Resilient LLMRouter with provider fallbacks & telemetry
 │   │   ├── models/          # SQLAlchemy ORM models (Users, Scans, Findings, Patches, Deliveries)
 │   │   ├── patching/        # Unified diff applier, candidate patch generator, 12-check verifier
 │   │   ├── schemas/         # Pydantic domain schemas, enums, change analysis & report models
 │   │   ├── security/        # Argon2id password hashing, session tokens, secret redaction, CSRF
 │   │   └── services/        # Auth, quotas, review publication, scan recovery & workflow events
-│   ├── alembic/             # Database migrations (001 through 010)
+│   ├── alembic/             # Database migrations through head 16c9a2e71f40
 │   └── tests/               # Pytest verification, security regression & migration lifecycle tests
 └── frontend/                 # Next.js + React 19 + TypeScript frontend
     └── src/
@@ -91,7 +93,7 @@ For complete threat evaluations and defense-in-depth matrices, see [Security & T
 
 - **Frontend**: Next.js 15, React 19, TypeScript, Vanilla CSS design system.
 - **Backend**: FastAPI, Python 3.11+, Pydantic Settings & Schemas.
-- **Persistence**: SQLAlchemy 2.0 ORM, Alembic migrations (revisions 001–010), SQLite default (portable to PostgreSQL / pgvector).
+- **Persistence**: SQLAlchemy 2.0 ORM, Alembic head `16c9a2e71f40`, SQLite default, and opt-in PostgreSQL/pgvector with bounded pools, statement/lock timeouts, snapshot pins, and retention.
 - **Static Analysis**: Tree-sitter AST parsers (Python, JS, TS, TSX, JSX), NetworkX graph engine, optional CLI adapters for Semgrep, Trivy, and OSV-Scanner.
 - **Agent Orchestration**: LangGraph state machine with durable SQLite checkpointing.
 - **LLM Abstraction**: One `LLMRouter` owns capability policy, cheap-first selection, bounded retry/fallback, evidence-scoped caching, and optional low-risk Ollama execution across configured providers.
@@ -125,7 +127,10 @@ python -m pip install -e ".[dev]"
 # No model is downloaded by normal installation or CI.
 python -m pip install -e ".[local-ml]"
 
-# Apply database migrations (001 through 010)
+# Optional: install the PostgreSQL driver for a configured production database.
+python -m pip install -e ".[postgres]"
+
+# Apply migrations through 16c9a2e71f40
 alembic upgrade head
 
 # Start development server
@@ -154,6 +159,8 @@ Configuration is managed via environment variables. See [`.env.example`](.env.ex
 
 Key configuration areas:
 - `DATABASE_URL`: Relational database connection string (default: `sqlite:///./repolens.db`).
+- `DATABASE_*TIMEOUT*`, `DATABASE_POOL_SIZE`, `DATABASE_MAX_OVERFLOW`: bounded PostgreSQL admission and query controls.
+- `ENABLE_PGVECTOR`: opt-in persistent vector retrieval; SQLite/exact retrieval remains the zero-infrastructure default.
 - `ENVIRONMENT`: Set to `development` or `production`.
 - `AUTH_COOKIE_SECURE`: Must be `true` in production over HTTPS.
 - `CORS_ORIGINS` & `TRUSTED_HOSTS`: Explicit comma-separated allowed origins/hosts.
@@ -184,7 +191,26 @@ Key configuration areas:
 cd backend
 python -m pytest
 ```
-> **Latest Release Verification**: Collected 650 backend tests — **645 passed**, 5 PostgreSQL/pgvector integration tests skipped in the default SQLite environment (0 failed, 0 errors).
+> **Current backend suite**: 953 tests collected. PostgreSQL, pgvector, Redis, and live-provider tests skip unless their explicit integration environment variables are configured. The exact executed release result is recorded with each release commit/CI run.
+
+### Manual production and scale validation
+
+Normal CI remains zero-key and requires no PostgreSQL, Redis, Docker, model server, or model download. The separate `Manual Production Validation` workflow and local entrypoints provide opt-in validation:
+
+```bash
+cd backend
+
+# Safe deterministic application smoke using sandboxed network/write boundaries.
+python -m app.cli.deployment_smoke sandbox
+
+# Passive generated inventories; supported presets are 1k, 10k, and 100k.
+python -m app.benchmarks.scale --preset 1k --output scale-report.json
+
+# Real service checks run only when explicit disposable integration URLs are set.
+python -m pytest tests/test_postgres_integration.py tests/test_pgvector_index.py -m integration
+```
+
+Staging smoke mode validates registration/login, scan, report, PR analysis, remediation, approval, and read-only publication/delivery previews. External writes require both `--allow-external-writes` and `REPOLENS_SMOKE_ALLOW_EXTERNAL_WRITES=1`; they are disabled by default.
 
 ### Frontend Verification
 ```bash
@@ -223,6 +249,9 @@ RepoLens enforces strict controls around external GitHub writes:
 - **Untrusted Code Execution**: RepoLens does not run arbitrary test suites, execute binaries, or provide dynamic sandbox execution.
 - **Autonomous Auto-Merging**: Machine systems cannot merge pull requests or bypass human review.
 - **Private Repository Multi-Tenancy**: Current public release candidate focuses on public GitHub repository analysis; organization-wide OAuth token delegations and private repository sync are out of scope for v1.
+- **Static Module Resolution Only**: Relative imports, `tsconfig`/`jsconfig` base URLs and paths, safe relative `extends`, package imports/exports, and npm/yarn/pnpm workspaces are resolved only when one existing target is provable. Dynamic JavaScript config, condition-dependent targets, and ambiguous aliases remain `UNRESOLVED`.
+- **Extreme-Scale Validation Status**: RepoLens is **designed for extreme scale** through immutable subtree reuse, bounded persistent queries, resumable frontiers, and candidate-derived AI budgets. It is **not yet proven at million-file scale**. The 1K/10K/100K harness is available, but no unexecuted benchmark result is claimed here.
+- **Environment-Dependent Production Proofs**: Real PostgreSQL/pgvector concurrency and live providers require explicitly configured staging infrastructure; default CI verifies their fail-closed/skip behavior without pretending those services ran.
 
 ---
 

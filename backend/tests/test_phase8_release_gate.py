@@ -33,6 +33,7 @@ from app.models.workflow_event import WorkflowEventModel
 from app.schemas.enums import UsageOperation, UserRole
 from app.security.password import hash_password, verify_dummy_password, verify_password
 from app.services.quota_service import check_and_increment_quota
+from tests.request_helpers import cookie_headers
 
 
 def _login_actor(client: TestClient, db_session: Session, email: str, role: str = "USER", password: str = "SecurePass12345!"):
@@ -85,11 +86,11 @@ def test_phase8_comprehensive_release_gate(client: TestClient, db_session: Sessi
     assert op_charlie["role"] == "OPERATOR"
 
     # Verify /me
-    alice_me = client.get("/api/v1/auth/me", cookies=alice["cookies"]).json()
+    alice_me = client.get("/api/v1/auth/me", headers=cookie_headers(alice["cookies"])).json()
     assert alice_me["email"] == "alice@example.com"
     assert alice_me["role"] == "USER"
 
-    charlie_me = client.get("/api/v1/auth/me", cookies=op_charlie["cookies"]).json()
+    charlie_me = client.get("/api/v1/auth/me", headers=cookie_headers(op_charlie["cookies"])).json()
     assert charlie_me["email"] == "charlie_op@example.com"
     assert charlie_me["role"] == "OPERATOR"
 
@@ -100,7 +101,7 @@ def test_phase8_comprehensive_release_gate(client: TestClient, db_session: Sessi
     no_csrf = client.post(
         "/api/v1/scans",
         json={"repository_url": "https://github.com/alice/repo"},
-        cookies=alice["cookies"],
+        headers=cookie_headers(alice["cookies"]),
     )
     assert no_csrf.status_code == 403
     assert "CSRF" in str(no_csrf.json()["detail"])
@@ -109,8 +110,7 @@ def test_phase8_comprehensive_release_gate(client: TestClient, db_session: Sessi
     alice_scan_resp = client.post(
         "/api/v1/scans",
         json={"repository_url": "https://github.com/alice/repo"},
-        cookies=alice["cookies"],
-        headers=alice["headers"],
+        headers=cookie_headers(alice["cookies"], alice["headers"]),
     )
     assert alice_scan_resp.status_code == 202
     alice_scan_id = str(alice_scan_resp.json()["id"])
@@ -119,10 +119,10 @@ def test_phase8_comprehensive_release_gate(client: TestClient, db_session: Sessi
     # Requirement D & J: Tenant Isolation & Event Actor Attribution
     # -------------------------------------------------------------------------
     # Alice can view her scan
-    assert client.get(f"/api/v1/scans/{alice_scan_id}", cookies=alice["cookies"]).status_code == 200
+    assert client.get(f"/api/v1/scans/{alice_scan_id}", headers=cookie_headers(alice["cookies"])).status_code == 200
 
     # Bob CANNOT view Alice's scan (returns 404)
-    assert client.get(f"/api/v1/scans/{alice_scan_id}", cookies=bob["cookies"]).status_code == 404
+    assert client.get(f"/api/v1/scans/{alice_scan_id}", headers=cookie_headers(bob["cookies"])).status_code == 404
 
     # Verify event emitted has actor_user_id == alice["id"]
     event = db_session.query(WorkflowEventModel).filter_by(scan_id=alice_scan_id).first()
@@ -137,15 +137,14 @@ def test_phase8_comprehensive_release_gate(client: TestClient, db_session: Sessi
             "base_commit_sha": "1111111111111111111111111111111111111111",
             "head_commit_sha": "2222222222222222222222222222222222222222",
         },
-        cookies=alice["cookies"],
-        headers=alice["headers"],
+        headers=cookie_headers(alice["cookies"], alice["headers"]),
     )
     assert alice_ca_resp.status_code == 202
     alice_ca_id = str(alice_ca_resp.json()["id"])
 
     # Bob CANNOT view Alice's change analysis (returns 404)
-    assert client.get(f"/api/v1/change-analyses/{alice_ca_id}", cookies=bob["cookies"]).status_code == 404
-    assert client.get(f"/api/v1/change-analyses/{alice_ca_id}/report", cookies=bob["cookies"]).status_code == 404
+    assert client.get(f"/api/v1/change-analyses/{alice_ca_id}", headers=cookie_headers(bob["cookies"])).status_code == 404
+    assert client.get(f"/api/v1/change-analyses/{alice_ca_id}/report", headers=cookie_headers(bob["cookies"])).status_code == 404
 
     # -------------------------------------------------------------------------
     # Requirement E: Legacy Ownerless Safety
@@ -154,7 +153,7 @@ def test_phase8_comprehensive_release_gate(client: TestClient, db_session: Sessi
     legacy_scan._explicit_unowned = True
     db_session.add(legacy_scan)
     db_session.commit()
-    assert client.get(f"/api/v1/scans/{legacy_scan.id}", cookies=alice["cookies"]).status_code == 404
+    assert client.get(f"/api/v1/scans/{legacy_scan.id}", headers=cookie_headers(alice["cookies"])).status_code == 404
 
     # -------------------------------------------------------------------------
     # Requirement F & G: Operator Role Gating & Operator Tenant Isolation
@@ -178,8 +177,7 @@ def test_phase8_comprehensive_release_gate(client: TestClient, db_session: Sessi
     alice_deliver = client.post(
         f"/api/v1/patches/{patch_obj.id}/deliver",
         json={"target_branch": "patch-branch"},
-        cookies=alice["cookies"],
-        headers=alice["headers"],
+        headers=cookie_headers(alice["cookies"], alice["headers"]),
     )
     assert alice_deliver.status_code == 403
     assert "INSUFFICIENT_PRIVILEGES" in str(alice_deliver.json()["detail"])
@@ -188,8 +186,7 @@ def test_phase8_comprehensive_release_gate(client: TestClient, db_session: Sessi
     charlie_deliver = client.post(
         f"/api/v1/patches/{patch_obj.id}/deliver",
         json={"target_branch": "patch-branch"},
-        cookies=op_charlie["cookies"],
-        headers=op_charlie["headers"],
+        headers=cookie_headers(op_charlie["cookies"], op_charlie["headers"]),
     )
     assert charlie_deliver.status_code == 404
 
@@ -219,8 +216,7 @@ def test_phase8_comprehensive_release_gate(client: TestClient, db_session: Sessi
     resp_20 = client.post(
         "/api/v1/scans",
         json={"repository_url": "https://github.com/dave/repo"},
-        cookies=dave["cookies"],
-        headers=dave["headers"],
+        headers=cookie_headers(dave["cookies"], dave["headers"]),
     )
     assert resp_20.status_code == 202
 
@@ -228,8 +224,7 @@ def test_phase8_comprehensive_release_gate(client: TestClient, db_session: Sessi
     resp_21 = client.post(
         "/api/v1/scans",
         json={"repository_url": "https://github.com/dave/repo"},
-        cookies=dave["cookies"],
-        headers=dave["headers"],
+        headers=cookie_headers(dave["cookies"], dave["headers"]),
     )
     assert resp_21.status_code == 429
     assert "DAILY_QUOTA_EXCEEDED" in str(resp_21.json()["detail"])

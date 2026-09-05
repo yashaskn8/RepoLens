@@ -354,7 +354,7 @@ async def request_patch_revision(
         and str(execution.get("failure_message") or "").startswith("PATCH_PLAN_PROVENANCE_MISMATCH:")
     ):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(execution["failure_message"]),
         )
     if execution["state"] != "SUCCEEDED" or not execution["outcome_detail"].get("patch_id"):

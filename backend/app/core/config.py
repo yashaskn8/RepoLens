@@ -17,6 +17,11 @@ class Settings(BaseSettings):
 
     # Database connection string (defaults to SQLite, portable to PostgreSQL)
     DATABASE_URL: str = "sqlite:///./repolens.db"
+    DATABASE_POOL_SIZE: int = Field(default=10, ge=1, le=100)
+    DATABASE_MAX_OVERFLOW: int = Field(default=20, ge=0, le=200)
+    DATABASE_POOL_TIMEOUT_SECONDS: float = Field(default=5.0, gt=0, le=60)
+    DATABASE_STATEMENT_TIMEOUT_MS: int = Field(default=15_000, ge=100, le=300_000)
+    DATABASE_LOCK_TIMEOUT_MS: int = Field(default=2_000, ge=100, le=60_000)
 
     # Server configuration
     BACKEND_HOST: str = "0.0.0.0"

@@ -134,7 +134,7 @@ async def _submit_remediation(
         and str(execution.get("failure_message") or "").startswith("PATCH_PLAN_PROVENANCE_MISMATCH:")
     ):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(execution["failure_message"]),
         )
     if execution["state"] != "SUCCEEDED" or not execution["output_artifact_id"]:
@@ -194,7 +194,7 @@ def _get_verified_finding_and_scan(finding_id: UUID, current_user: CurrentUser, 
     if fm.verification_verdict != VerificationVerdict.CONFIRMED.value:
         verdict_display = fm.verification_verdict or "NONE"
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=(
                 f"Finding '{finding_id}' is not eligible for remediation: only findings with "
                 f"verification_verdict == 'CONFIRMED' may enter research, fix planning, or patch generation "

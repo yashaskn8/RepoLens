@@ -354,7 +354,7 @@ async def create_change_analysis_from_pr(
 
     if resolved_pr.is_fork:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="FORK_PULL_REQUEST_UNSUPPORTED: Pull requests from external forks are not supported in Phase 6. Only same-repository pull requests are supported.",
         )
 

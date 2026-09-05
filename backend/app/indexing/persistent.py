@@ -101,6 +101,7 @@ class PersistentIndex:
             str(root / "graph" / "repository_graph.py"),
             str(root / "graph" / "persistent.py"),
             str(root / "graph" / "imports.py"),
+            str(root / "graph" / "module_resolution.py"),
             str(root / "security" / "redaction.py"),
         )
         if not producer:
@@ -127,8 +128,18 @@ class PersistentIndex:
 
     def _acquire_writer(self):
         now = time.time()
-        changed = self.db.execute(update(IndexWriterModel).where(IndexWriterModel.id == self.writer_id,
-            IndexWriterModel.expires_at <= now).values(token=self.writer_token, expires_at=now + 300)).rowcount
+        try:
+            if self.db.get_bind().dialect.name == "postgresql":
+                self.db.execute(text("SELECT set_config('lock_timeout', :budget, true)"),
+                    {"budget": str(max(1, int(self.limits.query_seconds * 1000))) + "ms"})
+            changed = self.db.execute(update(IndexWriterModel).where(IndexWriterModel.id == self.writer_id,
+                IndexWriterModel.expires_at <= now).values(token=self.writer_token, expires_at=now + 300)).rowcount
+        except DBAPIError as exc:
+            self.db.rollback()
+            code = getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)
+            if code in {"55P03", "57014"}:
+                raise InventoryBound("index_writer_busy") from exc
+            raise
         if not changed:
             try:
                 with self.db.begin_nested():
@@ -223,7 +234,19 @@ class PersistentIndex:
             size = self.db.scalar(text("PRAGMA page_size"))
             used = (pages - reusable) * size
         elif dialect == "postgresql":
-            used = self.db.scalar(text("SELECT pg_database_size(current_database())"))
+            # Bound RepoLens catalog amplification, not unrelated schemas in a
+            # shared production database.
+            used = self.db.scalar(text("""
+                SELECT COALESCE(SUM(pg_total_relation_size(relation)), 0)
+                FROM unnest(ARRAY[
+                    to_regclass('index_writers'), to_regclass('index_snapshots'),
+                    to_regclass('index_trees'), to_regclass('index_entries'),
+                    to_regclass('index_projections'), to_regclass('index_facts'),
+                    to_regclass('index_postings'), to_regclass('index_signals'),
+                    to_regclass('index_pins')
+                ]) AS relations(relation)
+                WHERE relation IS NOT NULL
+            """))
         else:
             raise InventoryBound("database_size_authority_unavailable")
         self.stats["database_used_bytes"] = used

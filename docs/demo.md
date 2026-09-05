@@ -59,7 +59,7 @@ source .venv/bin/activate
 # Install dependencies in editable mode
 pip install -e ".[dev]"
 
-# Apply database migrations (001 through 010)
+# Apply database migrations through current head (16c9a2e71f40)
 alembic upgrade head
 
 # Start the FastAPI server

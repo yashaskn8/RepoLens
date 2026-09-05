@@ -28,6 +28,7 @@ from app.models.finding import FindingModel
 from app.models.patch import PatchModel
 from app.models.scan import ScanModel
 from app.models.user import UserModel
+from tests.request_helpers import cookie_headers
 
 
 def _create_and_login_user(client: TestClient, email: str, password: str = "SecurePass12345!"):
@@ -88,8 +89,7 @@ def test_regular_user_cannot_deliver_patch(client: TestClient, db_session: Sessi
     resp = client.post(
         f"/api/v1/patches/{patch_obj.id}/deliver",
         json={"target_branch": "patch-branch"},
-        cookies=user["cookies"],
-        headers=user["headers"],
+        headers=cookie_headers(user["cookies"], user["headers"]),
     )
     assert resp.status_code == 403
     assert "INSUFFICIENT_PRIVILEGES" in str(resp.json()["detail"])
@@ -116,8 +116,7 @@ def test_regular_user_cannot_publish_pr_review(client: TestClient, db_session: S
     # User attempts preview -> 403
     resp = client.post(
         f"/api/v1/change-analyses/{ca.id}/review-publication/preview",
-        cookies=user["cookies"],
-        headers=user["headers"],
+        headers=cookie_headers(user["cookies"], user["headers"]),
     )
     assert resp.status_code == 403
     assert "INSUFFICIENT_PRIVILEGES" in str(resp.json()["detail"])
@@ -148,8 +147,7 @@ def test_operator_cross_tenant_delivery_isolation(client: TestClient, db_session
     resp = client.post(
         f"/api/v1/patches/{patch_obj.id}/deliver",
         json={"target_branch": "patch-branch"},
-        cookies=operator["cookies"],
-        headers=operator["headers"],
+        headers=cookie_headers(operator["cookies"], operator["headers"]),
     )
     assert resp.status_code == 404
 

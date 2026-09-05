@@ -138,8 +138,92 @@ def test_typescript_reexport_creates_source_attested_import_edge(indexed_reposit
     index.build_manifest()
     edges = PersistentRepositoryGraph(index).get_edges(EdgeKind.IMPORTS)
     edge = next(edge for edge in edges if edge.source == "file:src/index.ts" and edge.target == "file:src/run.ts")
-    assert edge.metadata["dependency_certificate"]["resolution"] == "EXPLICIT_IMPORT"
+    assert edge.metadata["dependency_certificate"]["resolution"] == "PROVEN"
     assert edge.metadata["dependency_certificate"]["source_behavior_digest"]
+
+
+def test_typescript_config_extends_and_workspace_exports_resolve_only_proven_targets(indexed_repository):
+    from app.graph.persistent import PersistentRepositoryGraph
+    from app.graph.schemas import EdgeKind
+    repo, git, _, factory = indexed_repository
+    (repo / "config").mkdir()
+    (repo / "config" / "base.json").write_text(
+        '{"compilerOptions":{"baseUrl":"..","paths":{"@local/*":["src/lib/*"]}}}')
+    (repo / "tsconfig.json").write_text('{"extends":"./config/base.json"}')
+    (repo / "src" / "lib").mkdir(parents=True)
+    (repo / "src" / "lib" / "run.ts").write_text("export function run() { return 1; }\n")
+    (repo / "packages" / "core" / "src").mkdir(parents=True)
+    (repo / "packages" / "core" / "src" / "feature.ts").write_text("export const feature = true;\n")
+    (repo / "packages" / "core" / "package.json").write_text(
+        '{"name":"@repo/core","exports":{"./feature":"./src/feature.ts"}}')
+    (repo / "package.json").write_text('{"private":true,"workspaces":["packages/*"]}')
+    (repo / "src" / "main.ts").write_text(
+        "import { run } from '@local/run';\nimport { feature } from '@repo/core/feature';\nrun();\n")
+    git("add", ".")
+    git("commit", "-qm", "static module authorities")
+    index = factory()
+    index.build_manifest()
+    edges = PersistentRepositoryGraph(index)._cross_edges("src/main.ts")
+    imports = {edge.target: edge for edge in edges if edge.kind == EdgeKind.IMPORTS}
+    assert set(imports) == {"file:src/lib/run.ts", "file:packages/core/src/feature.ts"}
+    assert imports["file:src/lib/run.ts"].metadata["dependency_certificate"]["resolution_method"] == "TSCONFIG_PATHS"
+    assert imports["file:packages/core/src/feature.ts"].metadata["dependency_certificate"]["resolution_method"] == "PACKAGE_EXPORTS"
+    assert all(edge.metadata["dependency_certificate"]["resolution"] == "PROVEN" for edge in imports.values())
+    call = next(edge for edge in edges if edge.kind == EdgeKind.CALLS and edge.target.startswith("symbol:src/lib/run.ts:"))
+    assert call.metadata["dependency_certificate"]["resolution_method"] == "TSCONFIG_PATHS"
+
+
+def test_typescript_ambiguous_conditional_export_stays_unresolved(indexed_repository):
+    from app.graph.persistent import PersistentRepositoryGraph
+    repo, git, _, factory = indexed_repository
+    (repo / "packages" / "core").mkdir(parents=True)
+    (repo / "packages" / "core" / "esm.ts").write_text("export const value = 1;\n")
+    (repo / "packages" / "core" / "cjs.ts").write_text("export const value = 2;\n")
+    (repo / "packages" / "core" / "package.json").write_text(
+        '{"name":"core","exports":{".":{"import":"./esm.ts","require":"./cjs.ts"}}}')
+    (repo / "package.json").write_text('{"workspaces":["packages/*"]}')
+    (repo / "consumer.ts").write_text("import { value } from 'core';\n")
+    git("add", ".")
+    git("commit", "-qm", "ambiguous exports")
+    index = factory()
+    index.build_manifest()
+    graph = PersistentRepositoryGraph(index)
+    assert not graph._cross_edges("consumer.ts")
+    assert "UNRESOLVED:PACKAGE_EXPORTS:DYNAMIC_OR_CONDITIONAL_MAPPING" in graph.unresolved_frontier["consumer.ts"]
+
+
+def test_typescript_base_url_package_imports_and_pnpm_workspace_are_source_attested(indexed_repository):
+    from app.graph.persistent import PersistentRepositoryGraph
+    from app.graph.schemas import EdgeKind
+    repo, git, _, factory = indexed_repository
+    (repo / "tsconfig.json").write_text('{"compilerOptions":{"baseUrl":"src"}}')
+    (repo / "src" / "lib").mkdir(parents=True)
+    (repo / "src" / "lib" / "tool.ts").write_text("export const tool = 1;\n")
+    (repo / "src" / "consumer.ts").write_text("import { tool } from 'lib/tool';\n")
+    (repo / "modules" / "pkg" / "src").mkdir(parents=True)
+    (repo / "modules" / "pkg" / "src" / "internal.ts").write_text("export const internal = 1;\n")
+    (repo / "modules" / "pkg" / "src" / "index.ts").write_text("import { internal } from '#internal';\n")
+    (repo / "modules" / "pkg" / "package.json").write_text(
+        '{"name":"pkg","main":"src/index.ts","imports":{"#internal":"./src/internal.ts"}}')
+    (repo / "pnpm-workspace.yaml").write_text("packages:\n  - 'modules/*'\n")
+    (repo / "workspace-consumer.ts").write_text("import pkg from 'pkg';\n")
+    git("add", ".")
+    git("commit", "-qm", "base url and pnpm mappings")
+    index = factory()
+    index.build_manifest()
+    graph = PersistentRepositoryGraph(index)
+    expected = {
+        "src/consumer.ts": ("file:src/lib/tool.ts", "TSCONFIG_BASE_URL"),
+        "modules/pkg/src/index.ts": ("file:modules/pkg/src/internal.ts", "PACKAGE_IMPORTS"),
+        "workspace-consumer.ts": ("file:modules/pkg/src/index.ts", "WORKSPACE_PACKAGE"),
+    }
+    for source, (target, method) in expected.items():
+        resolved = graph._cross_edges(source)
+        edge = next((edge for edge in resolved
+                    if edge.kind == EdgeKind.IMPORTS and edge.target == target), None)
+        assert edge is not None, (source, target, resolved, graph.unresolved_frontier)
+        assert edge.metadata["dependency_certificate"]["resolution"] == "PROVEN"
+        assert edge.metadata["dependency_certificate"]["resolution_method"] == method
 
 
 def test_orphan_pins_release_but_retained_findings_survive(indexed_repository):

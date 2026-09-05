@@ -93,6 +93,14 @@ def test_pgvector_index_rejects_non_postgres_urls():
         PgVectorIndex(db_url="mysql://user:pass@localhost/db", dimensions=128)
 
 
+def test_pgvector_index_rejects_unsafe_identifiers_before_sql():
+    with pytest.raises(ValueError, match="safe PostgreSQL identifier"):
+        PgVectorIndex(db_url="postgresql://user:pass@localhost/db",
+                      table_name="vectors; DROP TABLE users", dimensions=3)
+    with pytest.raises(ValueError, match="namespace"):
+        PgVectorIndex(db_url="postgresql://user:pass@localhost/db", namespace="", dimensions=3)
+
+
 def test_pgvector_index_handles_missing_extension_error():
     """Verify that failure to create pgvector extension raises a clear RuntimeError."""
     mock_engine = MagicMock(spec=Engine)

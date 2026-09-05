@@ -15,6 +15,7 @@ Verifies:
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
+from tests.request_helpers import cookie_headers
 
 
 @pytest.fixture
@@ -42,7 +43,7 @@ def test_safe_methods_bypass_csrf(client: TestClient, authenticated_user):
     client.cookies.clear()
     resp = client.get(
         "/api/v1/auth/me",
-        cookies={"repolens_session": authenticated_user["session_cookie"]},
+        headers=cookie_headers({"repolens_session": authenticated_user["session_cookie"]}),
     )
     assert resp.status_code == 200
 
@@ -61,8 +62,7 @@ def test_valid_csrf_token_succeeds(client: TestClient, authenticated_user):
     resp = client.post(
         "/api/v1/scans",
         json={"repository_url": "https://github.com/org/repo"},
-        cookies=cookies,
-        headers=headers,
+        headers=cookie_headers(cookies, headers),
     )
     assert resp.status_code == 202
     assert "github.com/org/repo" in resp.json()["repository_url"]
@@ -79,7 +79,7 @@ def test_missing_csrf_header_rejected(client: TestClient, authenticated_user):
     resp = client.post(
         "/api/v1/scans",
         json={"repository_url": "https://github.com/org/repo"},
-        cookies=cookies,
+        headers=cookie_headers(cookies),
     )
     assert resp.status_code == 403
     assert "CSRF" in str(resp.json()["detail"])
@@ -98,8 +98,7 @@ def test_missing_csrf_cookie_rejected(client: TestClient, authenticated_user):
     resp = client.post(
         "/api/v1/scans",
         json={"repository_url": "https://github.com/org/repo"},
-        cookies=cookies,
-        headers=headers,
+        headers=cookie_headers(cookies, headers),
     )
     assert resp.status_code == 403
     assert "CSRF" in str(resp.json()["detail"])
@@ -119,8 +118,7 @@ def test_mismatched_csrf_cookie_and_header_rejected(client: TestClient, authenti
     resp = client.post(
         "/api/v1/scans",
         json={"repository_url": "https://github.com/org/repo"},
-        cookies=cookies,
-        headers=headers,
+        headers=cookie_headers(cookies, headers),
     )
     assert resp.status_code == 403
     assert "CSRF" in str(resp.json()["detail"])
@@ -153,8 +151,7 @@ def test_csrf_token_bound_to_different_session_rejected(client: TestClient, db_s
     resp = client.post(
         "/api/v1/scans",
         json={"repository_url": "https://github.com/org/repo"},
-        cookies=cookies,
-        headers=headers,
+        headers=cookie_headers(cookies, headers),
     )
     assert resp.status_code == 403
     assert "CSRF" in str(resp.json()["detail"])

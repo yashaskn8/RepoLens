@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from app.models.user import UsageCounterModel
 from app.schemas.enums import UsageOperation
 from app.services.quota_service import check_and_increment_quota, get_usage_count
+from tests.request_helpers import cookie_headers
 
 
 def test_quota_service_direct_increments_and_limits(db_session: Session):
@@ -87,8 +88,7 @@ def test_api_quota_enforcement_returns_429(client: TestClient, db_session: Sessi
     resp = client.post(
         "/api/v1/scans",
         json={"repository_url": "https://github.com/org/repo"},
-        cookies=cookies,
-        headers=headers,
+        headers=cookie_headers(cookies, headers),
     )
     assert resp.status_code == 429
     assert "DAILY_QUOTA_EXCEEDED" in resp.json()["detail"]

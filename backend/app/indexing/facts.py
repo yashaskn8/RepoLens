@@ -110,6 +110,9 @@ def persist_facts(index, projection, file, source: bytes) -> dict:
         payload = chunk.model_dump(mode="json", exclude={"content", "commit_sha", "chunk_id"})
         if chunk.symbol in import_targets:
             payload["import_targets"] = import_targets[chunk.symbol]
+            import_symbol = next((item for item in imports if f"import:{item.start_line}" == chunk.symbol), None)
+            if import_symbol and isinstance(import_symbol.details.get("source"), str):
+                payload["import_specifier"] = import_symbol.details["source"]
         add(IndexFactModel(**common, fact_id=key, kind="CHUNK", lookup=redact_secrets(chunk.symbol.lower()),
             target="", payload=redact_projection(payload)))
         for token, frequency in lexical_tokens(redact_secrets(chunk.symbol + " " + chunk.content)).items():
@@ -123,6 +126,11 @@ def persist_facts(index, projection, file, source: bytes) -> dict:
     for target in import_paths(file):
         add(IndexFactModel(**common, fact_id=_digest("import", target), kind="IMPORT_REF",
             lookup=file.path, target=redact_secrets(target), payload=redact_projection({"source_path": file.path, "target_path": target})))
+    from app.graph.module_resolution import import_specifiers
+    for specifier in import_specifiers(file):
+        add(IndexFactModel(**common, fact_id=_digest("import-spec", specifier), kind="IMPORT_SPEC",
+            lookup=file.path, target=redact_secrets(specifier),
+            payload=redact_projection({"source_path": file.path, "specifier": specifier})))
     nodes = graph.get_nodes()
     edges = graph.get_edges()
     # Identical endpoint strings in different services are distinct authorities.
@@ -294,8 +302,10 @@ def select_architecture_candidates(index, graph, *, limit: int = 3):
             continue  # Every edge must fit the independently attributable slice.
         references, certificates = [], []
         for source_path, target_path in cycle:
+            certificate = active[source_path][target_path]["evidence"]["dependency_certificate"]
             anchors = [fact for fact in index.file_facts(source_path, "CHUNK", limit=MAX_FILE_CHUNKS)
-                if target_path in fact.payload.get("import_targets", [])]
+                if (target_path in fact.payload.get("import_targets", []) or
+                    fact.payload.get("import_specifier") == certificate.get("specifier"))]
             if not anchors:
                 break
             anchor = anchors[0]
@@ -303,7 +313,7 @@ def select_architecture_candidates(index, graph, *, limit: int = 3):
             if index.load_chunk(identifier) is None:
                 break
             references.append("chunk:" + identifier)
-            certificates.append(active[source_path][target_path]["evidence"]["dependency_certificate"])
+            certificates.append(certificate)
         else:
             issue = _digest("DEPENDENCY_CYCLE", sorted(cycle))
             selected.append(AnalysisCandidate(candidate_id="candidate:" + issue,

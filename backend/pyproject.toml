@@ -46,6 +46,9 @@ local-ml = [
 pdf-qa = [
     "pdfplumber>=0.11.0,<0.12.0",
 ]
+postgres = [
+    "psycopg[binary]>=3.2.0,<4.0.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

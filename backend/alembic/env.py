@@ -24,6 +24,10 @@ if config.config_file_name is not None:
 # Set database URL dynamically from config / environment / Pydantic settings
 settings = get_settings()
 db_url = config.get_main_option("sqlalchemy.url") or os.environ.get("DATABASE_URL") or settings.DATABASE_URL
+if db_url.startswith("postgresql://"):
+    db_url = "postgresql+psycopg://" + db_url.removeprefix("postgresql://")
+elif db_url.startswith("postgres://"):
+    db_url = "postgresql+psycopg://" + db_url.removeprefix("postgres://")
 config.set_main_option("sqlalchemy.url", db_url)
 
 target_metadata = Base.metadata
