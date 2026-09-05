@@ -14,8 +14,8 @@ import shutil
 import time
 from uuid import uuid4
 
-from sqlalchemy import select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import select, update, text
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
 from app.analysis.authority import source_fingerprint
@@ -58,6 +58,12 @@ class IndexLimits:
     manifest_files: int = 512
     manifest_bytes: int = 4_194_304
     min_free_disk_bytes: int = 67_108_864
+    max_database_bytes: int = 2_147_483_648
+    retention_seconds: int = 604_800
+    gc_rows: int = 256
+    gc_seconds: float = 2
+    query_vm_steps: int = 200_000
+    query_seconds: float = 0.25
 
     def __post_init__(self):
         if any(value <= 0 for value in vars(self).values()):
@@ -113,7 +119,7 @@ class PersistentIndex:
                       "inventory_complete": False, "manifest_truncated": False}
         self.query_coverage = {}
         self.pending_entries = 0
-        self.writer_id = identity(self.tenant_id, self.repository_id, self.producer, "catalog-writer")
+        self.writer_id = identity(self.tenant_id, self.repository_id, "catalog-writer")
         self.writer_token = uuid4().hex
         self.writer_owned = False
 
@@ -140,9 +146,7 @@ class PersistentIndex:
             self.db.commit()
             self.writer_owned = False
 
-    def _commit(self, *, force: bool = False) -> None:
-        if not force and self.pending_entries < self.limits.page_size:
-            return
+    def _fence_writer(self) -> None:
         if self.writer_owned:
             now = time.time()
             # Lock/fence the catalog writer before flushing projection rows.
@@ -153,6 +157,11 @@ class PersistentIndex:
             if not owned:
                 self.db.rollback()
                 raise InventoryBound("index_writer_lease_lost")
+
+    def _commit(self, *, force: bool = False) -> None:
+        if not force and self.pending_entries < self.limits.page_size:
+            return
+        self._fence_writer()
         from app.execution.context import current_claim
         claim = current_claim()
         if claim is not None:
@@ -197,6 +206,64 @@ class PersistentIndex:
         if shutil.disk_usage(storage_path).free < self.limits.min_free_disk_bytes:
             raise InventoryBound("index_disk_backpressure")
 
+    def _check_storage_capacity(self, *, reserve_bytes: int | None = None):
+        dialect = self.db.get_bind().dialect.name
+        if dialect == "sqlite":
+            pages = self.db.scalar(text("PRAGMA page_count"))
+            reusable = self.db.scalar(text("PRAGMA freelist_count"))
+            size = self.db.scalar(text("PRAGMA page_size"))
+            used = (pages - reusable) * size
+        elif dialect == "postgresql":
+            used = self.db.scalar(text("SELECT pg_database_size(current_database())"))
+        else:
+            raise InventoryBound("database_size_authority_unavailable")
+        self.stats["database_used_bytes"] = used
+        self.stats["database_byte_limit"] = self.limits.max_database_bytes
+        # Reserve a bounded file projection plus its facts before extraction.
+        # SQLite free pages are reusable; no blocking VACUUM is necessary.
+        reservation = self.limits.max_projection_bytes * 4 if reserve_bytes is None else reserve_bytes
+        if used + reservation > self.limits.max_database_bytes:
+            raise InventoryBound("index_database_byte_budget")
+
+    def query_rows(self, statement, *, scalars: bool = False):
+        """Bound database work as well as returned rows; interruptions are unknown."""
+        dialect = self.db.get_bind().dialect.name
+        connection = None
+        started = time.monotonic()
+        steps = 0
+
+        def stop():
+            nonlocal steps
+            steps += 1000
+            return int(steps >= self.limits.query_vm_steps or time.monotonic() - started >= self.limits.query_seconds)
+
+        try:
+            if dialect == "sqlite":
+                connection = self.db.connection().connection.driver_connection
+                connection.set_progress_handler(stop, 1000)
+                result = self.db.execute(statement)
+                return result.scalars().all() if scalars else result.all()
+            if dialect == "postgresql":
+                with self.db.begin_nested():
+                    prior = self.db.scalar(text("SHOW statement_timeout"))
+                    self.db.execute(text("SELECT set_config('statement_timeout', :budget, true)"),
+                        {"budget": str(max(1, int(self.limits.query_seconds * 1000))) + "ms"})
+                    result = self.db.execute(statement)
+                    rows = result.scalars().all() if scalars else result.all()
+                    self.db.execute(text("SELECT set_config('statement_timeout', :prior, true)"), {"prior": prior})
+                    return rows
+            raise InventoryBound("query_budget_authority_unavailable")
+        except DBAPIError as exc:
+            code = getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)
+            if str(exc.orig).lower() != "interrupted" and code != "57014":
+                raise
+            self.stats["query_budget_exhaustions"] = self.stats.get("query_budget_exhaustions", 0) + 1
+            self.query_coverage["query_budget_exhausted"] = True
+            return []
+        finally:
+            if connection is not None:
+                connection.set_progress_handler(None, 0)
+
     def _entries(self, tree_id: str) -> Iterator[IndexEntryModel]:
         cursor = ""
         while True:
@@ -221,7 +288,9 @@ class PersistentIndex:
         prior = self.db.get(IndexProjectionModel, projection_id)
         if prior is not None:
             self.stats["reused_files"] += 1
-            return prior.id, disposition.classification.value, "indexed", prior.payload["file"]["size_bytes"]
+            reason = "indexed_partial" if prior.payload.get("facts_coverage", {}).get("status") == "PARTIAL" else "indexed"
+            return prior.id, disposition.classification.value, reason, prior.payload["file"]["size_bytes"]
+        self._check_storage_capacity()
         remaining = self.limits.max_source_bytes - self.stats["source_bytes_read"]
         if remaining <= 0:
             raise InventoryBound("index_source_byte_budget")
@@ -251,13 +320,19 @@ class PersistentIndex:
         projection = IndexProjectionModel(id=projection_id, tenant_id=self.tenant_id,
                     repository_id=self.repository_id, content_hash=digest,
                     producer_digest=self.producer, payload=payload, payload_bytes=payload_size)
-        self.db.add(projection)
-        self.db.flush()
-        from app.indexing.facts import persist_facts
-        facts_coverage = persist_facts(self, projection, file, source)
-        projection.payload = {**payload, "facts_coverage": facts_coverage}
+        try:
+            with self.db.begin_nested():
+                self.db.add(projection)
+                self.db.flush()
+                from app.indexing.facts import persist_facts
+                facts_coverage = persist_facts(self, projection, file, source)
+                projection.payload = {**payload, "facts_coverage": facts_coverage}
+        except InventoryBound as exc:
+            if str(exc) != "projection_fact_byte_limit":
+                raise
+            return None, disposition.classification.value, "projection_fact_byte_limit", len(source)
         self.stats["parsed_files"] += 1
-        return projection_id, disposition.classification.value, "indexed", len(source)
+        return projection_id, disposition.classification.value, "indexed_partial" if facts_coverage["status"] == "PARTIAL" else "indexed", len(source)
 
     def _walk(self, object_id: str, path: str = "", depth: int = 0) -> Iterator[IndexEntryModel]:
         if depth > self.limits.max_depth:
@@ -279,6 +354,11 @@ class PersistentIndex:
             if len(item_path.encode("utf-8")) > self.limits.max_path_bytes:
                 raise InventoryBound("inventory_path_limit")
             entry = self.db.get(IndexEntryModel, (tree.id, item.name))
+            if entry is None:
+                # Excluded files and directory-only trees also consume catalog
+                # space. Bound their pending page before creating metadata.
+                self._check_storage_capacity(reserve_bytes=max(16_384,
+                    self.limits.max_path_bytes * self.limits.page_size * 4))
             if item.kind == "tree":
                 child = self._tree(item.object_id, item_path)
                 if entry is None:
@@ -321,12 +401,12 @@ class PersistentIndex:
     def _summarize_tree(self, tree: IndexTreeModel) -> dict:
         if not tree.complete:
             self.entry_limits[tree.id] = tree.entry_count
-        counts = {"discovered_files": 0, "indexed_files": 0, "total_bytes": 0, "excluded_by_reason": {}, "excluded_subtrees": {}}
+        counts = {"discovered_files": 0, "indexed_files": 0, "total_bytes": 0, "partial_files": 0, "excluded_by_reason": {}, "excluded_subtrees": {}}
         for entry in self._entries(tree.id):
             if entry.child_tree_id:
                 child = self.db.get(IndexTreeModel, entry.child_tree_id)
                 child_counts = child.coverage if child.complete else self._summarize_tree(child)
-                for field in ("discovered_files", "indexed_files", "total_bytes"):
+                for field in ("discovered_files", "indexed_files", "total_bytes", "partial_files"):
                     counts[field] += child_counts.get(field, 0)
                 for reason, count in child_counts.get("excluded_by_reason", {}).items():
                     counts["excluded_by_reason"][reason] = counts["excluded_by_reason"].get(reason, 0) + count
@@ -337,6 +417,7 @@ class PersistentIndex:
                 counts["total_bytes"] += entry.size_bytes
                 if entry.projection_id:
                     counts["indexed_files"] += 1
+                    counts["partial_files"] += entry.reason == "indexed_partial"
                 else:
                     counts["excluded_by_reason"][entry.reason] = counts["excluded_by_reason"].get(entry.reason, 0) + 1
         tree.coverage = counts
@@ -355,6 +436,8 @@ class PersistentIndex:
     def build_manifest(self, *, branch: str | None = None) -> RepositoryManifest:
         self._acquire_writer()
         try:
+            from app.indexing.retention import collect_catalog
+            self.stats["retention"] = collect_catalog(self)
             return self._build_manifest(branch=branch)
         finally:
             self._release_writer()
@@ -373,6 +456,8 @@ class PersistentIndex:
                 policy_digest=self.producer, root_tree_id=root.id, status="BUILDING", coverage={})
             self.db.add(snapshot)
             self._commit(force=True)
+        else:
+            snapshot.accessed_at = time.time()
         files: list[FileEntry] = []
         active_bytes = 0
         languages: dict[str, int] = {}
@@ -400,6 +485,8 @@ class PersistentIndex:
                 if len(files) >= self.limits.manifest_files:
                     break
         self.stats["manifest_truncated"] = self.stats["indexed_files"] > len(files)
+        partial_reasons = {"projection_fact_byte_limit", "projection_byte_limit", "exceeds_max_size", "parser_depth_budget"}
+        self.stats["extraction_partial"] = bool(self.stats.get("partial_files") or partial_reasons.intersection(self.stats["excluded_by_reason"]))
         self.stats["stop_reason"] = reason
         self.snapshot_id = identity(self.base_snapshot_id, json.dumps(self.entry_limits, sort_keys=True))
         snapshot = self.db.get(IndexSnapshotModel, self.snapshot_id)
@@ -409,6 +496,8 @@ class PersistentIndex:
                 policy_digest=self.producer, root_tree_id=root.id, status="SEALED",
                 coverage={**self.stats, "entry_limits": dict(self.entry_limits)})
             self.db.add(snapshot)
+        else:
+            snapshot.accessed_at = time.time()
         self._commit(force=True)
         self.building = False
         from app.ingestion.detector import detect_frameworks
@@ -417,31 +506,43 @@ class PersistentIndex:
             total_files=self.stats["discovered_files"], total_size_bytes=self.stats["total_bytes"],
             languages=languages, frameworks=detect_frameworks(self.repo_dir),
             analysis_scope=AnalysisScope(
-                truncated=bool(reason or self.stats["manifest_truncated"]),
-                reason=reason or ("bounded_active_manifest" if self.stats["manifest_truncated"] else None),
+                truncated=bool(reason or self.stats["manifest_truncated"] or self.stats["extraction_partial"]),
+                reason=reason or ("bounded_active_manifest" if self.stats["manifest_truncated"] else "partial_file_extraction" if self.stats["extraction_partial"] else None),
                 files_processed=len(files), source_bytes_processed=sum(file.size_bytes for file in files),
                 total_observed_files=self.stats["discovered_files"],
                 total_observed_bytes=self.stats["total_bytes"],
             ))
 
     def pin(self, referrer_id: str) -> None:
-        self.snapshot()
-        key = (self.tenant_id, referrer_id, self.snapshot_id)
-        if self.db.get(IndexPinModel, key) is None:
-            self.db.add(IndexPinModel(tenant_id=self.tenant_id, referrer_id=referrer_id, snapshot_id=self.snapshot_id))
-            self.db.commit()
+        self._acquire_writer()
+        try:
+            self._fence_writer()
+            self.snapshot().accessed_at = time.time()
+            key = (self.tenant_id, referrer_id, self.snapshot_id)
+            if self.db.get(IndexPinModel, key) is None:
+                self.db.add(IndexPinModel(tenant_id=self.tenant_id, referrer_id=referrer_id, snapshot_id=self.snapshot_id))
+            self._commit(force=True)
+        finally:
+            self._release_writer()
 
     def open_snapshot(self, snapshot_id: str) -> None:
         """Restore only an immutable generation belonging to this authority."""
-        snapshot = self.db.get(IndexSnapshotModel, snapshot_id)
-        if (snapshot is None or snapshot.status != "SEALED" or
-                snapshot.tenant_id != self.tenant_id or snapshot.repository_id != self.repository_id or
-                snapshot.commit_sha != self.commit_sha or snapshot.policy_digest != self.producer):
-            raise InventoryBound("snapshot_not_in_scope")
-        self.snapshot_id = snapshot.id
-        self.entry_limits = dict(snapshot.coverage.get("entry_limits", {}))
-        self.stats = dict(snapshot.coverage)
-        self.building = False
+        self._acquire_writer()
+        try:
+            self._fence_writer()
+            snapshot = self.db.get(IndexSnapshotModel, snapshot_id, populate_existing=True)
+            if (snapshot is None or snapshot.status != "SEALED" or
+                    snapshot.tenant_id != self.tenant_id or snapshot.repository_id != self.repository_id or
+                    snapshot.commit_sha != self.commit_sha or snapshot.policy_digest != self.producer):
+                raise InventoryBound("snapshot_not_in_scope")
+            snapshot.accessed_at = time.time()
+            self.snapshot_id = snapshot.id
+            self.entry_limits = dict(snapshot.coverage.get("entry_limits", {}))
+            self.stats = dict(snapshot.coverage)
+            self.building = False
+            self._commit(force=True)
+        finally:
+            self._release_writer()
 
     def file_projection(self, path: str):
         entry = self.file_entry(path)

@@ -201,6 +201,16 @@ async def build_specialist_context(
     conflicted_evidence_ids: set[str] = set()
 
     for candidate in selected:
+        declared_refs = list(candidate.evidence_refs)
+        for role in ("supporting", "counter", "graph", "contract", "scanner", "flow",
+                     "caller", "callee", "guard", "test", "config"):
+            values = candidate.metadata.get(f"{role}_evidence_refs", [])
+            if isinstance(values, list):
+                declared_refs.extend(value for value in values[:20] if isinstance(value, str))
+        declared_refs = list(dict.fromkeys(declared_refs))[:16]
+        # Non-chunk graph/scanner contracts retain canonical context assembly.
+        # Chunk-only candidates need no repository-wide search at all.
+        anchor_only = all(ref.startswith("chunk:") for ref in declared_refs)
         bundle = await context_engine.build_context_bundle(
             scan_id=scan_id,
             query=(
@@ -209,8 +219,9 @@ async def build_specialist_context(
             ),
             analysis_intent=analysis_intent,
             context_budget=per_candidate_budget,
-            max_chunks=6,
-            required_chunk_ids=candidate.evidence_refs,
+            max_chunks=max(6, len(declared_refs)),
+            required_chunk_ids=declared_refs,
+            anchor_only=anchor_only,
         )
         packed = pack_repository_context(bundle, token_budget=per_candidate_budget)
         evidence_slice = build_evidence_slice(

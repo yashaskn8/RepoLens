@@ -23,6 +23,12 @@ class PersistentRepositoryGraph(RepositoryGraph):
         self.edge_limit = edge_limit
         self.query_truncated = False
         self._cross_cache = OrderedDict()
+        self.unresolved_frontier = {}
+
+    def _unresolved(self, path, reason):
+        self.query_truncated = True
+        if len(self.unresolved_frontier) < 64:
+            self.unresolved_frontier[path] = reason
 
     def _facts(self, kind, *, lookup=None, target=None, limit=None):
         maximum = limit or self.edge_limit
@@ -35,17 +41,17 @@ class PersistentRepositoryGraph(RepositoryGraph):
             statement = statement.where(IndexFactModel.lookup == lookup)
         if target is not None:
             statement = statement.where(IndexFactModel.target == target)
-        paths = self.index.db.execute(statement.with_only_columns(IndexFactModel.path).distinct()
-            .order_by(IndexFactModel.path).limit(65)).scalars().all()
-        self.query_truncated |= len(paths) > 64
+        paths = self.index.query_rows(statement.with_only_columns(IndexFactModel.path).distinct()
+            .order_by(IndexFactModel.path).limit(65), scalars=True)
+        self.query_truncated |= len(paths) > 64 or bool(self.index.query_coverage.get("query_budget_exhausted"))
         result = []
         for path in paths[:64]:
             projection = self.index.file_projection(path)
             if projection is None:
                 continue
             remaining = maximum - len(result)
-            rows = self.index.db.execute(statement.where(IndexFactModel.projection_id == projection.id)
-                .order_by(IndexFactModel.fact_id).limit(remaining + 1)).scalars().all()
+            rows = self.index.query_rows(statement.where(IndexFactModel.projection_id == projection.id)
+                .order_by(IndexFactModel.fact_id).limit(remaining + 1), scalars=True)
             self.query_truncated |= len(rows) > remaining
             result.extend(row.payload for row in rows[:remaining])
             if len(result) >= maximum:
@@ -74,9 +80,10 @@ class PersistentRepositoryGraph(RepositoryGraph):
         Both sides' digests form the certificate. Changing a dependency therefore
         invalidates its relationship even when the caller projection is reused.
         """
-        if path in self._cross_cache:
-            self._cross_cache.move_to_end(path)
-            return self._cross_cache[path]
+        cache_key = (self.index.snapshot_id, path)
+        if cache_key in self._cross_cache:
+            self._cross_cache.move_to_end(cache_key)
+            return self._cross_cache[cache_key]
         from app.graph.builder import build_repository_graph
         from app.graph.imports import import_paths
         from app.ingestion.schemas import FileEntry, RepositoryManifest
@@ -87,11 +94,14 @@ class PersistentRepositoryGraph(RepositoryGraph):
         projections = {path: source}
         payload_bytes = source.payload_bytes
         targets = {}
-        for target in import_paths(files[0]):
+        references = import_paths(files[0])
+        for target in references:
             projection = self.index.file_projection(target)
             if projection is None or target == path:
                 continue
             targets[target] = projection
+        if references and not targets:
+            self._unresolved(path, "IMPORT_TARGET_NOT_IN_SNAPSHOT")
         # Never choose one definition from ambiguous same-name module files.
         from collections import Counter
         def module_key(target):
@@ -100,10 +110,10 @@ class PersistentRepositoryGraph(RepositoryGraph):
         counts = Counter(module_key(target) for target in targets)
         for target, projection in targets.items():
             if counts[module_key(target)] > 1:
-                self.query_truncated = True
+                self._unresolved(path, "AMBIGUOUS_IMPORT_TARGET")
                 continue
             if len(files) >= 16 or payload_bytes + projection.payload_bytes > 4_194_304:
-                self.query_truncated = True
+                self._unresolved(path, "DEPENDENCY_RESOLUTION_BUDGET")
                 break
             files.append(FileEntry.model_validate(projection.payload["file"]))
             projections[target] = projection
@@ -111,9 +121,15 @@ class PersistentRepositoryGraph(RepositoryGraph):
         graph = build_repository_graph(RepositoryManifest(repository_url=self.index.repository_url,
             commit_hash=self.index.commit_sha, files=files))
         edges = []
+        for target, projection in projections.items():
+            if target != path:
+                edges.append(GraphEdge(source=f"file:{path}", target=f"file:{target}", kind=EdgeKind.IMPORTS,
+                    metadata={"dependency_certificate": {"snapshot_id": self.index.snapshot_id,
+                        "resolution": "EXPLICIT_IMPORT", "source_sha256": source.content_hash,
+                        "target_sha256": projection.content_hash, "producer_digest": self.index.producer}}))
         for edge in graph.get_edges():
             left, right = graph.get_node(edge.source), graph.get_node(edge.target)
-            if (edge.kind not in {EdgeKind.CALLS, EdgeKind.IMPORTS} or not left or not right or
+            if (edge.kind != EdgeKind.CALLS or not left or not right or
                     left.file_path != path or right.file_path == path):
                 continue
             if len(edges) >= self.edge_limit:
@@ -124,7 +140,7 @@ class PersistentRepositoryGraph(RepositoryGraph):
                 "target_sha256": projections[right.file_path].content_hash,
                 "producer_digest": self.index.producer}
             edges.append(edge.model_copy(update={"metadata": {**edge.metadata, "dependency_certificate": certificate}}))
-        self._cross_cache[path] = edges
+        self._cross_cache[cache_key] = edges
         if len(self._cross_cache) > 4:
             self._cross_cache.popitem(last=False)
         return edges
@@ -211,5 +227,6 @@ class PersistentRepositoryGraph(RepositoryGraph):
             complete=False, coverage={"status": "PARTIAL", "complete": False,
                 "reason": "bounded_active_graph; explicit imports only; global absence remains unknown",
                 "total_nodes": len(nodes), "total_edges": len(edges),
-                "query_truncated": self.query_truncated, "unresolved_graph_relationships": 1,
+                "query_truncated": self.query_truncated, "unresolved_graph_relationships": max(1, len(self.unresolved_frontier)),
+                "unresolved_frontier": dict(self.unresolved_frontier), "frontier_exhaustive": False,
                 "snapshot_id": self.index.snapshot_id})

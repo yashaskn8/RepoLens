@@ -29,6 +29,16 @@ def persist_facts(index, projection, file, source: bytes) -> dict:
     from app.specialist_candidates import build_bug_candidates, build_security_flow_candidates
     from app.indexing.persistent import redact_projection
     from app.security.redaction import redact_secrets
+    from app.ingestion.git_inventory import InventoryBound
+    stored_bytes = 0
+
+    def add(row):
+        nonlocal stored_bytes
+        values = {column.name: getattr(row, column.name) for column in row.__table__.columns}
+        stored_bytes += len(json.dumps(values, ensure_ascii=False, separators=(",", ":")).encode())
+        if stored_bytes > index.limits.max_projection_bytes * 3:
+            raise InventoryBound("projection_fact_byte_limit")
+        index.db.add(row)
     manifest = RepositoryManifest(repository_url=index.repository_url, commit_hash=ZERO_REVISION, files=[file])
     chunks = chunk_file(file, ZERO_REVISION, source.decode("utf-8", errors="ignore"),
         max_chunks=MAX_FILE_CHUNKS + 1, max_content_bytes=index.limits.max_projection_bytes)
@@ -41,7 +51,7 @@ def persist_facts(index, projection, file, source: bytes) -> dict:
     semantic_program = build_semantic_program(manifest, chunks)
     semantic_payload = redact_projection(semantic_program.model_dump(mode="json"))
     if len(json.dumps(semantic_payload).encode()) <= index.limits.max_projection_bytes:
-        index.db.add(IndexFactModel(projection_id=projection.id, tenant_id=index.tenant_id,
+        add(IndexFactModel(projection_id=projection.id, tenant_id=index.tenant_id,
             repository_id=index.repository_id, path=file.path, fact_id="semantic-summary",
             kind="SEMANTIC", lookup=file.path, target="", payload=semantic_payload))
     else:
@@ -49,24 +59,53 @@ def persist_facts(index, projection, file, source: bytes) -> dict:
     component = (file.path.split("/", 1)[0] if "/" in file.path else ".")[:128]
     common = dict(projection_id=projection.id, tenant_id=index.tenant_id,
                   repository_id=index.repository_id, path=file.path)
+    from app.graph.imports import import_paths
+    from app.indexing.schemas import CodeChunk, ChunkSymbolKind, content_hash
+    from app.ingestion.schemas import SymbolKind
+    lines = source.decode("utf-8", errors="ignore").split("\n")
+    import_targets = {}
+    import_spans = set()
+    imports = [symbol for symbol in file.symbols if symbol.kind == SymbolKind.IMPORT]
+    for symbol in imports[:16]:
+        if len(chunks) >= MAX_FILE_CHUNKS:
+            truncated = True
+            break
+        snippet = "\n".join(lines[symbol.start_line - 1:symbol.end_line])
+        if not snippet.strip() or len(snippet.encode("utf-8")) > 2048:
+            truncated = True
+            continue
+        name = f"import:{symbol.start_line}"
+        targets = import_paths(file.model_copy(update={"symbols": [symbol]}))
+        import_targets[name] = sorted(set(import_targets.get(name, ())) | set(targets))
+        span = (symbol.start_line, symbol.end_line)
+        if span in import_spans:
+            continue
+        import_spans.add(span)
+        identifier = _digest("import-span", file.path, symbol.start_line, symbol.end_line)
+        chunks.append(CodeChunk(chunk_id=identifier, commit_sha=ZERO_REVISION,
+            file_path=file.path, language=file.language, symbol=name, symbol_kind=ChunkSymbolKind.FILE,
+            start_line=symbol.start_line, end_line=symbol.end_line, content=snippet, content_hash=content_hash(snippet)))
+    truncated |= len(imports) > 16
     evidence_keys = {}
     postings = 0
     for chunk in chunks:
         key = _digest(chunk.symbol, chunk.symbol_kind.value, chunk.start_line, chunk.end_line)
         evidence_keys[f"chunk:{chunk.chunk_id}"] = key
-        index.db.add(IndexFactModel(**common, fact_id=key, kind="CHUNK", lookup=redact_secrets(chunk.symbol.lower()),
-            target="", payload=redact_projection(chunk.model_dump(mode="json", exclude={"content", "commit_sha", "chunk_id"}))))
+        payload = chunk.model_dump(mode="json", exclude={"content", "commit_sha", "chunk_id"})
+        if chunk.symbol in import_targets:
+            payload["import_targets"] = import_targets[chunk.symbol]
+        add(IndexFactModel(**common, fact_id=key, kind="CHUNK", lookup=redact_secrets(chunk.symbol.lower()),
+            target="", payload=redact_projection(payload)))
         for token, frequency in lexical_tokens(redact_secrets(chunk.symbol + " " + chunk.content)).items():
             if postings >= MAX_FILE_POSTINGS:
                 truncated = True
                 break
-            index.db.add(IndexPostingModel(**common, token=token, chunk_key=key,
+            add(IndexPostingModel(**common, token=token, chunk_key=key,
                 component=component, frequency=frequency))
             postings += 1
     graph = build_repository_graph(manifest, EvidenceStore(manifest))
-    from app.graph.imports import import_paths
     for target in import_paths(file):
-        index.db.add(IndexFactModel(**common, fact_id=_digest("import", target), kind="IMPORT_REF",
+        add(IndexFactModel(**common, fact_id=_digest("import", target), kind="IMPORT_REF",
             lookup=file.path, target=redact_secrets(target), payload=redact_projection({"source_path": file.path, "target_path": target})))
     nodes = graph.get_nodes()
     edges = graph.get_edges()
@@ -79,13 +118,13 @@ def persist_facts(index, projection, file, source: bytes) -> dict:
         if len(node.id.encode("utf-8")) > 1024:
             truncated = True
             continue
-        index.db.add(IndexFactModel(**common, fact_id=_digest("node", node.id), kind="NODE", lookup=redact_secrets(node.id),
+        add(IndexFactModel(**common, fact_id=_digest("node", node.id), kind="NODE", lookup=redact_secrets(node.id),
             target=node.kind.value, payload=redact_projection(node.model_dump(mode="json"))))
     for edge in edges[:MAX_FILE_FACTS]:
         if max(len(edge.source.encode("utf-8")), len(edge.target.encode("utf-8"))) > 1024:
             truncated = True
             continue
-        index.db.add(IndexFactModel(**common, fact_id=_digest("edge", edge.source, edge.target, edge.kind.value),
+        add(IndexFactModel(**common, fact_id=_digest("edge", edge.source, edge.target, edge.kind.value),
             kind="EDGE", lookup=redact_secrets(edge.source), target=redact_secrets(edge.target), payload=redact_projection(edge.model_dump(mode="json"))))
     truncated |= len(nodes) > MAX_FILE_FACTS or len(edges) > MAX_FILE_FACTS
     counts = {}
@@ -110,10 +149,10 @@ def persist_facts(index, projection, file, source: bytes) -> dict:
             }
             unique[issue] = payload
         for issue, payload in unique.items():
-            index.db.add(IndexSignalModel(**common, issue_id=issue, intent=intent, component=component,
+            add(IndexSignalModel(**common, issue_id=issue, intent=intent, component=component,
                 priority=100 if payload["strength"] == "STRONG" else 50, payload=payload))
         counts[intent] = len(unique)
-    return {"status": "PARTIAL" if truncated else "FILE_LOCAL", "postings": postings,
+    return {"status": "PARTIAL" if truncated else "FILE_LOCAL", "postings": postings, "stored_fact_bytes": stored_bytes,
             "chunks": len(chunks), "signals": counts, "cross_file_resolution": "UNKNOWN"}
 
 
@@ -136,8 +175,8 @@ def select_candidates(index, intent: str, *, limit: int = 12, examined_limit: in
     )
     # Select logical signals, not historical projection versions. Repeated
     # commits cannot consume the queue with duplicates of one old candidate.
-    rows = index.db.execute(statement.distinct().order_by(IndexSignalModel.component,
-        IndexSignalModel.path, IndexSignalModel.issue_id).limit(examined_limit + 1)).all()
+    rows = index.query_rows(statement.distinct().order_by(IndexSignalModel.component,
+        IndexSignalModel.path, IndexSignalModel.issue_id).limit(examined_limit + 1))
     queues = defaultdict(list)
     seen = set()
     for logical in rows[:examined_limit]:
@@ -167,8 +206,9 @@ def select_candidates(index, intent: str, *, limit: int = 12, examined_limit: in
                     break
         if len(selected) >= limit:
             break
-    index.query_coverage = {"signals_examined": min(len(rows), examined_limit),
-        "candidate_selection_partial": len(rows) > examined_limit or len(seen) > len(selected),
+    interrupted = bool(index.query_coverage.get("query_budget_exhausted"))
+    index.query_coverage = {"signals_examined": min(len(rows), examined_limit), "query_budget_exhausted": interrupted,
+        "candidate_selection_partial": interrupted or len(rows) > examined_limit or len(seen) > len(selected),
         "selected": len(selected)}
     return selected
 
@@ -181,11 +221,11 @@ def search_postings(index, query: str, *, limit: int = 64, examined_limit: int =
         allowance = min(64, examined_limit - examined)
         if allowance <= 0:
             break
-        rows = index.db.execute(select(IndexPostingModel.component, IndexPostingModel.path, IndexPostingModel.chunk_key).where(
+        rows = index.query_rows(select(IndexPostingModel.component, IndexPostingModel.path, IndexPostingModel.chunk_key).where(
             IndexPostingModel.tenant_id == index.tenant_id,
             IndexPostingModel.repository_id == index.repository_id,
             IndexPostingModel.token == token,
-        ).distinct().order_by(IndexPostingModel.component, IndexPostingModel.path, IndexPostingModel.chunk_key).limit(allowance)).all()
+        ).distinct().order_by(IndexPostingModel.component, IndexPostingModel.path, IndexPostingModel.chunk_key).limit(allowance))
         examined += len(rows)
         for logical in rows:
             projection = index.file_projection(logical.path)
@@ -193,5 +233,45 @@ def search_postings(index, query: str, *, limit: int = 64, examined_limit: int =
             if row is not None:
                 scores[chunk_id(index, row.projection_id, row.chunk_key)] += row.frequency / (row.frequency + 1.2)
     index.query_coverage = {"postings_examined": examined, "exhaustive": False,
+                            "query_budget_exhausted": bool(index.query_coverage.get("query_budget_exhausted")),
                             "postings_budget": examined_limit}
     return sorted(scores.items(), key=lambda item: (-item[1], item[0]))[:limit]
+
+
+def select_architecture_candidates(index, graph, *, limit: int = 3):
+    """Propose only complete, source-attested cycles inside the bounded view."""
+    import networkx as nx
+    from app.graph.schemas import EdgeKind
+    from app.specialist_candidates import AnalysisCandidate, CandidateStrength
+    active = nx.DiGraph()
+    for edge in graph.get_edges(EdgeKind.IMPORTS):
+        if edge.metadata.get("dependency_certificate", {}).get("snapshot_id") == index.snapshot_id:
+            active.add_edge(edge.source[5:], edge.target[5:], evidence=edge.metadata)
+    selected = []
+    for component in sorted((sorted(group) for group in nx.strongly_connected_components(active) if len(group) > 1)):
+        cycle = nx.find_cycle(active.subgraph(component), source=component[0])
+        if len(cycle) > 6:
+            continue  # Every edge must fit the independently attributable slice.
+        references, certificates = [], []
+        for source_path, target_path in cycle:
+            anchors = [fact for fact in index.file_facts(source_path, "CHUNK", limit=MAX_FILE_CHUNKS)
+                if target_path in fact.payload.get("import_targets", [])]
+            if not anchors:
+                break
+            anchor = anchors[0]
+            identifier = chunk_id(index, anchor.projection_id, anchor.fact_id)
+            if index.load_chunk(identifier) is None:
+                break
+            references.append("chunk:" + identifier)
+            certificates.append(active[source_path][target_path]["evidence"]["dependency_certificate"])
+        else:
+            issue = _digest("DEPENDENCY_CYCLE", sorted(cycle))
+            selected.append(AnalysisCandidate(candidate_id="candidate:" + issue,
+                candidate_kind="DEPENDENCY_CYCLE", strength=CandidateStrength.MODERATE,
+                deterministic_reason=f"Explicit imports form a source-attested cycle of {len(cycle)} edges; runtime impact is unresolved.",
+                evidence_refs=list(dict.fromkeys(references)),
+                metadata={"issue_fingerprint": issue, "edges": cycle, "dependency_certificates": certificates,
+                    "scope": "BOUNDED_ACTIVE_GRAPH", "coverage_complete": False}))
+        if len(selected) >= limit:
+            break
+    return selected

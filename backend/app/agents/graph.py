@@ -249,6 +249,14 @@ async def run_analysis_workflow(
         mcp_executor=mcp_executor,
     )
     cloud_budget = WorkflowCloudBudget.from_settings()
+    persistent_index = getattr(evidence_store, "persistent_index", None)
+    index_authority = None if persistent_index is None else {
+        "snapshot_id": persistent_index.snapshot_id,
+        "producer_digest": persistent_index.producer,
+        "tenant_id": persistent_index.tenant_id,
+        "repository_id": persistent_index.repository_id,
+        "commit_sha": persistent_index.commit_sha,
+    }
 
     async def invoke_with_cloud_budget(payload: Any) -> AnalysisState:
         token = bind_workflow_cloud_budget(cloud_budget)
@@ -275,6 +283,16 @@ async def run_analysis_workflow(
                 # checkpoint snapshots are authoritative and usage is merged
                 # monotonically.
                 cloud_budget.hydrate(current_state.values.get("ai_cloud_budget"))
+                checkpoint_authority = (current_state.values.get("manifest_summary") or {}).get("index_authority")
+                if index_authority != checkpoint_authority:
+                    # Never apply checkpoint findings or evidence IDs to a different
+                    # generation, including legacy checkpoints without provenance.
+                    return {
+                        "scan_id": scan_id,
+                        "status": "FAILED",
+                        "errors": ["Checkpoint evidence generation is incompatible; start a new scan."],
+                        "ai_cloud_budget": cloud_budget.snapshot().as_dict(),
+                    }
                 # If all nodes already finished, return the completed state directly
                 if not current_state.next:
                     logger.info("Scan %s already completed in checkpointer. Returning cached result.", scan_id)
@@ -319,18 +337,27 @@ async def run_analysis_workflow(
             runtime.repository_graph,
             runtime.chunks,
         )
-        persistent_index = getattr(evidence_store, "persistent_index", None)
         if persistent_index is not None:
-            from app.indexing.facts import select_candidates
+            from app.indexing.facts import select_candidates, select_architecture_candidates
             deterministic_correctness = select_candidates(persistent_index, "bug")
             bug_selection = dict(persistent_index.query_coverage)
             deterministic_security_flows = select_candidates(persistent_index, "security")
+            security_selection = dict(persistent_index.query_coverage)
+            deterministic_architecture = select_architecture_candidates(persistent_index, runtime.repository_graph)
             summary["candidate_selection_coverage"] = {
-                "bug": bug_selection, "security": dict(persistent_index.query_coverage),
+                "bug": bug_selection, "security": security_selection,
+                "architecture": {"selected": len(deterministic_architecture), "candidate_selection_partial": True,
+                    "unresolved_frontier": dict(runtime.repository_graph.unresolved_frontier)},
             }
             summary["index_coverage"] = dict(persistent_index.stats)
+            graph_coverage.update({
+                "complete": False,
+                "unresolved_frontier": dict(runtime.repository_graph.unresolved_frontier),
+                "query_truncated": bool(runtime.repository_graph.query_truncated),
+            })
         summary = {
             **summary,
+            "index_authority": index_authority,
             "graph_coverage": graph_coverage,
             "unresolved_graph_relationships": graph_coverage.get("unresolved_graph_relationships", 0),
             "route_contract_coverage": contract_coverage,

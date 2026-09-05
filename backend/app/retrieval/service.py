@@ -154,11 +154,11 @@ class RetrievalService:
             if index.file_entry(query.strip()):
                 return [(chunk_id(index, row.projection_id, row.fact_id), 1.0)
                     for row in index.file_facts(query.strip(), "CHUNK", limit=64)]
-            paths = index.db.execute(select(IndexFactModel.path).where(
+            paths = index.query_rows(select(IndexFactModel.path).where(
                 IndexFactModel.tenant_id == index.tenant_id,
                 IndexFactModel.repository_id == index.repository_id,
                 IndexFactModel.kind == "CHUNK", IndexFactModel.lookup == q_clean,
-            ).distinct().order_by(IndexFactModel.path).limit(32)).scalars().all()
+            ).distinct().order_by(IndexFactModel.path).limit(32), scalars=True)
             results = []
             for path in paths:
                 for fact in index.file_facts(path, "CHUNK", limit=128):

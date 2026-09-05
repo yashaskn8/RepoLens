@@ -36,8 +36,11 @@ class ContextEngine:
         max_chunks: int = 5,
         use_neural_reranker: bool = False,
         required_chunk_ids: Optional[List[str]] = None,
+        anchor_only: bool = False,
     ) -> ContextBundle:
         """Assemble a bounded, evidence-grounded ContextBundle for a specific query and intent."""
+        if analysis_intent == "verification":
+            anchor_only = False
         relevant_chunks: List[RetrievalResult] = []
         retrieval_scores: Dict[str, float] = {}
 
@@ -49,11 +52,14 @@ class ContextEngine:
                 use_reranker=use_neural_reranker,
                 analysis_intent=analysis_intent,
             )
-            raw_results = await self.retrieval_service.retrieve(retrieval_query)
+            # Specialist slices authorize explicit facts, so do not perform
+            # lexical/vector/reranker work whose results would be discarded.
+            # Independent verification keeps the normal retrieval path.
+            raw_results = [] if anchor_only else await self.retrieval_service.retrieve(retrieval_query)
             candidate_verification = analysis_intent == "verification" or bool(required_chunk_ids) and analysis_intent in {
                 "verification", "bug", "security", "architecture", "integration"
             }
-            if not raw_results and not candidate_verification:
+            if not raw_results and not candidate_verification and not anchor_only:
                 # Exact/lexical/dense retrieval may legitimately yield no
                 # match (or the free embedding provider may be unavailable).
                 # A deterministic structural sample preserves scan coverage
@@ -138,7 +144,7 @@ class ContextEngine:
 
         # 2. Extract relevant graph relationships
         graph_relationships: List[GraphEdge] = []
-        if self.repository_graph:
+        if self.repository_graph and not anchor_only:
             # Collect edges touching any of our target files
             all_edges = self.repository_graph.get_edges()
             for edge in all_edges:
@@ -154,7 +160,7 @@ class ContextEngine:
 
         # 3. Extract relevant routes and contracts
         routes_and_contracts: List[RouteContractMatch] = []
-        if self.repository_graph:
+        if self.repository_graph and not anchor_only:
             report = self.repository_graph.evaluate_route_contracts()
             ranked_matches: List[tuple[int, int, str, RouteContractMatch]] = []
             for match in report.matches:
@@ -188,7 +194,9 @@ class ContextEngine:
 
         # 4. Extract relevant static scanner findings
         severity_rank = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
-        if analysis_intent in {"security", "verification"}:
+        if anchor_only:
+            static_pool = []
+        elif analysis_intent in {"security", "verification"}:
             static_pool = list(self.evidence_store.all_findings)
         else:
             static_pool = [
@@ -223,7 +231,8 @@ class ContextEngine:
             "total_static_findings": len(static_findings),
             "context_budget": context_budget,
             "estimated_tokens": estimated_tokens,
-            "neural_reranker_used": use_neural_reranker,
+            "neural_reranker_used": use_neural_reranker and not anchor_only,
+            "retrieval_mode": "EXACT_AUTHORIZED_ANCHORS" if anchor_only else "HYBRID",
             "independent_context_available": any(
                 result.provenance.get("selection") != "deterministic_candidate_anchor"
                 for result in relevant_chunks

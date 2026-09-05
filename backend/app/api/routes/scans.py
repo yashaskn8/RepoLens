@@ -229,6 +229,9 @@ async def execute_background_scan(
                 max_source_bytes=get_settings().MAX_TOTAL_SOURCE_BYTES,
                 max_file_bytes=get_settings().MAX_FILE_SIZE_BYTES,
                 max_seconds=get_settings().MAX_SCAN_DURATION_SECONDS * 0.75,
+                max_database_bytes=get_settings().INDEX_MAX_DATABASE_BYTES,
+                retention_seconds=get_settings().INDEX_RETENTION_SECONDS,
+                gc_rows=get_settings().INDEX_GC_ROWS,
             ),
         )
         evidence_store = await service.analyze_repository(
@@ -687,6 +690,15 @@ async def execute_background_scan(
                 "excluded_noncanonical_findings": len(excluded_candidate_keys),
             },
         })
+        workflow_summary = final_state.get("manifest_summary") or {}
+        for coverage_key in ("candidate_selection_coverage", "index_authority", "graph_coverage"):
+            if coverage_key in workflow_summary:
+                existing_meta[coverage_key] = workflow_summary[coverage_key]
+        if persistent_index is not None:
+            # Include budget exhaustion discovered during reasoning/verification,
+            # not only the earlier indexing-stage snapshot.
+            existing_meta["index_coverage"] = dict(persistent_index.stats)
+            existing_meta["retrieval_coverage"] = dict(persistent_index.query_coverage)
         scan_model.model_metadata = existing_meta
         flag_modified(scan_model, "model_metadata")
         db.commit()

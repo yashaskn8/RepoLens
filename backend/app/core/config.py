@@ -3,7 +3,7 @@
 from functools import lru_cache
 from typing import List, Literal, Optional, Union
 from urllib.parse import urlparse
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -97,6 +97,9 @@ class Settings(BaseSettings):
     MAX_FILE_SIZE_BYTES: int = 1_048_576  # 1 MB
     MAX_TOTAL_SOURCE_BYTES: int = 52_428_800  # 50 MB global source budget
     MAX_SCAN_DURATION_SECONDS: int = 300  # 5 minutes maximum scan lifecycle timeout
+    INDEX_MAX_DATABASE_BYTES: int = Field(default=2_147_483_648, ge=16_777_216)
+    INDEX_RETENTION_SECONDS: int = Field(default=604_800, ge=86_400)
+    INDEX_GC_ROWS: int = Field(default=256, ge=1, le=1024)
     ALLOWED_EXTENSIONS: str = ".py,.js,.ts,.tsx,.jsx,.json,.yaml,.yml,.toml,.md,.txt,.cfg,.ini,.html,.css,.sql,.sh,.dockerfile,.env.example"
 
     # Deterministic Scanner Settings

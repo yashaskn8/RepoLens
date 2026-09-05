@@ -1,6 +1,7 @@
 """Tenant-scoped durable tree inventory and immutable extraction projections."""
 
 from sqlalchemy import Boolean, Column, Float, ForeignKey, Index, Integer, JSON, String
+import time
 
 from app.models.base import Base
 
@@ -10,6 +11,7 @@ class IndexWriterModel(Base):
     id = Column(String(64), primary_key=True)
     token = Column(String(64), nullable=False)
     expires_at = Column(Float, nullable=False)
+    gc_state = Column(JSON, nullable=False, default=dict, server_default="{}")
 
 
 class IndexSnapshotModel(Base):
@@ -22,7 +24,12 @@ class IndexSnapshotModel(Base):
     root_tree_id = Column(String(64), nullable=False)
     status = Column(String(16), nullable=False, default="BUILDING")
     coverage = Column(JSON, nullable=False, default=dict)
-    __table_args__ = (Index("ix_index_snapshot_owner", "tenant_id", "repository_id", "commit_sha", "policy_digest"),)
+    accessed_at = Column(Float, nullable=False, default=time.time)
+    __table_args__ = (
+        Index("ix_index_snapshot_owner", "tenant_id", "repository_id", "commit_sha", "policy_digest"),
+        Index("ix_index_snapshot_scope", "tenant_id", "repository_id", "id"),
+        Index("ix_index_snapshot_root", "root_tree_id"),
+    )
 
 
 class IndexTreeModel(Base):
@@ -36,6 +43,7 @@ class IndexTreeModel(Base):
     complete = Column(Boolean, nullable=False, default=False)
     coverage = Column(JSON, nullable=False, default=dict)
     entry_count = Column(Integer, nullable=False, default=0)
+    __table_args__ = (Index("ix_index_tree_scope", "tenant_id", "repository_id", "id"),)
 
 
 class IndexProjectionModel(Base):
@@ -47,6 +55,7 @@ class IndexProjectionModel(Base):
     producer_digest = Column(String(64), nullable=False)
     payload = Column(JSON, nullable=False)
     payload_bytes = Column(Integer, nullable=False)
+    __table_args__ = (Index("ix_index_projection_scope", "tenant_id", "repository_id", "id"),)
 
 
 class IndexEntryModel(Base):
@@ -62,7 +71,7 @@ class IndexEntryModel(Base):
     classification = Column(String(32), nullable=False)
     reason = Column(String(128), nullable=False)
     size_bytes = Column(Integer, nullable=False, default=0)
-    __table_args__ = (Index("ix_index_entry_projection", "projection_id"),)
+    __table_args__ = (Index("ix_index_entry_projection", "projection_id"), Index("ix_index_entry_child", "child_tree_id"))
 
 
 class IndexPinModel(Base):
@@ -70,6 +79,7 @@ class IndexPinModel(Base):
     tenant_id = Column(String(128), primary_key=True)
     referrer_id = Column(String(128), primary_key=True)
     snapshot_id = Column(String(64), ForeignKey("index_snapshots.id", ondelete="RESTRICT"), primary_key=True)
+    __table_args__ = (Index("ix_index_pin_snapshot", "snapshot_id"),)
 
 
 class IndexFactModel(Base):
