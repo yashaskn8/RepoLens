@@ -77,6 +77,36 @@ class GitInventory:
                 process.kill()
                 process.wait()
 
+    def path_entry(self, tree_oid: str, path: str) -> TreeEntry | None:
+        """Exact immutable lookup; no wildcard expansion or working-tree reads."""
+        self.validate_oid(tree_oid)
+        if not path or path.startswith("/") or any(part in {"", ".", ".."} for part in path.split("/")) or "\\" in path or "\x00" in path:
+            raise InventoryBound("unsupported_path_identity")
+        process = self._open("--literal-pathspecs", "ls-tree", "-z", tree_oid, "--", path)
+        timer = threading.Timer(self.timeout, process.kill)
+        timer.daemon = True
+        timer.start()
+        try:
+            result = process.stdout.read(self.max_record_bytes + 1)
+            if len(result) > self.max_record_bytes or process.wait(timeout=self.timeout) != 0:
+                raise InventoryBound("path_lookup_incomplete")
+            if not result:
+                return None
+            records = result.split(b"\0")
+            if len(records) != 2 or records[-1]:
+                raise InventoryBound("ambiguous_path_lookup")
+            header, name = records[0].split(b"\t", 1)
+            mode, kind, oid = header.decode("ascii").split(" ")
+            if name.decode("utf-8") != path:
+                raise InventoryBound("path_lookup_mismatch")
+            return TreeEntry(mode, kind, self.validate_oid(oid), path)
+        finally:
+            timer.cancel()
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+            process.stdout.close()
+
     def entries(self, tree_oid: str) -> Iterator[TreeEntry]:
         self.validate_oid(tree_oid)
         process = self._open("ls-tree", "-z", tree_oid)

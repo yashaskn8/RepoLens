@@ -598,11 +598,14 @@ def _extract_js_ts_symbols_and_calls(
                 return
 
         # 5. Imports
-        elif node.type in ("import_statement", "import_declaration"):
+        elif node.type in ("import_statement", "import_declaration", "export_statement"):
             import_text = _node_text(node, source_bytes).strip()
             import_details = _parse_js_ts_import_details(node, source_bytes)
 
-            symbols.append(
+            # Re-exports with an explicit source are module dependencies;
+            # local/default export declarations are not imports.
+            if node.type != "export_statement" or import_details.get("source"):
+                symbols.append(
                 ParsedSymbol(
                     name=import_text,
                     kind=SymbolKind.IMPORT,
@@ -611,8 +614,7 @@ def _extract_js_ts_symbols_and_calls(
                     start_column=node.start_point[1],
                     end_column=node.end_point[1],
                     details=import_details,
-                )
-            )
+                ))
 
         # 6. Call Expressions
         elif node.type == "call_expression":

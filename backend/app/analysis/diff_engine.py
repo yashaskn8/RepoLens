@@ -198,6 +198,15 @@ class ChangeDiffEngine:
         repository_url: str,
     ) -> StructuralDiffResult:
         """Deterministically compute structural change facts between base and head revisions."""
+        if os.path.exists(os.path.join(base_workspace, ".git")) and os.path.exists(os.path.join(head_workspace, ".git")):
+            from app.ingestion.change_objects import changed_workspaces
+            with changed_workspaces(base_workspace, head_workspace, base_commit_sha, head_commit_sha,
+                    max_files=min(self.settings.MAX_REPO_FILES, 512),
+                    max_file_bytes=self.settings.MAX_FILE_SIZE_BYTES,
+                    max_bytes=self.settings.MAX_TOTAL_SOURCE_BYTES) as (base_region, head_region, coverage):
+                result = self.compute_structural_diff(base_region, head_region, base_commit_sha, head_commit_sha, repository_url)
+                result.discovery_coverage = coverage
+                return result
         # 1. Discover all files in base and head
         base_files = self._discover_files(base_workspace)
         head_files = self._discover_files(head_workspace)

@@ -126,7 +126,11 @@ class PersistentRepositoryGraph(RepositoryGraph):
                 edges.append(GraphEdge(source=f"file:{path}", target=f"file:{target}", kind=EdgeKind.IMPORTS,
                     metadata={"dependency_certificate": {"snapshot_id": self.index.snapshot_id,
                         "resolution": "EXPLICIT_IMPORT", "source_sha256": source.content_hash,
-                        "target_sha256": projection.content_hash, "producer_digest": self.index.producer}}))
+                        "target_sha256": projection.content_hash, "producer_digest": self.index.producer,
+                        "source_behavior_digest": source.payload.get("facts_coverage", {}).get("behavior_digest"),
+                        "target_behavior_digest": projection.payload.get("facts_coverage", {}).get("behavior_digest"),
+                        "source_coverage": source.payload.get("facts_coverage", {}).get("status", "UNKNOWN"),
+                        "target_coverage": projection.payload.get("facts_coverage", {}).get("status", "UNKNOWN")}}))
         for edge in graph.get_edges():
             left, right = graph.get_node(edge.source), graph.get_node(edge.target)
             if (edge.kind != EdgeKind.CALLS or not left or not right or
@@ -138,6 +142,10 @@ class PersistentRepositoryGraph(RepositoryGraph):
             certificate = {"snapshot_id": self.index.snapshot_id, "resolution": "EXPLICIT_IMPORT",
                 "source_sha256": source.content_hash,
                 "target_sha256": projections[right.file_path].content_hash,
+                "source_behavior_digest": source.payload.get("facts_coverage", {}).get("behavior_digest"),
+                "target_behavior_digest": projections[right.file_path].payload.get("facts_coverage", {}).get("behavior_digest"),
+                "source_coverage": source.payload.get("facts_coverage", {}).get("status", "UNKNOWN"),
+                "target_coverage": projections[right.file_path].payload.get("facts_coverage", {}).get("status", "UNKNOWN"),
                 "producer_digest": self.index.producer}
             edges.append(edge.model_copy(update={"metadata": {**edge.metadata, "dependency_certificate": certificate}}))
         self._cross_cache[cache_key] = edges

@@ -297,6 +297,8 @@ def build_security_flow_candidates(
             ),
             counter_evidence=counter_evidence,
             metadata={
+                "file_path": flow.source.file_path,
+                "required_evidence_roles": ["primary", "flow", "guard"],
                 "source": f"{flow.source.source_kind.lower()}:{flow.source.name}",
                 "sink": flow.sink.name,
                 "flow_certainty": certainty.value,

@@ -91,6 +91,7 @@ class PersistentIndex:
             str(root / "indexing" / "persistent.py"),
             str(root / "indexing" / "chunker.py"),
             str(root / "indexing" / "facts.py"),
+            str(root / "indexing" / "components.py"),
             str(root / "retrieval" / "tokens.py"),
             str(root / "semantics" / "builder.py"),
             str(root / "semantics" / "flow.py"),
@@ -110,6 +111,7 @@ class PersistentIndex:
             raise InventoryBound("parser_version_authority_unavailable") from exc
         self.producer = identity(producer, CLASSIFICATION_VERSION, *parser_versions, str(limits.max_file_bytes), str(limits.max_projection_bytes), str(limits.max_path_bytes))
         self.inventory = GitInventory(repo_dir)
+        self._component_resolver = None
         self.snapshot_id = identity(tenant_id, self.repository_id, commit_sha, self.producer)
         self.base_snapshot_id = self.snapshot_id
         self.entry_limits = {}
@@ -176,7 +178,14 @@ class PersistentIndex:
         self.pending_entries = 0
 
     def _tree_id(self, object_id: str, path: str) -> str:
-        return identity(self.tenant_id, self.repository_id, self.producer, object_id, path)
+        component = self._component_identity((path + "/" if path else "") + "__component_probe__.py")
+        return identity(self.tenant_id, self.repository_id, self.producer, object_id, path, json.dumps(component, sort_keys=True))
+
+    def _component_identity(self, path):
+        if self._component_resolver is None:
+            from app.indexing.components import ComponentResolver
+            self._component_resolver = ComponentResolver(self.inventory, self.commit_sha)
+        return self._component_resolver.file_identity(path)
 
     def _tree(self, object_id: str, path: str) -> IndexTreeModel:
         tree_id = self._tree_id(object_id, path)
@@ -284,7 +293,9 @@ class PersistentIndex:
         disposition = classify_file(path, language=language, mode=entry.mode)
         if not disposition.eligible:
             return None, disposition.classification.value, disposition.reason, 0
-        projection_id = identity(self.tenant_id, self.repository_id, self.producer, path, entry.object_id)
+        component = self._component_identity(path)
+        projection_id = identity(self.tenant_id, self.repository_id, self.producer, path, entry.object_id,
+            json.dumps(component, sort_keys=True))
         prior = self.db.get(IndexProjectionModel, projection_id)
         if prior is not None:
             self.stats["reused_files"] += 1
@@ -313,7 +324,7 @@ class PersistentIndex:
         file = FileEntry(path=path, language=language, size_bytes=len(source),
                          lines_count=len(source.splitlines()), symbols=symbols, calls=calls)
         digest = hashlib.sha256(source).hexdigest()
-        payload = {"file": redact_projection(file.model_dump(mode="json")), "source_sha256": digest}
+        payload = {"file": redact_projection(file.model_dump(mode="json")), "source_sha256": digest, "component": component}
         payload_size = len(json.dumps(payload, ensure_ascii=False).encode())
         if payload_size > self.limits.max_projection_bytes:
             return None, disposition.classification.value, "projection_byte_limit", len(source)
@@ -513,7 +524,10 @@ class PersistentIndex:
                 total_observed_bytes=self.stats["total_bytes"],
             ))
 
-    def pin(self, referrer_id: str) -> None:
+    def pin(self, referrer_id: str, *, owner_kind: str = "scan") -> None:
+        if owner_kind not in {"scan", "work", "change", "report", "evidence"} or len(referrer_id) > 90:
+            raise ValueError("Invalid snapshot pin owner")
+        referrer_id = f"{owner_kind}:{referrer_id}"
         self._acquire_writer()
         try:
             self._fence_writer()
@@ -522,6 +536,23 @@ class PersistentIndex:
             if self.db.get(IndexPinModel, key) is None:
                 self.db.add(IndexPinModel(tenant_id=self.tenant_id, referrer_id=referrer_id, snapshot_id=self.snapshot_id))
             self._commit(force=True)
+        finally:
+            self._release_writer()
+
+    def release_pin(self, referrer_id: str, *, owner_kind: str = "scan") -> int:
+        """Release all generations owned by one completed domain resource."""
+        if owner_kind not in {"scan", "work", "change", "report", "evidence"} or len(referrer_id) > 90:
+            raise ValueError("Invalid snapshot pin owner")
+        owner = f"{owner_kind}:{referrer_id}"
+        self._acquire_writer()
+        try:
+            self._fence_writer()
+            count = self.db.query(IndexPinModel).filter(
+                IndexPinModel.tenant_id == self.tenant_id,
+                IndexPinModel.referrer_id == owner,
+            ).delete(synchronize_session=False)
+            self._commit(force=True)
+            return int(count or 0)
         finally:
             self._release_writer()
 

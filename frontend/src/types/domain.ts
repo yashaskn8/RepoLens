@@ -869,6 +869,7 @@ export interface StructuralDiffResult {
   route_deltas: RouteContractDelta[];
   schema_deltas: SchemaModelDelta[];
   summary: Record<string, number>;
+  discovery_coverage?: Record<string, unknown>;
 }
 
 export interface BlastRadiusReport {

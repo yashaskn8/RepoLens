@@ -49,6 +49,7 @@ class ChangeAnalysisState(TypedDict, total=False):
     status: str
     error: Optional[str]
     completed_nodes: List[str]
+    impact_frontier: Dict[str, Any]
 
 
 async def run_acquire_node(state: ChangeAnalysisState) -> Dict[str, Any]:
@@ -121,6 +122,26 @@ async def build_canonical_phase6_graph(
     if not workspace_path:
         return None
     try:
+        from pathlib import Path
+        from app.execution.context import current_claim, new_execution_session
+        claim = current_claim()
+        if claim is not None and (Path(workspace_path) / ".git").exists():
+            from app.indexing.persistent import IndexLimits, PersistentIndex
+            from app.graph.persistent import PersistentRepositoryGraph
+            db = new_execution_session()
+            try:
+                index = PersistentIndex(db, tenant_id=claim.tenant_id, repository_url=repository_url,
+                    repo_dir=workspace_path, commit_sha=commit_sha,
+                    limits=IndexLimits(max_files=256, manifest_files=128, max_seconds=30))
+                index.build_manifest(branch=branch_ref)
+                index.pin(claim.work_item_id, owner_kind="work")
+                index.pin(claim.resource_id, owner_kind="change")
+                graph = PersistentRepositoryGraph(index)
+                graph._index_db = db
+                return graph
+            except Exception:
+                db.close()
+                raise
         from app.ingestion.manifest import build_manifest
         from app.graph.builder import build_repository_graph
 
@@ -159,15 +180,31 @@ async def run_impact_node(state: ChangeAnalysisState) -> Dict[str, Any]:
         branch_ref=state.get("base_ref"),
     )
 
-    report = impact_engine.compute_blast_radius(
-        analysis_id=UUID(state["analysis_id"]),
-        diff_result=diff_res,
-        base_graph=base_graph,
-    )
+    frontier = None
+    index_db = getattr(base_graph, "_index_db", None)
+    try:
+        from app.analysis.impact_frontier import advance_frontier, frontier_graph
+        # Recover exactly the original sealed view before using checkpoint IDs.
+        prior = state.get("impact_frontier")
+        if prior and getattr(base_graph, "index", None) is not None:
+            base_graph.index.open_snapshot(prior["authority"]["snapshot"])
+        frontier = advance_frontier(base_graph, diff_res, prior)
+        if frontier["queue"] and not frontier["stopped"]:
+            return {"impact_frontier": frontier, "status": "ANALYZING"}
+        base_graph = frontier_graph(frontier)
+        report = impact_engine.compute_blast_radius(
+            analysis_id=UUID(state["analysis_id"]), diff_result=diff_res, base_graph=base_graph)
+        if (frontier and frontier["partial"]) or diff_res.discovery_coverage.get("complete") is False:
+            report.is_truncated = True
+            report.truncation_reason = "PARTIAL_DISCOVERY_OR_IMPACT_FRONTIER"
+    finally:
+        if index_db is not None:
+            index_db.close()
 
     completed.append("impact")
     return {
         "blast_radius": report,
+        "impact_frontier": frontier or {},
         "status": "ANALYZING",
         "completed_nodes": completed,
     }
@@ -191,14 +228,13 @@ async def run_review_node(state: ChangeAnalysisState) -> Dict[str, Any]:
         branch_ref=state.get("base_ref"),
     )
 
-    review_report = await reviewer.review_changes(
-        analysis_id=UUID(state["analysis_id"]),
-        diff_result=diff_res,
-        blast_radius=blast_radius,
-        base_graph=base_graph,
-        base_workspace=state.get("base_workspace"),
-        head_workspace=state.get("head_workspace"),
-    )
+    try:
+        review_report = await reviewer.review_changes(
+            analysis_id=UUID(state["analysis_id"]), diff_result=diff_res, blast_radius=blast_radius,
+            base_graph=base_graph, base_workspace=state.get("base_workspace"), head_workspace=state.get("head_workspace"))
+    finally:
+        if (index_db := getattr(base_graph, "_index_db", None)) is not None:
+            index_db.close()
 
     completed.append("review")
     return {
@@ -223,14 +259,13 @@ async def run_verify_node(state: ChangeAnalysisState) -> Dict[str, Any]:
         branch_ref=state.get("base_ref"),
     )
 
-    verified_report = verifier.verify_report(
-        report=review_report,
-        diff_result=diff_res,
-        blast_radius=blast_radius,
-        base_graph=base_graph,
-        base_workspace=state.get("base_workspace"),
-        head_workspace=state.get("head_workspace"),
-    )
+    try:
+        verified_report = verifier.verify_report(
+            report=review_report, diff_result=diff_res, blast_radius=blast_radius,
+            base_graph=base_graph, base_workspace=state.get("base_workspace"), head_workspace=state.get("head_workspace"))
+    finally:
+        if (index_db := getattr(base_graph, "_index_db", None)) is not None:
+            index_db.close()
 
     completed.append("verify")
     return {
@@ -264,7 +299,10 @@ def build_change_analysis_graph(checkpointer: Optional[Any] = None) -> Any:
     workflow.add_edge(START, "acquire")
     workflow.add_edge("acquire", "diff")
     workflow.add_edge("diff", "impact")
-    workflow.add_edge("impact", "review")
+    workflow.add_conditional_edges("impact", lambda state: "impact" if (
+        state.get("impact_frontier", {}).get("queue") and
+        not state.get("impact_frontier", {}).get("stopped") and not state.get("blast_radius")
+    ) else "review", {"impact": "impact", "review": "review"})
     workflow.add_edge("review", "verify")
     workflow.add_edge("verify", "complete")
     workflow.add_edge("complete", END)

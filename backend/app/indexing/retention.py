@@ -6,7 +6,8 @@ Database free pages are reused by subsequent indexing, without blocking VACUUM.
 """
 
 import time
-from sqlalchemy import delete, select
+from uuid import UUID
+from sqlalchemy import delete, select, or_, and_
 
 from app.models.intelligence import (IndexEntryModel, IndexFactModel, IndexPinModel,
     IndexPostingModel, IndexProjectionModel, IndexSignalModel, IndexSnapshotModel,
@@ -33,6 +34,69 @@ def collect_catalog(index) -> dict:
         count = db.execute(delete(model).where(*conditions).execution_options(synchronize_session=False)).rowcount
         remaining -= count
         summary["deleted_rows"] += count
+
+    # Legacy UUID pins are scan owners. Unrecognized/manual owners fail closed.
+    # Ownership records, not age alone, decide whether protected evidence lives.
+    from app.models.scan import ScanModel
+    from app.models.report import ReportModel
+    from app.models.finding import FindingModel
+    from app.models.change_analysis import ChangeAnalysisModel, ChangeImpactModel
+    from app.models.execution import WorkItemModel
+    from app.models.artifact import ArtifactReferenceModel, ArtifactReferenceReleaseModel
+    from app.execution.types import TERMINAL_STATES
+    pin_cursor = cursors.get("pins", ["", ""])
+    pins = db.scalars(select(IndexPinModel).join(IndexSnapshotModel, IndexPinModel.snapshot_id == IndexSnapshotModel.id)
+        .where(IndexPinModel.tenant_id == index.tenant_id, IndexSnapshotModel.repository_id == index.repository_id,
+            or_(IndexPinModel.referrer_id > pin_cursor[0], and_(IndexPinModel.referrer_id == pin_cursor[0], IndexPinModel.snapshot_id > pin_cursor[1])))
+        .order_by(IndexPinModel.referrer_id, IndexPinModel.snapshot_id).limit(min(32, remaining))).all()
+    summary["released_pins"] = 0
+    if not pins:
+        cursors["pins"] = ["", ""]
+    for pin in pins:
+        if remaining <= 0 or time.monotonic() >= deadline:
+            break
+        kind, separator, owner_id = pin.referrer_id.partition(":")
+        if not separator:
+            kind, owner_id = "scan", pin.referrer_id
+        try:
+            UUID(owner_id)
+        except ValueError:
+            cursors["pins"] = [pin.referrer_id, pin.snapshot_id]
+            continue
+        # Append-only canonical artifact references remain authoritative even
+        # after their original domain owner disappears.
+        retained = db.scalar(select(ArtifactReferenceModel.id).where(
+            ArtifactReferenceModel.tenant_id == index.tenant_id,
+            ArtifactReferenceModel.referrer_id == owner_id,
+            ~select(ArtifactReferenceReleaseModel.id).where(
+                ArtifactReferenceReleaseModel.reference_id == ArtifactReferenceModel.id).exists()).limit(1))
+        live = True
+        if not retained and kind in {"scan", "evidence"}:
+            owner = db.get(ScanModel, owner_id)
+            if owner is None:
+                live = False
+            elif str(owner.owner_user_id or "legacy-local") == index.tenant_id:
+                live = (owner.status not in {"COMPLETED", "FAILED", "CANCELLED"} or
+                    exists(FindingModel, FindingModel.scan_id == owner_id) or
+                    exists(ReportModel, ReportModel.scan_id == owner_id))
+        elif not retained and kind in {"work", "report", "change"}:
+            model = {"work": WorkItemModel, "report": ReportModel, "change": ChangeAnalysisModel}[kind]
+            owner = db.get(model, owner_id)
+            if owner is None:
+                live = False
+            elif kind == "work" and owner.tenant_id == index.tenant_id:
+                live = owner.state not in {state.value for state in TERMINAL_STATES}
+            elif kind == "change" and owner.owner_user_id == index.tenant_id:
+                # Completed analyses remain protected only while they have
+                # canonical impact evidence; failed/empty work can be reclaimed.
+                live = owner.status not in {"COMPLETED", "FAILED"} or exists(
+                    ChangeImpactModel, ChangeImpactModel.analysis_id == owner_id,
+                )
+        if not live:
+            remove(IndexPinModel, IndexPinModel.tenant_id == pin.tenant_id,
+                IndexPinModel.referrer_id == pin.referrer_id, IndexPinModel.snapshot_id == pin.snapshot_id)
+            summary["released_pins"] += 1
+        cursors["pins"] = [pin.referrer_id, pin.snapshot_id]
 
     for model, label in ((IndexSnapshotModel, "snapshots"), (IndexTreeModel, "trees"), (IndexProjectionModel, "projections")):
         if remaining <= 0 or time.monotonic() >= deadline:

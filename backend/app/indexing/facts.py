@@ -3,6 +3,7 @@
 from collections import defaultdict
 import hashlib
 import json
+import re
 
 from sqlalchemy import select
 
@@ -22,6 +23,21 @@ ZERO_REVISION = "0" * 40
 
 def _digest(*values):
     return hashlib.sha256(json.dumps(values, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _behavior_value(value):
+    """Drop source-location/provenance churn while preserving semantic facts."""
+    volatile = {"fact_id", "evidence_id", "content_hash", "commit_sha", "start_line", "end_line",
+        "start_column", "end_column", "line_number", "column_number", "source_sha256"}
+    volatile.update({"size_bytes", "lines_count"})
+    if isinstance(value, dict):
+        result = {key: _behavior_value(item) for key, item in sorted(value.items()) if key not in volatile}
+        if isinstance(result.get("symbol"), str):
+            result["symbol"] = re.sub(r":\d+$", "", result["symbol"])
+        return result
+    if isinstance(value, list):
+        return [_behavior_value(item) for item in value]
+    return value
 
 
 def persist_facts(index, projection, file, source: bytes) -> dict:
@@ -56,7 +72,7 @@ def persist_facts(index, projection, file, source: bytes) -> dict:
             kind="SEMANTIC", lookup=file.path, target="", payload=semantic_payload))
     else:
         truncated = True
-    component = (file.path.split("/", 1)[0] if "/" in file.path else ".")[:128]
+    component = projection.payload["component"]["component_id"]
     common = dict(projection_id=projection.id, tenant_id=index.tenant_id,
                   repository_id=index.repository_id, path=file.path)
     from app.graph.imports import import_paths
@@ -127,6 +143,25 @@ def persist_facts(index, projection, file, source: bytes) -> dict:
         add(IndexFactModel(**common, fact_id=_digest("edge", edge.source, edge.target, edge.kind.value),
             kind="EDGE", lookup=redact_secrets(edge.source), target=redact_secrets(edge.target), payload=redact_projection(edge.model_dump(mode="json"))))
     truncated |= len(nodes) > MAX_FILE_FACTS or len(edges) > MAX_FILE_FACTS
+    behavior_nodes = {node.id: {"kind": node.kind.value, "label": node.label,
+        "file_path": node.file_path, "metadata": _behavior_value(node.metadata)} for node in nodes[:MAX_FILE_FACTS]}
+    behavior_edges = [{"source": behavior_nodes.get(edge.source, edge.source),
+        "target": behavior_nodes.get(edge.target, edge.target), "kind": edge.kind.value,
+        "metadata": _behavior_value(edge.metadata)} for edge in edges[:MAX_FILE_FACTS]]
+    behavior_authority = {
+        "analyzer": index.producer,
+        "symbols": [_behavior_value(symbol.model_dump(mode="json")) for symbol in file.symbols],
+        "calls": [_behavior_value(call.model_dump(mode="json")) for call in file.calls],
+        "semantic": _behavior_value(semantic_payload),
+        "imports": sorted(import_paths(file)),
+        "graph_nodes": list(behavior_nodes.values()),
+        "graph_edges": behavior_edges,
+        "bounds": {"chunks": MAX_FILE_CHUNKS, "postings": MAX_FILE_POSTINGS, "facts": MAX_FILE_FACTS,
+            "projection_bytes": index.limits.max_projection_bytes},
+        "coverage": "PARTIAL" if truncated else "FILE_LOCAL",
+    }
+    behavior_digest = _digest(behavior_authority)
+    behavior_sections = {key: _digest(value) for key, value in behavior_authority.items()}
     counts = {}
     for intent, candidates in (
         ("bug", build_bug_candidates(chunks, manifest=manifest, limit=64, semantic_program=semantic_program)),
@@ -145,6 +180,9 @@ def persist_facts(index, projection, file, source: bytes) -> dict:
             payload["metadata"]["evidence_keys"] = keys
             payload["metadata"]["dependency_certificate"] = {
                 "source_sha256": projection.content_hash, "producer_digest": projection.producer_digest,
+                "source_behavior_digest": behavior_digest,
+                "behavior_scope": "FILE_SEMANTICS_IMPORTS_CONTRACTS_GUARDS_FLOWS",
+                "coverage": behavior_authority["coverage"],
                 "scope": "FILE_LOCAL", "cross_file_resolution": "UNKNOWN",
             }
             unique[issue] = payload
@@ -153,6 +191,8 @@ def persist_facts(index, projection, file, source: bytes) -> dict:
                 priority=100 if payload["strength"] == "STRONG" else 50, payload=payload))
         counts[intent] = len(unique)
     return {"status": "PARTIAL" if truncated else "FILE_LOCAL", "postings": postings, "stored_fact_bytes": stored_bytes,
+            "behavior_digest": behavior_digest, "behavior_scope": behavior_authority["bounds"],
+            "behavior_sections": behavior_sections,
             "chunks": len(chunks), "signals": counts, "cross_file_resolution": "UNKNOWN"}
 
 

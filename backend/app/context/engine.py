@@ -37,6 +37,8 @@ class ContextEngine:
         use_neural_reranker: bool = False,
         required_chunk_ids: Optional[List[str]] = None,
         anchor_only: bool = False,
+        targeted_roles: Optional[List[str]] = None,
+        file_path_filter: Optional[str] = None,
     ) -> ContextBundle:
         """Assemble a bounded, evidence-grounded ContextBundle for a specific query and intent."""
         if analysis_intent == "verification":
@@ -48,9 +50,10 @@ class ContextEngine:
         if self.retrieval_service:
             retrieval_query = RetrievalQuery(
                 query=query,
-                top_k=max_chunks,
+                top_k=min(max_chunks, 2) if targeted_roles else max_chunks,
                 use_reranker=use_neural_reranker,
                 analysis_intent=analysis_intent,
+                file_path_filter=file_path_filter,
             )
             # Specialist slices authorize explicit facts, so do not perform
             # lexical/vector/reranker work whose results would be discarded.
@@ -59,7 +62,7 @@ class ContextEngine:
             candidate_verification = analysis_intent == "verification" or bool(required_chunk_ids) and analysis_intent in {
                 "verification", "bug", "security", "architecture", "integration"
             }
-            if not raw_results and not candidate_verification and not anchor_only:
+            if not raw_results and not candidate_verification and not anchor_only and not targeted_roles:
                 # Exact/lexical/dense retrieval may legitimately yield no
                 # match (or the free embedding provider may be unavailable).
                 # A deterministic structural sample preserves scan coverage
@@ -144,7 +147,8 @@ class ContextEngine:
 
         # 2. Extract relevant graph relationships
         graph_relationships: List[GraphEdge] = []
-        if self.repository_graph and not anchor_only:
+        graph_roles = {"graph", "caller", "callee"}
+        if self.repository_graph and not anchor_only and (not targeted_roles or graph_roles.intersection(targeted_roles)):
             # Collect edges touching any of our target files
             all_edges = self.repository_graph.get_edges()
             for edge in all_edges:
@@ -160,7 +164,7 @@ class ContextEngine:
 
         # 3. Extract relevant routes and contracts
         routes_and_contracts: List[RouteContractMatch] = []
-        if self.repository_graph and not anchor_only:
+        if self.repository_graph and not anchor_only and (not targeted_roles or "contract" in targeted_roles):
             report = self.repository_graph.evaluate_route_contracts()
             ranked_matches: List[tuple[int, int, str, RouteContractMatch]] = []
             for match in report.matches:
@@ -194,7 +198,7 @@ class ContextEngine:
 
         # 4. Extract relevant static scanner findings
         severity_rank = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
-        if anchor_only:
+        if anchor_only or targeted_roles and "scanner" not in targeted_roles:
             static_pool = []
         elif analysis_intent in {"security", "verification"}:
             static_pool = list(self.evidence_store.all_findings)
@@ -232,7 +236,10 @@ class ContextEngine:
             "context_budget": context_budget,
             "estimated_tokens": estimated_tokens,
             "neural_reranker_used": use_neural_reranker and not anchor_only,
-            "retrieval_mode": "EXACT_AUTHORIZED_ANCHORS" if anchor_only else "HYBRID",
+            "retrieval_mode": ("EXACT_AUTHORIZED_ANCHORS" if anchor_only else
+                "TARGETED_MISSING_ROLES" if targeted_roles else "HYBRID"),
+            "targeted_roles": sorted(set(targeted_roles or [])),
+            "file_path_filter": file_path_filter,
             "independent_context_available": any(
                 result.provenance.get("selection") != "deterministic_candidate_anchor"
                 for result in relevant_chunks

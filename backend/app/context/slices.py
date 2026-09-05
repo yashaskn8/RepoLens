@@ -201,33 +201,62 @@ async def build_specialist_context(
     conflicted_evidence_ids: set[str] = set()
 
     for candidate in selected:
-        declared_refs = list(candidate.evidence_refs)
+        role_refs: dict[str, list[str]] = {"primary": list(candidate.evidence_refs)}
         for role in ("supporting", "counter", "graph", "contract", "scanner", "flow",
                      "caller", "callee", "guard", "test", "config"):
             values = candidate.metadata.get(f"{role}_evidence_refs", [])
             if isinstance(values, list):
-                declared_refs.extend(value for value in values[:20] if isinstance(value, str))
+                role_refs[role] = [value for value in values[:20] if isinstance(value, str)]
+        requested_roles = candidate.metadata.get("required_evidence_roles", ["primary"])
+        valid_roles = set(role_refs) | {"supporting", "counter", "graph", "contract", "scanner",
+            "flow", "caller", "callee", "guard", "test", "config"}
+        required_roles = [role for role in requested_roles
+            if isinstance(role, str) and role in valid_roles][:4] if isinstance(requested_roles, list) else ["primary"]
+        declared_refs = list(candidate.evidence_refs)
+        for role in required_roles:
+            declared_refs.extend(role_refs.get(role, []))
+        for role in sorted(role_refs):
+            declared_refs.extend(role_refs[role])
         declared_refs = list(dict.fromkeys(declared_refs))[:16]
+        missing_roles = [role for role in required_roles if not role_refs.get(role)]
+        target_file = candidate.metadata.get("file_path")
+        targeted_roles = missing_roles if isinstance(target_file, str) and target_file else []
         # Non-chunk graph/scanner contracts retain canonical context assembly.
         # Chunk-only candidates need no repository-wide search at all.
-        anchor_only = all(ref.startswith("chunk:") for ref in declared_refs)
+        anchor_only = all(ref.startswith("chunk:") for ref in declared_refs) and not targeted_roles
         bundle = await context_engine.build_context_bundle(
             scan_id=scan_id,
             query=(
-                f"{candidate.candidate_kind} {candidate.related_symbol or ''} "
+                f"{candidate.candidate_kind} {' '.join(targeted_roles)} {candidate.related_symbol or ''} "
                 f"{candidate.deterministic_reason[:160]}"
             ),
             analysis_intent=analysis_intent,
             context_budget=per_candidate_budget,
-            max_chunks=max(6, len(declared_refs)),
+            max_chunks=max(6, len(declared_refs) + min(2, len(missing_roles))),
             required_chunk_ids=declared_refs,
             anchor_only=anchor_only,
+            targeted_roles=targeted_roles or None,
+            file_path_filter=target_file if targeted_roles else None,
         )
         packed = pack_repository_context(bundle, token_budget=per_candidate_budget)
+        candidate_for_slice = candidate.model_copy(deep=True)
+        retrieved_refs = [evidence_id for evidence_id in packed.evidence_index
+            if evidence_id not in declared_refs and evidence_id.startswith("chunk:")][:2]
+        role_coverage = {}
+        for role in required_roles:
+            references = [ref for ref in role_refs.get(role, []) if ref in packed.evidence_index]
+            if role in missing_roles and retrieved_refs:
+                references = retrieved_refs
+                candidate_for_slice.metadata[f"{role}_evidence_refs"] = references
+                role_coverage[role] = "TARGETED_SOURCE"
+            else:
+                role_coverage[role] = "DECLARED" if references else "UNRESOLVED"
+        candidate_for_slice.metadata["required_evidence_roles"] = required_roles
+        candidate_for_slice.metadata["evidence_role_coverage"] = role_coverage
         evidence_slice = build_evidence_slice(
             scan_id=scan_id,
             commit_sha=commit_sha,
-            candidate=candidate,
+            candidate=candidate_for_slice,
             packed=packed,
         )
         if evidence_slice is None:

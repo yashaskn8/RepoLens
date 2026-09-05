@@ -408,6 +408,7 @@ class StructuralDiffResult(BaseModel):
     route_deltas: List[RouteContractDelta] = Field(default_factory=list, description="API route and client call deltas")
     schema_deltas: List[SchemaModelDelta] = Field(default_factory=list, description="Data model and schema deltas")
     summary: Dict[str, int] = Field(default_factory=dict, description="Numerical summary of all detected changes")
+    discovery_coverage: Dict[str, Any] = Field(default_factory=dict, description="Changed-object scope and unresolved discovery frontier")
 
 
 # =========================================================================
@@ -549,7 +550,6 @@ class ChangeAnalysisReportResponse(BaseModel):
     markdown_report: str = Field(..., description="Deterministic, human-readable Markdown change report")
 
     model_config = ConfigDict(from_attributes=True)
-
 
 
 

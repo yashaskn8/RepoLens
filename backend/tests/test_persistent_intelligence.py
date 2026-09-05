@@ -14,6 +14,173 @@ from app.models.base import Base
 from app.models.intelligence import IndexEntryModel, IndexProjectionModel
 
 
+def test_git_change_discovery_skips_equal_subtrees_and_worktree_edits(indexed_repository):
+    from app.analysis.diff_engine import ChangeDiffEngine
+    from app.ingestion.git_inventory import GitInventory
+    repo, git, _, _ = indexed_repository
+    (repo / "unchanged").mkdir()
+    (repo / "unchanged" / "module.py").write_text("def stable():\n    return 1\n")
+    git("add", ".")
+    git("commit", "-qm", "unchanged subtree")
+    base = git("rev-parse", "HEAD")
+    untouched = git("rev-parse", "HEAD:unchanged")
+    (repo / "a.py").write_text("def load(value):\n    return value + 1\n")
+    git("add", "a.py")
+    git("commit", "-qm", "tiny change")
+    head = git("rev-parse", "HEAD")
+    (repo / "a.py").write_text("raise RuntimeError('dirty worktree is not evidence')")
+    original = GitInventory.entries
+    def guarded(inventory, tree):
+        assert tree != untouched
+        return original(inventory, tree)
+    with patch.object(GitInventory, "entries", guarded):
+        result = ChangeDiffEngine().compute_structural_diff(str(repo), str(repo), base, head, "https://github.com/fixture/repo")
+    assert result.modified_files == ["a.py"]
+    assert result.modified_symbols[0].symbol_name == "load"
+    assert result.discovery_coverage["complete"]
+    assert result.discovery_coverage["source_bytes"] < 200
+    assert not result.added_symbols and not result.deleted_symbols
+
+
+def test_changed_object_bounds_preserve_unknown_frontier(indexed_repository):
+    from app.ingestion.change_objects import changed_objects
+    from app.ingestion.git_inventory import GitInventory
+    repo, git, _, _ = indexed_repository
+    base = git("rev-parse", "HEAD")
+    (repo / "a.py").write_text("changed = True\n")
+    git("add", "a.py")
+    git("commit", "-qm", "changed")
+    inventory = GitInventory(str(repo))
+    changes, coverage = changed_objects(inventory, inventory, base, git("rev-parse", "HEAD"), max_entries=1)
+    assert not changes and not coverage["complete"] and coverage["frontier"]
+
+
+def test_impact_frontier_replays_pages_and_rejects_other_diff():
+    from app.analysis.impact_frontier import advance_frontier, frontier_graph
+    from app.graph.repository_graph import RepositoryGraph
+    from app.graph.schemas import NodeKind, EdgeKind
+    from app.schemas.change_analysis import StructuralDiffResult, SymbolDiffFact
+    graph = RepositoryGraph()
+    nodes = [f"symbol:f.py:FUNCTION:f{i}:1" for i in range(4)]
+    for i, node in enumerate(nodes):
+        graph.add_node(node, NodeKind.SYMBOL, f"f{i}", "f.py", 1, 2)
+    for source, target in zip(nodes[1:], nodes):
+        graph.add_edge(source, target, EdgeKind.CALLS)
+    diff = StructuralDiffResult(base_commit_sha="a" * 40, head_commit_sha="b" * 40,
+        repository_url="https://github.com/fixture/repo", deleted_symbols=[SymbolDiffFact(
+            file_path="f.py", symbol_name="f0", symbol_kind="FUNCTION", change_type="DELETED", base_location={"start_line": 1})])
+    first = advance_frontier(graph, diff, batch=1)
+    resumed = advance_frontier(graph, diff, first, batch=1)
+    assert advance_frontier(graph, diff, first, batch=1) == resumed
+    assert len(first["visited"]) == 1 and len(resumed["visited"]) == 2
+    assert len(frontier_graph(resumed).get_edges()) == 2
+    with pytest.raises(ValueError, match="authority"):
+        advance_frontier(graph, diff.model_copy(update={"head_commit_sha": "c" * 40}), first, batch=1)
+
+
+def test_component_boundary_changes_invalidate_shared_subtrees(indexed_repository):
+    repo, git, _, factory = indexed_repository
+    (repo / "services" / "api").mkdir(parents=True)
+    (repo / "services" / "api" / "run.py").write_text("def run():\n    return 1\n")
+    git("add", ".")
+    git("commit", "-qm", "service without package")
+    before = factory()
+    before.build_manifest()
+    prior = before.file_projection("services/api/run.py")
+    (repo / "services" / "package.json").write_text('{"name":"service"}')
+    git("add", ".")
+    git("commit", "-qm", "package boundary")
+    after = factory()
+    after.build_manifest()
+    changed = after.file_projection("services/api/run.py")
+    assert changed.id != prior.id
+    assert changed.payload["component"]["root"] == "services"
+    assert changed.payload["component"]["storage_partition"] == prior.payload["component"]["storage_partition"]
+
+
+def test_behavior_certificate_ignores_comments_but_tracks_semantics(indexed_repository):
+    repo, git, _, factory = indexed_repository
+    before = factory()
+    before.build_manifest()
+    original = before.file_projection("a.py")
+    first = original.payload["facts_coverage"]["behavior_digest"]
+    (repo / "a.py").write_text("# comment only\ndef load(value):\n    return value\n")
+    git("add", "a.py")
+    git("commit", "-qm", "comment")
+    commented = factory()
+    commented.build_manifest()
+    second_projection = commented.file_projection("a.py")
+    assert second_projection.id != original.id
+    prior_sections = original.payload["facts_coverage"]["behavior_sections"]
+    next_sections = second_projection.payload["facts_coverage"]["behavior_sections"]
+    changed_sections = {key for key in prior_sections if prior_sections[key] != next_sections[key]}
+    assert not changed_sections, changed_sections
+    assert second_projection.payload["facts_coverage"]["behavior_digest"] == first
+    (repo / "a.py").write_text("def load(value):\n    return value + 1\n")
+    git("add", "a.py")
+    git("commit", "-qm", "behavior")
+    changed = factory()
+    changed.build_manifest()
+    third = changed.file_projection("a.py").payload["facts_coverage"]["behavior_digest"]
+    assert third != first
+
+
+def test_typescript_reexport_creates_source_attested_import_edge(indexed_repository):
+    from app.graph.persistent import PersistentRepositoryGraph
+    from app.graph.schemas import EdgeKind
+    repo, git, _, factory = indexed_repository
+    (repo / "src").mkdir()
+    (repo / "src" / "run.ts").write_text("export function run() { return 1; }\n")
+    (repo / "src" / "index.ts").write_text("export { run as start } from './run';\n")
+    git("add", ".")
+    git("commit", "-qm", "typescript barrel")
+    index = factory()
+    index.build_manifest()
+    edges = PersistentRepositoryGraph(index).get_edges(EdgeKind.IMPORTS)
+    edge = next(edge for edge in edges if edge.source == "file:src/index.ts" and edge.target == "file:src/run.ts")
+    assert edge.metadata["dependency_certificate"]["resolution"] == "EXPLICIT_IMPORT"
+    assert edge.metadata["dependency_certificate"]["source_behavior_digest"]
+
+
+def test_orphan_pins_release_but_retained_findings_survive(indexed_repository):
+    from uuid import uuid4
+    from app.models.scan import ScanModel
+    from app.models.finding import FindingModel
+    from app.models.intelligence import IndexPinModel
+    from app.indexing.retention import collect_catalog
+    _, _, db, factory = indexed_repository
+    index = factory()
+    index.build_manifest()
+    orphan, retained, empty = [str(uuid4()) for _ in range(3)]
+    db.add_all([ScanModel(id=value, owner_user_id="tenant-a", repository_url=index.repository_url, status="COMPLETED") for value in (retained, empty)])
+    db.flush()
+    db.add(FindingModel(scan_id=retained, title="Retained evidence", description="Canonical", severity="LOW", category="BUG"))
+    db.commit()
+    for value in (orphan, retained, empty):
+        index.pin(value)
+    index._acquire_writer()
+    try:
+        result = collect_catalog(index)
+    finally:
+        index._release_writer()
+    refs = db.scalars(select(IndexPinModel.referrer_id)).all()
+    assert refs == ["scan:" + retained]
+    assert result["released_pins"] == 2
+
+
+def test_pin_release_is_owner_scoped_and_idempotent(indexed_repository):
+    from app.models.intelligence import IndexPinModel
+    _, _, db, factory = indexed_repository
+    index = factory()
+    index.build_manifest()
+    index.pin("work-item", owner_kind="work")
+    index.pin("other-item", owner_kind="work")
+    assert index.release_pin("work-item", owner_kind="work") == 1
+    assert index.release_pin("work-item", owner_kind="work") == 0
+    refs = db.scalars(select(IndexPinModel.referrer_id).order_by(IndexPinModel.referrer_id)).all()
+    assert refs == ["work:other-item"]
+
+
 @pytest.fixture
 def indexed_repository(tmp_path):
     repo = tmp_path / "repo"
@@ -288,6 +455,43 @@ async def test_candidate_batch_is_deduplicated_anchored_and_byte_bounded(indexed
     assert set(candidates[0].evidence_refs).issubset(pack.evidence_index)
     assert pack.packed_bytes <= 2048 * 4
     assert not any("vendor" in str(fact) for fact in pack.evidence_index.values())
+
+
+@pytest.mark.asyncio
+async def test_missing_evidence_role_uses_only_targeted_file_retrieval(indexed_repository):
+    from unittest.mock import AsyncMock
+    from app.analysis.store import EvidenceStore
+    from app.context.runtime import ScanIntelligenceRuntime
+    from app.context.slices import build_specialist_context
+    from app.indexing.facts import chunk_id, select_candidates
+    from app.retrieval.schemas import RetrievalResult, RetrievalChannel
+    repo, git, _, factory = indexed_repository
+    (repo / "b.py").write_text(
+        "async def refresh(value):\n    time.sleep(1)\n\ndef validate(value):\n    return bool(value)\n")
+    git("add", "b.py")
+    git("commit", "-qm", "targeted guard context")
+    index = factory()
+    store = EvidenceStore(index.build_manifest())
+    store.persistent_index = index
+    candidate = select_candidates(index, "bug")[0].model_copy(deep=True)
+    candidate.metadata.update(file_path="b.py", required_evidence_roles=["primary", "guard"])
+    primary = set(candidate.evidence_refs)
+    extra = next(chunk for fact in index.file_facts("b.py", "CHUNK", limit=16)
+        if (chunk := index.load_chunk(chunk_id(index, fact.projection_id, fact.fact_id))) is not None
+        and "chunk:" + chunk.chunk_id not in primary)
+    result = RetrievalResult(chunk_id=extra.chunk_id, score=0.8,
+        source_channels=[RetrievalChannel.LEXICAL], chunk=extra, provenance={"selection": "targeted_role"})
+    runtime = await ScanIntelligenceRuntime.build(store)
+    retrieve = AsyncMock(return_value=[result])
+    with patch.object(runtime.retrieval_service, "retrieve", new=retrieve), \
+         patch.object(runtime.repository_graph, "get_edges", side_effect=AssertionError("broad graph scan")), \
+         patch.object(runtime.repository_graph, "evaluate_route_contracts", side_effect=AssertionError("broad contract scan")):
+        pack = await build_specialist_context(context_engine=runtime.context_engine, scan_id="scan",
+            commit_sha=index.commit_sha, analysis_intent="bug", candidates=[candidate], token_budget=2048)
+    query = retrieve.await_args.args[0]
+    assert query.file_path_filter == "b.py" and query.top_k == 2
+    assert pack.slices[0].guard_evidence_refs == ["chunk:" + extra.chunk_id]
+    assert pack.slices[0].candidate_metadata["evidence_role_coverage"]["guard"] == "TARGETED_SOURCE"
 
 
 def test_byte_budget_allows_small_files_without_reserving_maximum_file_size(indexed_repository):
