@@ -2,6 +2,8 @@
 
 import subprocess
 from dataclasses import replace
+import hashlib
+import json
 from unittest.mock import patch
 
 import pytest
@@ -55,6 +57,56 @@ def test_changed_object_bounds_preserve_unknown_frontier(indexed_repository):
     assert not changes and not coverage["complete"] and coverage["frontier"]
 
 
+def test_git_inventory_reuses_bounded_batch_reader_and_recovers_after_oversize(indexed_repository):
+    from app.ingestion.git_inventory import GitInventory, InventoryBound
+    repo, git, _, _ = indexed_repository
+    first = git("rev-parse", "HEAD:a.py")
+    second = git("rev-parse", "HEAD:b.py")
+    inventory = GitInventory(str(repo))
+    with patch.object(inventory, "_open", wraps=inventory._open) as opened:
+        assert inventory.read_object(first, kind="blob", max_bytes=4096)
+        assert inventory.read_object(second, kind="blob", max_bytes=4096)
+        assert len([call for call in opened.call_args_list if call.args[:2] == ("cat-file", "--batch")]) == 1
+        with pytest.raises(InventoryBound, match="object_byte_limit"):
+            inventory.read_object(first, kind="blob", max_bytes=1)
+        assert inventory.read_object(second, kind="blob", max_bytes=4096)
+        assert len([call for call in opened.call_args_list if call.args[:2] == ("cat-file", "--batch")]) == 2
+    inventory.close()
+
+
+def test_projection_redaction_memo_reuses_secret_strings_without_changing_output():
+    import app.indexing.persistent as persistent
+    secret = "api_key='abcdefghi'"
+    payload = {secret: [secret, {"duplicate": secret}], "plain": "duplicate"}
+    expected = persistent.redact_projection(payload)
+    expected_digest = hashlib.sha256(json.dumps(expected, sort_keys=True).encode()).hexdigest()
+    memo = persistent.ProjectionRedactionMemo(max_entries=32, max_retained_bytes=4096,
+                                               max_value_bytes=256)
+    with patch.object(persistent, "redact_secrets", wraps=persistent.redact_secrets) as canonical:
+        actual = persistent.redact_projection(payload, memo)
+    secret_calls = [call for call in canonical.call_args_list if call.args == (secret,)]
+    assert len(secret_calls) == 1
+    assert actual == expected
+    assert hashlib.sha256(json.dumps(actual, sort_keys=True).encode()).hexdigest() == expected_digest
+
+
+def test_projection_redaction_memo_saturation_oversize_and_scope_fail_safe():
+    import app.indexing.persistent as persistent
+    first = persistent.ProjectionRedactionMemo(max_entries=1, max_retained_bytes=64,
+                                                max_value_bytes=8)
+    second = persistent.ProjectionRedactionMemo(max_entries=1, max_retained_bytes=64,
+                                                 max_value_bytes=8)
+    with patch.object(persistent, "redact_secrets", wraps=persistent.redact_secrets) as canonical:
+        assert first.redact_text("repeat") == first.redact_text("repeat")
+        assert first.redact_text("other") == first.redact_text("other")
+        oversized = "api_key='abcdefghi'"
+        assert first.redact_text(oversized) == first.redact_text(oversized)
+        assert second.redact_text("repeat") == "repeat"
+    assert len([call for call in canonical.call_args_list if call.args == ("repeat",)]) == 2
+    assert len([call for call in canonical.call_args_list if call.args == ("other",)]) == 2
+    assert len([call for call in canonical.call_args_list if call.args == (oversized,)]) == 2
+
+
 def test_impact_frontier_replays_pages_and_rejects_other_diff():
     from app.analysis.impact_frontier import advance_frontier, frontier_graph
     from app.graph.repository_graph import RepositoryGraph
@@ -96,6 +148,30 @@ def test_component_boundary_changes_invalidate_shared_subtrees(indexed_repositor
     assert changed.id != prior.id
     assert changed.payload["component"]["root"] == "services"
     assert changed.payload["component"]["storage_partition"] == prior.payload["component"]["storage_partition"]
+
+
+def test_component_probe_cache_reuses_exact_positive_and_negative_git_evidence(indexed_repository):
+    from app.indexing.components import ComponentResolver
+    from app.ingestion.git_inventory import GitInventory
+    repo, git, _, _ = indexed_repository
+    for directory in (repo / "plain" / "one", repo / "plain" / "two",
+                      repo / "package" / "one", repo / "package" / "two"):
+        directory.mkdir(parents=True)
+    (repo / "package" / "package.json").write_text('{"name":"fixture"}')
+    git("add", ".")
+    git("commit", "-qm", "component cache fixture")
+    commit = git("rev-parse", "HEAD")
+    inventory = GitInventory(str(repo))
+    resolver = ComponentResolver(inventory, commit)
+    with patch.object(inventory, "path_entry", wraps=inventory.path_entry) as lookup:
+        cached = [resolver.file_identity(path) for path in (
+            "plain/one/a.py", "plain/two/b.py", "package/one/a.py", "package/two/b.py")]
+    fresh = ComponentResolver(GitInventory(str(repo)), commit)
+    expected = [fresh.file_identity(path) for path in (
+        "plain/one/a.py", "plain/two/b.py", "package/one/a.py", "package/two/b.py")]
+    assert cached == expected
+    assert len([call for call in lookup.call_args_list if call.args[1] == "package.json"]) == 1
+    assert len([call for call in lookup.call_args_list if call.args[1] == "package/package.json"]) == 1
 
 
 def test_behavior_certificate_ignores_comments_but_tracks_semantics(indexed_repository):

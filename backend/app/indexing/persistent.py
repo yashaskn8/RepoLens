@@ -34,14 +34,46 @@ def identity(*values: str) -> str:
     return hashlib.sha256(json.dumps(values, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
 
-def redact_projection(value):
+class ProjectionRedactionMemo:
+    """Bound repeated canonical redaction to one projected source object."""
+
+    def __init__(self, *, max_entries: int = 2048, max_retained_bytes: int = 262_144,
+                 max_value_bytes: int = 8192):
+        if min(max_entries, max_retained_bytes, max_value_bytes) <= 0:
+            raise ValueError("redaction memo bounds must be positive")
+        self.max_entries = max_entries
+        self.max_retained_bytes = max_retained_bytes
+        self.max_value_bytes = max_value_bytes
+        self._retained_bytes = 0
+        self._values: dict[str, str] = {}
+
+    def redact_text(self, value: str) -> str:
+        cached = self._values.get(value)
+        if cached is not None:
+            return cached
+        result = redact_secrets(value)
+        if len(self._values) >= self.max_entries or len(value) > self.max_value_bytes:
+            return result
+        source_bytes = len(value.encode("utf-8"))
+        if source_bytes > self.max_value_bytes:
+            return result
+        retained = source_bytes + len(result.encode("utf-8"))
+        if self._retained_bytes + retained > self.max_retained_bytes:
+            return result
+        self._values[value] = result
+        self._retained_bytes += retained
+        return result
+
+
+def redact_projection(value, redactor: ProjectionRedactionMemo | None = None):
     """Keep structured authority fields while redacting literal repository data."""
+    redact = redactor.redact_text if redactor is not None else redact_secrets
     if isinstance(value, str):
-        return redact_secrets(value)
+        return redact(value)
     if isinstance(value, dict):
-        return {redact_secrets(str(key)): redact_projection(item) for key, item in value.items()}
+        return {redact(str(key)): redact_projection(item, redactor) for key, item in value.items()}
     if isinstance(value, list):
-        return [redact_projection(item) for item in value]
+        return [redact_projection(item, redactor) for item in value]
     return value
 
 
@@ -347,7 +379,8 @@ class PersistentIndex:
         file = FileEntry(path=path, language=language, size_bytes=len(source),
                          lines_count=len(source.splitlines()), symbols=symbols, calls=calls)
         digest = hashlib.sha256(source).hexdigest()
-        payload = {"file": redact_projection(file.model_dump(mode="json")), "source_sha256": digest, "component": component}
+        redactor = ProjectionRedactionMemo()
+        payload = {"file": redact_projection(file.model_dump(mode="json"), redactor), "source_sha256": digest, "component": component}
         payload_size = len(json.dumps(payload, ensure_ascii=False).encode())
         if payload_size > self.limits.max_projection_bytes:
             return None, disposition.classification.value, "projection_byte_limit", len(source)
@@ -359,7 +392,7 @@ class PersistentIndex:
                 self.db.add(projection)
                 self.db.flush()
                 from app.indexing.facts import persist_facts
-                facts_coverage = persist_facts(self, projection, file, source)
+                facts_coverage = persist_facts(self, projection, file, source, redactor=redactor)
                 projection.payload = {**payload, "facts_coverage": facts_coverage}
         except InventoryBound as exc:
             if str(exc) != "projection_fact_byte_limit":
@@ -474,6 +507,7 @@ class PersistentIndex:
             self.stats["retention"] = collect_catalog(self)
             return self._build_manifest(branch=branch)
         finally:
+            self.inventory.close()
             self._release_writer()
 
     def _build_manifest(self, *, branch: str | None = None) -> RepositoryManifest:

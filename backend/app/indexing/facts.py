@@ -40,12 +40,13 @@ def _behavior_value(value):
     return value
 
 
-def persist_facts(index, projection, file, source: bytes) -> dict:
+def persist_facts(index, projection, file, source: bytes, *, redactor=None) -> dict:
     """Runs once per compatible projection, with bounded amplification."""
     from app.specialist_candidates import build_bug_candidates, build_security_flow_candidates
-    from app.indexing.persistent import redact_projection
-    from app.security.redaction import redact_secrets
+    from app.indexing.persistent import ProjectionRedactionMemo, redact_projection
     from app.ingestion.git_inventory import InventoryBound
+    redactor = redactor or ProjectionRedactionMemo()
+    redact = redactor.redact_text
     stored_bytes = 0
 
     def add(row):
@@ -65,7 +66,7 @@ def persist_facts(index, projection, file, source: bytes) -> dict:
     chunks = retained_chunks
     from app.semantics import build_semantic_program
     semantic_program = build_semantic_program(manifest, chunks)
-    semantic_payload = redact_projection(semantic_program.model_dump(mode="json"))
+    semantic_payload = redact_projection(semantic_program.model_dump(mode="json"), redactor)
     if len(json.dumps(semantic_payload).encode()) <= index.limits.max_projection_bytes:
         add(IndexFactModel(projection_id=projection.id, tenant_id=index.tenant_id,
             repository_id=index.repository_id, path=file.path, fact_id="semantic-summary",
@@ -113,9 +114,9 @@ def persist_facts(index, projection, file, source: bytes) -> dict:
             import_symbol = next((item for item in imports if f"import:{item.start_line}" == chunk.symbol), None)
             if import_symbol and isinstance(import_symbol.details.get("source"), str):
                 payload["import_specifier"] = import_symbol.details["source"]
-        add(IndexFactModel(**common, fact_id=key, kind="CHUNK", lookup=redact_secrets(chunk.symbol.lower()),
-            target="", payload=redact_projection(payload)))
-        for token, frequency in lexical_tokens(redact_secrets(chunk.symbol + " " + chunk.content)).items():
+        add(IndexFactModel(**common, fact_id=key, kind="CHUNK", lookup=redact(chunk.symbol.lower()),
+            target="", payload=redact_projection(payload, redactor)))
+        for token, frequency in lexical_tokens(redact(chunk.symbol + " " + chunk.content)).items():
             if postings >= MAX_FILE_POSTINGS:
                 truncated = True
                 break
@@ -125,12 +126,12 @@ def persist_facts(index, projection, file, source: bytes) -> dict:
     graph = build_repository_graph(manifest, EvidenceStore(manifest))
     for target in import_paths(file):
         add(IndexFactModel(**common, fact_id=_digest("import", target), kind="IMPORT_REF",
-            lookup=file.path, target=redact_secrets(target), payload=redact_projection({"source_path": file.path, "target_path": target})))
+            lookup=file.path, target=redact(target), payload=redact_projection({"source_path": file.path, "target_path": target}, redactor)))
     from app.graph.module_resolution import import_specifiers
     for specifier in import_specifiers(file):
         add(IndexFactModel(**common, fact_id=_digest("import-spec", specifier), kind="IMPORT_SPEC",
-            lookup=file.path, target=redact_secrets(specifier),
-            payload=redact_projection({"source_path": file.path, "specifier": specifier})))
+            lookup=file.path, target=redact(specifier),
+            payload=redact_projection({"source_path": file.path, "specifier": specifier}, redactor)))
     nodes = graph.get_nodes()
     edges = graph.get_edges()
     # Identical endpoint strings in different services are distinct authorities.
@@ -142,14 +143,14 @@ def persist_facts(index, projection, file, source: bytes) -> dict:
         if len(node.id.encode("utf-8")) > 1024:
             truncated = True
             continue
-        add(IndexFactModel(**common, fact_id=_digest("node", node.id), kind="NODE", lookup=redact_secrets(node.id),
-            target=node.kind.value, payload=redact_projection(node.model_dump(mode="json"))))
+        add(IndexFactModel(**common, fact_id=_digest("node", node.id), kind="NODE", lookup=redact(node.id),
+            target=node.kind.value, payload=redact_projection(node.model_dump(mode="json"), redactor)))
     for edge in edges[:MAX_FILE_FACTS]:
         if max(len(edge.source.encode("utf-8")), len(edge.target.encode("utf-8"))) > 1024:
             truncated = True
             continue
         add(IndexFactModel(**common, fact_id=_digest("edge", edge.source, edge.target, edge.kind.value),
-            kind="EDGE", lookup=redact_secrets(edge.source), target=redact_secrets(edge.target), payload=redact_projection(edge.model_dump(mode="json"))))
+            kind="EDGE", lookup=redact(edge.source), target=redact(edge.target), payload=redact_projection(edge.model_dump(mode="json"), redactor)))
     truncated |= len(nodes) > MAX_FILE_FACTS or len(edges) > MAX_FILE_FACTS
     behavior_nodes = {node.id: {"kind": node.kind.value, "label": node.label,
         "file_path": node.file_path, "metadata": _behavior_value(node.metadata)} for node in nodes[:MAX_FILE_FACTS]}
@@ -182,7 +183,7 @@ def persist_facts(index, projection, file, source: bytes) -> dict:
                 continue
             issue = _digest(candidate.candidate_kind, file.path, candidate.related_symbol,
                 candidate.metadata.get("source_line"), candidate.metadata.get("sink"), candidate.metadata.get("callee"))
-            payload = redact_projection(candidate.model_dump(mode="json"))
+            payload = redact_projection(candidate.model_dump(mode="json"), redactor)
             payload["metadata"]["issue_fingerprint"] = issue
             payload["metadata"]["projection_id"] = projection.id
             payload["metadata"]["evidence_keys"] = keys

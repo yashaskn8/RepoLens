@@ -25,16 +25,44 @@ class GitInventory:
         self.repo_dir = repo_dir
         self.timeout = timeout
         self.max_record_bytes = max_record_bytes
+        self._batch_process = None
+        self._batch_lock = threading.Lock()
 
-    def _open(self, *args: str):
+    def _open(self, *args: str, input_pipe: bool = False):
         env = dict(os.environ)
         env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
                    GIT_NO_REPLACE_OBJECTS="1", GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
         return subprocess.Popen(
             ["git", "-c", "core.hooksPath=" + os.devnull, "-c", "core.fsmonitor=false",
              "-c", "core.pager=cat", *args], cwd=self.repo_dir, env=env,
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            stdin=subprocess.PIPE if input_pipe else subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         )
+
+    def _close_batch_locked(self) -> None:
+        process, self._batch_process = self._batch_process, None
+        if process is None:
+            return
+        try:
+            if process.stdin is not None:
+                process.stdin.close()
+            process.wait(timeout=1)
+        except (OSError, subprocess.TimeoutExpired):
+            process.kill()
+            process.wait()
+        finally:
+            if process.stdout is not None:
+                process.stdout.close()
+
+    def close(self) -> None:
+        with self._batch_lock:
+            self._close_batch_locked()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
     @staticmethod
     def validate_oid(value: str) -> str:
@@ -46,23 +74,44 @@ class GitInventory:
         self.validate_oid(oid)
         if kind not in {"blob", "tree"}:
             raise InventoryBound("unsupported Git object kind")
-        process = self._open("cat-file", kind, oid)
-        timer = threading.Timer(self.timeout, process.kill)
-        timer.daemon = True
-        timer.start()
-        try:
-            payload = process.stdout.read(max_bytes + 1)
-            if len(payload) > max_bytes:
-                raise InventoryBound("object_byte_limit")
-            if process.wait(timeout=self.timeout) != 0:
-                raise InventoryBound("object_unavailable_or_timeout")
-            return payload
-        finally:
-            timer.cancel()
-            if process.poll() is None:
-                process.kill()
-            process.wait()
-            process.stdout.close()
+        with self._batch_lock:
+            process = self._batch_process
+            if process is None or process.poll() is not None:
+                self._close_batch_locked()
+                process = self._open("cat-file", "--batch", input_pipe=True)
+                self._batch_process = process
+            timer = threading.Timer(self.timeout, process.kill)
+            timer.daemon = True
+            timer.start()
+            try:
+                process.stdin.write((oid + "\n").encode("ascii"))
+                process.stdin.flush()
+                header = process.stdout.readline(256)
+                if not header.endswith(b"\n"):
+                    raise InventoryBound("object_unavailable_or_timeout")
+                fields = header.rstrip(b"\n").split(b" ")
+                if len(fields) != 3:
+                    raise InventoryBound("object_unavailable_or_timeout")
+                returned_oid, returned_kind, raw_size = fields
+                try:
+                    object_size = int(raw_size)
+                except ValueError as exc:
+                    raise InventoryBound("object_unavailable_or_timeout") from exc
+                if (returned_oid.decode("ascii") != oid or returned_kind.decode("ascii") != kind
+                        or object_size < 0):
+                    raise InventoryBound("object_identity_mismatch")
+                if object_size > max_bytes:
+                    raise InventoryBound("object_byte_limit")
+                payload = process.stdout.read(object_size)
+                delimiter = process.stdout.read(1)
+                if len(payload) != object_size or delimiter != b"\n":
+                    raise InventoryBound("object_unavailable_or_timeout")
+                return payload
+            except (InventoryBound, OSError, UnicodeError):
+                self._close_batch_locked()
+                raise
+            finally:
+                timer.cancel()
 
     def root_tree(self, commit_sha: str) -> str:
         self.validate_oid(commit_sha)

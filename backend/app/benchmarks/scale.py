@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -87,7 +88,7 @@ def _write_fast_import(repo: Path, message: str, entries: Iterable[tuple[str, by
 
 def generate_passive_repository(repo: Path, file_count: int, *, symbols_per_file: int = 1,
                                 vendor_ratio: float = 0.0, fanout: int = 0,
-                                scc_size: int = 0, workspace_depth: int = 0) -> tuple[str, str]:
+                                scc_size: int = 0, workspace_depth: int = 0) -> tuple[str, str, dict]:
     """Create controlled Git objects directly; no generated source is imported or run."""
     if file_count <= 0 or file_count > 2_000_000:
         raise ValueError("file_count must be between 1 and 2,000,000")
@@ -95,20 +96,28 @@ def generate_passive_repository(repo: Path, file_count: int, *, symbols_per_file
         raise ValueError("symbols_per_file must be between 1 and 32")
     repo.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "--bare", "--quiet", str(repo)], check=True, timeout=30)
+    generated_files = max(0, file_count - 2)
+    fanout_files = min(max(0, fanout), generated_files)
+    cycle_files = min(max(0, scc_size), generated_files)
+    stress_files = max(fanout_files, cycle_files)
+    vendor_files = min(int(file_count * min(max(vendor_ratio, 0.0), 0.9)),
+                       max(0, generated_files - stress_files))
+
+    def source_path(index: int) -> str:
+        return f"src/p{index // 1000 + 1:04d}/module_{index:07d}.py"
 
     def entries():
         yield "src/p0000/hot.py", b"import time\nasync def unresolved_candidate(value):\n    time.sleep(1)\n    return value\n"
         yield "src/core.py", b"def shared(value):\n    return value\n"
-        emitted = 2
-        for index in range(max(0, file_count - emitted)):
-            vendor = vendor_ratio > 0 and index < int(file_count * min(vendor_ratio, 0.9))
-            prefix = "vendor" if vendor else "src"
-            bucket = index // 1000 + 1
-            path = f"{prefix}/p{bucket:04d}/module_{index:07d}.py"
-            imports = "from src.core import shared\n" if index < fanout else ""
-            if index < scc_size:
-                target = (index + 1) % max(1, scc_size)
-                imports += f"from src.p{target // 1000 + 1:04d}.module_{target:07d} import duplicate\n"
+        for index in range(generated_files):
+            vendor = stress_files <= index < stress_files + vendor_files
+            path = (f"vendor/p{index // 1000 + 1:04d}/module_{index:07d}.py"
+                    if vendor else source_path(index))
+            imports = "from src.core import shared\n" if index < fanout_files else ""
+            if index < cycle_files:
+                target = (index + 1) % cycle_files
+                target_path = source_path(target).removesuffix(".py").replace("/", ".")
+                imports += f"from {target_path} import duplicate\n"
             body = imports + "\n".join(
                 f"def {'duplicate' if symbol == 0 else f'symbol_{symbol}'}(value):\n    return value"
                 for symbol in range(symbols_per_file)) + "\n"
@@ -126,9 +135,14 @@ def generate_passive_repository(repo: Path, file_count: int, *, symbols_per_file
 
     _write_fast_import(repo, "base", entries())
     base = _git(repo, "rev-parse", "refs/heads/main")
-    changed = b"import time\nasync def unresolved_candidate(value):\n    time.sleep(2)\n    return value\n"
-    _write_fast_import(repo, "tiny change", [("src/p0000/hot.py", changed)], parent=base)
-    return base, _git(repo, "rev-parse", "refs/heads/main")
+    changed = b"def shared(value):\n    return value + 1\n"
+    _write_fast_import(repo, "tiny change", [("src/core.py", changed)], parent=base)
+    workspace_files = 2 * min(workspace_depth, 16) + (1 if workspace_depth else 0)
+    shape = {"represented_files": file_count + workspace_files,
+             "requested_source_files": file_count, "vendor_files": vendor_files,
+             "generated_files": 0, "fanout_files": fanout_files, "cycle_files": cycle_files,
+             "workspace_files": workspace_files}
+    return base, _git(repo, "rev-parse", "refs/heads/main"), shape
 
 
 def _percentile(values: list[float], percentile: float) -> float:
@@ -154,14 +168,15 @@ def run_scale_benchmark(*, file_count: int, symbols_per_file: int = 1,
     root = Path(holder.name if holder else keep_directory).resolve()
     root.mkdir(parents=True, exist_ok=True)
     repo, database = root / "fixture.git", root / "benchmark.db"
-    metrics: dict = {"schema_version": 1, "requested_files": file_count,
+    metrics: dict = {"schema_version": 2, "requested_files": file_count,
         "profile": {"symbols_per_file": symbols_per_file, "vendor_ratio": vendor_ratio,
                     "fanout": fanout, "scc_size": scc_size, "workspace_depth": workspace_depth}}
     tracemalloc.start()
     try:
         with _clock(metrics, "fixture_generation_seconds"):
-            base, head = generate_passive_repository(repo, file_count, symbols_per_file=symbols_per_file,
+            base, head, shape = generate_passive_repository(repo, file_count, symbols_per_file=symbols_per_file,
                 vendor_ratio=vendor_ratio, fanout=fanout, scc_size=scc_size, workspace_depth=workspace_depth)
+        metrics["inventory"] = shape
         inventory = GitInventory(str(repo))
         with _clock(metrics, "discovery_seconds"):
             changes, discovery = changed_objects(inventory, inventory, base, head,
@@ -180,18 +195,46 @@ def run_scale_benchmark(*, file_count: int, symbols_per_file: int = 1,
         with _clock(metrics, "cold_index_seconds"):
             cold.build_manifest()
         metrics["cold_index"] = dict(cold.stats)
+        unchanged = PersistentIndex(session, tenant_id="benchmark", repository_url="benchmark://fixture",
+                                    repo_dir=str(repo), commit_sha=base, limits=limits)
+        with _clock(metrics, "unchanged_warm_index_seconds"):
+            unchanged.build_manifest()
+        metrics["unchanged_warm_index"] = dict(unchanged.stats)
+        # Backward-compatible keys now truthfully mean an unchanged warm pass.
+        metrics["warm_index_seconds"] = metrics["unchanged_warm_index_seconds"]
+        metrics["warm_index"] = dict(unchanged.stats)
         before_size = database.stat().st_size
-        warm = PersistentIndex(session, tenant_id="benchmark", repository_url="benchmark://fixture",
-                               repo_dir=str(repo), commit_sha=head, limits=limits)
-        with _clock(metrics, "warm_index_seconds"):
-            warm.build_manifest()
-        metrics["warm_index"] = dict(warm.stats)
+        interrupted = PersistentIndex(session, tenant_id="benchmark", repository_url="benchmark://fixture",
+                                      repo_dir=str(repo), commit_sha=head,
+                                      limits=replace(limits, max_files=1))
+        with _clock(metrics, "interruption_seconds"):
+            interrupted.build_manifest()
+        if interrupted.stats["inventory_complete"]:
+            raise AssertionError("bounded interruption did not produce a partial generation")
         resumed = PersistentIndex(session, tenant_id="benchmark", repository_url="benchmark://fixture",
                                   repo_dir=str(repo), commit_sha=head, limits=limits)
         with _clock(metrics, "resume_time_seconds"):
-            resumed.open_snapshot(warm.snapshot_id)
+            resumed.build_manifest()
+        if not resumed.stats["inventory_complete"]:
+            raise AssertionError("resumed generation did not complete")
+        metrics["tiny_change_index_seconds"] = round(
+            metrics["interruption_seconds"] + metrics["resume_time_seconds"], 6)
+        metrics["tiny_change_index"] = dict(resumed.stats)
+        metrics["recovery"] = {
+            "status": "EXECUTED",
+            "interrupted_complete": interrupted.stats["inventory_complete"],
+            "interrupted_stop_reason": interrupted.stats["stop_reason"],
+            "resume_complete": resumed.stats["inventory_complete"],
+            "resume_reused_files": resumed.stats["reused_files"],
+            "false_complete": bool(interrupted.stats["inventory_complete"]),
+        }
+        reopened = PersistentIndex(session, tenant_id="benchmark", repository_url="benchmark://fixture",
+                                   repo_dir=str(repo), commit_sha=head, limits=limits)
+        with _clock(metrics, "snapshot_reopen_seconds"):
+            reopened.open_snapshot(resumed.snapshot_id)
         metrics["resume_status"] = "EXECUTED"
         metrics["persistent_storage_growth_bytes"] = max(0, database.stat().st_size - before_size)
+        warm = resumed
         latencies = []
         for query in ("unresolved candidate", "shared value", "duplicate") * 7:
             started = time.perf_counter()
@@ -204,6 +247,33 @@ def run_scale_benchmark(*, file_count: int, symbols_per_file: int = 1,
             diff = ChangeDiffEngine().compute_structural_diff(left, right, base, head, "benchmark://fixture")
             diff.discovery_coverage = coverage
         graph = PersistentRepositoryGraph(warm)
+        stress_probe_count = min(64, max(shape["fanout_files"], shape["cycle_files"]))
+        fanout_observed = 0
+        cycle_observed = 0
+        for index in range(stress_probe_count):
+            source_path = f"src/p{index // 1000 + 1:04d}/module_{index:07d}.py"
+            edges = graph._cross_edges(source_path)
+            if index < shape["fanout_files"] and any(edge.target == "file:src/core.py" for edge in edges):
+                fanout_observed += 1
+            if index < shape["cycle_files"]:
+                target = (index + 1) % shape["cycle_files"]
+                target_path = f"file:src/p{target // 1000 + 1:04d}/module_{target:07d}.py"
+                if any(edge.target == target_path for edge in edges):
+                    cycle_observed += 1
+        expected_fanout_sample = min(shape["fanout_files"], stress_probe_count)
+        expected_cycle_sample = min(shape["cycle_files"], stress_probe_count)
+        stress_verified = (fanout_observed == expected_fanout_sample
+                           and cycle_observed == expected_cycle_sample)
+        metrics["stress_graph"] = {
+            "files_examined": stress_probe_count,
+            "expected_fanout_edges_in_sample": expected_fanout_sample,
+            "observed_fanout_edges": fanout_observed,
+            "expected_cycle_edges_in_sample": expected_cycle_sample,
+            "observed_cycle_edges": cycle_observed,
+            "verified": stress_verified,
+        }
+        if not stress_verified:
+            raise AssertionError("generated stress graph did not produce its source-attested edges")
         frontier = None
         with _clock(metrics, "impact_frontier_seconds"):
             for _ in range(16):
@@ -221,8 +291,12 @@ def run_scale_benchmark(*, file_count: int, symbols_per_file: int = 1,
         metrics["candidate_counts"] = {"scope": "BOUNDED_SELECTED", "bug": len(bug),
             "security": len(security), "unique": len(set(ids)),
             "bug_coverage": bug_coverage, "security_coverage": security_coverage}
+        admission = ai_work_envelope(ids)
+        metrics["model_admission"] = {"status": "EVALUATED", **admission}
+        metrics["model_execution"] = {"status": "NOT_EXECUTED", "calls": None, "tokens": None}
+        metrics["verifier_execution"] = {"status": "NOT_EXECUTED", "attempts": None}
         metrics["ai"] = {"status": "NOT_EXECUTED", "model_calls": None, "tokens": None,
-                         "verifier_attempts": None, **ai_work_envelope(ids)}
+                         "verifier_attempts": None, **admission}
         metrics["scale_invariant"] = assert_inventory_independent_ai_work(100_000, max(100_001, file_count * 2), ids)
         _, peak = tracemalloc.get_traced_memory()
         metrics["peak_python_allocation_bytes"] = peak

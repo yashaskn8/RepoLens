@@ -11,6 +11,18 @@ class ComponentResolver:
         self.inventory = inventory
         self.root = inventory.root_tree(commit_sha)
         self.cache = OrderedDict()
+        self.probe_cache = OrderedDict()
+
+    def _probe(self, path):
+        key = (self.root, path)
+        if key in self.probe_cache:
+            self.probe_cache.move_to_end(key)
+            return self.probe_cache[key]
+        entry = self.inventory.path_entry(self.root, path)
+        self.probe_cache[key] = entry
+        if len(self.probe_cache) > 4096:
+            self.probe_cache.popitem(last=False)
+        return entry
 
     def boundary(self, path):
         directory = posixpath.dirname(path)
@@ -21,7 +33,7 @@ class ComponentResolver:
         for _ in range(32):
             for name in ("package.json", "pyproject.toml", "__init__.py"):
                 candidate = posixpath.join(current, name)
-                entry = self.inventory.path_entry(self.root, candidate)
+                entry = self._probe(candidate)
                 inspected.append((candidate, entry.object_id if entry else None))
                 if entry and entry.kind == "blob" and entry.mode in {"100644", "100755"}:
                     result = {"root": current or ".", "boundary": candidate, "kind": "PACKAGE"}
