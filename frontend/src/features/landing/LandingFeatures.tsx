@@ -29,20 +29,20 @@ export const FEATURES_DATA: FeatureItem[] = [
     title: 'Multi-Agent Specialist Consensus',
     badge: 'Consensus Engine',
     description:
-      'Parallel specialist LLM agents (Security Auditor, Architecture Sentinel, Blast Radius Assessor, and Remediation Engineer) cross-validate each finding against verified evidence.',
+      'Specialist analysis personas (Security Auditor, Architecture Sentinel, Impact Assessor, and Remediation Engineer) cross-validate each finding against verified code evidence.',
     tags: ['Parallel LLMs', 'Cross-Verification', 'Zero Hallucinations'],
     targetMode: 'ARCHITECTURE',
     actionText: 'View Consensus Engine →',
   },
   {
-    icon: '💥',
-    title: 'PR Blast Radius & Contract Deltas',
-    badge: 'Change Intelligence',
+    icon: '📊',
+    title: 'PR Impact & Contract Deltas',
+    badge: 'PR Analysis',
     description:
-      'Computes semantic diffs between Git commit SHAs, uncovering breaking API schema shifts, altered route signatures, and downstream blast impact zones before you merge.',
-    tags: ['Semantic Diff', 'Schema Drift', 'Impact Trees'],
+      'Computes semantic diffs between Git commits, uncovering breaking API schema shifts, altered route signatures, and downstream affected callers before you merge.',
+    tags: ['Semantic Diff', 'Contract Checks', 'Downstream Callers'],
     targetMode: 'CHANGE_ANALYSIS',
-    actionText: 'Analyze PR Deltas →',
+    actionText: 'Analyze PR Impact →',
   },
   {
     icon: '🛠️',

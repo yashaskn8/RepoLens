@@ -31,34 +31,29 @@ export interface AppShellProps {
 
 const navItems = [
   {
-    label: 'Overview',
+    label: 'Dashboard',
     href: '/dashboard',
     icon: <LayoutDashboard size={18} />,
-    badge: undefined,
   },
   {
-    label: 'Repository Scan',
+    label: 'Scan Repository',
     href: '/scan',
     icon: <Scan size={18} />,
-    badge: 'AST',
   },
   {
-    label: 'Change Intelligence',
+    label: 'PR Analysis',
     href: '/change-analysis',
     icon: <GitPullRequest size={18} />,
-    badge: 'PRs',
   },
   {
-    label: 'Findings Explorer',
+    label: 'Findings',
     href: '/findings',
     icon: <ShieldAlert size={18} />,
-    badge: undefined,
   },
   {
-    label: 'Remediation',
+    label: 'Suggested Fixes',
     href: '/remediation',
     icon: <Wrench size={18} />,
-    badge: 'HITL',
   },
 ];
 
@@ -116,12 +111,6 @@ export function AppShell({ children, breadcrumbs = [], title }: AppShellProps) {
                 </span>
               )}
             </div>
-
-            {!collapsed && item.badge && (
-              <Badge variant="cyan" size="sm">
-                {item.badge}
-              </Badge>
-            )}
           </Link>
         );
       })}
@@ -147,7 +136,7 @@ export function AppShell({ children, breadcrumbs = [], title }: AppShellProps) {
         title={collapsed ? 'Account' : undefined}
       >
         <User size={18} />
-        {!collapsed && <span style={{ fontWeight: pathname === '/account' ? 600 : 500 }}>Account & Role</span>}
+        {!collapsed && <span style={{ fontWeight: pathname === '/account' ? 600 : 500 }}>Account</span>}
       </Link>
 
       {collapsed && (

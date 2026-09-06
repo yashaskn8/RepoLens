@@ -26,7 +26,7 @@ export const WorkspaceNav: React.FC<WorkspaceNavProps> = ({ currentMode, onModeC
         className={`filter-btn workspace-nav-btn ${currentMode === 'SCAN' ? 'filter-btn-active' : ''}`}
         onClick={() => onModeChange('SCAN')}
       >
-        <span aria-hidden="true">🛡️</span> Security &amp; AST Scan
+        <span aria-hidden="true">🛡️</span> Scan Repository
       </button>
       <button
         type="button"
@@ -35,7 +35,7 @@ export const WorkspaceNav: React.FC<WorkspaceNavProps> = ({ currentMode, onModeC
         className={`filter-btn workspace-nav-btn ${currentMode === 'CHANGE_ANALYSIS' ? 'filter-btn-active' : ''}`}
         onClick={() => onModeChange('CHANGE_ANALYSIS')}
       >
-        <span aria-hidden="true">🔍</span> Change Intelligence &amp; PR
+        <span aria-hidden="true">🔍</span> PR Analysis
       </button>
       <button
         type="button"
@@ -44,7 +44,7 @@ export const WorkspaceNav: React.FC<WorkspaceNavProps> = ({ currentMode, onModeC
         className={`filter-btn workspace-nav-btn ${currentMode === 'ARCHITECTURE' ? 'filter-btn-active' : ''}`}
         onClick={() => onModeChange('ARCHITECTURE')}
       >
-        <span aria-hidden="true">🏗️</span> Architecture Engine
+        <span aria-hidden="true">🏗️</span> Code Relationships
       </button>
     </nav>
   );

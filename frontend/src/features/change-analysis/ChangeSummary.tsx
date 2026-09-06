@@ -40,7 +40,7 @@ export const ChangeSummary: React.FC<ChangeSummaryProps> = ({ analysis }) => {
       </Card>
 
       <Card className="!p-5">
-        <div className="metric-label">BLAST RADIUS (IMPACTED)</div>
+        <div className="metric-label">AFFECTED CALLERS</div>
         <div className="text-2xl font-extrabold text-orange-400 mt-1">
           {analysis.impacted_symbols_count}
         </div>

@@ -4,6 +4,7 @@ import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { FindingEvidence } from './FindingEvidence';
 import { RemediationLifecycle } from '@/components/RemediationLifecycle';
+import { AlertCircle, AlertTriangle, FileCode, HelpCircle, ShieldAlert, Sparkles, Wrench } from 'lucide-react';
 
 export interface FindingCardProps {
   finding: Finding;
@@ -11,83 +12,195 @@ export interface FindingCardProps {
   onToggleExpand: () => void;
 }
 
+/**
+ * Returns a human-friendly explanation of why a finding matters based on category/severity.
+ */
+function getImpactExplanation(finding: Finding): string {
+  if (finding.description && finding.description.length > 20) {
+    return finding.description;
+  }
+  switch (finding.severity) {
+    case 'CRITICAL':
+      return 'Critical security risk: Can lead to unauthorized access, privilege escalation, or arbitrary code execution.';
+    case 'HIGH':
+      return 'High risk: Exposes sensitive data, circumvents access controls, or creates severe architectural fragility.';
+    case 'MEDIUM':
+      return 'Medium risk: Insecure configuration, missing input sanitization, or breaking contract inconsistency.';
+    case 'LOW':
+    default:
+      return 'Code quality or maintenance debt: Could degrade maintainability or introduce subtle defects over time.';
+  }
+}
+
+/**
+ * Returns a clear recommended action for the finding.
+ */
+function getRecommendation(finding: Finding): string {
+  if (finding.mitigation_guidance) {
+    return finding.mitigation_guidance;
+  }
+  if (finding.category?.toLowerCase().includes('auth') || finding.title.toLowerCase().includes('token')) {
+    return 'Ensure credentials and tokens are loaded securely from environment secrets and never committed to source.';
+  }
+  if (finding.category?.toLowerCase().includes('injection') || finding.title.toLowerCase().includes('sql')) {
+    return 'Use parameterized queries or an ORM to prevent unsanitized user inputs from being executed directly.';
+  }
+  return 'Apply input validation, confine permissions, and verify that test coverage guards against regressions.';
+}
+
 export const FindingCard: React.FC<FindingCardProps> = ({
   finding,
   isExpanded,
   onToggleExpand,
 }) => {
+  const primaryEvidence = finding.evidences && finding.evidences.length > 0 ? finding.evidences[0] : null;
+
   return (
-    <article className="finding-card">
-      {/* Header Badges & Attribution */}
-      <div className="flex justify-between items-start gap-4 flex-wrap">
-        <div className="flex items-center gap-2 flex-wrap">
-          <Badge severity={finding.severity}>{finding.severity}</Badge>
+    <article
+      className="finding-card"
+      style={{
+        borderRadius: 'var(--radius-lg)',
+        backgroundColor: 'rgba(9, 13, 26, 0.85)',
+        border: '1px solid var(--border-glass)',
+        padding: '1.25rem 1.5rem',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '1rem',
+      }}
+    >
+      {/* Header Badges & Severity */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+          <Badge
+            variant={
+              finding.severity === 'CRITICAL'
+                ? 'critical'
+                : finding.severity === 'HIGH'
+                ? 'high'
+                : finding.severity === 'MEDIUM'
+                ? 'medium'
+                : 'low'
+            }
+            size="sm"
+          >
+            {finding.severity}
+          </Badge>
 
           {finding.verification_verdict && (
             <Badge
               variant={finding.verification_verdict === 'CONFIRMED' ? 'success' : 'medium'}
+              size="sm"
             >
-              {finding.verification_verdict}
+              {finding.verification_verdict === 'CONFIRMED' ? 'Verified' : finding.verification_verdict}
             </Badge>
           )}
 
-          <span className="text-xs text-slate-400 uppercase font-semibold">
-            {finding.category || 'General'}
+          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600, letterSpacing: '0.04em' }}>
+            {finding.category || 'Security Finding'}
           </span>
         </div>
 
-        {finding.model_metadata && (
-          <span className="text-xs text-slate-500">
-            Agent: {finding.model_metadata.provider || 'AI'} ({finding.model_metadata.model_name})
+        {finding.rule_id && (
+          <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+            Rule: {finding.rule_id}
           </span>
         )}
       </div>
 
-      {/* Finding Title & Description */}
-      <h3 className="text-base font-semibold text-slate-100 mt-3 mb-2">
-        {finding.title}
-      </h3>
-
-      <p className="text-sm text-slate-300 mb-3 leading-relaxed">
-        {finding.description}
-      </p>
-
-      {/* Verification Rationale */}
-      {finding.verification_reason && (
-        <div className="text-xs text-slate-400 bg-slate-950/40 p-2.5 rounded border border-white/5 mb-3 leading-relaxed">
-          <strong className="text-slate-200">Verification: </strong>
-          {finding.verification_reason}
+      {/* 4-Question Structured Format */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+        {/* 1. What happened? */}
+        <div style={{ display: 'flex', gap: '0.65rem', alignItems: 'baseline' }}>
+          <div style={{ width: '130px', flexShrink: 0, fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.03em' }}>
+            What happened?
+          </div>
+          <div style={{ fontSize: '0.9375rem', fontWeight: 600, color: '#ffffff', lineHeight: 1.4 }}>
+            {finding.title}
+          </div>
         </div>
-      )}
 
-      {/* Evidence Box */}
-      {finding.evidences && finding.evidences.length > 0 && (
-        <FindingEvidence evidence={finding.evidences[0]} />
-      )}
-
-      {/* Mitigation Guidance */}
-      {finding.mitigation_guidance && (
-        <div className="mt-3 text-xs text-emerald-300 leading-relaxed">
-          <strong>Remediation: </strong>
-          {finding.mitigation_guidance}
+        {/* 2. Why does it matter? */}
+        <div style={{ display: 'flex', gap: '0.65rem', alignItems: 'baseline' }}>
+          <div style={{ width: '130px', flexShrink: 0, fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.03em' }}>
+            Why it matters
+          </div>
+          <div style={{ fontSize: '0.8125rem', color: 'var(--text-light)', lineHeight: 1.5 }}>
+            {getImpactExplanation(finding)}
+          </div>
         </div>
-      )}
+
+        {/* 3. Where is it? */}
+        <div style={{ display: 'flex', gap: '0.65rem', alignItems: 'baseline' }}>
+          <div style={{ width: '130px', flexShrink: 0, fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.03em' }}>
+            Where is it?
+          </div>
+          <div style={{ flex: 1 }}>
+            {primaryEvidence ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.8125rem', fontFamily: 'var(--font-mono)', color: 'var(--accent-cyan)' }}>
+                  <FileCode size={14} />
+                  <span>{primaryEvidence.file_path}</span>
+                  {primaryEvidence.start_line && (
+                    <span style={{ color: 'var(--text-muted)' }}>
+                      :L{primaryEvidence.start_line}
+                      {primaryEvidence.end_line && primaryEvidence.end_line !== primaryEvidence.start_line ? `-L${primaryEvidence.end_line}` : ''}
+                    </span>
+                  )}
+                </div>
+
+                {primaryEvidence.code_snippet && (
+                  <pre
+                    style={{
+                      margin: '0.35rem 0 0 0',
+                      padding: '0.65rem 0.85rem',
+                      background: '#030611',
+                      border: '1px solid var(--border-subtle)',
+                      borderRadius: 'var(--radius-sm)',
+                      fontSize: '0.75rem',
+                      fontFamily: 'var(--font-mono)',
+                      color: 'var(--text-code)',
+                      overflowX: 'auto',
+                    }}
+                  >
+                    <code>{primaryEvidence.code_snippet}</code>
+                  </pre>
+                )}
+              </div>
+            ) : (
+              <span style={{ fontSize: '0.8125rem', color: 'var(--text-muted)' }}>
+                Identified in repository configuration or manifest
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* 4. What should I do? */}
+        <div style={{ display: 'flex', gap: '0.65rem', alignItems: 'baseline' }}>
+          <div style={{ width: '130px', flexShrink: 0, fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.03em' }}>
+            What to do
+          </div>
+          <div style={{ fontSize: '0.8125rem', color: '#6ee7b7', lineHeight: 1.5, background: 'rgba(16, 185, 129, 0.08)', padding: '0.5rem 0.75rem', borderRadius: 'var(--radius-sm)', border: '1px solid rgba(16, 185, 129, 0.2)', width: '100%' }}>
+            {getRecommendation(finding)}
+          </div>
+        </div>
+      </div>
 
       {/* Remediation Lifecycle Action Button */}
-      <div className="mt-4 flex justify-end">
+      <div style={{ display: 'flex', justifyContent: 'flex-end', paddingTop: '0.5rem', borderTop: '1px solid var(--border-subtle)' }}>
         <Button
-          variant={isExpanded ? 'filter-active' : 'filter'}
+          variant={isExpanded ? 'secondary' : 'glow'}
           size="sm"
           onClick={onToggleExpand}
           aria-expanded={isExpanded}
+          leftIcon={<Wrench size={14} />}
         >
-          {isExpanded ? 'Hide Remediation & Patch ▴' : '🛠️ Remediate & Safe Patch ▾'}
+          {isExpanded ? 'Hide Suggested Fix' : 'View Suggested Fix'}
         </Button>
       </div>
 
       {/* Embedded Remediation Lifecycle */}
       {isExpanded && (
-        <div className="mt-4 pt-4 border-t border-slate-800">
+        <div style={{ marginTop: '0.75rem', paddingTop: '0.75rem', borderTop: '1px solid var(--border-subtle)' }}>
           <RemediationLifecycle finding={finding} />
         </div>
       )}

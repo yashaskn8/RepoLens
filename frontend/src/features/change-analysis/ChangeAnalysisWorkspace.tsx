@@ -313,8 +313,8 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
             </button>
           )}
           <div className="flex items-center gap-2">
-            <span className="text-sm font-bold text-white">Change Intelligence &amp; PR Review</span>
-            <span className="badge-tag text-[10px] text-cyan-300 border-cyan-500/30">Blast Radius Active</span>
+            <span className="text-sm font-bold text-white">PR Impact Analysis &amp; Review</span>
+            <span className="badge-tag text-[10px] text-cyan-300 border-cyan-500/30">Analysis Active</span>
           </div>
         </div>
 
@@ -389,7 +389,7 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
               aria-selected={activeTab === 'IMPACTS'}
               role="tab"
             >
-              💥 Blast Radius Explorer ({impacts.length})
+              📊 Downstream Impacts ({impacts.length})
             </Button>
             <Button
               variant={activeTab === 'CONTRACTS' ? 'filter-active' : 'filter'}

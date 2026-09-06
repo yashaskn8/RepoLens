@@ -67,9 +67,9 @@ export const ImpactExplorer: React.FC<ImpactExplorerProps> = ({
       {/* Impact Cards List */}
       {filteredImpacts.length === 0 ? (
         <EmptyState
-          icon="💥"
+          icon="📊"
           title="No impacts matching filters"
-          description="Adjust severity or verification status filters to view blast radius details."
+          description="Adjust severity or verification status filters to view affected callers and impact details."
         />
       ) : (
         <div className="flex flex-col gap-4">

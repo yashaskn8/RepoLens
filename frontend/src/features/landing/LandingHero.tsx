@@ -41,16 +41,16 @@ export function LandingHero({ onNavigate, onSelectPreset }: LandingHeroProps) {
           <span>Tree-sitter AST Parsing</span>
         </div>
         <div className="capability-chip" role="listitem">
-          <span aria-hidden="true">💥</span>
-          <span>PR Blast Radius &amp; Deltas</span>
+          <span aria-hidden="true">📊</span>
+          <span>PR Impact Analysis</span>
         </div>
         <div className="capability-chip" role="listitem">
           <span aria-hidden="true">⚡</span>
-          <span>6-Step Verified Remediation</span>
+          <span>Verified Suggested Fixes</span>
         </div>
         <div className="capability-chip" role="listitem">
           <span aria-hidden="true">🚀</span>
-          <span>GitHub CI/CD Publishing</span>
+          <span>GitHub Review Publishing</span>
         </div>
       </div>
 
@@ -60,7 +60,7 @@ export function LandingHero({ onNavigate, onSelectPreset }: LandingHeroProps) {
           type="button"
           className="btn-hero-primary"
           onClick={() => onNavigate('SCAN')}
-          aria-label="Ready to Fix: Launch Security and AST Scan"
+          aria-label="Ready to Fix: Launch Security and Code Scan"
         >
           <span aria-hidden="true">⚡</span>
           <span>Ready to Fix &amp; Scan</span>
@@ -70,10 +70,10 @@ export function LandingHero({ onNavigate, onSelectPreset }: LandingHeroProps) {
           type="button"
           className="btn-hero-secondary"
           onClick={() => onNavigate('CHANGE_ANALYSIS')}
-          aria-label="Analyze Pull Request Blast Radius & Deltas"
+          aria-label="Analyze Pull Request Impact & Contract Deltas"
         >
           <span aria-hidden="true">🔍</span>
-          <span>PR Blast Radius &amp; Deltas</span>
+          <span>Analyze PR Impact</span>
         </button>
 
         <button

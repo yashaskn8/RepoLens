@@ -8,67 +8,82 @@ import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { Badge } from '@/components/ui/Badge';
-import { StatusIndicator } from '@/components/ui/StatusIndicator';
 import { startScan, fetchScan } from '@/lib/api';
 import { useWorkflowStream } from '@/lib/useWorkflowStream';
-import { Scan, ScanStatus } from '@/types/domain';
+import { Scan } from '@/types/domain';
 import {
   Scan as ScanIcon,
   GitBranch,
   Terminal,
   ShieldCheck,
-  Zap,
   CheckCircle2,
   AlertCircle,
   Clock,
-  Layers,
   ArrowRight,
-  ExternalLink,
   Loader2,
-  FileCode,
   Lock,
-  Cpu,
-  Code2,
-  Server,
-  Activity,
-  Boxes,
   ChevronRight,
-  ShieldAlert,
+  ChevronDown,
+  Activity,
 } from 'lucide-react';
 
 const PRESET_CARDS = [
   {
-    name: 'RepoLens (Self-Scan)',
+    name: 'RepoLens',
     url: 'https://github.com/yashaskn8/RepoLens',
     branch: 'main',
-    stack: 'Next.js 15 + FastAPI',
-    astScope: '~180 AST Symbols',
+    stack: 'Next.js + FastAPI',
+    desc: 'Full-stack application',
     tag: 'Full-Stack',
   },
   {
-    name: 'FastAPI Microservice',
+    name: 'FastAPI',
     url: 'https://github.com/tiangolo/fastapi',
     branch: 'master',
-    stack: 'Python 3.12 + Pydantic',
-    astScope: '~450 Routes & Schemas',
+    stack: 'Python + Pydantic',
+    desc: 'Python web framework',
     tag: 'Backend',
   },
   {
-    name: 'Express API Server',
+    name: 'Express',
     url: 'https://github.com/expressjs/express',
     branch: 'master',
     stack: 'Node.js + JavaScript',
-    astScope: '~320 Endpoints',
+    desc: 'Web server library',
     tag: 'Node.js',
   },
 ];
 
 const ANALYSIS_ENGINES = [
-  { id: 'ast_graph', label: 'Cross-Layer AST Contract Matching', desc: 'Connects TSX fetch() calls to FastAPI route decorators', default: true },
-  { id: 'treesitter', label: 'Tree-sitter Syntax Grammar Parse', desc: 'Extracts classes, functions, and call hierarchies', default: true },
-  { id: 'semgrep', label: 'Deterministic Static Rulesets', desc: 'Scans for authorization, CSRF, and injection flaws', default: true },
-  { id: 'osv', label: 'OSV Dependency Vulnerability Checker', desc: 'Cross-references package manifests with vulnerability databases', default: true },
+  { id: 'ast_graph', label: 'Code Relationships', desc: 'Connects frontend API calls to backend route handlers' },
+  { id: 'treesitter', label: 'Code Parser', desc: 'Reads classes, functions, and import hierarchies' },
+  { id: 'semgrep', label: 'Security Rules', desc: 'Scans for authorization, CSRF, and injection flaws' },
+  { id: 'osv', label: 'Dependency Vulnerabilities', desc: 'Checks dependencies against vulnerability databases' },
 ];
+
+function getFriendlyEventLabel(eventType: string): string {
+  switch (eventType?.toUpperCase()) {
+    case 'INGESTION':
+    case 'CLONE':
+      return 'Preparing repository';
+    case 'PARSING':
+    case 'AST':
+      return 'Reading code';
+    case 'GRAPH':
+    case 'MAPPING':
+      return 'Finding relationships';
+    case 'ANALYSIS':
+    case 'SCANNING':
+    case 'SEMGREP':
+    case 'OSV':
+      return 'Checking for risks';
+    case 'COMPLETED':
+    case 'SUMMARY':
+      return 'Preparing results';
+    default:
+      return eventType?.toLowerCase() || 'Processing';
+  }
+}
 
 function ScanWorkspaceContent() {
   const router = useRouter();
@@ -79,10 +94,11 @@ function ScanWorkspaceContent() {
   const [activeScan, setActiveScan] = useState<Scan | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showEngines, setShowEngines] = useState(false);
   const [recentScans, setRecentScans] = useState<Scan[]>([]);
 
   // Workflow streaming
-  const { events, status: streamStatus } = useWorkflowStream(
+  const { events } = useWorkflowStream(
     activeScan?.id,
     Boolean(activeScan?.id && (activeScan?.status === 'PENDING' || activeScan?.status === 'RUNNING'))
   );
@@ -111,7 +127,6 @@ function ScanWorkspaceContent() {
         const updated = await fetchScan(activeScan.id);
         setActiveScan(updated);
 
-        // Save to local storage recent scans
         if (typeof window !== 'undefined') {
           const stored = localStorage.getItem('repolens_recent_scans');
           const list: Scan[] = stored ? JSON.parse(stored) : [];
@@ -146,7 +161,6 @@ function ScanWorkspaceContent() {
       });
       setActiveScan(scanResult);
 
-      // Save initial scan
       if (typeof window !== 'undefined') {
         const stored = localStorage.getItem('repolens_recent_scans');
         const list: Scan[] = stored ? JSON.parse(stored) : [];
@@ -154,8 +168,12 @@ function ScanWorkspaceContent() {
         setRecentScans(updatedList);
         localStorage.setItem('repolens_recent_scans', JSON.stringify(updatedList));
       }
-    } catch (err: any) {
-      setError(err?.message || 'Failed to initiate repository scan.');
+    } catch (err: unknown) {
+      if (err instanceof Error) {
+        setError(err.message);
+      } else {
+        setError('Failed to initiate repository scan.');
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -188,14 +206,11 @@ function ScanWorkspaceContent() {
                 color: '#ffffff',
               }}
             >
-              Repository AST Scan Workspace
+              Scan Repository
             </h1>
-            <Badge variant="cyan" size="sm">
-              Tree-sitter Engine
-            </Badge>
           </div>
           <p style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>
-            Deterministic structural static analysis, cross-layer contract tracing, and verified quality scanning.
+            Analyze any public GitHub repository to discover structure, code relationships, and security findings.
           </p>
         </div>
 
@@ -214,7 +229,7 @@ function ScanWorkspaceContent() {
             }}
           >
             <Lock size={12} style={{ color: 'var(--success-text)' }} />
-            <span>Isolated Read-Only Sandbox</span>
+            <span>Passive &amp; Isolated Analysis</span>
           </div>
         </div>
       </div>
@@ -227,7 +242,7 @@ function ScanWorkspaceContent() {
           gap: '1.5rem',
         }}
       >
-        {/* Left Column: Repository Configuration & Execution Cockpit */}
+        {/* Left Column: Repository Configuration */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
           <div
             className="glass-panel"
@@ -241,7 +256,7 @@ function ScanWorkspaceContent() {
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', borderBottom: '1px solid var(--border-subtle)', paddingBottom: '0.85rem' }}>
               <Terminal size={18} style={{ color: 'var(--accent-cyan)' }} />
               <h2 style={{ fontSize: '1.0625rem', fontWeight: 700, fontFamily: 'var(--font-display)', color: '#ffffff' }}>
-                Scan Target Parameters
+                Repository to Analyze
               </h2>
             </div>
 
@@ -268,7 +283,7 @@ function ScanWorkspaceContent() {
               {/* URL & Branch Grid */}
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 140px', gap: '1rem' }}>
                 <Input
-                  label="Git Repository URL"
+                  label="Repository URL"
                   required
                   placeholder="https://github.com/owner/repository"
                   leftIcon={<Terminal size={15} />}
@@ -278,7 +293,7 @@ function ScanWorkspaceContent() {
                 />
 
                 <Input
-                  label="Branch / Ref"
+                  label="Branch (optional)"
                   placeholder="main"
                   leftIcon={<GitBranch size={15} />}
                   value={branch}
@@ -287,68 +302,84 @@ function ScanWorkspaceContent() {
                 />
               </div>
 
-              {/* Active Analysis Engines */}
-              <div>
-                <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-light)', textTransform: 'uppercase', letterSpacing: '0.05em', display: 'block', marginBottom: '0.65rem' }}>
-                  Enabled Analysis Engines (Deterministic Pass)
-                </span>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
-                  {ANALYSIS_ENGINES.map((engine) => (
-                    <div
-                      key={engine.id}
-                      style={{
-                        padding: '0.65rem 0.85rem',
-                        borderRadius: 'var(--radius-md)',
-                        background: 'rgba(4, 7, 17, 0.7)',
-                        border: '1px solid var(--border-subtle)',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        gap: '0.2rem',
-                      }}
-                    >
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                        <CheckCircle2 size={13} style={{ color: 'var(--accent-cyan)' }} />
-                        <span style={{ fontSize: '0.75rem', fontWeight: 600, color: '#ffffff' }}>
+              {/* Progressive Disclosure: Analysis Engines */}
+              <div style={{ border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-md)', overflow: 'hidden' }}>
+                <button
+                  type="button"
+                  onClick={() => setShowEngines(!showEngines)}
+                  style={{
+                    width: '100%',
+                    padding: '0.65rem 0.85rem',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    background: 'rgba(255, 255, 255, 0.02)',
+                    border: 'none',
+                    cursor: 'pointer',
+                    color: 'var(--text-secondary)',
+                    fontSize: '0.75rem',
+                    fontWeight: 600,
+                  }}
+                >
+                  <span style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                    <CheckCircle2 size={13} style={{ color: 'var(--accent-cyan)' }} />
+                    4 Active Analysis Engines (Code Relationships, Syntax, Security Rules, Dependencies)
+                  </span>
+                  <ChevronDown
+                    size={14}
+                    style={{
+                      transform: showEngines ? 'rotate(180deg)' : 'none',
+                      transition: 'transform var(--transition-fast)',
+                    }}
+                  />
+                </button>
+
+                {showEngines && (
+                  <div style={{ padding: '0.75rem', background: 'rgba(4, 7, 17, 0.6)', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem', borderTop: '1px solid var(--border-subtle)' }}>
+                    {ANALYSIS_ENGINES.map((engine) => (
+                      <div
+                        key={engine.id}
+                        style={{
+                          padding: '0.5rem 0.75rem',
+                          borderRadius: 'var(--radius-sm)',
+                          background: 'rgba(255, 255, 255, 0.02)',
+                          border: '1px solid var(--border-subtle)',
+                        }}
+                      >
+                        <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#ffffff' }}>
                           {engine.label}
-                        </span>
+                        </div>
+                        <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                          {engine.desc}
+                        </div>
                       </div>
-                      <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', paddingLeft: '1.2rem' }}>
-                        {engine.desc}
-                      </span>
-                    </div>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
-              {/* Security Confinement Chips */}
+              {/* Safety note */}
               <div
                 style={{
-                  padding: '0.75rem 1rem',
+                  padding: '0.65rem 0.85rem',
                   borderRadius: 'var(--radius-md)',
                   background: 'rgba(16, 185, 129, 0.06)',
                   border: '1px solid rgba(16, 185, 129, 0.2)',
                   display: 'flex',
                   alignItems: 'center',
-                  justifyContent: 'space-between',
-                  flexWrap: 'wrap',
                   gap: '0.5rem',
                   fontSize: '0.75rem',
                   color: 'var(--text-light)',
                 }}
               >
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                  <ShieldCheck size={14} style={{ color: 'var(--success-text)' }} />
-                  <span>Hostile Repo Confinement: Zero untrusted code execution. Ephemeral shallow clone.</span>
-                </div>
-                <Badge variant="success" size="sm">
-                  100% PASSIVE
-                </Badge>
+                <ShieldCheck size={14} style={{ color: 'var(--success-text)' }} />
+                <span>Zero untrusted code execution. Repositories are analyzed passively.</span>
               </div>
 
-              {/* Primary Launch Action Button */}
+              {/* Primary Action Button */}
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '0.5rem' }}>
                 <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                  Estimated extraction duration: ~8–15s
+                  Estimated time: ~8–15 seconds
                 </span>
                 <Button
                   type="submit"
@@ -358,13 +389,13 @@ function ScanWorkspaceContent() {
                   disabled={isScanning}
                   rightIcon={<ArrowRight size={16} />}
                 >
-                  {isScanning ? 'AST Scan in Progress...' : 'Launch AST Extraction'}
+                  {isScanning ? 'Analyzing Repository...' : 'Analyze Repository'}
                 </Button>
               </div>
             </form>
           </div>
 
-          {/* Quick Preset Repositories Grid */}
+          {/* Quick Examples */}
           <div
             className="glass-panel"
             style={{
@@ -376,9 +407,9 @@ function ScanWorkspaceContent() {
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                Verified Benchmark Presets
+                Example Repositories
               </span>
-              <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Click to auto-populate</span>
+              <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Click to fill</span>
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.75rem' }}>
@@ -392,14 +423,14 @@ function ScanWorkspaceContent() {
                     }
                   }}
                   style={{
-                    padding: '1rem',
+                    padding: '0.85rem 1rem',
                     borderRadius: 'var(--radius-md)',
                     background: repoUrl === preset.url ? 'rgba(99, 102, 241, 0.15)' : 'rgba(4, 7, 17, 0.7)',
                     border: repoUrl === preset.url ? '1px solid var(--accent-primary)' : '1px solid var(--border-subtle)',
                     cursor: isScanning ? 'not-allowed' : 'pointer',
                     display: 'flex',
                     flexDirection: 'column',
-                    gap: '0.35rem',
+                    gap: '0.3rem',
                     transition: 'all var(--transition-fast)',
                   }}
                   className="interactive-btn"
@@ -411,7 +442,7 @@ function ScanWorkspaceContent() {
                     <Badge variant="cyan" size="sm">{preset.tag}</Badge>
                   </div>
                   <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{preset.stack}</span>
-                  <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>{preset.astScope}</span>
+                  <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>{preset.desc}</span>
                 </div>
               ))}
             </div>
@@ -448,11 +479,11 @@ function ScanWorkspaceContent() {
                       }
                       size="sm"
                     >
-                      {activeScan.status}
+                      {activeScan.status === 'COMPLETED' ? 'Analysis Complete' : activeScan.status}
                     </Badge>
                   </div>
-                  <span style={{ fontSize: '0.75rem', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
-                    ID: {activeScan.id} • Branch: {activeScan.branch || 'main'}
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                    Branch: {activeScan.branch || 'main'}
                   </span>
                 </div>
 
@@ -462,7 +493,7 @@ function ScanWorkspaceContent() {
                   onClick={() => router.push(`/scans/${activeScan.id}`)}
                   rightIcon={<ChevronRight size={14} />}
                 >
-                  View Findings
+                  View Results
                 </Button>
               </div>
 
@@ -471,11 +502,11 @@ function ScanWorkspaceContent() {
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.65rem' }}>
                   <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-light)', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
                     <Clock size={13} style={{ color: 'var(--accent-cyan)' }} />
-                    Live AST Stream ({events.length} milestones)
+                    Analysis Progress ({events.length} steps)
                   </span>
                   {isScanning && (
                     <span style={{ fontSize: '0.7rem', color: 'var(--accent-cyan)', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
-                      <Loader2 size={12} className="animate-spin" /> Ingesting
+                      <Loader2 size={12} className="animate-spin" /> Running
                     </span>
                   )}
                 </div>
@@ -495,7 +526,7 @@ function ScanWorkspaceContent() {
                 >
                   {events.length === 0 ? (
                     <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem', fontFamily: 'var(--font-mono)' }}>
-                      Awaiting worker task dispatch and AST stream...
+                      Starting analysis steps...
                     </div>
                   ) : (
                     events.map((ev) => (
@@ -506,16 +537,15 @@ function ScanWorkspaceContent() {
                           alignItems: 'baseline',
                           gap: '0.65rem',
                           fontSize: '0.75rem',
-                          fontFamily: 'var(--font-mono)',
                         }}
                       >
-                        <span style={{ color: 'var(--text-muted)' }}>
+                        <span style={{ color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: '0.7rem' }}>
                           {new Date(ev.created_at).toLocaleTimeString()}
                         </span>
                         <Badge variant="default" size="sm">
-                          {ev.event_type}
+                          {getFriendlyEventLabel(ev.event_type)}
                         </Badge>
-                        <span style={{ color: 'var(--text-code)' }}>{ev.message}</span>
+                        <span style={{ color: 'var(--text-secondary)' }}>{ev.message}</span>
                       </div>
                     ))
                   )}
@@ -523,7 +553,7 @@ function ScanWorkspaceContent() {
               </div>
             </div>
           ) : (
-            /* 5-Phase Architecture Pipeline Indicator */
+            /* Clear 5-Phase Pipeline Indicator */
             <div
               className="glass-panel"
               style={{
@@ -536,18 +566,18 @@ function ScanWorkspaceContent() {
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <Activity size={18} style={{ color: 'var(--accent-primary)' }} />
                 <h3 style={{ fontSize: '1rem', fontWeight: 700, fontFamily: 'var(--font-display)', color: '#ffffff' }}>
-                  Deterministic 5-Phase Pipeline
+                  Analysis Sequence
                 </h3>
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                 {[
-                  { num: '01', title: 'Passive Ingestion', desc: 'Ephemeral shallow clone, no credentials stored' },
-                  { num: '02', title: 'Tree-sitter Parsing', desc: 'Generates AST nodes for Python, TypeScript, and TSX' },
-                  { num: '03', title: 'Cross-Layer Mapping', desc: 'Links client fetch() calls to FastAPI route handlers' },
-                  { num: '04', title: 'Deterministic Verifier', desc: 'Validates 12 AST invariants to discard hallucinations' },
-                  { num: '05', title: 'Evidence Generation', desc: 'Produces line-grounded security and quality findings' },
-                ].map((st, idx) => (
+                  { num: '01', title: 'Preparing repository', desc: 'Secure shallow clone, isolated in memory' },
+                  { num: '02', title: 'Reading code', desc: 'Parsing classes, functions, and files' },
+                  { num: '03', title: 'Finding relationships', desc: 'Mapping client API calls to backend handlers' },
+                  { num: '04', title: 'Checking for risks', desc: 'Scanning for security, privacy, and contract issues' },
+                  { num: '05', title: 'Preparing results', desc: 'Compiling findings with line-by-line evidence' },
+                ].map((st) => (
                   <div
                     key={st.num}
                     style={{
@@ -585,7 +615,7 @@ function ScanWorkspaceContent() {
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                Recent Workspace Scans ({recentScans.length})
+                Recent Scans ({recentScans.length})
               </span>
               <Link href="/findings" style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '0.2rem' }}>
                 All findings <ChevronRight size={12} />
@@ -640,7 +670,7 @@ function ScanWorkspaceContent() {
 
 export default function ScanPage() {
   return (
-    <AppShell breadcrumbs={[{ label: 'Scans', href: '/scan' }, { label: 'New Workspace' }]} title="Repository Scan">
+    <AppShell breadcrumbs={[{ label: 'Scans', href: '/scan' }, { label: 'Scan Repository' }]} title="Scan Repository">
       <Suspense fallback={<div>Loading workspace...</div>}>
         <ScanWorkspaceContent />
       </Suspense>

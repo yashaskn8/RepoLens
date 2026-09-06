@@ -57,11 +57,11 @@ export const PIPELINE_STEPS: PipelineStep[] = [
     step: '03',
     title: 'Multi-Agent Consensus',
     badge: 'Parallel LLMs',
-    desc: 'Security, Architecture, and Blast Radius specialist agents review findings against real AST snippets to eliminate false positives.',
+    desc: 'Security, Architecture, and PR Impact specialist agents review findings against real AST snippets to eliminate false positives.',
     details: ['Parallel Evaluation', 'Cross-Validation', 'Confidence Scoring'],
     deepDive: {
       overview:
-        'Four isolated specialist LLM personas (Security Auditor, Architecture Sentinel, Blast Radius Assessor, Remediation Engineer) concurrently analyze each finding with the full AST node context.',
+        'Four isolated specialist LLM personas (Security Auditor, Architecture Sentinel, Impact Assessor, Remediation Engineer) concurrently analyze each finding with the full AST node context.',
       guarantees: [
         'Strict evidence grounding: agents cannot hallucinate non-existent files or functions',
         'Cross-agent consensus voting with confidence score thresholding',
@@ -270,7 +270,7 @@ export function ArchitecturePipeline({
                 className="btn-hero-secondary text-sm"
                 onClick={() => onNavigate('CHANGE_ANALYSIS')}
               >
-                <span>🔍 Analyze PR Blast Radius</span>
+                <span>🔍 Analyze PR Impact</span>
               </button>
             </div>
           </div>

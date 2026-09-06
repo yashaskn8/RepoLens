@@ -93,10 +93,10 @@ function ChangeAnalysisEntryContent() {
             marginBottom: '0.4rem',
           }}
         >
-          Change Intelligence & PR Blast Radius
+          PR Impact Analysis
         </h1>
         <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>
-          Compute structural diffs, cross-layer contract breaks, affected UI components, and automated review findings.
+          Analyze pull requests and branch changes to see breaking contract changes, affected callers, and risk level.
         </p>
       </div>
 
@@ -105,8 +105,8 @@ function ChangeAnalysisEntryContent() {
         <div style={{ marginBottom: '1.5rem' }}>
           <Tabs
             tabs={[
-              { id: 'pr', label: 'GitHub Pull Request', icon: <GitPullRequest size={15} /> },
-              { id: 'commits', label: 'Git Branch / Commit Diff', icon: <GitBranch size={15} /> },
+              { id: 'pr', label: 'Pull Request URL', icon: <GitPullRequest size={15} /> },
+              { id: 'commits', label: 'Compare Branches / Commits', icon: <GitBranch size={15} /> },
             ]}
             activeTab={mode}
             onChange={(id) => setMode(id as 'pr' | 'commits')}
@@ -137,7 +137,7 @@ function ChangeAnalysisEntryContent() {
             <Input
               label="GitHub Pull Request URL or Reference"
               required
-              placeholder="https://github.com/owner/repo/pull/42 or owner/repo#42"
+              placeholder="https://github.com/owner/repo/pull/42"
               leftIcon={<GitPullRequest size={15} />}
               value={prUrl}
               onChange={(e) => setPrUrl(e.target.value)}
@@ -146,7 +146,7 @@ function ChangeAnalysisEntryContent() {
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
               <Input
-                label="Repository Git URL"
+                label="Repository URL"
                 required
                 placeholder="https://github.com/owner/repository"
                 leftIcon={<Terminal size={15} />}
@@ -156,7 +156,7 @@ function ChangeAnalysisEntryContent() {
               />
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
                 <Input
-                  label="Base Ref / Branch"
+                  label="Base branch / commit (default: main)"
                   required
                   placeholder="main"
                   leftIcon={<GitBranch size={15} />}
@@ -165,7 +165,7 @@ function ChangeAnalysisEntryContent() {
                   disabled={isSubmitting}
                 />
                 <Input
-                  label="Head Ref / Branch"
+                  label="Head branch / commit"
                   required
                   placeholder="feature/branch"
                   leftIcon={<GitBranch size={15} />}
@@ -194,11 +194,8 @@ function ChangeAnalysisEntryContent() {
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <ShieldCheck size={14} style={{ color: 'var(--success-text)' }} />
-              <span>Computes transitive impact, schema breaks, and generates verified review comments.</span>
+              <span>Computes affected files, breaking changes, and downstream callers.</span>
             </div>
-            <Badge variant="cyan" size="sm">
-              AST AST-Diff v1.2
-            </Badge>
           </div>
 
           <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '0.5rem' }}>
@@ -209,7 +206,7 @@ function ChangeAnalysisEntryContent() {
               isLoading={isSubmitting}
               rightIcon={<ArrowRight size={16} />}
             >
-              {isSubmitting ? 'Analyzing Changes...' : 'Launch Change Intelligence'}
+              {isSubmitting ? 'Analyzing PR Impact...' : 'Analyze PR Impact'}
             </Button>
           </div>
         </form>
@@ -238,7 +235,7 @@ function ChangeAnalysisEntryContent() {
           <EmptyState
             icon={<GitPullRequest size={24} />}
             title="No past analyses"
-            description="Submit a pull request or branch comparison above to view full blast radius reports."
+            description="Submit a pull request or branch comparison above to view full PR impact reports."
           />
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>

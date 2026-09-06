@@ -104,7 +104,7 @@ export default function DashboardPage() {
               )}
             </div>
             <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>
-              Deterministic AST dependency graphs, cross-layer contract tracing, and human-authorized remediation workspace.
+              Scan repositories, inspect code relationships, and analyze PR impacts in a safe, read-only workspace.
             </p>
           </div>
 
@@ -133,9 +133,9 @@ export default function DashboardPage() {
           }}
         >
           <StatCard
-            label="AST Graph Engine"
+            label="Engine Status"
             value="Active"
-            subtext="FastAPI + Semgrep + Tree-sitter"
+            subtext="Passive, read-only analyzer"
             icon={<Cpu size={18} />}
             badge={
               <Badge variant={health?.status === 'healthy' ? 'success' : 'warning'} size="sm">
@@ -144,25 +144,25 @@ export default function DashboardPage() {
             }
           />
           <StatCard
-            label="PR Blast Radius Reports"
+            label="PR Impact Analyses"
             value={changeAnalyses.length}
-            subtext="Cross-layer impact analyses"
+            subtext="Pull request risk evaluations"
             icon={<GitPullRequest size={18} />}
             glow="cyan"
             onClick={() => router.push('/change-analysis')}
           />
           <StatCard
-            label="Verified Findings"
+            label="Findings Tracked"
             value={recentScans.reduce((total, scan) => total + scan.findings_count, 0)}
-            subtext="Grounded findings in recent scans"
+            subtext="Issues identified in recent scans"
             icon={<ShieldCheck size={18} />}
-            badge={<Badge variant="cyan" size="sm">Evidence required</Badge>}
+            badge={<Badge variant="cyan" size="sm">Verified</Badge>}
             onClick={() => router.push('/findings')}
           />
           <StatCard
-            label="Remediation Gates"
-            value="HITL"
-            subtext="Human review required for patches"
+            label="Suggested Fixes"
+            value="Ready"
+            subtext="Human review required before publishing"
             icon={<Wrench size={18} />}
             glow="indigo"
             onClick={() => router.push('/remediation')}
@@ -193,7 +193,7 @@ export default function DashboardPage() {
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <GitPullRequest size={18} style={{ color: 'var(--accent-cyan)' }} />
                 <h3 style={{ fontSize: '1.125rem', fontWeight: 700, fontFamily: 'var(--font-display)', color: '#ffffff' }}>
-                  Pull Request & Blast Radius Intelligence
+                  Pull Request Impact Analyses
                 </h3>
               </div>
               <Link href="/change-analysis" style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
@@ -211,7 +211,7 @@ export default function DashboardPage() {
               <EmptyState
                 icon={<GitPullRequest size={24} />}
                 title="No PR analyses yet"
-                description="Analyze your first pull request or commit diff to discover breaking contract changes and blast radius."
+                description="Analyze your first pull request to see affected files, functions, and callers."
                 actionLabel="Analyze Pull Request"
                 onAction={() => router.push('/change-analysis')}
               />
@@ -287,12 +287,12 @@ export default function DashboardPage() {
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <ScanIcon size={18} style={{ color: 'var(--accent-primary)' }} />
                 <h3 style={{ fontSize: '1.125rem', fontWeight: 700, fontFamily: 'var(--font-display)', color: '#ffffff' }}>
-                  Repository AST Scanner
+                  Scan a Repository
                 </h3>
               </div>
 
               <p style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', lineHeight: 1.55 }}>
-                Tree-sitter syntactic analysis and cross-layer call graph construction across frontend and backend boundaries.
+                Quickly analyze a repository to discover code relationships, architecture, and security findings.
               </p>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
@@ -302,7 +302,7 @@ export default function DashboardPage() {
                   onClick={() => router.push('/scan?repo=https://github.com/yashaskn8/RepoLens&branch=main')}
                   style={{ justifyContent: 'flex-start' }}
                 >
-                  Scan RepoLens Repository (Self-Scan)
+                  Sample: RepoLens Repository
                 </Button>
                 <Button
                   variant="secondary"
@@ -310,13 +310,13 @@ export default function DashboardPage() {
                   onClick={() => router.push('/scan?repo=https://github.com/tiangolo/fastapi&branch=master')}
                   style={{ justifyContent: 'flex-start' }}
                 >
-                  Scan FastAPI Microservice
+                  Sample: FastAPI Repository
                 </Button>
               </div>
 
               <Link href="/scan">
                 <Button variant="glow" size="md" rightIcon={<ArrowRight size={14} />} style={{ width: '100%' }}>
-                  Open Scan Workspace
+                  Scan Any Repository
                 </Button>
               </Link>
             </div>
@@ -337,8 +337,8 @@ export default function DashboardPage() {
                 className="glass-panel-interactive"
               >
                 <ShieldAlert size={20} style={{ color: 'var(--high-text)' }} />
-                <span style={{ fontSize: '0.875rem', fontWeight: 700, color: '#ffffff' }}>Findings Explorer</span>
-                <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Verified rules & AST evidence</span>
+                <span style={{ fontSize: '0.875rem', fontWeight: 700, color: '#ffffff' }}>Findings</span>
+                <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Inspect security and code findings</span>
               </Link>
 
               <Link
@@ -355,8 +355,8 @@ export default function DashboardPage() {
                 className="glass-panel-interactive"
               >
                 <Wrench size={20} style={{ color: 'var(--accent-purple)' }} />
-                <span style={{ fontSize: '0.875rem', fontWeight: 700, color: '#ffffff' }}>7-Step Remediation</span>
-                <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Human-in-the-loop patches</span>
+                <span style={{ fontSize: '0.875rem', fontWeight: 700, color: '#ffffff' }}>Suggested Fixes</span>
+                <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Review verified patches and fixes</span>
               </Link>
             </div>
           </div>

@@ -55,9 +55,6 @@ export function LandingNav({ onOpenAuthModal }: LandingNavProps) {
           >
             RepoLens
           </span>
-          <Badge variant="cyan" size="sm">
-            2026 Engine
-          </Badge>
         </div>
       </Link>
 
@@ -71,28 +68,28 @@ export function LandingNav({ onOpenAuthModal }: LandingNavProps) {
         className="hidden md:flex"
       >
         <Link
-          href="#architecture"
+          href="/scan"
           style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', transition: 'color var(--transition-fast)' }}
         >
-          Architecture
+          Scan Repository
         </Link>
         <Link
-          href="#pipeline"
+          href="/change-analysis"
           style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', transition: 'color var(--transition-fast)' }}
         >
-          Evidence Flow
-        </Link>
-        <Link
-          href="#safety"
-          style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', transition: 'color var(--transition-fast)' }}
-        >
-          Safety & Contracts
+          PR Analysis
         </Link>
         <Link
           href="/findings"
           style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', transition: 'color var(--transition-fast)' }}
         >
-          Explorer
+          Findings
+        </Link>
+        <Link
+          href="/remediation"
+          style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', transition: 'color var(--transition-fast)' }}
+        >
+          Suggested Fixes
         </Link>
       </nav>
 
@@ -111,14 +108,14 @@ export function LandingNav({ onOpenAuthModal }: LandingNavProps) {
           }}
           aria-label="GitHub Repository"
         >
-          <GitBranch size={18} />
-          <span style={{ fontSize: '0.75rem', fontFamily: 'var(--font-mono)' }}>GitHub</span>
+          <GitBranch size={16} />
+          <span style={{ fontSize: '0.8125rem' }}>GitHub</span>
         </Link>
 
         {isAuthenticated ? (
           <Link href="/dashboard">
             <Button variant="glow" size="sm" rightIcon={<ArrowRight size={14} />}>
-              Open Dashboard
+              Dashboard
             </Button>
           </Link>
         ) : (
@@ -134,7 +131,7 @@ export function LandingNav({ onOpenAuthModal }: LandingNavProps) {
             </Button>
             <Link href="/scan">
               <Button variant="glow" size="sm" rightIcon={<ArrowRight size={14} />}>
-                Launch Workspace
+                Analyze Repository
               </Button>
             </Link>
           </>

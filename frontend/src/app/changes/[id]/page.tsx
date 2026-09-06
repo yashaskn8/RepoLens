@@ -44,6 +44,10 @@ import {
   ExternalLink,
   ChevronRight,
   Sparkles,
+  ShieldX,
+  AlertCircle,
+  HelpCircle,
+  Network,
 } from 'lucide-react';
 
 interface ChangeDetailPageProps {
@@ -62,7 +66,7 @@ export default function ChangeDetailPage({ params }: ChangeDetailPageProps) {
   const [review, setReview] = useState<ChangeReviewReport | null>(null);
   const [publication, setPublication] = useState<ReviewPublicationPreviewResponse | null>(null);
 
-  const [centerTab, setCenterTab] = useState<'diff' | 'contracts' | 'report'>('diff');
+  const [centerTab, setCenterTab] = useState<'diff' | 'contracts' | 'callers' | 'report'>('diff');
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isPublishing, setIsPublishing] = useState(false);
@@ -127,61 +131,135 @@ export default function ChangeDetailPage({ params }: ChangeDetailPageProps) {
 
   const currentFileDiff = diff?.changed_files?.find((f: FileDiffFact) => f.file_path === selectedFile) || diff?.changed_files?.[0];
 
+  const breakingChangesCount = (diff?.route_deltas?.length || 0) + (diff?.schema_deltas?.length || 0);
+  const criticalFindingsCount = review?.findings?.filter((f) => f.severity === 'CRITICAL' || f.severity === 'HIGH').length || 0;
+
+  // Compute recommendation
+  let recommendation: {
+    status: 'Safe to merge' | 'Needs review' | 'Blocking issues';
+    variant: 'success' | 'warning' | 'critical';
+    details: string;
+  } = {
+    status: 'Safe to merge',
+    variant: 'success',
+    details: 'No breaking contract mutations or high-risk findings detected.',
+  };
+
+  if (analysis?.risk_level === 'CRITICAL' || breakingChangesCount > 0) {
+    recommendation = {
+      status: 'Blocking issues',
+      variant: 'critical',
+      details: `${breakingChangesCount > 0 ? `${breakingChangesCount} breaking contract delta(s)` : 'Critical security issues'} must be resolved before merging.`,
+    };
+  } else if (analysis?.risk_level === 'HIGH' || analysis?.risk_level === 'MEDIUM' || criticalFindingsCount > 0) {
+    recommendation = {
+      status: 'Needs review',
+      variant: 'warning',
+      details: 'Modifications touch downstream callers or non-critical risk patterns. Team review advised.',
+    };
+  }
+
   return (
     <AppShell
       breadcrumbs={[
-        { label: 'Change Intelligence', href: '/change-analysis' },
+        { label: 'PR Impact', href: '/change-analysis' },
         { label: analysis ? `${analysis.repository_owner}/${analysis.repository_name}` : analysisId.slice(0, 8) },
       ]}
-      title="Change Intelligence Workspace"
+      title="PR Impact Workspace"
     >
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem', height: 'calc(100vh - 8rem)' }}>
-        {/* Workspace Top Bar */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', height: 'calc(100vh - 8rem)' }}>
+        {/* Workspace Executive Summary Card */}
         <div
           className="glass-panel"
           style={{
-            padding: '1.25rem 1.75rem',
-            display: 'flex',
-            justifyContent: 'space-between',
+            padding: '1.25rem 1.5rem',
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+            gap: '1.25rem',
             alignItems: 'center',
-            flexWrap: 'wrap',
-            gap: '1rem',
+            background: 'linear-gradient(135deg, rgba(99, 102, 241, 0.08) 0%, rgba(8, 12, 28, 0.9) 100%)',
             border: '1px solid var(--border-glass-hover)',
           }}
         >
+          {/* PR / Repo Details */}
           <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', marginBottom: '0.25rem' }}>
-              <GitPullRequest size={18} style={{ color: 'var(--accent-cyan)' }} />
-              <h1 style={{ fontSize: '1.25rem', fontWeight: 800, fontFamily: 'var(--font-display)', color: '#ffffff' }}>
-                {analysis ? `${analysis.repository_owner}/${analysis.repository_name}` : 'Change Analysis'}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
+              <GitPullRequest size={16} style={{ color: 'var(--accent-cyan)' }} />
+              <h1 style={{ fontSize: '1.15rem', fontWeight: 800, fontFamily: 'var(--font-display)', color: '#ffffff' }}>
+                {analysis ? `${analysis.repository_owner}/${analysis.repository_name}` : 'Pull Request Impact'}
               </h1>
-              {analysis?.risk_level && (
-                <Badge
-                  variant={
-                    analysis.risk_level === 'CRITICAL'
-                      ? 'critical'
-                      : analysis.risk_level === 'HIGH'
-                      ? 'high'
-                      : analysis.risk_level === 'MEDIUM'
-                      ? 'medium'
-                      : 'low'
-                  }
-                  size="sm"
-                >
-                  {analysis.risk_level} RISK
-                </Badge>
-              )}
             </div>
             <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
-              Base: {analysis?.base_commit_sha?.slice(0, 8)} ➔ Head: {analysis?.head_commit_sha?.slice(0, 8)} •{' '}
-              {analysis?.changed_files_count || 0} files touched • {impacts.length} impacts identified
+              Base: {analysis?.base_commit_sha?.slice(0, 8) || 'main'} ➔ Head: {analysis?.head_commit_sha?.slice(0, 8) || 'HEAD'}
             </div>
           </div>
 
-          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
-            <Badge variant="cyan" size="sm">
-              Blast Radius: {analysis?.impacted_symbols_count || 0} symbols
-            </Badge>
+          {/* Risk Level Prominently Displayed */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+            <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600, letterSpacing: '0.04em' }}>
+              Risk Level
+            </span>
+            <div>
+              <Badge
+                variant={
+                  analysis?.risk_level === 'CRITICAL'
+                    ? 'critical'
+                    : analysis?.risk_level === 'HIGH'
+                    ? 'high'
+                    : analysis?.risk_level === 'MEDIUM'
+                    ? 'medium'
+                    : 'success'
+                }
+                size="md"
+              >
+                {analysis?.risk_level || 'LOW'} RISK
+              </Badge>
+            </div>
+          </div>
+
+          {/* Clear Recommendation */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+            <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600, letterSpacing: '0.04em' }}>
+              Recommendation
+            </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+              <Badge
+                variant={
+                  recommendation.variant === 'critical'
+                    ? 'critical'
+                    : recommendation.variant === 'warning'
+                    ? 'high'
+                    : 'success'
+                }
+                size="md"
+              >
+                {recommendation.status}
+              </Badge>
+            </div>
+            <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+              {recommendation.details}
+            </span>
+          </div>
+
+          {/* Stats: Files & Breaking Changes */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+            <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600, letterSpacing: '0.04em' }}>
+              Impact Scope
+            </span>
+            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <Badge variant="default" size="sm">
+                {diff?.changed_files?.length || 0} files
+              </Badge>
+              {breakingChangesCount > 0 ? (
+                <Badge variant="critical" size="sm">
+                  {breakingChangesCount} breaking changes
+                </Badge>
+              ) : (
+                <Badge variant="cyan" size="sm">
+                  0 breaking changes
+                </Badge>
+              )}
+            </div>
           </div>
         </div>
 
@@ -189,20 +267,20 @@ export default function ChangeDetailPage({ params }: ChangeDetailPageProps) {
         <div
           style={{
             display: 'grid',
-            gridTemplateColumns: '17rem minmax(0, 1fr) 22rem',
+            gridTemplateColumns: '18rem minmax(0, 1fr) 22rem',
             gap: '1.25rem',
             flex: 1,
             minHeight: 0,
           }}
         >
-          {/* LEFT PANE: Changed Files & Blast Radius Navigation */}
+          {/* LEFT PANE: Changed Files List with Diff Summary */}
           <div
             className="glass-panel"
             style={{
               padding: '1.25rem',
               display: 'flex',
               flexDirection: 'column',
-              gap: '1rem',
+              gap: '0.85rem',
               overflowY: 'auto',
             }}
           >
@@ -255,20 +333,20 @@ export default function ChangeDetailPage({ params }: ChangeDetailPageProps) {
               })}
             </div>
 
-            {/* Impacted Contracts Summary */}
-            <div style={{ marginTop: 'auto', borderTop: '1px solid var(--border-subtle)', paddingTop: '1rem' }}>
-              <div style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '0.5rem' }}>
-                Impact Summary
+            {/* Impact Summary */}
+            <div style={{ marginTop: 'auto', borderTop: '1px solid var(--border-subtle)', paddingTop: '0.85rem' }}>
+              <div style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '0.35rem' }}>
+                Diff Summary
               </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                <div>• Direct Files: {diff?.changed_files?.length || 0}</div>
-                <div>• Route Deltas: {diff?.route_deltas?.length || 0}</div>
-                <div>• Schema Deltas: {diff?.schema_deltas?.length || 0}</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                <div>• Total Files Touched: {diff?.changed_files?.length || 0}</div>
+                <div>• Breaking Changes: {breakingChangesCount}</div>
+                <div>• Downstream Callers: {impacts.length}</div>
               </div>
             </div>
           </div>
 
-          {/* CENTER PANE: Unified Structural Diff & Contract Deltas */}
+          {/* CENTER PANE: Structural Diff, Breaking Changes, & Callers */}
           <div
             className="glass-panel"
             style={{
@@ -289,8 +367,9 @@ export default function ChangeDetailPage({ params }: ChangeDetailPageProps) {
             >
               <Tabs
                 tabs={[
-                  { id: 'diff', label: 'Structural Diff', icon: <FileDiff size={14} /> },
-                  { id: 'contracts', label: 'Contract Deltas', count: (diff?.route_deltas?.length || 0) + (diff?.schema_deltas?.length || 0), icon: <Layers size={14} /> },
+                  { id: 'diff', label: 'File Diff', icon: <FileDiff size={14} /> },
+                  { id: 'contracts', label: 'Breaking Changes', count: breakingChangesCount, icon: <Layers size={14} /> },
+                  { id: 'callers', label: 'Affected Callers', count: impacts.length, icon: <Network size={14} /> },
                   { id: 'report', label: 'Review Summary', icon: <FileCode size={14} /> },
                 ]}
                 activeTab={centerTab}
@@ -306,6 +385,7 @@ export default function ChangeDetailPage({ params }: ChangeDetailPageProps) {
 
             {/* Center Tab Body */}
             <div style={{ flex: 1, overflowY: 'auto', padding: '1.25rem' }}>
+              {/* Tab: File Diff */}
               {centerTab === 'diff' && (
                 <div>
                   {currentFileDiff ? (
@@ -321,7 +401,7 @@ export default function ChangeDetailPage({ params }: ChangeDetailPageProps) {
                         <div style={{ fontSize: '0.8125rem', fontFamily: 'var(--font-mono)', color: 'var(--accent-cyan)', marginBottom: '0.5rem' }}>
                           {currentFileDiff.file_path} ({currentFileDiff.change_type})
                         </div>
-                        <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>
+                        <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', lineHeight: 1.6 }}>
                           Changed Line Spans: {JSON.stringify(currentFileDiff.changed_line_ranges || [])}
                         </div>
                       </div>
@@ -334,17 +414,26 @@ export default function ChangeDetailPage({ params }: ChangeDetailPageProps) {
                 </div>
               )}
 
+              {/* Tab: Breaking Changes */}
               {centerTab === 'contracts' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                  <h4 style={{ fontSize: '0.9375rem', fontWeight: 700, color: '#ffffff' }}>
-                    Route & Schema Contract Deltas
-                  </h4>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <h4 style={{ fontSize: '0.9375rem', fontWeight: 700, color: '#ffffff' }}>
+                      Route &amp; Schema Contract Deltas
+                    </h4>
+                    {breakingChangesCount > 0 && (
+                      <Badge variant="critical" size="sm">
+                        Breaking mutations detected
+                      </Badge>
+                    )}
+                  </div>
 
-                  {(!diff?.route_deltas || diff.route_deltas.length === 0) &&
-                  (!diff?.schema_deltas || diff.schema_deltas.length === 0) ? (
-                    <div style={{ color: 'var(--text-muted)', fontSize: '0.875rem' }}>
-                      No breaking cross-layer contract mutations detected.
-                    </div>
+                  {breakingChangesCount === 0 ? (
+                    <EmptyState
+                      icon={<CheckCircle2 size={24} style={{ color: 'var(--success-text)' }} />}
+                      title="Zero breaking changes detected"
+                      description="All public routes and schemas maintain backward compatibility with current consumers."
+                    />
                   ) : (
                     <>
                       {diff?.route_deltas?.map((rDelta, idx) => (
@@ -352,13 +441,13 @@ export default function ChangeDetailPage({ params }: ChangeDetailPageProps) {
                           key={idx}
                           style={{
                             padding: '1rem',
-                            background: 'rgba(5, 8, 18, 0.7)',
-                            border: '1px solid var(--border-subtle)',
+                            background: 'rgba(239, 68, 68, 0.08)',
+                            border: '1px solid rgba(239, 68, 68, 0.3)',
                             borderRadius: 'var(--radius-md)',
                           }}
                         >
                           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.35rem' }}>
-                            <Badge variant="purple" size="sm">ROUTE DELTA</Badge>
+                            <Badge variant="critical" size="sm">ROUTE DELTA</Badge>
                             <span style={{ fontSize: '0.875rem', fontWeight: 600, color: '#ffffff' }}>
                               {rDelta.head_http_method || rDelta.base_http_method} {rDelta.head_path || rDelta.base_path}
                             </span>
@@ -374,13 +463,13 @@ export default function ChangeDetailPage({ params }: ChangeDetailPageProps) {
                           key={idx}
                           style={{
                             padding: '1rem',
-                            background: 'rgba(5, 8, 18, 0.7)',
-                            border: '1px solid var(--border-subtle)',
+                            background: 'rgba(239, 68, 68, 0.08)',
+                            border: '1px solid rgba(239, 68, 68, 0.3)',
                             borderRadius: 'var(--radius-md)',
                           }}
                         >
                           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.35rem' }}>
-                            <Badge variant="cyan" size="sm">SCHEMA DELTA</Badge>
+                            <Badge variant="critical" size="sm">SCHEMA DELTA</Badge>
                             <span style={{ fontSize: '0.875rem', fontWeight: 600, color: '#ffffff' }}>
                               {sDelta.model_name}.{sDelta.field_name}
                             </span>
@@ -395,6 +484,53 @@ export default function ChangeDetailPage({ params }: ChangeDetailPageProps) {
                 </div>
               )}
 
+              {/* Tab: Affected Downstream Callers */}
+              {centerTab === 'callers' && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                  <h4 style={{ fontSize: '0.9375rem', fontWeight: 700, color: '#ffffff' }}>
+                    Affected Downstream Callers &amp; Dependencies ({impacts.length})
+                  </h4>
+
+                  {impacts.length === 0 ? (
+                    <EmptyState
+                      icon={<CheckCircle2 size={24} style={{ color: 'var(--success-text)' }} />}
+                      title="No downstream callers affected"
+                      description="Changes are internal to modified files and do not propagate to downstream consumers."
+                    />
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
+                      {impacts.map((impact, idx) => (
+                        <div
+                          key={idx}
+                          style={{
+                            padding: '0.85rem 1rem',
+                            background: 'rgba(5, 8, 18, 0.7)',
+                            border: '1px solid var(--border-subtle)',
+                            borderRadius: 'var(--radius-md)',
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                          }}
+                        >
+                          <div>
+                            <div style={{ fontSize: '0.8125rem', fontWeight: 600, color: '#ffffff', fontFamily: 'var(--font-mono)' }}>
+                              {impact.affected_symbol || impact.affected_file || impact.title}
+                            </div>
+                            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                              Impact type: {impact.impact_type} • Source: {impact.source_symbol || impact.source_file || 'File change'}
+                            </div>
+                          </div>
+                          <Badge variant="cyan" size="sm">
+                            {impact.severity || 'IMPACT'}
+                          </Badge>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Tab: Review Summary */}
               {centerTab === 'report' && (
                 <div
                   style={{
@@ -425,44 +561,50 @@ export default function ChangeDetailPage({ params }: ChangeDetailPageProps) {
             {/* Review Findings Section */}
             <div>
               <div style={{ fontSize: '0.8125rem', fontWeight: 700, color: 'var(--text-primary)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '0.75rem' }}>
-                AI Review Findings ({review?.findings?.length || 0})
+                Review Findings ({review?.findings?.length || 0})
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
-                {review?.findings?.map((item, idx) => (
-                  <div
-                    key={idx}
-                    style={{
-                      padding: '0.85rem',
-                      borderRadius: 'var(--radius-md)',
-                      backgroundColor: 'rgba(5, 8, 18, 0.7)',
-                      border: '1px solid var(--border-subtle)',
-                    }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', marginBottom: '0.3rem' }}>
-                      <Badge
-                        variant={
-                          item.severity === 'CRITICAL'
-                            ? 'critical'
-                            : item.severity === 'HIGH'
-                            ? 'high'
-                            : item.severity === 'MEDIUM'
-                            ? 'medium'
-                            : 'low'
-                        }
-                        size="sm"
-                      >
-                        {item.severity}
-                      </Badge>
-                      <span style={{ fontSize: '0.8125rem', fontWeight: 600, color: '#ffffff' }}>
-                        {item.title}
-                      </span>
-                    </div>
-                    <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', lineHeight: 1.45 }}>
-                      {item.reasoning_summary}
-                    </p>
+                {(!review?.findings || review.findings.length === 0) ? (
+                  <div style={{ fontSize: '0.8125rem', color: 'var(--text-muted)' }}>
+                    No automated review findings on this diff.
                   </div>
-                ))}
+                ) : (
+                  review.findings.map((item, idx) => (
+                    <div
+                      key={idx}
+                      style={{
+                        padding: '0.85rem',
+                        borderRadius: 'var(--radius-md)',
+                        backgroundColor: 'rgba(5, 8, 18, 0.7)',
+                        border: '1px solid var(--border-subtle)',
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', marginBottom: '0.3rem' }}>
+                        <Badge
+                          variant={
+                            item.severity === 'CRITICAL'
+                              ? 'critical'
+                              : item.severity === 'HIGH'
+                              ? 'high'
+                              : item.severity === 'MEDIUM'
+                              ? 'medium'
+                              : 'low'
+                          }
+                          size="sm"
+                        >
+                          {item.severity}
+                        </Badge>
+                        <span style={{ fontSize: '0.8125rem', fontWeight: 600, color: '#ffffff' }}>
+                          {item.title}
+                        </span>
+                      </div>
+                      <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', lineHeight: 1.45 }}>
+                        {item.reasoning_summary}
+                      </p>
+                    </div>
+                  ))
+                )}
               </div>
             </div>
 
