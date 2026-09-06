@@ -4,7 +4,7 @@ from logging.config import fileConfig
 import os
 import sys
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, inspect, pool, text
 
 # Ensure backend path is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -28,7 +28,9 @@ if db_url.startswith("postgresql://"):
     db_url = "postgresql+psycopg://" + db_url.removeprefix("postgresql://")
 elif db_url.startswith("postgres://"):
     db_url = "postgresql+psycopg://" + db_url.removeprefix("postgres://")
-config.set_main_option("sqlalchemy.url", db_url)
+# Alembic stores options in ConfigParser, where a literal percent character
+# (including URL-encoded credentials such as ``%40``) must be escaped.
+config.set_main_option("sqlalchemy.url", db_url.replace("%", "%%"))
 
 target_metadata = Base.metadata
 
@@ -62,6 +64,25 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
+        if connection.dialect.name == "postgresql":
+            # Alembic defaults version_num to VARCHAR(32), but RepoLens retains
+            # one historical revision identifier longer than that. Bootstrap
+            # new databases with sufficient capacity and widen older tables
+            # before Alembic attempts to record that immutable revision.
+            if inspect(connection).has_table("alembic_version"):
+                connection.execute(text(
+                    "ALTER TABLE alembic_version "
+                    "ALTER COLUMN version_num TYPE VARCHAR(128)"
+                ))
+            else:
+                connection.execute(text(
+                    "CREATE TABLE alembic_version ("
+                    "version_num VARCHAR(128) NOT NULL, "
+                    "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)"
+                    ")"
+                ))
+            connection.commit()
+
         context.configure(
             connection=connection,
             target_metadata=target_metadata,

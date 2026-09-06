@@ -37,9 +37,17 @@ def _get_alembic_config(db_url: str) -> Config:
     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     ini_path = os.path.join(base_dir, "alembic.ini")
     cfg = Config(ini_path)
-    cfg.set_main_option("sqlalchemy.url", db_url)
+    cfg.set_main_option("sqlalchemy.url", db_url.replace("%", "%%"))
     cfg.set_main_option("script_location", os.path.join(base_dir, "alembic"))
     return cfg
+
+
+def test_alembic_config_accepts_percent_encoded_database_url():
+    db_url = "postgresql+psycopg://user:p%40ss@localhost/database"
+
+    cfg = _get_alembic_config(db_url)
+
+    assert cfg.get_main_option("sqlalchemy.url") == db_url
 
 
 def test_alembic_upgrade_head_on_empty_db_creates_complete_schema():
@@ -636,4 +644,3 @@ def test_alembic_008_change_analysis_domain_orm_read_write():
             db.close()
         finally:
             engine.dispose()
-

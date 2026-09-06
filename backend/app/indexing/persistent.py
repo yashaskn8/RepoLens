@@ -286,6 +286,9 @@ class PersistentIndex:
             """))
         else:
             raise InventoryBound("database_size_authority_unavailable")
+        # PostgreSQL SUM(bigint) is NUMERIC and psycopg returns Decimal. Keep
+        # persisted coverage JSON dialect-neutral and integer-valued.
+        used = int(used or 0)
         self.stats["database_used_bytes"] = used
         self.stats["database_byte_limit"] = self.limits.max_database_bytes
         # Reserve a bounded file projection plus its facts before extraction.
@@ -406,6 +409,11 @@ class PersistentIndex:
             return None, disposition.classification.value, "projection_fact_byte_limit", len(source)
         projection.payload = {**payload, "facts_coverage": facts_coverage}
         self.db.add(projection)
+        # The dependent fact/posting rows and the tree entry do not expose ORM
+        # relationships, so PostgreSQL cannot rely on unit-of-work insertion
+        # order. Publish the completed projection authority first; pending
+        # dependants remain batched for the normal page commit.
+        self.db.flush([projection])
         self.stats["parsed_files"] += 1
         return projection_id, disposition.classification.value, "indexed_partial" if facts_coverage["status"] == "PARTIAL" else "indexed", len(source)
 
