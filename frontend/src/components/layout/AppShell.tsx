@@ -147,6 +147,7 @@ export function AppShell({ children, breadcrumbs = [], title }: AppShellProps) {
 
       {collapsed && (
         <button
+          suppressHydrationWarning
           type="button"
           onClick={() => setIsCollapsed(false)}
           style={{
@@ -226,6 +227,7 @@ export function AppShell({ children, breadcrumbs = [], title }: AppShellProps) {
                   </span>
                 </Link>
                 <button
+                  suppressHydrationWarning
                   type="button"
                   onClick={closeMobile}
                   style={{
@@ -309,6 +311,7 @@ export function AppShell({ children, breadcrumbs = [], title }: AppShellProps) {
 
             {!isCollapsed && (
               <button
+                suppressHydrationWarning
                 type="button"
                 onClick={() => setIsCollapsed(!isCollapsed)}
                 className="interactive-btn"

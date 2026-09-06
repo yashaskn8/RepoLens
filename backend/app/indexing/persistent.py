@@ -611,8 +611,12 @@ class PersistentIndex:
             total_files=self.stats["discovered_files"], total_size_bytes=self.stats["total_bytes"],
             languages=languages, frameworks=detect_frameworks(self.repo_dir),
             analysis_scope=AnalysisScope(
-                truncated=bool(reason or self.stats["manifest_truncated"] or self.stats["extraction_partial"]),
-                reason=reason or ("bounded_active_manifest" if self.stats["manifest_truncated"] else "partial_file_extraction" if self.stats["extraction_partial"] else None),
+                # Truncation means inventory/manifest work stopped before its
+                # bounded target. Per-file fact extraction has its own explicit
+                # coverage field and must not make a complete inventory look
+                # as though repository discovery stopped early.
+                truncated=bool(reason or self.stats["manifest_truncated"]),
+                reason=reason or ("bounded_active_manifest" if self.stats["manifest_truncated"] else None),
                 files_processed=len(files), source_bytes_processed=sum(file.size_bytes for file in files),
                 total_observed_files=self.stats["discovered_files"],
                 total_observed_bytes=self.stats["total_bytes"],

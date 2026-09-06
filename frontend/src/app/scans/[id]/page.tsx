@@ -144,6 +144,12 @@ export default function ScanDetailPage({ params }: ScanDetailPageProps) {
   const indexedFiles = asCount(indexCoverage.indexed_files);
   const discoveredFiles = asCount(indexCoverage.discovered_files);
   const reasoningFiles = asCount(analysisScope.files_processed);
+  const partialFiles = asCount(indexCoverage.partial_files);
+  const excludedByReason = asRecord(indexCoverage.excluded_by_reason);
+  const excludedFiles = Object.values(excludedByReason).reduce<number>(
+    (total, value) => total + (asCount(value) ?? 0),
+    0,
+  );
   const graphNodes = asCount(graphCoverage.total_nodes);
   const graphEdges = asCount(graphCoverage.total_edges);
   const unavailableScanners = scannerCoverage.filter(
@@ -211,7 +217,7 @@ export default function ScanDetailPage({ params }: ScanDetailPageProps) {
                   size="sm"
                 >
                   {scan.status === 'COMPLETED'
-                    ? coverageLimited ? 'Completed — limited coverage' : 'Analysis Complete'
+                    ? coverageLimited ? 'Completed — scoped coverage' : 'Analysis Complete'
                     : scan.status}
                 </Badge>
               )}
@@ -283,7 +289,7 @@ export default function ScanDetailPage({ params }: ScanDetailPageProps) {
             </span>
             <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
               {reasoningFiles !== null
-                ? `${reasoningFiles.toLocaleString()} files in bounded reasoning scope`
+                ? `${reasoningFiles.toLocaleString()} analyzable files inspected${partialFiles ? `; ${partialFiles.toLocaleString()} had bounded fact extraction` : ''}${excludedFiles ? `; ${excludedFiles.toLocaleString()} non-analyzable files inventoried` : ''}`
                 : 'Passive source parsing; excluded scope is reported separately'}
             </span>
           </div>

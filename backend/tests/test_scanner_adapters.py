@@ -172,7 +172,8 @@ class TestSemgrepAdapter:
             result = await adapter.scan("/tmp/repo")
 
         assert result.status == ToolStatus.UNAVAILABLE
-        assert "not installed or not in PATH" in result.error_message
+        assert "Optional semgrep scanner is unavailable" in result.error_message
+        assert "built-in deterministic analysis continues" in result.error_message
         assert len(result.findings) == 0
 
     @pytest.mark.asyncio

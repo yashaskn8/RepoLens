@@ -28,7 +28,10 @@ _SENSITIVE_ASSIGNMENT = re.compile(
     r"\s*[:=]\s*(?P<value>.+?)\s*$",
     re.IGNORECASE,
 )
-_CONFIG_SUFFIXES = {".tf", ".tfvars", ".yaml", ".yml", ".toml", ".ini"}
+_CONFIG_SUFFIXES = {
+    ".tf", ".tfvars", ".yaml", ".yml", ".toml", ".ini",
+    ".conf", ".rules", ".tpl", ".mako", ".sh", ".bash",
+}
 
 
 def _call_name(node: ast.Call) -> str:
@@ -150,6 +153,7 @@ def _is_obvious_reference_or_placeholder(value: str) -> bool:
             "valuefrom", "getenv", "secret_string", ".result",
         ))
         or normalized.startswith(("data.", "aws_", "azurerm_", "google_", "random_", "vault_"))
+        or normalized in {"postgres", "password", "secret", "admin", "root", "localhost"}
         or normalized.startswith(("<", "your_", "your-", "example", "placeholder", "changeme", "change-me", "dummy", "test_", "dev_", "dev-"))
         or set(normalized) <= {"x", "*", "-", "_"}
     )
@@ -194,6 +198,12 @@ def _hardcoded_credential_findings(path: str, text: str) -> list[StaticFinding]:
         key = match.group("key")
         value = _literal_assignment_value(match.group("value"))
         if not _is_sensitive_assignment_key(key) or value is None or _is_obvious_reference_or_placeholder(value):
+            continue
+        normalized_path = path.lower().replace("\\", "/")
+        normalized_value = value.lower()
+        if normalized_path.startswith(".github/workflows/") and any(
+            marker in normalized_value for marker in ("test", "ci-", "ci_", "localhost")
+        ):
             continue
         detector_id = f"iac.security.hardcoded-{key.lower().replace('-', '_')}"
         findings.append(

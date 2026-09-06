@@ -357,6 +357,7 @@ async def execute_background_scan(
         runtime = await ScanIntelligenceRuntime.build(
             evidence_store=evidence_store,
             repo_dir=workspace_dir,
+            prefer_complete_graph=True,
         )
         graph_data = runtime.repository_graph.to_domain_data()
         graph_projection = publish_graph_artifacts(

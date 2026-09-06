@@ -15,9 +15,9 @@ from app.models.finding import EvidenceModel, FindingModel
 from app.models.report import ReportModel
 from app.models.scan import ScanModel
 from app.models.user import UserModel
-from app.reporting.assembler import ReportAssembler
+from app.reporting.assembler import ReportAssembler, _coverage
 from app.reporting.renderer import ReportLabPdfRenderer
-from app.reporting.schemas import ReportDocument, ReportStatus
+from app.reporting.schemas import ReportDocument, ReportScope, ReportStatus
 from app.reporting.storage import ArtifactStorageError, LocalReportArtifactStorage
 from app.schemas.enums import FindingStatus, ScanStatus, Severity, VerificationVerdict
 from app.services.auth_service import AuthService
@@ -88,6 +88,13 @@ def test_report_pipeline_is_deterministic_bounded_and_tenant_safe(
                     "source_bytes_processed": 12000,
                     "total_observed_bytes": 12000,
                     "truncated": False,
+                },
+                "index_coverage": {
+                    "discovered_files": 20,
+                    "indexed_files": 20,
+                    "inventory_complete": True,
+                    "partial_files": 0,
+                    "excluded_by_reason": {},
                 },
                 "scanner_coverage": [
                     {"tool": "semgrep", "status": "COMPLETED", "findings_count": 2},
@@ -215,6 +222,7 @@ def test_report_pipeline_is_deterministic_bounded_and_tenant_safe(
         assert document.metadata.repository == scan.repository_url
         assert document.metadata.commit_sha == commit_sha
         assert document.coverage.status == "FULL"
+        assert document.scope.inventory_complete is True
         assert document.appendix.omitted_finding_count == 1
         assert document.appendix.omitted_evidence_count == 3
         assert {item.finding_id for item in document.appendix.evidence} == {critical_id, high_id}
@@ -235,6 +243,7 @@ def test_report_pipeline_is_deterministic_bounded_and_tenant_safe(
         assert "Evidence Appendix" in extracted
         assert "frontend/src/api.ts" in extracted
         assert "Coverage status" in extracted and "FULL" in extracted
+        assert "Files inventoried" in extracted and "Inventory complete" in extracted
         assert raw_secret not in extracted
         assert "[REDACTED]" in extracted
         assert "attacker.invalid" in extracted
@@ -281,6 +290,26 @@ def test_report_pipeline_is_deterministic_bounded_and_tenant_safe(
         assert client.get(f"/api/v1/reports/{report.id}/download").status_code == 404
     finally:
         get_settings.cache_clear()
+
+
+def test_report_coverage_distinguishes_complete_inventory_from_scoped_semantics():
+    scope = ReportScope(
+        files_discovered=377,
+        files_analyzed=326,
+        inventory_complete=True,
+        partial_files=5,
+        excluded_files=51,
+    )
+    coverage, _ = _coverage(
+        {"scanner_coverage": [{"tool": "repolens-core", "status": "COMPLETED"}]},
+        scope,
+    )
+
+    assert not scope.truncated
+    assert coverage.status == "PARTIAL"
+    assert "Repository inventory completed" in coverage.distinction
+    assert "326 analyzable files" in coverage.distinction
+    assert "51 non-analyzable files" in coverage.distinction
 
 
 def test_large_report_renders_with_a_bounded_detail_budget(

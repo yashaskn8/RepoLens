@@ -177,6 +177,7 @@ class ScanIntelligenceRuntime:
         embedding_provider: Optional[EmbeddingProvider] = None,
         vector_index: Optional[VectorIndex] = None,
         reranker: Optional[QwenReranker] = None,
+        prefer_complete_graph: bool = False,
     ) -> "ScanIntelligenceRuntime":
         """Asynchronously assemble the complete repository intelligence runtime from EvidenceStore."""
         manifest = evidence_store.manifest
@@ -185,7 +186,22 @@ class ScanIntelligenceRuntime:
             # Durable file projections already contain deterministic facts.
             # Source and optional embeddings are demanded by selected queries.
             from app.graph.persistent import PersistentRepositoryGraph
-            repository_graph = PersistentRepositoryGraph(persistent_index)
+            stats = persistent_index.stats
+            active_manifest_complete = bool(
+                prefer_complete_graph
+                and stats.get("inventory_complete") is True
+                and stats.get("manifest_truncated") is False
+                and stats.get("indexed_files") == len(manifest.files)
+                and len(manifest.files) <= 512
+            )
+            # A fully materialized bounded manifest can prove repository-wide
+            # endpoint presence/absence and resolve imported request schemas.
+            # Very large repositories retain the disk-backed bounded graph.
+            repository_graph = (
+                build_repository_graph(manifest, evidence_store)
+                if active_manifest_complete
+                else PersistentRepositoryGraph(persistent_index)
+            )
             retrieval_service = RetrievalService(chunks=[], repository_graph=repository_graph,
                 embedding_provider=embedding_provider, vector_index=vector_index,
                 reranker=reranker, persistent_index=persistent_index)

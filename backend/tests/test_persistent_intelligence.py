@@ -411,7 +411,8 @@ def test_partial_projection_stays_partial_when_reused_in_changed_tree(indexed_re
     manifest = changed.build_manifest()
     assert changed.stats["reused_files"] == 1
     assert changed.stats["partial_files"] == 1
-    assert manifest.analysis_scope.truncated
+    assert changed.stats["extraction_partial"]
+    assert not manifest.analysis_scope.truncated
 
 
 def test_storage_backpressure_also_stops_excluded_inventory_growth(indexed_repository):
@@ -503,6 +504,35 @@ async def test_fresh_workflow_checkpoints_current_index_authority(indexed_reposi
     assert "candidate_selection_coverage" in result["manifest_summary"]
 
 
+@pytest.mark.asyncio
+async def test_fresh_workflow_accepts_complete_graph_with_persistent_index(indexed_repository):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from app.agents.graph import run_analysis_workflow
+    from app.analysis.store import EvidenceStore
+    from app.context.runtime import ScanIntelligenceRuntime
+    from app.graph.repository_graph import RepositoryGraph
+    repo, _, _, factory = indexed_repository
+    index = factory()
+    store = EvidenceStore(index.build_manifest())
+    store.persistent_index = index
+    runtime = await ScanIntelligenceRuntime.build(store, prefer_complete_graph=True)
+    assert type(runtime.repository_graph) is RepositoryGraph
+    exact_graph_complete = runtime.repository_graph.to_domain_data().complete
+    app = SimpleNamespace(ainvoke=AsyncMock(side_effect=lambda payload, **kwargs: payload))
+    with patch("app.agents.graph.build_analysis_graph", return_value=app):
+        result = await run_analysis_workflow(
+            store,
+            "scan",
+            str(repo),
+            context_engine=runtime.context_engine,
+            repository_graph=runtime.repository_graph,
+        )
+    assert result["manifest_summary"]["graph_coverage"]["complete"] == exact_graph_complete
+    assert result["manifest_summary"]["graph_coverage"]["unresolved_frontier"] == {}
+    assert not result["manifest_summary"]["graph_coverage"]["query_truncated"]
+
+
 def test_partial_discovery_resumes_without_losing_completed_projection(indexed_repository):
     _, _, db, factory = indexed_repository
     partial = factory(limits=replace(IndexLimits(), max_files=1))
@@ -548,6 +578,12 @@ def test_tenant_scope_and_excluded_source_cannot_be_bypassed(indexed_repository)
 
 def test_classification_keeps_hidden_configuration_and_rejects_external_links():
     assert classify_file(".github/workflows/ci.yml", language="yaml").eligible
+    assert classify_file("deploy/init-db.sh", language="shell").eligible
+    assert classify_file("frontend/nginx.conf", language=None).eligible
+    assert classify_file("Makefile", language=None).eligible
+    assert classify_file("services/app/alembic/script.py.mako", language=None).eligible
+    assert classify_file("README", language=None).classification == FileClass.DOC
+    assert classify_file("requirements.lock", language=None).classification == FileClass.LOCKFILE
     assert classify_file("node_modules/a/index.js", language="javascript").classification == FileClass.VENDORED
     assert not classify_file("linked.py", language="python", mode="120000").eligible
 
@@ -605,6 +641,26 @@ async def test_persistent_runtime_retrieves_cross_file_calls_without_embeddings(
     new_edge = next(edge for edge in PersistentRepositoryGraph(changed).get_outgoing_edges("symbol:b.py:FUNCTION:refresh:2") if edge.kind == EdgeKind.CALLS)
     assert changed.stats["parsed_files"] == 1
     assert new_edge.metadata["dependency_certificate"]["target_sha256"] != old_target
+
+
+@pytest.mark.asyncio
+async def test_complete_graph_supports_persistent_chunk_retrieval(indexed_repository):
+    from app.analysis.store import EvidenceStore
+    from app.context.runtime import ScanIntelligenceRuntime
+    from app.graph.repository_graph import RepositoryGraph
+    from app.retrieval.schemas import RetrievalQuery
+    _, _, _, factory = indexed_repository
+    index = factory()
+    store = EvidenceStore(index.build_manifest())
+    store.persistent_index = index
+    runtime = await ScanIntelligenceRuntime.build(store, prefer_complete_graph=True)
+
+    assert type(runtime.repository_graph) is RepositoryGraph
+    results = await runtime.retrieval_service.retrieve(
+        RetrievalQuery(query="refresh", use_reranker=False, analysis_intent="bug")
+    )
+
+    assert any(item.chunk.file_path == "b.py" for item in results)
 
 
 @pytest.mark.asyncio
@@ -983,4 +1039,5 @@ def test_projection_amplification_rolls_back_incomplete_facts(indexed_repository
     assert index.stats["excluded_by_reason"].get("projection_fact_byte_limit", 0) > 0
     assert db.scalar(select(func.count()).select_from(IndexFactModel)) == 0
     assert db.scalar(select(func.count()).select_from(IndexProjectionModel)) == 0
-    assert manifest.analysis_scope.truncated
+    assert index.stats["extraction_partial"]
+    assert not manifest.analysis_scope.truncated

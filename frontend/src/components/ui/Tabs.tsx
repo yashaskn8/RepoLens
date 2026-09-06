@@ -33,6 +33,7 @@ export function Tabs({ tabs, activeTab, onChange, className = '', variant = 'box
           const isActive = tab.id === activeTab;
           return (
             <button
+              suppressHydrationWarning
               key={tab.id}
               type="button"
               onClick={() => onChange(tab.id)}
@@ -96,6 +97,7 @@ export function Tabs({ tabs, activeTab, onChange, className = '', variant = 'box
         const isActive = tab.id === activeTab;
         return (
           <button
+            suppressHydrationWarning
             key={tab.id}
             type="button"
             onClick={() => onChange(tab.id)}

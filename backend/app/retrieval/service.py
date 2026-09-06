@@ -120,7 +120,8 @@ class RetrievalService:
         self.repository_graph = repository_graph
         self._graph_nodes_by_file: Dict[str, List[str]] = {}
         self._graph_nodes_by_file_symbol: Dict[Tuple[str, str], List[str]] = {}
-        if repository_graph is not None and persistent_index is None:
+        disk_backed_nodes = callable(getattr(repository_graph, "nodes_for_file", None))
+        if repository_graph is not None and not disk_backed_nodes:
             for node in sorted(repository_graph.get_nodes(), key=lambda item: item.id):
                 if not node.file_path:
                     continue
@@ -308,8 +309,9 @@ class RetrievalService:
             seed_node_ids = (symbol_nodes or self._graph_nodes_by_file.get(chunk.file_path, []))[
                 : self.MAX_GRAPH_NODES_PER_SEED
             ]
-            if self.persistent_index is not None:
-                nodes = self.repository_graph.nodes_for_file(chunk.file_path)
+            nodes_for_file = getattr(self.repository_graph, "nodes_for_file", None)
+            if callable(nodes_for_file):
+                nodes = nodes_for_file(chunk.file_path)
                 matching = [node for node in nodes if node.label == chunk.symbol]
                 seed_node_ids = [node.id for node in (matching or nodes)[:self.MAX_GRAPH_NODES_PER_SEED]]
             for seed_node_id in seed_node_ids:

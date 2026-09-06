@@ -12,7 +12,7 @@ from typing import Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 
-REPORT_SCHEMA_VERSION = "1.0"
+REPORT_SCHEMA_VERSION = "1.1"
 REPORT_TYPE_SCAN = "SCAN_SECURITY"
 
 
@@ -54,6 +54,10 @@ class ReportScope(FrozenReportModel):
     files_analyzed: Optional[int] = None
     source_bytes_analyzed: Optional[int] = None
     source_bytes_discovered: Optional[int] = None
+    inventory_complete: Optional[bool] = None
+    partial_files: int = 0
+    excluded_files: int = 0
+    excluded_by_reason: Dict[str, int] = Field(default_factory=dict)
     languages: Dict[str, int] = Field(default_factory=dict)
     unsupported_areas: List[str] = Field(default_factory=list)
     truncated: bool = False

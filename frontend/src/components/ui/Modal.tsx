@@ -117,6 +117,7 @@ export function Modal({
             )}
           </div>
           <button
+            suppressHydrationWarning
             type="button"
             onClick={onClose}
             className="interactive-btn"

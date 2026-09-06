@@ -5,7 +5,7 @@ from enum import Enum
 from pathlib import PurePosixPath
 
 
-CLASSIFICATION_VERSION = "classification/1"
+CLASSIFICATION_VERSION = "classification/2"
 
 
 class FileClass(str, Enum):
@@ -47,7 +47,7 @@ def classify_file(path: str, *, language: str | None, sample: bytes = b"", mode:
         return Disposition(FileClass.MINIFIED, False, "minified_or_source_map")
     if b"\x00" in sample or name.endswith((".png", ".jpg", ".zip", ".pdf", ".exe", ".dll", ".db", ".sqlite", ".woff", ".pyc")):
         return Disposition(FileClass.BINARY, False, "binary_file")
-    if name in {"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "uv.lock", "poetry.lock", "cargo.lock", "go.sum"}:
+    if name in {"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "uv.lock", "poetry.lock", "cargo.lock", "go.sum", "requirements.lock"}:
         return Disposition(FileClass.LOCKFILE, False, "dependency_scanner_only")
     if name.endswith((".generated.ts", "_pb2.py", ".g.cs")) or b"@generated" in sample[:2048].lower():
         return Disposition(FileClass.GENERATED, False, "generated_source")
@@ -55,8 +55,12 @@ def classify_file(path: str, *, language: str | None, sample: bytes = b"", mode:
         return Disposition(FileClass.TEST, True, "passive_test_source")
     if language in {"python", "javascript", "typescript", "tsx"}:
         return Disposition(FileClass.SOURCE, True, "supported_source")
-    if name.endswith((".json", ".toml", ".yaml", ".yml", ".ini", ".tf", ".tfvars")) or name in {"requirements.txt", "dockerfile", ".env.example"}:
+    if language in {"shell", "sql", "html", "css", "scss"}:
+        return Disposition(FileClass.SOURCE, True, "bounded_text_source")
+    if name.endswith((".json", ".toml", ".yaml", ".yml", ".ini", ".tf", ".tfvars", ".conf", ".rules", ".tpl", ".mako")) or name in {
+        "requirements.txt", "dockerfile", ".env.example", "makefile", ".gitignore", ".dockerignore",
+    }:
         return Disposition(FileClass.CONFIG, True, "bounded_configuration")
-    if name.endswith((".md", ".rst", ".txt")):
+    if name.endswith((".md", ".rst", ".txt")) or name in {"readme", "license", "notice"}:
         return Disposition(FileClass.DOC, False, "documentation_not_behavior_authority")
     return Disposition(FileClass.UNKNOWN, False, "unsupported_source")

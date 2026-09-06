@@ -1,6 +1,7 @@
 """Tests for Phase 3.5B: Wiring Phase 2 repository intelligence into real scans via ScanIntelligenceRuntime."""
 
 from typing import Dict, List, Optional, Tuple
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 import pytest
@@ -216,6 +217,27 @@ async def test_scan_intelligence_runtime_assembly_end_to_end():
     assert len(bundle.relevant_chunks) >= 1
     assert any("items" in c.chunk.file_path for c in bundle.relevant_chunks)
     assert bundle.provenance["total_chunks"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_bounded_complete_persistent_manifest_uses_exact_contract_graph():
+    evidence_store, _ = _build_test_evidence_store()
+    evidence_store.persistent_index = SimpleNamespace(
+        stats={
+            "inventory_complete": True,
+            "manifest_truncated": False,
+            "indexed_files": len(evidence_store.manifest.files),
+        }
+    )
+
+    runtime = await ScanIntelligenceRuntime.build(
+        evidence_store=evidence_store,
+        prefer_complete_graph=True,
+    )
+
+    report = runtime.repository_graph.evaluate_route_contracts()
+    assert report.total_frontend_requests == 1
+    assert report.matched_count == 1
 
 
 @pytest.mark.asyncio

@@ -52,6 +52,7 @@ export function AppHeader({
       <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
         {onToggleSidebar && (
           <button
+            suppressHydrationWarning
             type="button"
             onClick={onToggleSidebar}
             style={{
@@ -108,6 +109,7 @@ export function AppHeader({
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem' }}>
         {/* Quick Command Trigger Button */}
         <button
+          suppressHydrationWarning
           type="button"
           onClick={() => {
             const event = new KeyboardEvent('keydown', { key: 'k', metaKey: true, bubbles: true });

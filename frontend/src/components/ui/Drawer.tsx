@@ -124,6 +124,7 @@ export function Drawer({
             )}
           </div>
           <button
+            suppressHydrationWarning
             type="button"
             onClick={onClose}
             className="interactive-btn"

@@ -150,7 +150,11 @@ class BaseScannerAdapter(ABC):
             return ScannerResult(
                 tool=self.tool_name,
                 status=ToolStatus.UNAVAILABLE,
-                error_message=f"Executable '{self.tool_path}' is not installed or not in PATH.",
+                error_message=(
+                    f"Optional {self.tool_name} scanner is unavailable in this deployment. "
+                    "RepoLens built-in deterministic analysis continues; this scanner's "
+                    "specialized coverage is not included."
+                ),
             )
 
         start_time = time.perf_counter()

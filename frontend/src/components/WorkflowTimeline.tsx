@@ -173,6 +173,7 @@ export function WorkflowTimeline({ scanId }: WorkflowTimelineProps) {
         <div className="flex items-center gap-3">
           <label className="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer select-none">
             <input
+              suppressHydrationWarning
               type="checkbox"
               checked={autoScroll}
               onChange={(e) => setAutoScroll(e.target.checked)}
@@ -189,6 +190,7 @@ export function WorkflowTimeline({ scanId }: WorkflowTimelineProps) {
           const isActive = filter === cat;
           return (
             <button
+              suppressHydrationWarning
               key={cat}
               onClick={() => setFilter(cat)}
               className={`px-2.5 py-1 rounded-md font-medium transition-colors ${
@@ -265,6 +267,7 @@ export function WorkflowTimeline({ scanId }: WorkflowTimelineProps) {
                 {hasPayload && (
                   <div className="mt-2">
                     <button
+                      suppressHydrationWarning
                       onClick={() => toggleExpand(evt.id)}
                       className="text-[10px] text-slate-400 hover:text-cyan-400 underline cursor-pointer"
                     >

@@ -188,6 +188,7 @@ export function CommandPalette() {
         >
           <Search size={18} style={{ color: 'var(--text-muted)' }} />
           <input
+            suppressHydrationWarning
             type="text"
             autoFocus
             value={search}

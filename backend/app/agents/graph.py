@@ -345,16 +345,22 @@ async def run_analysis_workflow(
             deterministic_security_flows = select_candidates(persistent_index, "security")
             security_selection = dict(persistent_index.query_coverage)
             deterministic_architecture = select_architecture_candidates(persistent_index, runtime.repository_graph)
+            unresolved_frontier = dict(
+                getattr(runtime.repository_graph, "unresolved_frontier", {})
+            )
+            query_truncated = bool(
+                getattr(runtime.repository_graph, "query_truncated", False)
+            )
             summary["candidate_selection_coverage"] = {
                 "bug": bug_selection, "security": security_selection,
                 "architecture": {"selected": len(deterministic_architecture), "candidate_selection_partial": True,
-                    "unresolved_frontier": dict(runtime.repository_graph.unresolved_frontier)},
+                    "unresolved_frontier": unresolved_frontier},
             }
             summary["index_coverage"] = dict(persistent_index.stats)
             graph_coverage.update({
-                "complete": False,
-                "unresolved_frontier": dict(runtime.repository_graph.unresolved_frontier),
-                "query_truncated": bool(runtime.repository_graph.query_truncated),
+                "complete": bool(graph_data.complete) and not query_truncated,
+                "unresolved_frontier": unresolved_frontier,
+                "query_truncated": query_truncated,
             })
         summary = {
             **summary,

@@ -86,6 +86,41 @@ secret_id: aws_secretsmanager_secret.database.id
     assert "fixed-yaml-key-1234" not in serialized
 
 
+def test_ci_fixture_credentials_are_not_reported_as_production_secrets(tmp_path: Path):
+    workflow = """env:
+  POSTGRES_PASSWORD: postgres
+  JWT_SECRET_KEY: ci-test-secret-key-min-32-characters
+"""
+    path = tmp_path / ".github" / "workflows" / "ci.yml"
+    path.parent.mkdir(parents=True)
+    path.write_text(workflow, encoding="utf-8")
+
+    result = analyze_core_repository(
+        str(tmp_path),
+        _manifest([_entry(".github/workflows/ci.yml", None, workflow)]),
+    )
+
+    assert result.findings == []
+
+
+def test_shell_configuration_is_passively_checked_without_flagging_runtime_references(tmp_path: Path):
+    script = """#!/bin/sh
+DB_PASSWORD=${DB_PASSWORD:?required}
+ADMIN_PASSWORD=FixedProductionAdmin987!
+"""
+    path = tmp_path / "init.sh"
+    path.write_text(script, encoding="utf-8")
+
+    result = analyze_core_repository(
+        str(tmp_path),
+        _manifest([_entry("init.sh", "shell", script)]),
+    )
+
+    assert len(result.findings) == 1
+    assert result.findings[0].evidence.start_line == 3
+    assert "FixedProductionAdmin987" not in str(result.findings[0].model_dump())
+
+
 def test_routes_prefixes_parameters_and_missing_endpoints_match_exactly():
     backend = """from fastapi import APIRouter
 router = APIRouter(prefix="/api/v1/items")

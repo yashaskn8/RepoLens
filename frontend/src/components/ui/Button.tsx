@@ -151,6 +151,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
 
     return (
       <button
+        suppressHydrationWarning
         ref={ref}
         disabled={disabled || isLoading}
         style={{ ...baseStyle, ...sizeStyles[size], ...getVariantStyle(variant) }}

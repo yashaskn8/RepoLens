@@ -125,6 +125,8 @@ def _coverage(meta: Dict[str, Any], scope: ReportScope) -> Tuple[ReportCoverage,
 
     if scope.truncated:
         status = "PARTIAL"
+    elif scope.partial_files or scope.excluded_files:
+        status = "PARTIAL"
     elif analyzers and any(item.status not in {"COMPLETED", "AVAILABLE"} for item in analyzers):
         status = "DEGRADED"
     elif analyzers:
@@ -133,12 +135,21 @@ def _coverage(meta: Dict[str, Any], scope: ReportScope) -> Tuple[ReportCoverage,
         status = "UNKNOWN"
         limitations.append("Analyzer coverage metadata was not recorded.")
 
-    distinction = {
-        "FULL": "No findings means no findings were recorded within the fully recorded analyzer scope.",
-        "PARTIAL": "No findings must not be interpreted as clean: the analysis scope was truncated.",
-        "DEGRADED": "No findings must not be interpreted as clean: at least one analyzer was unavailable or degraded.",
-        "UNKNOWN": "No findings must not be interpreted as clean: analyzer coverage was not recorded.",
-    }[status]
+    if scope.truncated:
+        distinction = "Repository inventory or the active manifest stopped at a recorded resource boundary."
+    elif scope.partial_files or scope.excluded_files:
+        distinction = (
+            "Repository inventory completed, but semantic coverage is scoped: "
+            f"{scope.files_analyzed or 0} analyzable files were inspected, "
+            f"{scope.partial_files} had bounded auxiliary fact extraction, and "
+            f"{scope.excluded_files} non-analyzable files were inventoried."
+        )
+    else:
+        distinction = {
+            "FULL": "No findings means no findings were recorded within the fully recorded analyzer scope.",
+            "DEGRADED": "No findings must not be interpreted as clean: at least one analyzer was unavailable or degraded.",
+            "UNKNOWN": "No findings must not be interpreted as clean: analyzer coverage was not recorded.",
+        }[status]
     return ReportCoverage(status=status, analyzers=analyzers, distinction=distinction), limitations
 
 
@@ -310,20 +321,41 @@ class ReportAssembler:
             meta["analysis_coverage"] = canonical_coverage.get("coverage")
         scope_meta = meta.get("analysis_scope") or meta.get("scope") or {}
         scope_meta = scope_meta if isinstance(scope_meta, dict) else {}
+        index_meta = meta.get("index_coverage") if isinstance(meta.get("index_coverage"), dict) else {}
+        excluded_by_reason_raw = index_meta.get("excluded_by_reason")
+        excluded_by_reason = {
+            _safe_text(key, 128): _safe_int(value) or 0
+            for key, value in list(excluded_by_reason_raw.items())[:100]
+        } if isinstance(excluded_by_reason_raw, dict) else {}
+        excluded_files = sum(excluded_by_reason.values())
+        partial_files = _safe_int(index_meta.get("partial_files")) or 0
         unsupported = _safe_string_list(meta.get("unsupported_areas") or scope_meta.get("unsupported_areas"))
         limits = _safe_string_list(scope_meta.get("limits_encountered"))
         if scope_meta.get("reason"):
             limits.append(_safe_text(scope_meta.get("reason"), 512))
+        if partial_files:
+            limits.append(
+                f"{partial_files} analyzable files had bounded auxiliary fact extraction; "
+                "their source parsing and deterministic scanner coverage remain recorded."
+            )
+        if excluded_files:
+            limits.append(
+                f"{excluded_files} non-analyzable files were inventoried and excluded by recorded file-type policy."
+            )
         languages_raw = meta.get("languages") if isinstance(meta.get("languages"), dict) else {}
         languages = {
             _safe_text(key, 64): _safe_int(value) or 0
             for key, value in list(languages_raw.items())[:100]
         }
         scope = ReportScope(
-            files_discovered=_safe_int(scope_meta.get("total_observed_files")),
-            files_analyzed=_safe_int(scope_meta.get("files_processed")),
+            files_discovered=_safe_int(index_meta.get("discovered_files")) or _safe_int(scope_meta.get("total_observed_files")),
+            files_analyzed=_safe_int(index_meta.get("indexed_files")) or _safe_int(scope_meta.get("files_processed")),
             source_bytes_analyzed=_safe_int(scope_meta.get("source_bytes_processed")),
             source_bytes_discovered=_safe_int(scope_meta.get("total_observed_bytes")),
+            inventory_complete=index_meta.get("inventory_complete") if isinstance(index_meta.get("inventory_complete"), bool) else None,
+            partial_files=partial_files,
+            excluded_files=excluded_files,
+            excluded_by_reason=excluded_by_reason,
             languages=languages,
             unsupported_areas=unsupported,
             truncated=bool(scope_meta.get("truncated", False)),

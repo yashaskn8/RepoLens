@@ -106,10 +106,25 @@ def runtime_authorities(
     }
     scanner_sources = [
         root / "analysis" / "service.py",
+        root / "analysis" / "core.py",
         root / "analysis" / "base.py",
         root / "analysis" / "adapters" / "semgrep.py",
         root / "analysis" / "adapters" / "trivy.py",
         root / "analysis" / "adapters" / "osv.py",
+    ]
+    graph_sources = [
+        root / "graph" / "repository_graph.py",
+        root / "graph" / "builder.py",
+        root / "graph" / "matcher.py",
+        root / "graph" / "schemas.py",
+        root / "context" / "runtime.py",
+        root / "retrieval" / "service.py",
+    ]
+    ingestion_sources = [
+        root / "ingestion" / "manifest.py",
+        root / "ingestion" / "classification.py",
+        root / "indexing" / "persistent.py",
+        root / "indexing" / "facts.py",
     ]
     scanner_config_fingerprint = source_fingerprint(*(str(path) for path in scanner_sources))
     values: dict[str, Any] = {
@@ -125,7 +140,9 @@ def runtime_authorities(
     }
     for key, path in authority_files.items():
         values[key] = source_fingerprint(str(path))
+    values["ingestion"] = source_fingerprint(*(str(path) for path in ingestion_sources))
     values["scanner"] = values.get("scanner") or scanner_config_fingerprint
+    values["graph"] = source_fingerprint(*(str(path) for path in graph_sources))
     return values
 
 

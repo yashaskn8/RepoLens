@@ -19,6 +19,5 @@ def _font_bundle_digest() -> str:
 
 
 RENDERER_VERSION = (
-    f"reportlab-platypus-1.1/reportlab-{reportlab.Version}/fonts-{_font_bundle_digest()}"
+    f"reportlab-platypus-1.2/reportlab-{reportlab.Version}/fonts-{_font_bundle_digest()}"
 )
-

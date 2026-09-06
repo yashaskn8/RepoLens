@@ -98,6 +98,7 @@ export function AuthModal({ isOpen, onClose, initialMode = 'login' }: AuthModalP
 
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '0.5rem' }}>
           <button
+            suppressHydrationWarning
             type="button"
             onClick={() => {
               setMode(mode === 'login' ? 'register' : 'login');

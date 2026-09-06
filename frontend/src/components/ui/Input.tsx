@@ -49,6 +49,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
             </div>
           )}
           <input
+            suppressHydrationWarning
             ref={ref}
             disabled={disabled}
             style={{
@@ -109,6 +110,7 @@ export function SearchInput({ value, onChange, onClear, placeholder = 'Search...
       rightElement={
         value && onClear ? (
           <button
+            suppressHydrationWarning
             type="button"
             onClick={onClear}
             style={{
@@ -147,6 +149,7 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
           </label>
         )}
         <select
+          suppressHydrationWarning
           ref={ref}
           style={{
             width: '100%',

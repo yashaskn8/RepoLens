@@ -11,6 +11,7 @@ export const WorkspaceNav: React.FC<WorkspaceNavProps> = ({ currentMode, onModeC
   return (
     <nav className="workspace-nav" aria-label="Workspace Mode Navigation">
       <button
+        suppressHydrationWarning
         type="button"
         role="tab"
         aria-selected={currentMode === 'LANDING'}
@@ -20,6 +21,7 @@ export const WorkspaceNav: React.FC<WorkspaceNavProps> = ({ currentMode, onModeC
         <span aria-hidden="true">🏠</span> Overview
       </button>
       <button
+        suppressHydrationWarning
         type="button"
         role="tab"
         aria-selected={currentMode === 'SCAN'}
@@ -29,6 +31,7 @@ export const WorkspaceNav: React.FC<WorkspaceNavProps> = ({ currentMode, onModeC
         <span aria-hidden="true">🛡️</span> Scan Repository
       </button>
       <button
+        suppressHydrationWarning
         type="button"
         role="tab"
         aria-selected={currentMode === 'CHANGE_ANALYSIS'}
@@ -38,6 +41,7 @@ export const WorkspaceNav: React.FC<WorkspaceNavProps> = ({ currentMode, onModeC
         <span aria-hidden="true">🔍</span> PR Analysis
       </button>
       <button
+        suppressHydrationWarning
         type="button"
         role="tab"
         aria-selected={currentMode === 'ARCHITECTURE'}
@@ -49,4 +53,3 @@ export const WorkspaceNav: React.FC<WorkspaceNavProps> = ({ currentMode, onModeC
     </nav>
   );
 };
-
