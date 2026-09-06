@@ -162,6 +162,7 @@ def _clock(metrics: dict, key: str):
 def run_scale_benchmark(*, file_count: int, symbols_per_file: int = 1,
                         vendor_ratio: float = 0.0, fanout: int = 0,
                         scc_size: int = 0, workspace_depth: int = 0,
+                        max_index_seconds: float = 900,
                         keep_directory: str | None = None) -> dict:
     """Run local deterministic paths and report live-model work as not executed."""
     holder = tempfile.TemporaryDirectory(prefix="repolens-scale-") if keep_directory is None else None
@@ -170,7 +171,8 @@ def run_scale_benchmark(*, file_count: int, symbols_per_file: int = 1,
     repo, database = root / "fixture.git", root / "benchmark.db"
     metrics: dict = {"schema_version": 2, "requested_files": file_count,
         "profile": {"symbols_per_file": symbols_per_file, "vendor_ratio": vendor_ratio,
-                    "fanout": fanout, "scc_size": scc_size, "workspace_depth": workspace_depth}}
+                    "fanout": fanout, "scc_size": scc_size, "workspace_depth": workspace_depth,
+                    "max_index_seconds": max_index_seconds}}
     tracemalloc.start()
     try:
         with _clock(metrics, "fixture_generation_seconds"):
@@ -188,7 +190,7 @@ def run_scale_benchmark(*, file_count: int, symbols_per_file: int = 1,
         session = sessionmaker(bind=engine)()
         limits = IndexLimits(max_files=file_count + workspace_depth * 2 + 32,
             max_source_bytes=max(52_428_800, file_count * symbols_per_file * 256),
-            max_seconds=900, manifest_files=min(file_count + 32, 2048),
+            max_seconds=max_index_seconds, manifest_files=min(file_count + 32, 2048),
             max_database_bytes=max(2_147_483_648, file_count * symbols_per_file * 32_768))
         cold = PersistentIndex(session, tenant_id="benchmark", repository_url="benchmark://fixture",
                                repo_dir=str(repo), commit_sha=base, limits=limits)
@@ -318,13 +320,15 @@ def main() -> int:
     parser.add_argument("--fanout", type=int, default=0)
     parser.add_argument("--scc-size", type=int, default=0)
     parser.add_argument("--workspace-depth", type=int, default=0)
+    parser.add_argument("--max-index-seconds", type=float, default=900)
     parser.add_argument("--keep-directory")
     parser.add_argument("--output")
     args = parser.parse_args()
     count = args.files or PRESETS.get(args.preset or "1k", 1_000)
     result = run_scale_benchmark(file_count=count, symbols_per_file=args.symbols_per_file,
         vendor_ratio=args.vendor_ratio, fanout=args.fanout, scc_size=args.scc_size,
-        workspace_depth=args.workspace_depth, keep_directory=args.keep_directory)
+        workspace_depth=args.workspace_depth, max_index_seconds=args.max_index_seconds,
+        keep_directory=args.keep_directory)
     rendered = json.dumps(result, indent=2, sort_keys=True)
     if args.output:
         Path(args.output).write_text(rendered + "\n", encoding="utf-8")

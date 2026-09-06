@@ -14,9 +14,11 @@ def test_ai_work_envelope_depends_on_unique_candidates_not_inventory_size():
 
 def test_small_passive_scale_run_emits_truthful_machine_metrics():
     report = run_scale_benchmark(file_count=24, symbols_per_file=2, vendor_ratio=0.25,
-                                 fanout=4, scc_size=3, workspace_depth=2)
+                                 fanout=4, scc_size=3, workspace_depth=2,
+                                 max_index_seconds=30)
     assert report["requested_files"] == 24
     assert report["inventory"]["vendor_files"] == 6
+    assert report["profile"]["max_index_seconds"] == 30
     assert report["discovery"]["complete"]
     assert report["discovery"]["materialized_change_records"] == 1
     assert report["cold_index"]["parsed_files"] > 0
