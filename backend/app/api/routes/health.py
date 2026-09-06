@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 from app.core.config import get_settings
 from app.core.database import get_db
+from app.core.schema_readiness import missing_scan_storage_tables
 from app.models.finding import FindingModel
 from app.models.patch import PatchModel
 from app.models.scan import ScanModel
@@ -43,6 +44,8 @@ def check_health(db: Session = Depends(get_db)) -> Dict[str, Any]:
     db_status = "connected"
     try:
         db.execute(text("SELECT 1"))
+        if missing_scan_storage_tables(db):
+            db_status = "migration_required"
     except Exception as exc:
         logger.error(f"Database health check failed: {exc}", exc_info=True)
         db_status = "unhealthy"
@@ -209,4 +212,3 @@ def get_detailed_health(db: Session = Depends(get_db)) -> TelemetryReport:
 def get_api_telemetry(db: Session = Depends(get_db)) -> TelemetryReport:
     """Retrieve operational telemetry."""
     return _build_telemetry_report(db)
-

@@ -2,6 +2,8 @@
 
 from datetime import datetime, timedelta, timezone
 import hashlib
+import threading
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import create_engine
@@ -15,14 +17,18 @@ from app.execution import (
     DurableExecutionEngine,
     EnqueueRequest,
     ExecutionState,
+    FailureCode,
     IdempotencyConflict,
     RequestBudget,
     ResourceProfile,
     SideEffectClass,
     WorkKind,
 )
-from app.models.execution import RequestBudgetModel, ResourcePoolModel, WorkItemModel
+from app.models.execution import FailureRecordModel, RequestBudgetModel, ResourcePoolModel, WorkItemModel
+from app.models.scan import ScanModel
 from app.models.user import UserModel
+from app.execution.dispatcher import DurableWorkDispatcher
+from app.execution.dispatcher import WorkHandlerResult
 
 
 class MutableClock:
@@ -74,7 +80,7 @@ def _request(
         requested_by="user:tenant-1",
         policy_snapshot_id="policy-sha256:abc",
         work_kind=WorkKind.GITHUB_DELIVERY if side_effect == SideEffectClass.EXTERNAL_SIDE_EFFECT else WorkKind.SCAN,
-        resource_type="scan",
+        resource_type="SCAN",
         resource_id=resource_id,
         idempotency_key=key,
         request_digest=hashlib.sha256(resource_id.encode()).hexdigest(),
@@ -180,3 +186,89 @@ def test_expiry_retries_safe_work_but_requires_external_reconciliation(execution
     assert external_row.state == ExecutionState.FAILED.value
     assert external_row.reconciliation_required is True
     assert engine.claim_next("worker-d") is None
+
+
+def test_orphan_reconciliation_trusts_existing_domain_row_over_process_memory(execution_db):
+    """An absent process-local task entry cannot terminate SQL-authoritative work."""
+    scan_id = str(uuid4())
+    execution_db.add(
+        ScanModel(
+            id=scan_id,
+            owner_user_id="tenant-1",
+            repository_url="https://github.com/org/repo.git",
+            status="RUNNING",
+        )
+    )
+    execution_db.commit()
+    engine = DurableExecutionEngine(execution_db, lease_seconds=60)
+    enqueued = engine.enqueue(_request("orphan-safety", resource_id=scan_id))
+    claim = engine.claim_next("same-process-worker")
+    engine.start(enqueued.work_item_id, claim.lease_token)
+
+    reconciled = DurableWorkDispatcher._reconcile_missing_active_work(execution_db, limit=10)
+
+    execution_db.refresh(execution_db.get(WorkItemModel, enqueued.work_item_id))
+    assert reconciled == 0
+    assert execution_db.get(WorkItemModel, enqueued.work_item_id).state == ExecutionState.RUNNING.value
+
+
+def test_terminal_execution_reconciliation_closes_stuck_scan(execution_db):
+    scan_id = str(uuid4())
+    execution_db.add(
+        ScanModel(
+            id=scan_id,
+            owner_user_id="tenant-1",
+            repository_url="https://github.com/org/repo.git",
+            status="RUNNING",
+            model_metadata={"index_coverage": {"indexed_files": 10}},
+        )
+    )
+    execution_db.commit()
+    engine = DurableExecutionEngine(execution_db, lease_seconds=60)
+    enqueued = engine.enqueue(_request("terminal-reconcile", resource_id=scan_id))
+    claim = engine.claim_next("worker-a")
+    engine.start(enqueued.work_item_id, claim.lease_token)
+    engine.fail(
+        enqueued.work_item_id,
+        claim.lease_token,
+        code=FailureCode.INTERNAL_INVARIANT_VIOLATION,
+        public_message="Analysis stopped safely.",
+        retryable=False,
+    )
+
+    reconciled = DurableWorkDispatcher._reconcile_terminal_scan_statuses(execution_db, limit=10)
+    execution_db.expire_all()
+    scan = execution_db.get(ScanModel, scan_id)
+
+    assert reconciled == 1
+    assert scan.status == "FAILED"
+    assert scan.completed_at is not None
+    assert scan.model_metadata["failure_code"] == FailureCode.INTERNAL_INVARIANT_VIOLATION.value
+    assert scan.model_metadata["index_coverage"] == {"indexed_files": 10}
+
+
+@pytest.mark.asyncio
+async def test_scan_domain_runs_off_dispatcher_event_loop(monkeypatch):
+    observed = {}
+    dispatcher_thread = threading.get_ident()
+
+    async def fake_scan(**_kwargs):
+        observed["thread"] = threading.get_ident()
+
+    monkeypatch.setattr("app.api.routes.scans.execute_background_scan", fake_scan)
+    monkeypatch.setattr(DurableWorkDispatcher, "_scan_payload", lambda _scan_id: ("https://github.com/org/repo.git", "main"))
+    monkeypatch.setattr(
+        DurableWorkDispatcher,
+        "_scan_result",
+        lambda _scan_id: WorkHandlerResult(
+            outcome=DomainOutcome.COMPLETE,
+            coverage_summary={"status": "COMPLETE"},
+        ),
+    )
+
+    result = await DurableWorkDispatcher._execute_domain(
+        type("Claim", (), {"work_kind": WorkKind.SCAN, "resource_id": "scan-id"})()
+    )
+
+    assert result.outcome == DomainOutcome.COMPLETE
+    assert observed["thread"] != dispatcher_thread

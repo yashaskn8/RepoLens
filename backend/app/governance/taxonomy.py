@@ -152,7 +152,13 @@ def safe_failure(
         return CanonicalFailure(code=FailureCode.PROVIDER_RATE_LIMITED, message="The selected provider is rate limited.", retryable=True)
     if "AUTH" in name:
         return CanonicalFailure(code=FailureCode.PROVIDER_AUTH_FAILURE, message="Provider authentication failed.", retryable=False)
-    if "REPOSITORY" in name or "GIT" in name:
+    if name == "INVENTORYBOUND" and text in {"index_writer_busy", "index_writer_lease_lost"}:
+        return CanonicalFailure(
+            code=FailureCode.WORKER_LOST,
+            message="Repository indexing was interrupted and can be resumed safely.",
+            retryable=True,
+        )
+    if "REPOSITORY" in name or "GIT" in name or "CLONE" in name or "INGESTION" in name:
         return CanonicalFailure(code=FailureCode.REPOSITORY_UNAVAILABLE, message="The repository revision could not be acquired.", retryable=True)
     return CanonicalFailure(
         code=default,

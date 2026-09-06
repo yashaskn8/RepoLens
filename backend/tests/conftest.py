@@ -50,6 +50,11 @@ def db_session():
     """Yield an isolated test session per test function."""
     connection = engine.connect()
     transaction = connection.begin()
+    # Python's sqlite3 driver defers the physical BEGIN until the first write.
+    # Worker sessions use SAVEPOINTs on this shared connection; without an
+    # explicit outer BEGIN, releasing the first savepoint commits durable work
+    # and resource reservations across tests instead of rolling them back.
+    connection.exec_driver_sql("BEGIN")
     session = TestingSessionLocal(bind=connection, join_transaction_mode="create_savepoint")
 
     yield session

@@ -42,6 +42,20 @@ interface ScanDetailPageProps {
   params: Promise<{ id: string }>;
 }
 
+type JsonRecord = Record<string, unknown>;
+
+function asRecord(value: unknown): JsonRecord {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as JsonRecord
+    : {};
+}
+
+function asCount(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? value
+    : null;
+}
+
 export default function ScanDetailPage({ params }: ScanDetailPageProps) {
   const resolvedParams = use(params);
   const scanId = resolvedParams.id;
@@ -119,6 +133,34 @@ export default function ScanDetailPage({ params }: ScanDetailPageProps) {
     );
   }, [findings]);
 
+  const metadata = asRecord(scan?.model_metadata);
+  const indexCoverage = asRecord(metadata.index_coverage);
+  const analysisScope = asRecord(metadata.analysis_scope);
+  const graphCoverage = asRecord(metadata.graph_coverage);
+  const analysisCoverage = asRecord(metadata.analysis_coverage);
+  const scannerCoverage = Array.isArray(metadata.scanner_coverage)
+    ? metadata.scanner_coverage.map(asRecord)
+    : [];
+  const indexedFiles = asCount(indexCoverage.indexed_files);
+  const discoveredFiles = asCount(indexCoverage.discovered_files);
+  const reasoningFiles = asCount(analysisScope.files_processed);
+  const graphNodes = asCount(graphCoverage.total_nodes);
+  const graphEdges = asCount(graphCoverage.total_edges);
+  const unavailableScanners = scannerCoverage.filter(
+    (tool) => String(tool.status || '').toUpperCase() !== 'COMPLETED'
+  );
+  const analysisStatus = String(analysisCoverage.status || '').toUpperCase();
+  const coverageLimited = Boolean(
+    analysisStatus && analysisStatus !== 'COMPLETE'
+    || indexCoverage.manifest_truncated === true
+    || graphCoverage.complete === false
+  );
+  const dependencyScanner = scannerCoverage.find(
+    (tool) => String(tool.tool || '').toLowerCase().includes('osv')
+  );
+  const dependencyCoverageComplete = String(dependencyScanner?.status || '').toUpperCase() === 'COMPLETED';
+  const hasActiveFindingFilters = Boolean(searchQuery.trim() || severityFilter !== 'ALL');
+
   const repoName = scan
     ? scan.repository_url.replace('https://github.com/', '').replace(/\/$/, '')
     : `Scan ${scanId}`;
@@ -161,14 +203,16 @@ export default function ScanDetailPage({ params }: ScanDetailPageProps) {
                 <Badge
                   variant={
                     scan.status === 'COMPLETED'
-                      ? 'success'
+                      ? coverageLimited ? 'warning' : 'success'
                       : scan.status === 'FAILED'
                       ? 'error'
                       : 'cyan'
                   }
                   size="sm"
                 >
-                  {scan.status === 'COMPLETED' ? 'Analysis Complete' : scan.status}
+                  {scan.status === 'COMPLETED'
+                    ? coverageLimited ? 'Completed — limited coverage' : 'Analysis Complete'
+                    : scan.status}
                 </Badge>
               )}
             </div>
@@ -233,10 +277,14 @@ export default function ScanDetailPage({ params }: ScanDetailPageProps) {
               Files Analyzed
             </span>
             <span style={{ fontSize: '1.125rem', fontWeight: 700, color: '#ffffff' }}>
-              {telemetry?.stage_count ? `${telemetry.stage_count * 12}+ files` : 'All project files'}
+              {indexedFiles !== null
+                ? discoveredFiles !== null ? `${indexedFiles.toLocaleString()} of ${discoveredFiles.toLocaleString()}` : indexedFiles.toLocaleString()
+                : 'Not reported'}
             </span>
             <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-              Passive AST syntax parsing
+              {reasoningFiles !== null
+                ? `${reasoningFiles.toLocaleString()} files in bounded reasoning scope`
+                : 'Passive source parsing; excluded scope is reported separately'}
             </span>
           </div>
 
@@ -246,10 +294,12 @@ export default function ScanDetailPage({ params }: ScanDetailPageProps) {
               Relationships Discovered
             </span>
             <span style={{ fontSize: '1.125rem', fontWeight: 700, color: 'var(--accent-cyan)' }}>
-              Mapped
+              {graphNodes !== null && graphEdges !== null
+                ? `${graphNodes.toLocaleString()} nodes · ${graphEdges.toLocaleString()} links`
+                : 'Not reported'}
             </span>
             <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-              Cross-layer routes &amp; client calls
+              {graphCoverage.complete === true ? 'Complete deterministic graph' : 'Partial deterministic graph; unknown links remain'}
             </span>
           </div>
 
@@ -317,14 +367,22 @@ export default function ScanDetailPage({ params }: ScanDetailPageProps) {
               </div>
             ) : filteredFindings.length === 0 ? (
               <EmptyState
-                icon={<CheckCircle2 size={28} style={{ color: 'var(--success-text)' }} />}
-                title="No findings matched filter"
-                description="Either the repository has zero matching violations or current filters exclude all records."
-                actionLabel="Clear Filters"
-                onAction={() => {
-                  setSearchQuery('');
-                  setSeverityFilter('ALL');
-                }}
+                icon={coverageLimited
+                  ? <AlertTriangle size={28} style={{ color: 'var(--warning-text)' }} />
+                  : <CheckCircle2 size={28} style={{ color: 'var(--success-text)' }} />}
+                title={hasActiveFindingFilters
+                  ? 'No findings match these filters'
+                  : coverageLimited ? 'No verified findings in available coverage' : 'No verified findings'}
+                description={hasActiveFindingFilters
+                  ? 'Clear the filters to review all confirmed findings from this scan.'
+                  : coverageLimited
+                    ? `This is not a clean bill of health. ${unavailableScanners.length} configured scanner${unavailableScanners.length === 1 ? ' was' : 's were'} unavailable or incomplete, and omitted scope remains unknown.`
+                    : 'RepoLens completed the recorded analysis and did not confirm a finding. This does not prove that no defect exists.'}
+                actionLabel={hasActiveFindingFilters ? 'Clear Filters' : undefined}
+                onAction={hasActiveFindingFilters ? () => {
+                    setSearchQuery('');
+                    setSeverityFilter('ALL');
+                  } : undefined}
               />
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
@@ -377,9 +435,13 @@ export default function ScanDetailPage({ params }: ScanDetailPageProps) {
 
               {dependencyFindings.length === 0 ? (
                 <EmptyState
-                  icon={<CheckCircle2 size={24} style={{ color: 'var(--success-text)' }} />}
-                  title="No vulnerable dependencies detected"
-                  description="Package manifests and dependencies were evaluated against open vulnerability databases. No known vulnerable dependencies were found."
+                  icon={dependencyCoverageComplete
+                    ? <CheckCircle2 size={24} style={{ color: 'var(--success-text)' }} />
+                    : <AlertTriangle size={24} style={{ color: 'var(--warning-text)' }} />}
+                  title={dependencyCoverageComplete ? 'No verified vulnerable dependencies' : 'Dependency scan unavailable'}
+                  description={dependencyCoverageComplete
+                    ? 'The configured dependency scanner completed and did not produce a confirmed dependency finding.'
+                    : 'RepoLens could not complete its configured dependency-vulnerability scanner. Dependency risk remains unknown for this scan.'}
                 />
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
@@ -424,13 +486,13 @@ export default function ScanDetailPage({ params }: ScanDetailPageProps) {
                 <div style={{ padding: '0.85rem', background: 'rgba(5, 8, 18, 0.7)', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-subtle)' }}>
                   <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Duration</div>
                   <div style={{ fontSize: '1.125rem', fontWeight: 700, color: '#ffffff', marginTop: '0.2rem' }}>
-                    {telemetry?.total_duration_ms ? `${(telemetry.total_duration_ms / 1000).toFixed(2)}s` : 'Passive Instant'}
+                    {telemetry?.total_duration_ms != null ? `${(telemetry.total_duration_ms / 1000).toFixed(2)}s` : 'Not reported'}
                   </div>
                 </div>
                 <div style={{ padding: '0.85rem', background: 'rgba(5, 8, 18, 0.7)', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-subtle)' }}>
                   <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Tools Completed</div>
                   <div style={{ fontSize: '1.125rem', fontWeight: 700, color: '#ffffff', marginTop: '0.2rem' }}>
-                    {telemetry?.tools_completed || 4}
+                    {telemetry?.tools_completed ?? 0}
                   </div>
                 </div>
                 <div style={{ padding: '0.85rem', background: 'rgba(5, 8, 18, 0.7)', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-subtle)' }}>

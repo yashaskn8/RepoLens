@@ -288,7 +288,11 @@ def test_large_report_renders_with_a_bounded_detail_budget(
     tmp_path: Path,
 ):
     """A large finding set stays useful and within hard artifact limits."""
-    owner = db_session.query(UserModel).filter(UserModel.email == "default_test_user@example.com").one()
+    owner = create_or_elevate_operator(
+        db_session,
+        email="default_test_user@example.com",
+        password="DefaultTestPass12345!",
+    )
     scan_id = str(uuid4())
     scan = ScanModel(
         id=scan_id,
@@ -374,7 +378,11 @@ def test_report_recovery_terminalizes_an_exhausted_attempt_budget(
     monkeypatch.setenv("REPORT_MAX_ATTEMPTS", "2")
     get_settings.cache_clear()
     try:
-        owner = db_session.query(UserModel).filter(UserModel.email == "default_test_user@example.com").one()
+        owner = create_or_elevate_operator(
+            db_session,
+            email="default_test_user@example.com",
+            password="DefaultTestPass12345!",
+        )
         scan_id = str(uuid4())
         report_id = str(uuid4())
         db_session.add(ScanModel(

@@ -71,6 +71,17 @@ class _AttemptControl:
     lease_lost: bool = False
 
 
+_RETRYABLE_SCAN_FAILURES = frozenset(
+    {
+        FailureCode.REPOSITORY_UNAVAILABLE,
+        FailureCode.ANALYZER_TIMEOUT,
+        FailureCode.PROVIDER_RATE_LIMITED,
+        FailureCode.PROVIDER_UNAVAILABLE,
+        FailureCode.WORKER_LOST,
+    }
+)
+
+
 class DurableWorkDispatcher:
     """Local worker runtime whose only durable authority is the relational database.
 
@@ -236,9 +247,89 @@ class DurableWorkDispatcher:
                 result = engine.recover_expired(limit=100)
                 if result.recovered:
                     logger.warning("Recovered %s expired durable work leases.", result.recovered)
+            cls._reconcile_terminal_scan_statuses(db, limit=100)
             return engine.claim_next(cls._worker_prefix)
         finally:
             db.close()
+
+    @classmethod
+    def _reconcile_terminal_scan_statuses(cls, db, *, limit: int) -> int:
+        """Close scan rows whose SQL-authoritative work is already terminal."""
+        if limit <= 0:
+            return 0
+        from app.models.scan import ScanModel
+        from app.schemas.workflow_event import WorkflowEventCreate, WorkflowEventType
+        from app.services.workflow_event_service import WorkflowEventService
+
+        rows = (
+            db.query(WorkItemModel, ScanModel)
+            .join(ScanModel, ScanModel.id == WorkItemModel.resource_id)
+            .filter(
+                WorkItemModel.resource_type == "SCAN",
+                WorkItemModel.state.in_(
+                    (
+                        ExecutionState.SUCCEEDED.value,
+                        ExecutionState.FAILED.value,
+                        ExecutionState.CANCELLED.value,
+                        ExecutionState.TIMED_OUT.value,
+                    )
+                ),
+                ScanModel.status.in_(("PENDING", "RUNNING")),
+                ScanModel.owner_user_id == WorkItemModel.tenant_id,
+            )
+            .order_by(WorkItemModel.terminal_at.asc())
+            .limit(limit)
+            .all()
+        )
+        reconciled = 0
+        now = datetime.now(timezone.utc)
+        for work, scan in rows:
+            failure = (
+                db.query(FailureRecordModel)
+                .filter(FailureRecordModel.work_item_id == work.id)
+                .order_by(FailureRecordModel.created_at.desc(), FailureRecordModel.id.desc())
+                .first()
+            )
+            if work.state == ExecutionState.TIMED_OUT.value:
+                code = FailureCode.WORKFLOW_TIMEOUT.value
+                message = "Repository analysis exceeded its wall-clock budget."
+                coverage = "PARTIAL"
+            elif work.state == ExecutionState.CANCELLED.value:
+                code = FailureCode.CANCELLED_BY_USER.value
+                message = "Repository analysis was cancelled."
+                coverage = "UNKNOWN"
+            elif failure is not None:
+                code = failure.code
+                message = failure.public_message
+                coverage = "UNKNOWN"
+            else:
+                code = FailureCode.INTERNAL_INVARIANT_VIOLATION.value
+                message = "Repository analysis ended without a completed domain result."
+                coverage = "UNKNOWN"
+
+            scan.status = "FAILED"
+            scan.completed_at = now
+            metadata = dict(scan.model_metadata or {})
+            metadata.update({"failure_code": code, "failure_message": message})
+            scan.model_metadata = metadata
+            WorkflowEventService.emit_critical(
+                db,
+                WorkflowEventCreate(
+                    event_type=WorkflowEventType.SCAN_FAILED,
+                    scan_id=UUID(scan.id),
+                    commit_sha=scan.commit_hash,
+                    message=message,
+                    metadata_payload={
+                        "failure_code": code,
+                        "coverage": coverage,
+                        "recovered_from_terminal_work": True,
+                    },
+                ),
+            )
+            reconciled += 1
+        if reconciled:
+            db.commit()
+        return reconciled
 
     @classmethod
     def _reconcile_missing_active_work(cls, db, *, limit: int) -> int:
@@ -268,12 +359,11 @@ class DurableWorkDispatcher:
         )
         reconciled = 0
         for work, lease in candidates:
-            local_worker_abandoned = (
-                lease.worker_id.startswith(cls._worker_prefix)
-                and work.id not in cls._active_tasks
-                and work.id not in cls._inline_active
-            )
-            if not local_worker_abandoned and cls._domain_resource_exists(db, work):
+            # Process-local task registries are only scheduling hints. A task may
+            # leave the registry while cancellable thread work unwinds, so absence
+            # from memory cannot prove abandonment. Existing domain rows are
+            # recovered only through the SQL lease-expiry path below.
+            if cls._domain_resource_exists(db, work):
                 continue
             try:
                 if DurableExecutionEngine(
@@ -629,6 +719,8 @@ class DurableWorkDispatcher:
                     await asyncio.to_thread(cls._mark_external_state_uncertain, claim)
                 return
             if control.budget_stopped or control.lease_lost:
+                if control.budget_stopped:
+                    await asyncio.to_thread(cls._mark_domain_budget_stopped, claim)
                 return
             await asyncio.to_thread(cls._complete_transition, claim, result)
         except asyncio.CancelledError:
@@ -640,6 +732,8 @@ class DurableWorkDispatcher:
                     await asyncio.to_thread(cls._mark_external_state_uncertain, claim)
                 return
             if control.budget_stopped or control.lease_lost:
+                if control.budget_stopped:
+                    await asyncio.to_thread(cls._mark_domain_budget_stopped, claim)
                 return
             # Shutdown deliberately leaves the SQL lease active. A later worker
             # recovers it after expiry instead of claiming false completion.
@@ -672,7 +766,11 @@ class DurableWorkDispatcher:
         handler_task: asyncio.Task,
         control: _AttemptControl,
     ) -> None:
-        interval = max(1.0, get_settings().EXECUTION_LEASE_SECONDS / 3.0)
+        # Keep renewal comfortably inside even the shortest lease created by a
+        # mixed-version worker. Deriving only from this process's configuration
+        # allowed a 60-second persisted lease to expire while this loop slept for
+        # ~100 seconds.
+        interval = max(1.0, min(10.0, get_settings().EXECUTION_LEASE_SECONDS / 3.0))
         while not handler_task.done():
             await asyncio.sleep(interval)
             try:
@@ -681,6 +779,16 @@ class DurableWorkDispatcher:
                 control.lease_lost = True
                 handler_task.cancel()
                 return
+            except Exception:
+                # A transient SQLite writer or database connection failure must
+                # not silently kill the only renewal loop. Retry on the next
+                # bounded interval; SQL expiry remains the final authority.
+                logger.warning(
+                    "Durable work heartbeat failed transiently for %s.",
+                    claim.work_item_id,
+                    exc_info=True,
+                )
+                continue
             if result.cancel_requested:
                 control.cancel_requested = True
                 handler_task.cancel()
@@ -978,16 +1086,78 @@ class DurableWorkDispatcher:
         finally:
             db.close()
 
+    @staticmethod
+    def _mark_domain_budget_stopped(claim: ClaimedWork) -> None:
+        """Keep domain status consistent with a terminal execution budget."""
+        db = SessionLocal()
+        try:
+            if claim.work_kind == WorkKind.SCAN:
+                from app.models.scan import ScanModel
+                from app.schemas.workflow_event import WorkflowEventCreate, WorkflowEventType
+                from app.services.workflow_event_service import WorkflowEventService
+
+                model = db.query(ScanModel).filter(ScanModel.id == claim.resource_id).first()
+                if model is not None and model.status not in ("COMPLETED", "FAILED"):
+                    model.status = "FAILED"
+                    model.completed_at = datetime.now(timezone.utc)
+                    metadata = dict(model.model_metadata or {})
+                    metadata.update(
+                        {
+                            "failure_code": FailureCode.WORKFLOW_TIMEOUT.value,
+                            "failure_message": (
+                                "Repository analysis exceeded its wall-clock budget. "
+                                "Partial coverage is preserved; retry with a larger scan budget."
+                            ),
+                        }
+                    )
+                    model.model_metadata = metadata
+                    WorkflowEventService.emit_critical(
+                        db,
+                        WorkflowEventCreate(
+                            event_type=WorkflowEventType.SCAN_FAILED,
+                            scan_id=UUID(model.id),
+                            commit_sha=model.commit_hash,
+                            stage="multi_agent_workflow",
+                            message="Repository analysis stopped at its wall-clock budget",
+                            metadata_payload={
+                                "failure_code": FailureCode.WORKFLOW_TIMEOUT.value,
+                                "coverage": "PARTIAL",
+                            },
+                        ),
+                    )
+            elif claim.work_kind == WorkKind.CHANGE_ANALYSIS:
+                from app.models.change_analysis import ChangeAnalysisModel
+
+                model = db.query(ChangeAnalysisModel).filter(
+                    ChangeAnalysisModel.id == claim.resource_id
+                ).first()
+                if model is not None and model.status not in ("COMPLETED", "FAILED"):
+                    model.status = "FAILED"
+                    model.failure_code = FailureCode.WORKFLOW_TIMEOUT.value
+                    model.failure_message = "Change analysis exceeded its wall-clock budget."
+                    model.completed_at = datetime.now(timezone.utc)
+            db.commit()
+        finally:
+            db.close()
+
     @classmethod
     async def _execute_domain(cls, claim: ClaimedWork) -> WorkHandlerResult:
         if claim.work_kind == WorkKind.SCAN:
             from app.api.routes.scans import execute_background_scan
 
             payload = await asyncio.to_thread(cls._scan_payload, claim.resource_id)
-            await execute_background_scan(
-                scan_id=claim.resource_id,
-                repo_url=payload[0],
-                branch=payload[1],
+            # LangGraph includes CPU-heavy deterministic nodes. Running its
+            # coroutine on the API/dispatcher loop can starve lease heartbeats
+            # and request handling, so the complete scan owns a worker event
+            # loop while the dispatcher loop remains responsive.
+            await asyncio.to_thread(
+                lambda: asyncio.run(
+                    execute_background_scan(
+                        scan_id=claim.resource_id,
+                        repo_url=payload[0],
+                        branch=payload[1],
+                    )
+                )
             )
             return await asyncio.to_thread(cls._scan_result, claim.resource_id)
 
@@ -1316,13 +1486,27 @@ class DurableWorkDispatcher:
         db = SessionLocal()
         try:
             scan = db.query(ScanModel).filter(ScanModel.id == scan_id).first()
-            if scan is None or scan.status != "COMPLETED":
+            if scan is None:
                 raise DomainWorkFailed(
-                    FailureCode.REPOSITORY_UNAVAILABLE,
-                    "Repository analysis did not complete successfully.",
-                    retryable=True,
+                    FailureCode.INTERNAL_INVARIANT_VIOLATION,
+                    "The scan resource no longer exists.",
+                    retryable=False,
                 )
             metadata = scan.model_metadata if isinstance(scan.model_metadata, dict) else {}
+            if scan.status != "COMPLETED":
+                raw_code = metadata.get("failure_code")
+                try:
+                    failure_code = FailureCode(raw_code)
+                except (TypeError, ValueError):
+                    failure_code = FailureCode.INTERNAL_INVARIANT_VIOLATION
+                message = metadata.get("failure_message")
+                if not isinstance(message, str) or not message.strip():
+                    message = "Repository analysis did not complete successfully."
+                raise DomainWorkFailed(
+                    failure_code,
+                    message,
+                    retryable=failure_code in _RETRYABLE_SCAN_FAILURES,
+                )
             coverage = AnalysisCoverage.from_analyzers(metadata.get("scanner_coverage") or [])
             if not coverage.units:
                 coverage = AnalysisCoverage.from_units([

@@ -4,6 +4,7 @@ import subprocess
 from dataclasses import replace
 import hashlib
 import json
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -733,6 +734,34 @@ def test_catalog_writer_is_exclusive_and_stale_writer_cannot_publish(indexed_rep
     first._release_writer()
     assert db.get(IndexWriterModel, first.writer_id).token == contender.writer_token
     contender._release_writer()
+
+
+def test_sqlite_owned_retry_fences_interrupted_catalog_writer(indexed_repository):
+    from app.models.intelligence import IndexWriterModel
+
+    _, _, db, factory = indexed_repository
+    interrupted, resumed = factory(), factory()
+    interrupted._acquire_writer()
+
+    with patch(
+        "app.execution.context.current_claim",
+        return_value=SimpleNamespace(tenant_id=resumed.tenant_id),
+    ):
+        resumed._acquire_writer()
+
+    writer = db.get(IndexWriterModel, resumed.writer_id)
+    assert writer.token == resumed.writer_token
+    resumed._release_writer()
+
+
+def test_catalog_writer_contention_is_retryable_infrastructure_failure():
+    from app.governance.taxonomy import FailureCode, safe_failure
+    from app.ingestion.git_inventory import InventoryBound
+
+    failure = safe_failure(InventoryBound("index_writer_busy"))
+
+    assert failure.code == FailureCode.WORKER_LOST
+    assert failure.retryable is True
 
 
 def test_checkpoint_survives_interrupted_projection(indexed_repository):

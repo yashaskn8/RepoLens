@@ -30,6 +30,7 @@ from app.api.idempotency import idempotency_identity
 from app.context.runtime import ScanIntelligenceRuntime
 from app.core.config import get_settings
 from app.core.database import SessionLocal, get_db
+from app.core.schema_readiness import missing_scan_storage_tables
 from app.execution.application import (
     NewWorkPaused,
     WorkSubmissionService,
@@ -107,11 +108,6 @@ def _scan_resource(db: Session, scan_model: ScanModel) -> Scan:
         )
     )
     metadata = scan_model.model_metadata if isinstance(scan_model.model_metadata, dict) else {}
-    model_metadata = (
-        ModelExecutionMetadata(model_name="RepoLens-MultiAgent", extra_metadata=metadata)
-        if metadata
-        else None
-    )
     requested_branch = metadata.get("requested_branch")
     resolved_branch = metadata.get("resolved_branch_or_ref")
     return Scan(
@@ -125,7 +121,10 @@ def _scan_resource(db: Session, scan_model: ScanModel) -> Scan:
         status=ScanStatus(scan_model.status),
         findings_count=findings_count,
         findings=[],
-        model_metadata=model_metadata,
+        # Scan metadata is an aggregate contract (coverage, graph, provenance,
+        # scanners, and model usage), not a single model invocation. Returning
+        # the stored structure preserves truthful PARTIAL/UNAVAILABLE state.
+        model_metadata=metadata or None,
         created_at=scan_model.created_at,
         completed_at=scan_model.completed_at,
     )
@@ -787,6 +786,18 @@ async def create_scan(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid repository URL: {str(exc)}",
+        )
+
+    if missing_scan_storage_tables(db):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error_code": "DATABASE_MIGRATION_REQUIRED",
+                "message": (
+                    "Repository analysis storage is not ready. "
+                    "Apply database migrations and restart RepoLens."
+                ),
+            },
         )
 
     req_branch = payload.requested_branch if payload.requested_branch is not None else payload.branch

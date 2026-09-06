@@ -24,6 +24,9 @@ wheels/
 venv/
 ENV/
 *.db
+*.db-journal
+*.db-shm
+*.db-wal
 *.sqlite3
 
 # Pytest / Coverage

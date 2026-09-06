@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, Suspense } from 'react';
+import React, { useState, useEffect, Suspense, useSyncExternalStore } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { AppShell } from '@/components/layout/AppShell';
@@ -8,7 +8,7 @@ import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { Badge } from '@/components/ui/Badge';
-import { startScan, fetchScan } from '@/lib/api';
+import { startScan, fetchScan, listScans } from '@/lib/api';
 import { useWorkflowStream } from '@/lib/useWorkflowStream';
 import { Scan } from '@/types/domain';
 import { useAuth } from '@/context/AuthContext';
@@ -90,6 +90,14 @@ function ScanWorkspaceContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { isAuthenticated, isLoading: isAuthLoading } = useAuth();
+  // This component can hydrate after the auth provider has already refreshed.
+  // Keep its server and first client render identical, then reveal session-aware
+  // controls once hydration is complete.
+  const isHydrated = useSyncExternalStore(
+    () => () => undefined,
+    () => true,
+    () => false,
+  );
 
   const [repoUrl, setRepoUrl] = useState(searchParams.get('repo') || 'https://github.com/yashaskn8/RepoLens');
   const [branch, setBranch] = useState(searchParams.get('branch') || 'main');
@@ -105,19 +113,25 @@ function ScanWorkspaceContent() {
     Boolean(activeScan?.id && (activeScan?.status === 'PENDING' || activeScan?.status === 'RUNNING'))
   );
 
-  // Load recent scans on mount
+  // Server state is tenant-scoped. Never hydrate scan identities from a
+  // browser-global cache that survives logout or account changes.
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const stored = localStorage.getItem('repolens_recent_scans');
-      if (stored) {
-        try {
-          setRecentScans(JSON.parse(stored));
-        } catch {
-          // ignore
-        }
-      }
+    let cancelled = false;
+    if (isAuthLoading) return () => { cancelled = true; };
+    if (!isAuthenticated) {
+      setRecentScans([]);
+      return () => { cancelled = true; };
     }
-  }, []);
+
+    void listScans(10)
+      .then((scans) => {
+        if (!cancelled) setRecentScans(scans);
+      })
+      .catch(() => {
+        if (!cancelled) setRecentScans([]);
+      });
+    return () => { cancelled = true; };
+  }, [isAuthenticated, isAuthLoading]);
 
   // Poll scan completion if running
   useEffect(() => {
@@ -129,14 +143,10 @@ function ScanWorkspaceContent() {
         const updated = await fetchScan(activeScan.id);
         setActiveScan(updated);
 
-        if (typeof window !== 'undefined') {
-          const stored = localStorage.getItem('repolens_recent_scans');
-          const list: Scan[] = stored ? JSON.parse(stored) : [];
-          const filtered = list.filter((s) => s.id !== updated.id);
-          const updatedList = [updated, ...filtered].slice(0, 10);
-          setRecentScans(updatedList);
-          localStorage.setItem('repolens_recent_scans', JSON.stringify(updatedList));
-        }
+        setRecentScans((current) => [
+          updated,
+          ...current.filter((scan) => scan.id !== updated.id),
+        ].slice(0, 10));
 
         if (updated.status === 'COMPLETED' || updated.status === 'FAILED') {
           clearInterval(interval);
@@ -169,13 +179,10 @@ function ScanWorkspaceContent() {
       });
       setActiveScan(scanResult);
 
-      if (typeof window !== 'undefined') {
-        const stored = localStorage.getItem('repolens_recent_scans');
-        const list: Scan[] = stored ? JSON.parse(stored) : [];
-        const updatedList = [scanResult, ...list].slice(0, 10);
-        setRecentScans(updatedList);
-        localStorage.setItem('repolens_recent_scans', JSON.stringify(updatedList));
-      }
+      setRecentScans((current) => [
+        scanResult,
+        ...current.filter((scan) => scan.id !== scanResult.id),
+      ].slice(0, 10));
     } catch (err: unknown) {
       if (err instanceof Error) {
         setError(err.message);
@@ -387,19 +394,21 @@ function ScanWorkspaceContent() {
               {/* Primary Action Button */}
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '0.5rem' }}>
                 <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                  Estimated time: ~8–15 seconds
+                  Large repositories may take several minutes
                 </span>
                 <Button
                   type="submit"
                   variant="glow"
                   size="lg"
                   isLoading={isSubmitting}
-                  disabled={isScanning || isAuthLoading}
+                  disabled={isScanning || isAuthLoading || !isHydrated}
                   rightIcon={<ArrowRight size={16} />}
                 >
                   {isScanning
                     ? 'Analyzing Repository...'
-                    : isAuthenticated
+                    : !isHydrated || isAuthLoading
+                      ? 'Checking session...'
+                      : isAuthenticated
                       ? 'Analyze Repository'
                       : 'Sign in to Analyze'}
                 </Button>

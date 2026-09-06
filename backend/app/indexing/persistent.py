@@ -165,12 +165,30 @@ class PersistentIndex:
 
     def _acquire_writer(self):
         now = time.time()
+        dialect = self.db.get_bind().dialect.name
+        from app.execution.context import current_claim
+
+        claim = current_claim()
+        if claim is not None and claim.tenant_id != self.tenant_id:
+            raise InventoryBound("execution_tenant_mismatch")
+        writer_conditions = [
+            IndexWriterModel.id == self.writer_id,
+            IndexWriterModel.expires_at <= now,
+        ]
+        if dialect == "sqlite" and claim is not None:
+            # SQLite execution is deliberately single-worker. If a new owned
+            # attempt holds that worker slot, an unexpired catalog writer can
+            # only belong to an interrupted predecessor and is safe to fence.
+            writer_conditions = [IndexWriterModel.id == self.writer_id]
         try:
-            if self.db.get_bind().dialect.name == "postgresql":
+            if dialect == "postgresql":
                 self.db.execute(text("SELECT set_config('lock_timeout', :budget, true)"),
                     {"budget": str(max(1, int(self.limits.query_seconds * 1000))) + "ms"})
-            changed = self.db.execute(update(IndexWriterModel).where(IndexWriterModel.id == self.writer_id,
-                IndexWriterModel.expires_at <= now).values(token=self.writer_token, expires_at=now + 300)).rowcount
+            changed = self.db.execute(
+                update(IndexWriterModel)
+                .where(*writer_conditions)
+                .values(token=self.writer_token, expires_at=now + 300)
+            ).rowcount
         except DBAPIError as exc:
             self.db.rollback()
             code = getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)
@@ -217,8 +235,13 @@ class PersistentIndex:
         if claim is not None:
             if claim.tenant_id != self.tenant_id:
                 raise InventoryBound("execution_tenant_mismatch")
+            from app.core.config import get_settings
             from app.execution.engine import DurableExecutionEngine
-            result = DurableExecutionEngine(self.db, auto_commit=False).heartbeat(claim.work_item_id, claim.lease_token)
+            result = DurableExecutionEngine(
+                self.db,
+                lease_seconds=get_settings().EXECUTION_LEASE_SECONDS,
+                auto_commit=False,
+            ).heartbeat(claim.work_item_id, claim.lease_token)
             if not result.active or result.cancel_requested or result.budget_exhausted:
                 self.db.rollback()
                 raise InventoryBound("execution_admission_stopped")

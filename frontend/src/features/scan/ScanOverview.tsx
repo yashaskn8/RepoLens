@@ -9,9 +9,19 @@ export interface ScanOverviewProps {
 }
 
 export const ScanOverview: React.FC<ScanOverviewProps> = ({ scan }) => {
-  const archOverview = scan.model_metadata?.extra_metadata?.architecture_overview as string | undefined;
-  const frameworks = (scan.model_metadata?.extra_metadata?.frameworks as string[]) || [];
-  const languages = (scan.model_metadata?.extra_metadata?.languages as Record<string, number>) || {};
+  const extraMetadata = scan.model_metadata?.extra_metadata;
+  const details = extraMetadata && typeof extraMetadata === 'object' && !Array.isArray(extraMetadata)
+    ? extraMetadata as Record<string, unknown>
+    : {};
+  const archOverview = typeof details.architecture_overview === 'string'
+    ? details.architecture_overview
+    : undefined;
+  const frameworks = Array.isArray(details.frameworks)
+    ? details.frameworks.filter((value): value is string => typeof value === 'string')
+    : [];
+  const languages = details.languages && typeof details.languages === 'object' && !Array.isArray(details.languages)
+    ? details.languages as Record<string, number>
+    : {};
 
   const apiBase = getApiBaseUrl();
 

@@ -1,12 +1,11 @@
 """Scan schema representing a repository analysis lifecycle and results."""
 
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from uuid import UUID, uuid4
 from pydantic import BaseModel, Field, HttpUrl
 from app.schemas.enums import ScanStatus
 from app.schemas.finding import Finding
-from app.schemas.metadata import ModelExecutionMetadata
 
 
 def _utc_now() -> datetime:
@@ -38,7 +37,10 @@ class Scan(ScanBase):
     status: ScanStatus = Field(default=ScanStatus.PENDING, description="Current scan lifecycle status")
     findings_count: int = Field(default=0, ge=0, description="Total count of findings detected")
     findings: List[Finding] = Field(default_factory=list, description="Findings associated with this scan")
-    model_metadata: Optional[ModelExecutionMetadata] = Field(default=None, description="Telemetry metadata for model execution")
+    model_metadata: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Structured scan coverage, provenance, and model execution metadata",
+    )
     created_at: datetime = Field(default_factory=_utc_now, description="Timestamp when scan was queued")
     completed_at: Optional[datetime] = Field(default=None, description="Timestamp when scan finished")
 

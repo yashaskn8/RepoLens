@@ -60,7 +60,7 @@ async def test_clone_failure_records_failed_scan_without_cleanup_error():
         scan = db.get(ScanModel, scan_id)
         assert scan is not None
         assert scan.status == ScanStatus.FAILED.value
-        assert scan.model_metadata["failure_code"] == "INTERNAL_INVARIANT_VIOLATION"
+        assert scan.model_metadata["failure_code"] == "REPOSITORY_UNAVAILABLE"
         assert scan.model_metadata["failure_message"]
         assert "git clone failed" not in scan.model_metadata["failure_message"]
     finally:

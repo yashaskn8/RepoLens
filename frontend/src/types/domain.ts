@@ -91,7 +91,7 @@ export interface Scan {
   status: ScanStatus;
   findings_count: number;
   findings: Finding[];
-  model_metadata?: ModelExecutionMetadata | null;
+  model_metadata?: Record<string, unknown> | null;
   created_at: string;
   completed_at?: string | null;
 }
