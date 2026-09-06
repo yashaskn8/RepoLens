@@ -108,6 +108,12 @@ jobs:
       - name: Install backend
         working-directory: backend
         run: pip install -e ".[dev]"
+      - name: Require at least one configured provider
+        run: |
+          if [ -z "${GEMINI_API_KEY}${GROQ_API_KEY}${NVIDIA_API_KEY}${HUGGINGFACE_API_KEY}" ]; then
+            echo "::error::run_live_providers requires at least one configured provider secret"
+            exit 1
+          fi
       - name: Run configured provider smokes
         working-directory: backend
         run: python -m pytest tests/test_live_providers.py -q

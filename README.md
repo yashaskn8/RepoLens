@@ -210,7 +210,11 @@ python -m app.benchmarks.scale --preset 1k --output scale-report.json
 python -m pytest tests/test_postgres_integration.py tests/test_pgvector_index.py -m integration
 ```
 
+Set `REPOLENS_POSTGRES_TEST_URL` and `PGVECTOR_TEST_URL` to the same disposable PostgreSQL database when validating migrations and pgvector together. Live-provider validation requires at least one of `GEMINI_API_KEY`, `GROQ_API_KEY`, `NVIDIA_API_KEY`, or `HUGGINGFACE_API_KEY`, then runs with `python -m pytest tests/test_live_providers.py -q`. The manual workflow fails instead of reporting success when live-provider validation is requested without any configured provider key.
+
 Staging smoke mode validates registration/login, scan, report, PR analysis, remediation, approval, and read-only publication/delivery previews. External writes require both `--allow-external-writes` and `REPOLENS_SMOKE_ALLOW_EXTERNAL_WRITES=1`; they are disabled by default.
+
+Executed scale evidence: [50K benchmark](docs/benchmarks/scale-50k.md) and [100K benchmark](docs/benchmarks/scale-100k.md).
 
 ### Frontend Verification
 ```bash
@@ -250,7 +254,7 @@ RepoLens enforces strict controls around external GitHub writes:
 - **Autonomous Auto-Merging**: Machine systems cannot merge pull requests or bypass human review.
 - **Private Repository Multi-Tenancy**: Current public release candidate focuses on public GitHub repository analysis; organization-wide OAuth token delegations and private repository sync are out of scope for v1.
 - **Static Module Resolution Only**: Relative imports, `tsconfig`/`jsconfig` base URLs and paths, safe relative `extends`, package imports/exports, and npm/yarn/pnpm workspaces are resolved only when one existing target is provable. Dynamic JavaScript config, condition-dependent targets, and ambiguous aliases remain `UNRESOLVED`.
-- **Extreme-Scale Validation Status**: RepoLens is **designed for extreme scale** through immutable subtree reuse, bounded persistent queries, resumable frontiers, and candidate-derived AI budgets. It is **not yet proven at million-file scale**. The 1K/10K/100K harness is available, but no unexecuted benchmark result is claimed here.
+- **Extreme-Scale Validation Status**: RepoLens has been validated on a synthetic 100,017-file repository with 80,017 eligible/indexed files while preserving bounded memory, incremental locality, recovery correctness, and constant AI admission. Coverage remained truthfully `PARTIAL`, model/verifier execution was `NOT_EXECUTED`, and million-file scale remains unproven. See the [50K](docs/benchmarks/scale-50k.md) and [100K](docs/benchmarks/scale-100k.md) benchmark evidence.
 - **Environment-Dependent Production Proofs**: Real PostgreSQL/pgvector concurrency and live providers require explicitly configured staging infrastructure; default CI verifies their fail-closed/skip behavior without pretending those services ran.
 
 ---
