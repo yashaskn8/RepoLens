@@ -46,9 +46,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const register = async (email: string, password: string) => {
-    const registered = await registerUser({ email, password });
-    // After registration, auto-login or set user if login returns session
-    setUser(registered);
+    await registerUser({ email, password });
+    // Registration creates the account only. Authenticate explicitly so the
+    // client state never claims a session before HttpOnly/CSRF cookies exist.
+    const loggedIn = await loginUser({ email, password });
+    setUser(loggedIn);
   };
 
   const logout = async () => {

@@ -11,6 +11,7 @@ import { Badge } from '@/components/ui/Badge';
 import { startScan, fetchScan } from '@/lib/api';
 import { useWorkflowStream } from '@/lib/useWorkflowStream';
 import { Scan } from '@/types/domain';
+import { useAuth } from '@/context/AuthContext';
 import {
   Scan as ScanIcon,
   GitBranch,
@@ -88,6 +89,7 @@ function getFriendlyEventLabel(eventType: string): string {
 function ScanWorkspaceContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { isAuthenticated, isLoading: isAuthLoading } = useAuth();
 
   const [repoUrl, setRepoUrl] = useState(searchParams.get('repo') || 'https://github.com/yashaskn8/RepoLens');
   const [branch, setBranch] = useState(searchParams.get('branch') || 'main');
@@ -150,6 +152,12 @@ function ScanWorkspaceContent() {
   const handleStartScan = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!repoUrl) return;
+
+    if (!isAuthenticated) {
+      setError('Sign in to analyze repositories.');
+      window.dispatchEvent(new Event('repolens:open-auth'));
+      return;
+    }
 
     setError(null);
     setIsSubmitting(true);
@@ -386,10 +394,14 @@ function ScanWorkspaceContent() {
                   variant="glow"
                   size="lg"
                   isLoading={isSubmitting}
-                  disabled={isScanning}
+                  disabled={isScanning || isAuthLoading}
                   rightIcon={<ArrowRight size={16} />}
                 >
-                  {isScanning ? 'Analyzing Repository...' : 'Analyze Repository'}
+                  {isScanning
+                    ? 'Analyzing Repository...'
+                    : isAuthenticated
+                      ? 'Analyze Repository'
+                      : 'Sign in to Analyze'}
                 </Button>
               </div>
             </form>

@@ -11,7 +11,7 @@ import { Badge } from '@/components/ui/Badge';
 import { Tabs } from '@/components/ui/Tabs';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Skeleton } from '@/components/ui/Skeleton';
-import { startChangeAnalysis, startChangeAnalysisFromPR, listChangeAnalyses } from '@/lib/api';
+import { getErrorMessage, startChangeAnalysis, startChangeAnalysisFromPR, listChangeAnalyses } from '@/lib/api';
 import { ChangeAnalysisSummary } from '@/types/domain';
 import {
   GitPullRequest,
@@ -74,8 +74,8 @@ function ChangeAnalysisEntryContent() {
         });
         router.push(`/changes/${result.id}`);
       }
-    } catch (err: any) {
-      setError(err?.message || 'Failed to initiate change analysis.');
+    } catch (err: unknown) {
+      setError(getErrorMessage(err, 'Failed to initiate change analysis.'));
       setIsSubmitting(false);
     }
   };

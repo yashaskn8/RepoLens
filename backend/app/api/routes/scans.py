@@ -141,6 +141,7 @@ async def execute_background_scan(
     db: Session = SessionLocal()
     workspace_dir: Optional[str] = None
     index_db = None
+    persistent_index = None
 
     try:
         # 1. Update status to RUNNING and emit SCAN_STARTED

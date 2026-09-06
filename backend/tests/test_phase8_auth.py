@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.cli.create_operator import create_or_elevate_operator
 from app.models.user import UserModel, UserSessionModel
+from app.models.scan import ScanModel
 from app.schemas.enums import UserRole
 from app.security.password import (
     hash_password,
@@ -97,6 +98,44 @@ def test_user_registration_and_login_flow(client: TestClient, db_session: Sessio
     assert me_data["id"] == user_data["id"]
     assert me_data["email"] == email
     assert me_data["role"] == "USER"
+
+
+def test_registration_requires_login_before_protected_scan(client: TestClient, db_session: Session):
+    """Client auth state must follow the server session, not account creation."""
+    client.cookies.clear()
+    email = "registration_session_contract@example.com"
+    password = "ValidStrongPassword12345!"
+
+    registration = client.post(
+        "/api/v1/auth/register",
+        json={"email": email, "password": password},
+    )
+    assert registration.status_code == 201
+    assert "repolens_session" not in registration.cookies
+
+    unauthenticated = client.post(
+        "/api/v1/scans",
+        json={"repository_url": "https://github.com/org/repo"},
+    )
+    assert unauthenticated.status_code == 401
+    assert unauthenticated.json()["detail"]["error_code"] == "UNAUTHENTICATED"
+
+    login = client.post(
+        "/api/v1/auth/login",
+        json={"email": email, "password": password},
+    )
+    assert login.status_code == 200
+    csrf_token = login.cookies["repolens_csrf"]
+
+    authenticated = client.post(
+        "/api/v1/scans",
+        json={"repository_url": "https://github.com/org/repo"},
+        headers={"X-CSRF-Token": csrf_token},
+    )
+    assert authenticated.status_code == 202
+    scan = db_session.get(ScanModel, authenticated.json()["id"])
+    assert scan is not None
+    assert scan.owner_user_id == login.json()["id"]
 
 
 def test_login_failed_attempts_and_lockout(client: TestClient, db_session: Session):

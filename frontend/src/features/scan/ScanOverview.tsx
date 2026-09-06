@@ -2,6 +2,7 @@ import React from 'react';
 import { Scan } from '@/types/domain';
 import { Card } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
+import { getApiBaseUrl } from '@/lib/api';
 
 export interface ScanOverviewProps {
   scan: Scan;
@@ -12,7 +13,7 @@ export const ScanOverview: React.FC<ScanOverviewProps> = ({ scan }) => {
   const frameworks = (scan.model_metadata?.extra_metadata?.frameworks as string[]) || [];
   const languages = (scan.model_metadata?.extra_metadata?.languages as Record<string, number>) || {};
 
-  const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
+  const apiBase = getApiBaseUrl();
 
   return (
     <Card

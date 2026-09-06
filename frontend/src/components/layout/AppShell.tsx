@@ -77,6 +77,12 @@ export function AppShell({ children, breadcrumbs = [], title }: AppShellProps) {
     setIsMobileOpen(false);
   }, [pathname]);
 
+  useEffect(() => {
+    const openAuth = () => setIsAuthModalOpen(true);
+    window.addEventListener('repolens:open-auth', openAuth);
+    return () => window.removeEventListener('repolens:open-auth', openAuth);
+  }, []);
+
   const closeMobile = useCallback(() => setIsMobileOpen(false), []);
 
   const renderNavLinks = (collapsed: boolean) => (

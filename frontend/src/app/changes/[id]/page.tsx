@@ -20,6 +20,7 @@ import {
   generateReviewPublicationPreview,
   approveReviewPublication,
   publishReviewPublication,
+  getErrorMessage,
 } from '@/lib/api';
 import {
   ChangeAnalysisResponse,
@@ -106,8 +107,8 @@ export default function ChangeDetailPage({ params }: ChangeDetailPageProps) {
     try {
       const pub = await generateReviewPublicationPreview(analysisId);
       setPublication(pub);
-    } catch (err: any) {
-      setPublishMessage(err?.message || 'Failed to generate review preview.');
+    } catch (err: unknown) {
+      setPublishMessage(getErrorMessage(err, 'Failed to generate review preview.'));
     }
   };
 
@@ -122,8 +123,8 @@ export default function ChangeDetailPage({ params }: ChangeDetailPageProps) {
       setPublishMessage(`Review published successfully to GitHub (Review ID: ${res.github_review_id || 'OK'})`);
       const updatedPub = await fetchReviewPublication(analysisId);
       setPublication(updatedPub);
-    } catch (err: any) {
-      setPublishMessage(err?.message || 'Failed to publish review to GitHub.');
+    } catch (err: unknown) {
+      setPublishMessage(getErrorMessage(err, 'Failed to publish review to GitHub.'));
     } finally {
       setIsPublishing(false);
     }

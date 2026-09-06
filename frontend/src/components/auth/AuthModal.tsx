@@ -6,7 +6,7 @@ import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { ShieldCheck, LogIn, UserPlus, AlertCircle } from 'lucide-react';
-import { Badge } from '@/components/ui/Badge';
+import { getErrorMessage } from '@/lib/api';
 
 export interface AuthModalProps {
   isOpen: boolean;
@@ -35,8 +35,8 @@ export function AuthModal({ isOpen, onClose, initialMode = 'login' }: AuthModalP
         await register(email, password);
       }
       onClose();
-    } catch (err: any) {
-      setError(err?.message || 'Authentication request failed. Please check credentials.');
+    } catch (err: unknown) {
+      setError(getErrorMessage(err, 'Authentication request failed. Please check your credentials.'));
     } finally {
       setIsLoading(false);
     }
@@ -88,6 +88,9 @@ export function AuthModal({ isOpen, onClose, initialMode = 'login' }: AuthModalP
           label="Password"
           type="password"
           required
+          minLength={mode === 'register' ? 12 : undefined}
+          maxLength={128}
+          helperText={mode === 'register' ? 'Use at least 12 characters.' : undefined}
           placeholder="••••••••••••"
           value={password}
           onChange={(e) => setPassword(e.target.value)}

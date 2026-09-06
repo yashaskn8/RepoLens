@@ -40,7 +40,97 @@ import {
   UserResponse,
 } from '@/types/domain';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
+export function getApiBaseUrl(): string {
+  const configured = process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, '');
+  if (configured) return configured;
+  if (typeof window !== 'undefined') {
+    // Keep localhost/127.0.0.1 consistent with the page host. Cookies are
+    // host-scoped, so mixing the two names creates a false logged-in state.
+    return `${window.location.protocol}//${window.location.hostname}:8000`;
+  }
+  return 'http://localhost:8000';
+}
+
+type ApiErrorDetail = {
+  message?: unknown;
+  error_code?: unknown;
+  detail?: unknown;
+  msg?: unknown;
+};
+
+export class ApiError extends Error {
+  readonly status: number;
+  readonly errorCode?: string;
+
+  constructor(message: string, status: number, errorCode?: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.errorCode = errorCode;
+  }
+}
+
+function cleanMessage(value: string): string {
+  return value.trim().replace(/^Value error,\s*/i, '');
+}
+
+function humanizeErrorCode(value: string): string {
+  const text = value.toLowerCase().replace(/_/g, ' ');
+  return text ? text[0].toUpperCase() + text.slice(1) : '';
+}
+
+function extractApiMessage(value: unknown): string | null {
+  if (typeof value === 'string') return cleanMessage(value) || null;
+  if (Array.isArray(value)) {
+    const messages = value.map(extractApiMessage).filter((item): item is string => Boolean(item));
+    return messages.length ? [...new Set(messages)].join('. ') : null;
+  }
+  if (!value || typeof value !== 'object') return null;
+  const detail = value as ApiErrorDetail;
+  return (
+    extractApiMessage(detail.message) ||
+    extractApiMessage(detail.msg) ||
+    extractApiMessage(detail.detail) ||
+    (typeof detail.error_code === 'string' ? humanizeErrorCode(detail.error_code) : null)
+  );
+}
+
+function extractErrorCode(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const body = value as ApiErrorDetail;
+  if (typeof body.error_code === 'string') return body.error_code;
+  if (body.detail && typeof body.detail === 'object' && !Array.isArray(body.detail)) {
+    const nested = body.detail as ApiErrorDetail;
+    return typeof nested.error_code === 'string' ? nested.error_code : undefined;
+  }
+  return undefined;
+}
+
+export async function apiErrorFromResponse(response: Response, fallback: string): Promise<ApiError> {
+  let payload: unknown = null;
+  try {
+    const body = await response.text();
+    if (body) {
+      try {
+        payload = JSON.parse(body);
+      } catch {
+        if (response.headers.get('content-type')?.toLowerCase().startsWith('text/plain')) {
+          payload = body.slice(0, 240);
+        }
+      }
+    }
+  } catch {
+    // The fallback remains authoritative when an error body cannot be read.
+  }
+  const message = extractApiMessage(payload) || `${fallback} (${response.status})`;
+  return new ApiError(message, response.status, extractErrorCode(payload));
+}
+
+export function getErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message.trim()) return error.message;
+  if (typeof error === 'string' && error.trim()) return error;
+  return fallback;
+}
 
 /**
  * Extract CSRF token from client cookie.
@@ -55,7 +145,7 @@ export function getCsrfToken(): string | null {
  * Standard fetch wrapper attaching credentials and CSRF tokens.
  */
 export async function apiFetch(input: string, init?: RequestInit): Promise<Response> {
-  const url = input.startsWith('http') ? input : `${API_BASE_URL}${input}`;
+  const url = input.startsWith('http') ? input : `${getApiBaseUrl()}${input}`;
   const method = (init?.method || 'GET').toUpperCase();
   const headers = new Headers(init?.headers || {});
 
@@ -71,11 +161,16 @@ export async function apiFetch(input: string, init?: RequestInit): Promise<Respo
     }
   }
 
-  return fetch(url, {
-    ...init,
-    headers,
-    credentials: 'include',
-  });
+  try {
+    return await fetch(url, {
+      ...init,
+      headers,
+      credentials: 'include',
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') throw error;
+    throw new ApiError('Unable to reach the RepoLens server. Check that the backend is running.', 0, 'NETWORK_ERROR');
+  }
 }
 
 /* ========================================================================= */
@@ -89,8 +184,7 @@ export async function registerUser(payload: UserRegisterRequest): Promise<UserRe
   });
 
   if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.detail?.message || err.detail || `Registration failed (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Registration failed');
   }
 
   return response.json();
@@ -103,8 +197,7 @@ export async function loginUser(payload: UserLoginRequest): Promise<UserResponse
   });
 
   if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.detail?.message || err.detail || `Login failed (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Login failed');
   }
 
   return response.json();
@@ -116,8 +209,7 @@ export async function logoutUser(): Promise<{ message: string }> {
   });
 
   if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.detail?.message || err.detail || `Logout failed (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Logout failed');
   }
 
   return response.json();
@@ -129,7 +221,7 @@ export async function fetchCurrentUser(): Promise<UserResponse> {
   });
 
   if (!response.ok) {
-    throw new Error(`Unauthenticated (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Authentication required');
   }
 
   return response.json();
@@ -145,7 +237,7 @@ export async function fetchHealth(): Promise<HealthResponse> {
   });
 
   if (!response.ok) {
-    throw new Error(`Health check failed with status: ${response.status}`);
+    throw await apiErrorFromResponse(response, 'Health check failed');
   }
 
   return response.json();
@@ -162,8 +254,7 @@ export async function startScan(payload: ScanCreate): Promise<Scan> {
   });
 
   if (!response.ok) {
-    const errData = await response.json().catch(() => ({}));
-    throw new Error(errData.detail?.message || errData.detail || `Scan initiation failed (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Scan initiation failed');
   }
 
   return response.json();
@@ -175,7 +266,7 @@ export async function fetchScan(scanId: string): Promise<Scan> {
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch scan status (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Failed to fetch scan status');
   }
 
   return response.json();
@@ -184,8 +275,7 @@ export async function fetchScan(scanId: string): Promise<Scan> {
 export async function requestScanReport(scanId: string): Promise<ScanReportResource> {
   const response = await apiFetch(`/api/v1/scans/${scanId}/reports`, { method: 'POST' });
   if (!response.ok) {
-    const error = await response.json().catch(() => ({}));
-    throw new Error(error.detail?.message || error.detail || `Report generation request failed (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Report generation request failed');
   }
   return response.json();
 }
@@ -199,21 +289,20 @@ export async function fetchLatestScanReport(
     signal,
   });
   if (response.status === 404) return null;
-  if (!response.ok) throw new Error(`Failed to restore report status (${response.status})`);
+  if (!response.ok) throw await apiErrorFromResponse(response, 'Failed to restore report status');
   return response.json();
 }
 
 export async function fetchReport(reportId: string, signal?: AbortSignal): Promise<ScanReportResource> {
   const response = await apiFetch(`/api/v1/reports/${reportId}`, { cache: 'no-store', signal });
-  if (!response.ok) throw new Error(`Failed to fetch report status (${response.status})`);
+  if (!response.ok) throw await apiErrorFromResponse(response, 'Failed to fetch report status');
   return response.json();
 }
 
 export async function downloadReportPdf(reportId: string): Promise<Blob> {
   const response = await apiFetch(`/api/v1/reports/${reportId}/download`, { cache: 'no-store' });
   if (!response.ok) {
-    const error = await response.json().catch(() => ({}));
-    throw new Error(error.detail?.message || error.detail || `Report download failed (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Report download failed');
   }
   const contentType = response.headers.get('content-type')?.toLowerCase() || '';
   if (!contentType.startsWith('application/pdf')) {
@@ -228,7 +317,7 @@ export async function fetchScanFindings(scanId: string): Promise<Finding[]> {
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch scan findings (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Failed to fetch scan findings');
   }
 
   return response.json();
@@ -241,7 +330,7 @@ export async function listScans(limit = 20, offset = 0): Promise<Scan[]> {
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch repository scans (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Failed to fetch repository scans');
   }
 
   return response.json();
@@ -253,7 +342,7 @@ export async function fetchScanTelemetry(scanId: string): Promise<ScanTelemetry>
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch scan telemetry (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Failed to fetch scan telemetry');
   }
 
   return response.json();
@@ -269,7 +358,7 @@ export async function fetchFinding(findingId: string): Promise<Finding> {
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch finding (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Failed to fetch finding');
   }
 
   return response.json();
@@ -290,23 +379,21 @@ function isRemediationAccepted(value: unknown): value is RemediationAccepted {
 
 export async function fetchJob(jobId: string): Promise<JobResource> {
   const response = await apiFetch(`/api/v1/jobs/${jobId}`, { cache: 'no-store' });
-  if (!response.ok) throw new Error(`Failed to fetch job status (${response.status})`);
+  if (!response.ok) throw await apiErrorFromResponse(response, 'Failed to fetch job status');
   return response.json();
 }
 
 export async function fetchJobResult<T>(jobId: string): Promise<T> {
   const response = await apiFetch(`/api/v1/jobs/${jobId}/result`, { cache: 'no-store' });
   if (!response.ok) {
-    const error = await response.json().catch(() => ({}));
-    throw new Error(error.detail?.message || error.detail || `Failed to fetch job result (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Failed to fetch job result');
   }
   return response.json();
 }
 
 async function resolveRemediationResponse<T>(response: Response, failureLabel: string): Promise<T> {
   if (!response.ok) {
-    const error = await response.json().catch(() => ({}));
-    throw new Error(error.detail?.message || error.detail || `${failureLabel} (${response.status})`);
+    throw await apiErrorFromResponse(response, failureLabel);
   }
   const value: unknown = await response.json();
   if (!isRemediationAccepted(value)) return value as T;
@@ -357,7 +444,7 @@ export async function fetchPatch(patchId: string): Promise<PatchResponse> {
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch patch (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Failed to fetch patch');
   }
 
   return response.json();
@@ -369,7 +456,7 @@ export async function fetchScanPatches(scanId: string): Promise<PatchResponse[]>
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch scan patches (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Failed to fetch scan patches');
   }
 
   return response.json();
@@ -385,8 +472,7 @@ export async function approvePatch(
   });
 
   if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.detail?.message || err.detail || `Failed to approve patch (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Failed to approve patch');
   }
 
   return response.json();
@@ -402,8 +488,7 @@ export async function rejectPatch(
   });
 
   if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.detail?.message || err.detail || `Failed to reject patch (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Failed to reject patch');
   }
 
   return response.json();
@@ -419,8 +504,7 @@ export async function revisePatch(
   });
 
   if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.detail?.message || err.detail || `Failed to request patch revision (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Failed to request patch revision');
   }
 
   return response.json();
@@ -436,8 +520,7 @@ export async function fetchDeliveryPreview(patchId: string): Promise<DeliveryPre
   });
 
   if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.detail?.message || err.detail || `Failed to fetch delivery preview (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Failed to fetch delivery preview');
   }
 
   return response.json();
@@ -453,8 +536,7 @@ export async function requestDelivery(
   });
 
   if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.detail?.message || err.detail || `Delivery failed (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Delivery failed');
   }
 
   return response.json();
@@ -466,7 +548,7 @@ export async function fetchDelivery(deliveryId: string): Promise<DeliveryRespons
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch delivery status (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Failed to fetch delivery status');
   }
 
   return response.json();
@@ -481,7 +563,7 @@ export async function fetchDeliveryByPatch(patchId: string): Promise<DeliveryRes
     return null;
   }
   if (!response.ok) {
-    return null;
+    throw await apiErrorFromResponse(response, 'Failed to fetch delivery status');
   }
 
   return response.json();
@@ -500,8 +582,7 @@ export async function startChangeAnalysis(
   });
 
   if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.detail?.message || err.detail || `Failed to start change analysis (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Failed to start change analysis');
   }
 
   return response.json();
@@ -516,8 +597,7 @@ export async function startChangeAnalysisFromPR(
   });
 
   if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.detail?.message || err.detail || `Failed to resolve PR and start analysis (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Failed to resolve PR and start analysis');
   }
 
   return response.json();
@@ -536,7 +616,7 @@ export async function listChangeAnalyses(
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to list change analyses (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Failed to list change analyses');
   }
 
   return response.json();
@@ -550,7 +630,7 @@ export async function fetchChangeAnalysis(
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch change analysis (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Failed to fetch change analysis');
   }
 
   return response.json();
@@ -564,7 +644,7 @@ export async function fetchChangeAnalysisDiff(
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch diff results (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Failed to fetch diff results');
   }
 
   return response.json();
@@ -578,7 +658,7 @@ export async function fetchChangeAnalysisImpacts(
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch impacts (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Failed to fetch impacts');
   }
 
   return response.json();
@@ -592,7 +672,7 @@ export async function fetchChangeAnalysisReview(
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch review findings (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Failed to fetch review findings');
   }
 
   return response.json();
@@ -606,7 +686,7 @@ export async function fetchChangeAnalysisReport(
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch change analysis report (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Failed to fetch change analysis report');
   }
 
   return response.json();
@@ -620,7 +700,7 @@ export async function fetchChangeAnalysisTelemetry(
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch change analysis telemetry (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Failed to fetch change analysis telemetry');
   }
 
   return response.json();
@@ -632,7 +712,7 @@ export async function downloadChangeAnalysisMarkdown(analysisId: string): Promis
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to download report markdown (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Failed to download report markdown');
   }
 
   return response.text();
@@ -650,8 +730,7 @@ export async function fetchReviewPublication(
   });
 
   if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.detail?.message || err.detail || `Failed to fetch review publication (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Failed to fetch review publication');
   }
 
   return response.json();
@@ -665,8 +744,7 @@ export async function generateReviewPublicationPreview(
   });
 
   if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.detail?.message || err.detail || `Failed to generate review preview (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Failed to generate review preview');
   }
 
   return response.json();
@@ -682,8 +760,7 @@ export async function approveReviewPublication(
   });
 
   if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.detail?.message || err.detail || `Failed to approve review publication (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Failed to approve review publication');
   }
 
   return response.json();
@@ -699,8 +776,7 @@ export async function publishReviewPublication(
   });
 
   if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.detail?.message || err.detail || `Failed to publish review (${response.status})`);
+    throw await apiErrorFromResponse(response, 'Failed to publish review');
   }
 
   return response.json();

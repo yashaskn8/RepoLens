@@ -11,6 +11,7 @@ from uuid import uuid4
 import pytest
 
 from app.api.routes.scans import execute_background_scan
+from app.ingestion.clone import CloneFailedError
 from app.llm.types import LLMProvider, LLMResponse, ModelCapability
 from app.models.finding import FindingModel
 from app.models.scan import ScanModel
@@ -26,6 +27,44 @@ def _commit_fixture(path):
     for args in (("init", "-q"), ("add", "."), ("commit", "-qm", "fixture")):
         subprocess.run([*command, *args], cwd=path, check=True, capture_output=True)
     return subprocess.check_output([*command, "rev-parse", "HEAD"], cwd=path).decode().strip()
+
+
+@pytest.mark.asyncio
+async def test_clone_failure_records_failed_scan_without_cleanup_error():
+    """Clone failures retain the domain failure instead of failing again during cleanup."""
+    scan_id = str(uuid4())
+    db = TestingSessionLocal()
+    try:
+        db.add(ScanModel(
+            id=scan_id,
+            repository_url="https://github.com/org/unavailable.git",
+            branch="main",
+            status=ScanStatus.PENDING.value,
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    with patch("app.api.routes.scans.SessionLocal", side_effect=TestingSessionLocal), patch(
+        "app.api.routes.scans.clone_repository",
+        side_effect=CloneFailedError("git clone failed"),
+    ):
+        await execute_background_scan(
+            scan_id=scan_id,
+            repo_url="https://github.com/org/unavailable.git",
+            branch="main",
+        )
+
+    db = TestingSessionLocal()
+    try:
+        scan = db.get(ScanModel, scan_id)
+        assert scan is not None
+        assert scan.status == ScanStatus.FAILED.value
+        assert scan.model_metadata["failure_code"] == "INTERNAL_INVARIANT_VIOLATION"
+        assert scan.model_metadata["failure_message"]
+        assert "git clone failed" not in scan.model_metadata["failure_message"]
+    finally:
+        db.close()
 
 
 @pytest.mark.asyncio

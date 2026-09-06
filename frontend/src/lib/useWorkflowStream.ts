@@ -2,8 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { WORKFLOW_EVENT_TYPES, WorkflowEvent, WorkflowEventType } from '@/types/domain';
-
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
+import { getApiBaseUrl } from '@/lib/api';
 
 export type StreamStatus = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'completed' | 'error';
 
@@ -117,9 +116,10 @@ export function useWorkflowStream(
       setStatus(lastEventIdRef.current > 0 ? 'reconnecting' : 'connecting');
       setError(null);
 
+      const apiBaseUrl = getApiBaseUrl();
       const streamUrl = changeAnalysisId
-        ? `${API_BASE_URL}/api/v1/change-analyses/${changeAnalysisId}/events?after_id=${lastEventIdRef.current}`
-        : `${API_BASE_URL}/api/v1/scans/${scanId}/events?after_id=${lastEventIdRef.current}`;
+        ? `${apiBaseUrl}/api/v1/change-analyses/${changeAnalysisId}/events?after_id=${lastEventIdRef.current}`
+        : `${apiBaseUrl}/api/v1/scans/${scanId}/events?after_id=${lastEventIdRef.current}`;
       const es = new EventSource(streamUrl, { withCredentials: true });
       eventSourceRef.current = es;
 
