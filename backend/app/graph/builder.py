@@ -142,6 +142,26 @@ def build_repository_graph(
     """Deterministically build canonical RepositoryGraph using three-pass node & edge wiring."""
     graph = RepositoryGraph()
     all_file_paths = {f.path.replace("\\", "/") for f in manifest.files}
+    schemas_by_name: Dict[str, List[Tuple[str, Dict[str, Any]]]] = {}
+    for file_entry in manifest.files:
+        clean_path = file_entry.path.replace("\\", "/")
+        for symbol in file_entry.symbols:
+            schema_fields = symbol.details.get("schema_fields") if symbol.kind == SymbolKind.CLASS else None
+            if schema_fields:
+                schemas_by_name.setdefault(symbol.name, []).append((clean_path, schema_fields))
+
+    def resolve_schema_fields(schema_name: Any, route_file: str, inline: Any) -> Dict[str, Any]:
+        if isinstance(inline, dict) and inline:
+            return inline
+        candidates = schemas_by_name.get(str(schema_name or ""), [])
+        if len(candidates) == 1:
+            return candidates[0][1]
+        route_parts = route_file.split("/")
+        ranked = sorted(
+            candidates,
+            key=lambda item: -sum(a == b for a, b in zip(route_parts, item[0].split("/"))),
+        )
+        return ranked[0][1] if ranked else {}
 
     # Index functions, methods, and imports for fast deterministic resolution
     functions_by_file: Dict[str, Dict[str, List[Tuple[int, str]]]] = {}
@@ -191,6 +211,12 @@ def build_repository_graph(
                 http_method = str(sym.details.get("http_method", "GET")).upper()
                 route_path = str(sym.details.get("path", "/"))
                 route_node_id = f"route:{http_method}:{route_path}"
+                request_schema = sym.details.get("request_schema")
+                request_schema_fields = resolve_schema_fields(
+                    request_schema,
+                    clean_path,
+                    sym.details.get("request_schema_fields"),
+                )
 
                 graph.add_node(
                     node_id=route_node_id,
@@ -204,6 +230,8 @@ def build_repository_graph(
                         "path": route_path,
                         "framework": "fastapi" if sym.kind == SymbolKind.FASTAPI_ROUTE else "express",
                         "handler_name": sym.name,
+                        "request_schema": request_schema,
+                        "request_schema_fields": request_schema_fields,
                     },
                 )
 
@@ -221,6 +249,8 @@ def build_repository_graph(
                 functions_by_file[clean_path].setdefault(handler_name, []).append((sym.start_line, handler_sym_id))
 
             elif sym.kind in (SymbolKind.FETCH_CALL, SymbolKind.AXIOS_CALL):
+                if is_test or sym.details.get("statically_resolvable") is False or not sym.details.get("url"):
+                    continue
                 target_url = str(sym.details.get("url", "/"))
                 http_method = str(sym.details.get("http_method", "GET")).upper()
                 client_type = "axios" if sym.kind == SymbolKind.AXIOS_CALL else "fetch"
@@ -237,6 +267,7 @@ def build_repository_graph(
                         "http_method": http_method,
                         "url": target_url,
                         "client": client_type,
+                        "body_shape": sym.details.get("body_shape"),
                     },
                 )
 
@@ -312,6 +343,8 @@ def build_repository_graph(
                 graph.add_edge(handler_sym_id, route_node_id, EdgeKind.EXPOSES_ROUTE)
 
             elif sym.kind in (SymbolKind.FETCH_CALL, SymbolKind.AXIOS_CALL):
+                if is_test or sym.details.get("statically_resolvable") is False or not sym.details.get("url"):
+                    continue
                 target_url = str(sym.details.get("url", "/"))
                 http_method = str(sym.details.get("http_method", "GET")).upper()
                 req_node_id = f"req:{clean_path}:{sym.start_line}:{http_method}:{target_url}"

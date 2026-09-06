@@ -33,14 +33,9 @@ async def run_integration_agent(
 
     matches = []
     if context_engine:
-        bundle = await context_engine.build_context_bundle(
-            scan_id=str(scan_id),
-            query="API endpoints client fetch axios route contract",
-            analysis_intent="integration",
-            context_budget=5_500,
-            max_chunks=8,
-        )
-        matches = bundle.routes_and_contracts
+        # Contract matching is deterministic and must not be clipped by an AI
+        # retrieval/context budget. The graph itself remains the bounded source.
+        matches = context_engine.repository_graph.evaluate_route_contracts().matches
     candidate_findings = contract_candidates(matches, scan_id=scan_id)
 
     return {

@@ -327,6 +327,7 @@ async def run_analysis_workflow(
             "unmatched_count": getattr(contract_report, "unmatched_count", 0),
             "method_mismatch_count": getattr(contract_report, "method_mismatch_count", 0),
             "ambiguous_count": getattr(contract_report, "ambiguous_count", 0),
+            "payload_mismatch_count": getattr(contract_report, "payload_mismatch_count", 0),
         }
         deterministic_correctness = build_bug_candidates(runtime.chunks)
         deterministic_security_flows = build_security_flow_candidates(

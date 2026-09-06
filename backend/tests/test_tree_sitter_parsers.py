@@ -65,11 +65,11 @@ def purge_records():
 
     route_map = {r.details.get("http_method"): r.details for r in routes}
     assert "GET" in route_map
-    assert route_map["GET"]["path"] == "/{user_id}"
+    assert route_map["GET"]["path"] == "/users/{user_id}"
     assert route_map["GET"]["handler"] == "get_user_by_id"
 
     assert "POST" in route_map
-    assert route_map["POST"]["path"] == "/login"
+    assert route_map["POST"]["path"] == "/users/login"
     assert route_map["POST"]["handler"] == "authenticate_user"
 
     assert "DELETE" in route_map

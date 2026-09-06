@@ -55,7 +55,7 @@ def classify_file(path: str, *, language: str | None, sample: bytes = b"", mode:
         return Disposition(FileClass.TEST, True, "passive_test_source")
     if language in {"python", "javascript", "typescript", "tsx"}:
         return Disposition(FileClass.SOURCE, True, "supported_source")
-    if name.endswith((".json", ".toml", ".yaml", ".yml", ".ini")) or name in {"requirements.txt", "dockerfile", ".env.example"}:
+    if name.endswith((".json", ".toml", ".yaml", ".yml", ".ini", ".tf", ".tfvars")) or name in {"requirements.txt", "dockerfile", ".env.example"}:
         return Disposition(FileClass.CONFIG, True, "bounded_configuration")
     if name.endswith((".md", ".rst", ".txt")):
         return Disposition(FileClass.DOC, False, "documentation_not_behavior_authority")

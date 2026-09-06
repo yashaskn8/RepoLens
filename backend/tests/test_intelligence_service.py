@@ -59,6 +59,7 @@ async def test_intelligence_service_orchestration():
         assert len(evidence_store.all_findings) == 1
         assert evidence_store.all_findings[0].tool == "semgrep"
         assert evidence_store.scanner_results["trivy"].status == ToolStatus.UNAVAILABLE
+        assert evidence_store.scanner_results["repolens-core"].status == ToolStatus.COMPLETED
 
         # Verify symbols extracted in manifest
         symbols = evidence_store.get_symbols(file_path="app.py")

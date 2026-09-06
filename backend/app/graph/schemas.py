@@ -37,6 +37,8 @@ class ContractMatchStatus(str, Enum):
     METHOD_MISMATCH = "METHOD_MISMATCH"
     PATH_MISMATCH = "PATH_MISMATCH"
     AMBIGUOUS_MATCH = "AMBIGUOUS_MATCH"
+    REQUEST_BODY_TYPE_MISMATCH = "REQUEST_BODY_TYPE_MISMATCH"
+    REQUEST_BODY_MISSING_REQUIRED_FIELDS = "REQUEST_BODY_MISSING_REQUIRED_FIELDS"
 
 
 class GraphNode(BaseModel):
@@ -72,6 +74,12 @@ class RouteContractMatch(BaseModel):
     matched_route_ids: List[str] = Field(default_factory=list)
     matched_backend_paths: List[str] = Field(default_factory=list)
     matched_backend_methods: List[str] = Field(default_factory=list)
+    backend_file: Optional[str] = None
+    backend_line: Optional[int] = None
+    backend_request_schema: Optional[str] = None
+    frontend_body_shape: Dict[str, Any] = Field(default_factory=dict)
+    missing_required_fields: List[str] = Field(default_factory=list)
+    missing_item_fields: Dict[str, List[str]] = Field(default_factory=dict)
     details: str = Field(default="", description="Human-actionable explanation of match or mismatch")
 
 
@@ -84,6 +92,7 @@ class ContractMatchReport(BaseModel):
     unmatched_count: int = 0
     method_mismatch_count: int = 0
     ambiguous_count: int = 0
+    payload_mismatch_count: int = 0
     matches: List[RouteContractMatch] = Field(default_factory=list)
 
 

@@ -5,6 +5,7 @@ import logging
 from typing import Dict, List, Optional
 from app.analysis.adapters import OSVScannerAdapter, SemgrepAdapter, TrivyAdapter
 from app.analysis.base import BaseScannerAdapter
+from app.analysis.core import analyze_core_repository
 from app.analysis.schemas import ScannerResult, ToolStatus
 from app.analysis.store import EvidenceStore
 from app.ingestion.manifest import build_manifest
@@ -76,6 +77,19 @@ class RepositoryIntelligenceService:
                 )
             else:
                 scanner_results[result_or_exc.tool] = result_or_exc
+
+        # RepoLens-owned checks are always available and do not depend on an
+        # external scanner executable or model provider.
+        try:
+            core_result = await asyncio.to_thread(analyze_core_repository, repo_dir, manifest)
+        except Exception as exc:
+            logger.error("RepoLens core deterministic analysis failed", exc_info=exc)
+            core_result = ScannerResult(
+                tool="repolens-core",
+                status=ToolStatus.FAILED,
+                error_message="RepoLens core deterministic analysis failed.",
+            )
+        scanner_results[core_result.tool] = core_result
 
         # 3. Assemble unified EvidenceStore
         store = EvidenceStore(manifest=manifest, scanner_results=scanner_results)

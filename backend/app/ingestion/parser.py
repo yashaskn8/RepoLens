@@ -1,5 +1,6 @@
 """Tree-sitter structural parser for Python, JavaScript, TypeScript, and TSX with deterministic call extraction."""
 
+import ast
 import hashlib
 import re
 from functools import lru_cache
@@ -68,6 +69,158 @@ def _node_text(node: Optional[Node], source_bytes: bytes) -> str:
     if node is None:
         return ""
     return source_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="ignore")
+
+
+def _join_route_paths(prefix: str, path: str) -> str:
+    """Join framework router prefixes without changing parameter syntax."""
+    if not prefix:
+        return path or "/"
+    if not path or path == "/":
+        return prefix.rstrip("/") or "/"
+    return f"{prefix.rstrip('/')}/{path.lstrip('/')}"
+
+
+def _python_contract_metadata(source_bytes: bytes) -> tuple[dict[str, str], dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Extract FastAPI router prefixes, Pydantic fields, and handler body schemas."""
+    try:
+        tree = ast.parse(source_bytes.decode("utf-8", errors="ignore"))
+    except (SyntaxError, ValueError):
+        return {}, {}, {}
+
+    router_prefixes: dict[str, str] = {}
+    schemas: dict[str, dict[str, Any]] = {}
+    handlers: dict[str, dict[str, Any]] = {}
+
+    for node in tree.body:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            value = node.value
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if isinstance(value, ast.Call) and getattr(value.func, "id", None) == "APIRouter":
+                prefix = next(
+                    (
+                        keyword.value.value
+                        for keyword in value.keywords
+                        if keyword.arg == "prefix"
+                        and isinstance(keyword.value, ast.Constant)
+                        and isinstance(keyword.value.value, str)
+                    ),
+                    "",
+                )
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        router_prefixes[target.id] = prefix
+
+        if isinstance(node, ast.ClassDef):
+            bases = {ast.unparse(base).rsplit(".", 1)[-1] for base in node.bases}
+            if "BaseModel" not in bases:
+                continue
+            fields: dict[str, Any] = {}
+            for statement in node.body:
+                if not isinstance(statement, ast.AnnAssign) or not isinstance(statement.target, ast.Name):
+                    continue
+                annotation = ast.unparse(statement.annotation)
+                required = statement.value is None
+                if isinstance(statement.value, ast.Call) and getattr(statement.value.func, "id", None) == "Field":
+                    has_default = any(
+                        keyword.arg in {"default", "default_factory"}
+                        for keyword in statement.value.keywords
+                    )
+                    positional_default = statement.value.args[0] if statement.value.args else None
+                    required = not has_default and (
+                        positional_default is None
+                        or isinstance(positional_default, ast.Constant) and positional_default.value is Ellipsis
+                    )
+                elif statement.value is not None:
+                    required = isinstance(statement.value, ast.Constant) and statement.value.value is Ellipsis
+                fields[statement.target.id] = {"type": annotation, "required": required}
+            schemas[node.name] = fields
+
+    # Enrich nested list item contracts after every schema has been collected.
+    for fields in schemas.values():
+        for field in fields.values():
+            match = re.search(r"(?:list|List)\s*\[\s*([A-Za-z_][A-Za-z0-9_]*)", field["type"])
+            if match and match.group(1) in schemas:
+                field["item_schema"] = match.group(1)
+                field["item_fields"] = schemas[match.group(1)]
+
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        request_schema = None
+        positional = list(node.args.posonlyargs) + list(node.args.args)
+        defaults = [None] * (len(positional) - len(node.args.defaults)) + list(node.args.defaults)
+        for argument, default in zip(positional, defaults):
+            if argument.annotation is None:
+                continue
+            annotation = ast.unparse(argument.annotation).split("[")[0].rsplit(".", 1)[-1]
+            if annotation not in schemas and argument.arg.lower() not in {"payload", "body", "request_body", "data"}:
+                continue
+            if isinstance(default, ast.Call) and getattr(default.func, "id", None) in {
+                "Depends", "Query", "Header", "Path", "Cookie"
+            }:
+                continue
+            request_schema = annotation
+            break
+        handlers[node.name] = {
+            "request_schema": request_schema,
+            "request_schema_fields": schemas.get(request_schema or "", {}),
+        }
+    return router_prefixes, schemas, handlers
+
+
+def _js_expression_shape(
+    node: Optional[Node],
+    source_bytes: bytes,
+    bindings: dict[str, Node],
+    *,
+    seen: Optional[set[str]] = None,
+) -> dict[str, Any]:
+    """Return a bounded structural request-body shape without evaluating code."""
+    if node is None:
+        return {"kind": "unknown"}
+    seen = set(seen or ())
+    if node.type == "parenthesized_expression":
+        named = node.named_children
+        return _js_expression_shape(named[0] if named else None, source_bytes, bindings, seen=seen)
+    if node.type == "identifier":
+        name = _node_text(node, source_bytes)
+        if name in seen or name not in bindings:
+            return {"kind": "unknown", "expression": name[:128]}
+        seen.add(name)
+        return _js_expression_shape(bindings[name], source_bytes, bindings, seen=seen)
+    if node.type == "object":
+        properties: dict[str, Any] = {}
+        for child in node.named_children:
+            if child.type not in {"pair", "property"}:
+                continue
+            key_node = child.child_by_field_name("key")
+            value_node = child.child_by_field_name("value")
+            key = _node_text(key_node, source_bytes).strip("\"'")
+            if key:
+                properties[key] = _js_expression_shape(value_node, source_bytes, bindings, seen=seen)
+        return {"kind": "object", "keys": sorted(properties), "properties": properties}
+    if node.type == "array":
+        items = node.named_children
+        item_shape = _js_expression_shape(items[0], source_bytes, bindings, seen=seen) if items else {"kind": "unknown"}
+        return {"kind": "array", "item": item_shape}
+    if node.type == "call_expression":
+        function = node.child_by_field_name("function")
+        if _node_text(function, source_bytes) == "JSON.stringify":
+            arguments = node.child_by_field_name("arguments")
+            named = list(arguments.named_children) if arguments else []
+            return _js_expression_shape(named[0] if named else None, source_bytes, bindings, seen=seen)
+        if function is not None and function.type == "member_expression":
+            prop = function.child_by_field_name("property")
+            if _node_text(prop, source_bytes) == "map":
+                arguments = node.child_by_field_name("arguments")
+                callbacks = [
+                    child for child in (arguments.named_children if arguments else [])
+                    if child.type == "arrow_function"
+                ]
+                if callbacks:
+                    body = callbacks[0].child_by_field_name("body")
+                    return {"kind": "array", "item": _js_expression_shape(body, source_bytes, bindings, seen=seen)}
+    return {"kind": "unknown", "expression": _node_text(node, source_bytes)[:128]}
 
 
 def _parse_python_import_details(node: Node, source_bytes: bytes) -> Dict[str, Any]:
@@ -216,6 +369,7 @@ def _extract_python_symbols_and_calls(
     """Extract functions, classes, imports, FastAPI routes, and resolvable call sites from Python AST."""
     symbols: List[ParsedSymbol] = []
     calls: List[ParsedCall] = []
+    router_prefixes, schema_contracts, handler_contracts = _python_contract_metadata(source_bytes)
 
     def visit(node: Node, caller_ctx: Optional[Dict[str, Any]] = None):
         # 1. Decorated definitions (FastAPI / Flask routes)
@@ -243,6 +397,9 @@ def _extract_python_symbols_and_calls(
                                 parts = inside.split(",")
                                 if parts and parts[0]:
                                     path = parts[0].strip().strip("\"'")
+                            router_name = dec.lstrip("@").split(".", 1)[0].strip()
+                            path = _join_route_paths(router_prefixes.get(router_name, ""), path)
+                            contract = handler_contracts.get(func_name, {})
                             symbols.append(
                                 ParsedSymbol(
                                     name=f"{method.upper()} {path}",
@@ -256,6 +413,9 @@ def _extract_python_symbols_and_calls(
                                         "path": path,
                                         "handler": func_name,
                                         "decorator": dec,
+                                        "router_prefix": router_prefixes.get(router_name, ""),
+                                        "request_schema": contract.get("request_schema"),
+                                        "request_schema_fields": contract.get("request_schema_fields", {}),
                                     },
                                 )
                             )
@@ -364,7 +524,12 @@ def _extract_python_symbols_and_calls(
                     end_line=end_l,
                     start_column=node.start_point[1],
                     end_column=node.end_point[1],
-                    details={"superclasses": superclasses, "fields": fields, "body_fingerprint": fp},
+                    details={
+                        "superclasses": superclasses,
+                        "fields": fields,
+                        "schema_fields": schema_contracts.get(name, {}),
+                        "body_fingerprint": fp,
+                    },
                 )
             )
 
@@ -456,6 +621,18 @@ def _extract_js_ts_symbols_and_calls(
     """Extract functions, classes, imports, express routes, and resolvable call sites from JS/TS AST."""
     symbols: List[ParsedSymbol] = []
     calls: List[ParsedCall] = []
+    bindings: dict[str, Node] = {}
+
+    def collect_bindings(node: Node) -> None:
+        if node.type == "variable_declarator":
+            name_node = node.child_by_field_name("name")
+            value_node = node.child_by_field_name("value")
+            if name_node is not None and name_node.type == "identifier" and value_node is not None:
+                bindings[_node_text(name_node, source_bytes)] = value_node
+        for child in node.children:
+            collect_bindings(child)
+
+    collect_bindings(root_node)
 
     def visit(node: Node, caller_ctx: Optional[Dict[str, Any]] = None):
         # 1. Function Declarations
@@ -627,11 +804,14 @@ def _extract_js_ts_symbols_and_calls(
                     fn_name = _node_text(fn_node, source_bytes)
                     if fn_name == "fetch":
                         url_arg = "unknown"
+                        statically_resolvable = False
                         http_method = "GET"  # fetch() defaults to GET
+                        body_shape = None
                         if args_node and args_node.children:
                             for arg in args_node.children:
                                 if arg.type in ("string", "template_string", "string_fragment", "identifier"):
                                     url_arg = _node_text(arg, source_bytes).strip("\"'`")
+                                    statically_resolvable = arg.type != "identifier"
                                     break
                             # Extract HTTP method from options object: fetch(url, { method: 'POST' })
                             for arg in args_node.children:
@@ -646,6 +826,8 @@ def _extract_js_ts_symbols_and_calls(
                                                     val_text = _node_text(val_node, source_bytes).strip("\"'`")
                                                     if val_text.upper() in ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"):
                                                         http_method = val_text.upper()
+                                                elif key_text == "body":
+                                                    body_shape = _js_expression_shape(val_node, source_bytes, bindings)
                                     break  # Only inspect first object argument
                         symbols.append(
                             ParsedSymbol(
@@ -655,15 +837,23 @@ def _extract_js_ts_symbols_and_calls(
                                 end_line=node.end_point[0] + 1,
                                 start_column=node.start_point[1],
                                 end_column=node.end_point[1],
-                                details={"target": url_arg, "url": url_arg, "http_method": http_method},
+                                details={
+                                    "target": url_arg,
+                                    "url": url_arg,
+                                    "http_method": http_method,
+                                    "body_shape": body_shape,
+                                    "statically_resolvable": statically_resolvable,
+                                },
                             )
                         )
                     elif fn_name == "axios":
                         target_url = "unknown"
+                        statically_resolvable = False
                         if args_node and args_node.children:
                             for arg in args_node.children:
                                 if arg.type in ("string", "template_string", "string_fragment", "identifier"):
                                     target_url = _node_text(arg, source_bytes).strip("\"'`")
+                                    statically_resolvable = arg.type != "identifier"
                                     break
                         symbols.append(
                             ParsedSymbol(
@@ -673,7 +863,12 @@ def _extract_js_ts_symbols_and_calls(
                                 end_line=node.end_point[0] + 1,
                                 start_column=node.start_point[1],
                                 end_column=node.end_point[1],
-                                details={"callee": "axios", "target": target_url, "url": target_url},
+                                details={
+                                    "callee": "axios",
+                                    "target": target_url,
+                                    "url": target_url,
+                                    "statically_resolvable": statically_resolvable,
+                                },
                             )
                         )
                     else:
@@ -698,14 +893,27 @@ def _extract_js_ts_symbols_and_calls(
                     obj_text = _node_text(obj_node, source_bytes) if obj_node else ""
                     prop_text = _node_text(prop_node, source_bytes) if prop_node else ""
 
-                    # Axios methods
-                    if obj_text == "axios" and prop_text in ("get", "post", "put", "delete", "patch", "request"):
+                    # Axios and common imported HTTP client wrappers.
+                    is_http_client = (
+                        obj_text == "axios"
+                        or obj_text.lower() in {"api", "http", "apiclient", "httpclient", "requestclient"}
+                        or obj_text.lower().endswith(("apiclient", "httpclient", "requestclient"))
+                    )
+                    if is_http_client and prop_text in ("get", "post", "put", "delete", "patch", "request"):
                         target_url = "unknown"
-                        if args_node and args_node.children:
-                            for arg in args_node.children:
+                        statically_resolvable = False
+                        named_args = list(args_node.named_children) if args_node else []
+                        if named_args:
+                            for arg in named_args:
                                 if arg.type in ("string", "template_string", "string_fragment", "identifier"):
                                     target_url = _node_text(arg, source_bytes).strip("\"'`")
+                                    statically_resolvable = arg.type != "identifier"
                                     break
+                        body_shape = (
+                            _js_expression_shape(named_args[1], source_bytes, bindings)
+                            if prop_text in {"post", "put", "patch"} and len(named_args) > 1
+                            else None
+                        )
                         symbols.append(
                             ParsedSymbol(
                                 name=f"axios.{prop_text}({target_url})",
@@ -714,7 +922,14 @@ def _extract_js_ts_symbols_and_calls(
                                 end_line=node.end_point[0] + 1,
                                 start_column=node.start_point[1],
                                 end_column=node.end_point[1],
-                                details={"callee": f"axios.{prop_text}", "target": target_url, "url": target_url},
+                                details={
+                                    "callee": f"{obj_text}.{prop_text}",
+                                    "target": target_url,
+                                    "url": target_url,
+                                    "http_method": prop_text.upper() if prop_text != "request" else "GET",
+                                    "body_shape": body_shape,
+                                    "statically_resolvable": statically_resolvable,
+                                },
                             )
                         )
                     # Express routes

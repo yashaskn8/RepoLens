@@ -66,6 +66,16 @@ _CONTRACT_PRESENTATION: dict[ContractMatchStatus, tuple[str, Severity, str]] = {
         Severity.LOW,
         "Remove route ambiguity so the request resolves to one explicit contract.",
     ),
+    ContractMatchStatus.REQUEST_BODY_TYPE_MISMATCH: (
+        "Frontend request body type does not match backend schema",
+        Severity.MEDIUM,
+        "Send the object or array shape required by the matched backend request schema.",
+    ),
+    ContractMatchStatus.REQUEST_BODY_MISSING_REQUIRED_FIELDS: (
+        "Frontend request omits required backend fields",
+        Severity.MEDIUM,
+        "Include every required backend request field, including required nested item fields.",
+    ),
 }
 
 
@@ -86,6 +96,31 @@ def contract_candidates(
             continue
         title, severity, mitigation = presentation
         evidence_ref = f"contract:{match.frontend_request_id}"
+        evidences = [
+            Evidence(
+                file_path=match.frontend_file,
+                start_line=match.frontend_line,
+                end_line=match.frontend_line,
+                context_notes=(
+                    f"Deterministic route-contract status={match.status.value}; "
+                    f"evidence_ref={evidence_ref}; frontend_method={match.frontend_method}; "
+                    f"frontend_url={match.frontend_url}"
+                ),
+            )
+        ]
+        if match.backend_file and match.backend_line:
+            evidences.append(
+                Evidence(
+                    file_path=match.backend_file,
+                    start_line=match.backend_line,
+                    end_line=match.backend_line,
+                    context_notes=(
+                        f"Matched backend route/schema evidence; schema={match.backend_request_schema or 'unknown'}; "
+                        f"missing_fields={match.missing_required_fields}; "
+                        f"missing_item_fields={match.missing_item_fields}"
+                    ),
+                )
+            )
         candidates.append(
             Finding(
                 scan_id=scan_id,
@@ -95,17 +130,7 @@ def contract_candidates(
                 status=FindingStatus.OPEN,
                 rule_id=evidence_ref,
                 category="integration",
-                evidences=[
-                    Evidence(
-                        file_path=match.frontend_file,
-                        start_line=match.frontend_line,
-                        end_line=match.frontend_line,
-                        context_notes=(
-                            f"Deterministic route-contract status={match.status.value}; "
-                            f"evidence_ref={evidence_ref}"
-                        ),
-                    )
-                ],
+                evidences=evidences,
                 mitigation_guidance=mitigation,
                 source_tool="route_contract",
                 detector_id=evidence_ref,
