@@ -1,0 +1,35 @@
+{
+  "case_id": "SEC-AUTH-01B",
+  "benchmark_version": "1.0.0",
+  "case_family": "SEC-AUTH-01",
+  "category": "SECURITY",
+  "difficulty": "EASY",
+  "split": "DEV",
+  "target_pipeline": "REPOSITORY_SCAN",
+  "evaluation_stage": "STATIC_FINDING",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "files": {
+      "app/routes/orders.py": "from fastapi import APIRouter, Depends\nrouter = APIRouter()\n\n@router.post('/orders')\ndef create_order(token: str = Depends(oauth2_scheme)):\n    payload = verify_token(token)\n    tenant_id_context = payload['tenant_id']\n    db_session.where(tenant_id=tenant_id_context)\n    return {'status': 'created'}\n"
+    },
+    "description": "FastAPI endpoint extracting tenant identity from cryptographically verified token"
+  },
+  "annotation": {
+    "expected_verdict": "CLEAN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "CLIENT_CONTROLLED_AUTH_HEADER"
+    ],
+    "claims": [],
+    "how_established": "source_code_audit",
+    "fixture_source": "synthetic_fastapi_verified_token",
+    "human_authored_explanation": "Tenant context is derived from verify_token cryptographic verification, which is safe."
+  },
+  "tags": [
+    "auth",
+    "tenant-isolation",
+    "clean"
+  ]
+}

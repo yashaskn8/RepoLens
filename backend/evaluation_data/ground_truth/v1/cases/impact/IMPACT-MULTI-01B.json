@@ -1,0 +1,42 @@
+{
+  "case_id": "IMPACT-MULTI-01B",
+  "benchmark_version": "1.0.0",
+  "case_family": "IMPACT-MULTI-01",
+  "category": "CHANGE_IMPACT",
+  "difficulty": "EASY",
+  "split": "DEV",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "IMPACT_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "app/common/format.py": "def format_name(first: str, last: str) -> str:\n    return f'{first} {last}'\n",
+      "app/services/email.py": "from app.common.format import format_name\ndef send_email(f: str, l: str):\n    return format_name(f, l)\n",
+      "app/services/pdf.py": "from app.common.format import format_name\ndef make_pdf(f: str, l: str):\n    return format_name(f, l)\n"
+    },
+    "head_files": {
+      "app/common/format.py": "def format_name(first: str, last: str) -> str:\n    return f'{first} {last}'\n",
+      "app/services/email.py": "from app.common.format import format_name\ndef send_email(f: str, l: str):\n    return format_name(f, l)\n",
+      "app/services/pdf.py": "from app.common.format import format_name\ndef make_pdf(f: str, l: str):\n    return format_name(f, l)\n"
+    },
+    "description": "Shared helper unchanged across base and head"
+  },
+  "annotation": {
+    "expected_verdict": "CLEAN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "BLAST_RADIUS_MULTI_CONSUMER"
+    ],
+    "claims": [],
+    "expected_impact_count": 0,
+    "how_established": "impact_engine_ground_truth",
+    "fixture_source": "phase6_multi_caller_clean",
+    "human_authored_explanation": "Zero impact facts."
+  },
+  "tags": [
+    "impact",
+    "clean"
+  ]
+}

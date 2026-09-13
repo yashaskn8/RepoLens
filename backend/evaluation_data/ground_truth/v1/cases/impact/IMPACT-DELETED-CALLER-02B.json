@@ -1,0 +1,41 @@
+{
+  "case_id": "IMPACT-DELETED-CALLER-02B",
+  "benchmark_version": "1.0.0",
+  "case_family": "IMPACT-DELETED-CALLER-02",
+  "category": "CHANGE_IMPACT",
+  "difficulty": "EASY",
+  "split": "FROZEN_PUBLIC_EVAL",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "IMPACT_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "pkg/crypto/hasher.py": "def compute_sha256(data: str) -> str:\n    return 'hash'\n",
+      "pkg/audit/logger.py": "from pkg.crypto.hasher import compute_sha256\ndef write_audit_log(entry: str):\n    h = compute_sha256(entry)\n    return h\n"
+    },
+    "head_files": {
+      "pkg/crypto/hasher.py": "def compute_sha256(data: str) -> str:\n    return 'hash'\n",
+      "pkg/audit/logger.py": "from pkg.crypto.hasher import compute_sha256\ndef write_audit_log(entry: str):\n    h = compute_sha256(entry)\n    return h\n"
+    },
+    "description": "Unchanged crypto hasher and logger"
+  },
+  "annotation": {
+    "expected_verdict": "CLEAN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "DELETED_SYMBOL_WITH_CALLERS"
+    ],
+    "claims": [],
+    "expected_impact_count": 0,
+    "how_established": "impact_engine_ground_truth",
+    "fixture_source": "novel_frozen_deleted_clean",
+    "human_authored_explanation": "No deletion."
+  },
+  "tags": [
+    "impact",
+    "clean",
+    "frozen-eval"
+  ]
+}

@@ -1,0 +1,57 @@
+{
+  "case_id": "SEC-SQLI-02A",
+  "benchmark_version": "1.0.0",
+  "case_family": "SEC-SQLI-02",
+  "category": "SECURITY",
+  "difficulty": "MEDIUM",
+  "split": "FROZEN_PUBLIC_EVAL",
+  "target_pipeline": "REPOSITORY_SCAN",
+  "evaluation_stage": "ANALYSIS_CANDIDATE",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "files": {
+      "services/customer_db.py": "def find_customers_by_domain(domain_str: str, cursor):\n    sql = \"SELECT id, email FROM customers WHERE email LIKE '%\" + domain_str + \"%'\"\n    cursor.execute(sql)\n    return cursor.fetchall()\n"
+    },
+    "description": "String concatenation inside helper function passed to database execute"
+  },
+  "annotation": {
+    "expected_verdict": "ISSUE",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "INTERPROCEDURAL_FLOW_SQLI"
+    ],
+    "claims": [
+      {
+        "rule_id": "INTERPROCEDURAL_FLOW_SQLI",
+        "permitted_files": [
+          "services/customer_db.py"
+        ],
+        "permitted_symbols": [
+          "find_customers_by_domain"
+        ],
+        "permitted_spans": [
+          [
+            1,
+            4
+          ]
+        ],
+        "required_structural_facts": {
+          "sink_kind": "INPUT_TO_DATABASE",
+          "flow_required": true
+        },
+        "forbidden_structural_facts": {},
+        "expected_severity": "HIGH"
+      }
+    ],
+    "how_established": "source_code_audit",
+    "fixture_source": "novel_frozen_sqli_pg",
+    "human_authored_explanation": "SQL query built via string concatenation and executed on cursor without parameterization."
+  },
+  "tags": [
+    "sqli",
+    "frozen-eval",
+    "python"
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "case_id": "BUG-UNAWAITED-01D",
+  "benchmark_version": "1.0.0",
+  "case_family": "BUG-UNAWAITED-01",
+  "category": "CORRECTNESS",
+  "difficulty": "HARD",
+  "split": "DEV",
+  "target_pipeline": "REPOSITORY_SCAN",
+  "evaluation_stage": "ANALYSIS_CANDIDATE",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "files": {
+      "app/services/audit.py": "import asyncio\n\nasync def log_audit_event(event_name: str):\n    pass\n\ndef record_user_login(user_id: str):\n    # Coroutine passed to external scheduler; static status is ambiguous\n    coro = log_audit_event('USER_LOGGED_IN')\n    custom_external_scheduler.schedule(coro)\n    return {'status': 'scheduled'}\n"
+    },
+    "description": "Coroutine passed to opaque external scheduler"
+  },
+  "annotation": {
+    "expected_verdict": "UNKNOWN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "UNAWAITED_ASYNC_CALL"
+    ],
+    "claims": [],
+    "how_established": "expert_review",
+    "fixture_source": "synthetic_opaque_scheduler",
+    "human_authored_explanation": "Cannot determine statically if custom_external_scheduler awaits the coroutine or drops it."
+  },
+  "tags": [
+    "correctness",
+    "unknown"
+  ]
+}

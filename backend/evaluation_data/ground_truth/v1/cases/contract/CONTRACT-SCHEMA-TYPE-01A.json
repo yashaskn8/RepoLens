@@ -1,0 +1,53 @@
+{
+  "case_id": "CONTRACT-SCHEMA-TYPE-01A",
+  "benchmark_version": "1.0.0",
+  "case_family": "CONTRACT-SCHEMA-TYPE-01",
+  "category": "CONTRACT",
+  "difficulty": "EASY",
+  "split": "FROZEN_PUBLIC_EVAL",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "CHANGE_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "models/billing.py": "from pydantic import BaseModel\n\nclass InvoiceOut(BaseModel):\n    invoice_id: int\n"
+    },
+    "head_files": {
+      "models/billing.py": "from pydantic import BaseModel\n\nclass InvoiceOut(BaseModel):\n    invoice_id: str\n"
+    },
+    "description": "Field invoice_id type modified from int to str"
+  },
+  "annotation": {
+    "expected_verdict": "ISSUE",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "SCHEMA_FIELD_TYPE_CHANGED"
+    ],
+    "claims": [
+      {
+        "rule_id": "SCHEMA_FIELD_TYPE_CHANGED",
+        "permitted_files": [
+          "models/billing.py"
+        ],
+        "permitted_symbols": [
+          "InvoiceOut"
+        ],
+        "required_structural_facts": {
+          "change_type": "MODIFIED_TYPE"
+        },
+        "forbidden_structural_facts": {},
+        "expected_severity": "HIGH"
+      }
+    ],
+    "how_established": "diff_engine_ground_truth",
+    "fixture_source": "novel_frozen_schema_type_change",
+    "human_authored_explanation": "Incompatible schema type modification emitted as MODIFIED_TYPE."
+  },
+  "tags": [
+    "contract",
+    "schema",
+    "frozen-eval"
+  ]
+}

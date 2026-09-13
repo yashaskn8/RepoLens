@@ -1,0 +1,38 @@
+{
+  "case_id": "CONTRACT-METHOD-01C",
+  "benchmark_version": "1.0.0",
+  "case_family": "CONTRACT-METHOD-01",
+  "category": "CONTRACT",
+  "difficulty": "MEDIUM",
+  "split": "DEV",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "CHANGE_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "app/api/items.py": "from fastapi import APIRouter\nrouter = APIRouter()\n@router.delete('/api/items/{id}')\ndef delete_item(id: str):\n    pass\n"
+    },
+    "head_files": {
+      "app/api/items.py": "from fastapi import APIRouter\nrouter = APIRouter()\n@router.delete('/api/items/{id}')\ndef delete_item(id: str):\n    # docstring added\n    pass\n"
+    },
+    "description": "Docstring added to unchanged DELETE endpoint"
+  },
+  "annotation": {
+    "expected_verdict": "CLEAN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "HTTP_METHOD_MISMATCH"
+    ],
+    "claims": [],
+    "how_established": "diff_engine_ground_truth",
+    "fixture_source": "phase6_method_docstring",
+    "human_authored_explanation": "DELETE method unchanged."
+  },
+  "tags": [
+    "contract",
+    "http-method",
+    "clean"
+  ]
+}

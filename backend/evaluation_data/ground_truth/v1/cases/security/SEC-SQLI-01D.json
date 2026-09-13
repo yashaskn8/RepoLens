@@ -1,0 +1,35 @@
+{
+  "case_id": "SEC-SQLI-01D",
+  "benchmark_version": "1.0.0",
+  "case_family": "SEC-SQLI-01",
+  "category": "SECURITY",
+  "difficulty": "MEDIUM",
+  "split": "DEV",
+  "target_pipeline": "REPOSITORY_SCAN",
+  "evaluation_stage": "ANALYSIS_CANDIDATE",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "files": {
+      "app/db/query.py": "import sqlite3\n\ndef search_accounts(user_input: str):\n    # Misleading comment: SQL injection vulnerability test\n    conn = sqlite3.connect('app.db')\n    cursor = conn.cursor()\n    query = \"SELECT * FROM accounts WHERE id = ?\"\n    cursor.execute(query, (int(user_input),))\n    return cursor.fetchall()\n"
+    },
+    "description": "Safe parameterized query with misleading vulnerability comment"
+  },
+  "annotation": {
+    "expected_verdict": "CLEAN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "INTERPROCEDURAL_FLOW_SQLI"
+    ],
+    "claims": [],
+    "how_established": "source_code_audit",
+    "fixture_source": "synthetic_sqli_comment_adversarial",
+    "human_authored_explanation": "Comment says vulnerability but implementation is safely parameterized."
+  },
+  "tags": [
+    "sqli",
+    "adversarial",
+    "clean"
+  ]
+}

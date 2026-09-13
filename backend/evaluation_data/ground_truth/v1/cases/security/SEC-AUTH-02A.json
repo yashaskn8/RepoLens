@@ -1,0 +1,54 @@
+{
+  "case_id": "SEC-AUTH-02A",
+  "benchmark_version": "1.0.0",
+  "case_family": "SEC-AUTH-02",
+  "category": "SECURITY",
+  "difficulty": "EASY",
+  "split": "DEV",
+  "target_pipeline": "REPOSITORY_SCAN",
+  "evaluation_stage": "STATIC_FINDING",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "files": {
+      "app/routes/admin.py": "from fastapi import APIRouter, Request\nrouter = APIRouter()\n\n@router.delete('/admin/users/{user_id}')\ndef delete_user(user_id: str, request: Request):\n    role = request.headers.get('X-User-Role')\n    if 'admin' in role.split(','):\n        execute_delete(user_id)\n    return {'deleted': user_id}\n"
+    },
+    "description": "FastAPI endpoint using client request header to enforce authorization"
+  },
+  "annotation": {
+    "expected_verdict": "ISSUE",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "CLIENT_CONTROLLED_AUTH_HEADER"
+    ],
+    "claims": [
+      {
+        "rule_id": "CLIENT_CONTROLLED_AUTH_HEADER",
+        "permitted_files": [
+          "app/routes/admin.py"
+        ],
+        "permitted_symbols": [
+          "delete_user"
+        ],
+        "permitted_spans": [
+          [
+            5,
+            9
+          ]
+        ],
+        "required_structural_facts": {},
+        "forbidden_structural_facts": {},
+        "expected_severity": "CRITICAL"
+      }
+    ],
+    "how_established": "source_code_audit",
+    "fixture_source": "synthetic_fastapi_role_header",
+    "human_authored_explanation": "X-User-Role header read directly from request and used in authorization check without cryptographic signature."
+  },
+  "tags": [
+    "auth",
+    "authorization",
+    "fastapi"
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "case_id": "CONTRACT-SCHEMA-ADD-01C",
+  "benchmark_version": "1.0.0",
+  "case_family": "CONTRACT-SCHEMA-ADD-01",
+  "category": "CONTRACT",
+  "difficulty": "MEDIUM",
+  "split": "DEV",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "CHANGE_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "app/schemas/user.py": "from pydantic import BaseModel\n\nclass UserCreate(BaseModel):\n    username: str\n"
+    },
+    "head_files": {
+      "app/schemas/user.py": "from pydantic import BaseModel\n\nclass UserCreate(BaseModel):\n    # docstring added\n    \"\"\"Model for user creation.\"\"\"\n    username: str\n"
+    },
+    "description": "Docstring added to Pydantic model with no field modifications"
+  },
+  "annotation": {
+    "expected_verdict": "CLEAN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "SCHEMA_FIELD_ADDED"
+    ],
+    "claims": [],
+    "how_established": "diff_engine_ground_truth",
+    "fixture_source": "phase6_schema_docstring",
+    "human_authored_explanation": "Model fields unchanged."
+  },
+  "tags": [
+    "contract",
+    "schema",
+    "clean"
+  ]
+}

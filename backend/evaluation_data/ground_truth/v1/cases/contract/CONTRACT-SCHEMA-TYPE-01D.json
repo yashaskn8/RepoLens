@@ -1,0 +1,38 @@
+{
+  "case_id": "CONTRACT-SCHEMA-TYPE-01D",
+  "benchmark_version": "1.0.0",
+  "case_family": "CONTRACT-SCHEMA-TYPE-01",
+  "category": "CONTRACT",
+  "difficulty": "HARD",
+  "split": "FROZEN_PUBLIC_EVAL",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "CHANGE_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "models/billing.py": "class CustomModel:\n    raw_type = int\n"
+    },
+    "head_files": {
+      "models/billing.py": "class CustomModel:\n    raw_type = str\n"
+    },
+    "description": "Custom class variable assignment not using Pydantic or dataclass annotations"
+  },
+  "annotation": {
+    "expected_verdict": "UNKNOWN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "SCHEMA_FIELD_TYPE_CHANGED"
+    ],
+    "claims": [],
+    "how_established": "expert_review",
+    "fixture_source": "novel_frozen_schema_custom_class",
+    "human_authored_explanation": "Cannot determine if custom raw_type class variable represents a formal schema contract."
+  },
+  "tags": [
+    "contract",
+    "unknown",
+    "frozen-eval"
+  ]
+}

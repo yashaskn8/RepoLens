@@ -1,0 +1,40 @@
+{
+  "case_id": "IMPACT-DIRECT-01C",
+  "benchmark_version": "1.0.0",
+  "case_family": "IMPACT-DIRECT-01",
+  "category": "CHANGE_IMPACT",
+  "difficulty": "MEDIUM",
+  "split": "DEV",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "IMPACT_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "app/auth/verifier.py": "def verify_credentials(user_id: str) -> bool:\n    return True\n",
+      "app/api/login.py": "from app.auth.verifier import verify_credentials\ndef login_endpoint(user_id: str):\n    if verify_credentials(user_id):\n        return 'ok'\n"
+    },
+    "head_files": {
+      "app/auth/verifier.py": "def verify_credentials(user_id: str) -> bool:\n    return True\n",
+      "app/api/login.py": "from app.auth.verifier import verify_credentials\ndef login_endpoint(user_id: str):\n    # doc comment in caller only\n    if verify_credentials(user_id):\n        return 'ok'\n"
+    },
+    "description": "Callee untouched; comment added to caller only"
+  },
+  "annotation": {
+    "expected_verdict": "CLEAN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "BLAST_RADIUS_DIRECT_CALLER"
+    ],
+    "claims": [],
+    "expected_impact_count": 0,
+    "how_established": "impact_engine_ground_truth",
+    "fixture_source": "phase6_caller_comment_only",
+    "human_authored_explanation": "Callee function verify_credentials did not change."
+  },
+  "tags": [
+    "impact",
+    "clean"
+  ]
+}

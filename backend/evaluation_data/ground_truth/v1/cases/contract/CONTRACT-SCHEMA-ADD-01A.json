@@ -1,0 +1,53 @@
+{
+  "case_id": "CONTRACT-SCHEMA-ADD-01A",
+  "benchmark_version": "1.0.0",
+  "case_family": "CONTRACT-SCHEMA-ADD-01",
+  "category": "CONTRACT",
+  "difficulty": "EASY",
+  "split": "DEV",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "CHANGE_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "app/schemas/user.py": "from pydantic import BaseModel\n\nclass UserCreate(BaseModel):\n    username: str\n"
+    },
+    "head_files": {
+      "app/schemas/user.py": "from pydantic import BaseModel\n\nclass UserCreate(BaseModel):\n    username: str\n    email: str\n"
+    },
+    "description": "Field email added to UserCreate Pydantic model"
+  },
+  "annotation": {
+    "expected_verdict": "ISSUE",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "SCHEMA_FIELD_ADDED"
+    ],
+    "claims": [
+      {
+        "rule_id": "SCHEMA_FIELD_ADDED",
+        "permitted_files": [
+          "app/schemas/user.py"
+        ],
+        "permitted_symbols": [
+          "UserCreate"
+        ],
+        "required_structural_facts": {
+          "change_type": "ADDED_FIELD"
+        },
+        "forbidden_structural_facts": {},
+        "expected_severity": "LOW"
+      }
+    ],
+    "how_established": "diff_engine_ground_truth",
+    "fixture_source": "phase6_schema_add_field",
+    "human_authored_explanation": "Structural schema delta emitted as ADDED_FIELD."
+  },
+  "tags": [
+    "contract",
+    "schema",
+    "diff"
+  ]
+}

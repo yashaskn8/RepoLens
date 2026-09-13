@@ -1,0 +1,35 @@
+{
+  "case_id": "SEC-SQLI-02D",
+  "benchmark_version": "1.0.0",
+  "case_family": "SEC-SQLI-02",
+  "category": "SECURITY",
+  "difficulty": "HARD",
+  "split": "FROZEN_PUBLIC_EVAL",
+  "target_pipeline": "REPOSITORY_SCAN",
+  "evaluation_stage": "ANALYSIS_CANDIDATE",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "files": {
+      "services/customer_db.py": "def dispatch_query(table_name: str, cursor):\n    # Dynamic query builder imported from external package\n    sql = external_query_builder(table_name)\n    cursor.execute(sql)\n    return cursor.fetchall()\n"
+    },
+    "description": "Query string created by external builder whose implementation is unavailable"
+  },
+  "annotation": {
+    "expected_verdict": "UNKNOWN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "INTERPROCEDURAL_FLOW_SQLI"
+    ],
+    "claims": [],
+    "how_established": "expert_review",
+    "fixture_source": "novel_frozen_sqli_external_builder",
+    "human_authored_explanation": "External query builder cannot be evaluated statically."
+  },
+  "tags": [
+    "sqli",
+    "frozen-eval",
+    "unknown"
+  ]
+}

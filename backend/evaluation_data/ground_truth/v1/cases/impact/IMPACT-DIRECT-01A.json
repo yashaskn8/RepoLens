@@ -1,0 +1,54 @@
+{
+  "case_id": "IMPACT-DIRECT-01A",
+  "benchmark_version": "1.0.0",
+  "case_family": "IMPACT-DIRECT-01",
+  "category": "CHANGE_IMPACT",
+  "difficulty": "EASY",
+  "split": "DEV",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "IMPACT_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "app/auth/verifier.py": "def verify_credentials(user_id: str) -> bool:\n    return True\n",
+      "app/api/login.py": "from app.auth.verifier import verify_credentials\ndef login_endpoint(user_id: str):\n    if verify_credentials(user_id):\n        return 'ok'\n"
+    },
+    "head_files": {
+      "app/auth/verifier.py": "def verify_credentials(user_id: str) -> bool:\n    # Modified verification logic\n    return len(user_id) > 3\n",
+      "app/api/login.py": "from app.auth.verifier import verify_credentials\ndef login_endpoint(user_id: str):\n    if verify_credentials(user_id):\n        return 'ok'\n"
+    },
+    "description": "verify_credentials modified with exactly one downstream caller in login.py"
+  },
+  "annotation": {
+    "expected_verdict": "ISSUE",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "BLAST_RADIUS_DIRECT_CALLER"
+    ],
+    "claims": [
+      {
+        "rule_id": "BLAST_RADIUS_DIRECT_CALLER",
+        "permitted_files": [
+          "app/api/login.py"
+        ],
+        "permitted_symbols": [
+          "login_endpoint"
+        ],
+        "required_structural_facts": {},
+        "forbidden_structural_facts": {},
+        "expected_severity": "LOW"
+      }
+    ],
+    "expected_impact_count": 1,
+    "how_established": "impact_engine_ground_truth",
+    "fixture_source": "phase6_direct_caller",
+    "human_authored_explanation": "ChangeImpactEngine identifies login_endpoint as directly impacted caller."
+  },
+  "tags": [
+    "impact",
+    "direct-caller",
+    "diff"
+  ]
+}

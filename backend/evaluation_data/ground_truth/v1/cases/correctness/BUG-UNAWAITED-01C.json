@@ -1,0 +1,34 @@
+{
+  "case_id": "BUG-UNAWAITED-01C",
+  "benchmark_version": "1.0.0",
+  "case_family": "BUG-UNAWAITED-01",
+  "category": "CORRECTNESS",
+  "difficulty": "MEDIUM",
+  "split": "DEV",
+  "target_pipeline": "REPOSITORY_SCAN",
+  "evaluation_stage": "ANALYSIS_CANDIDATE",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "files": {
+      "app/services/audit.py": "def sync_log_audit_event(event_name: str):\n    pass\n\ndef record_user_login(user_id: str):\n    sync_log_audit_event('USER_LOGGED_IN')\n    return {'status': 'ok'}\n"
+    },
+    "description": "Synchronous functions called synchronously"
+  },
+  "annotation": {
+    "expected_verdict": "CLEAN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "UNAWAITED_ASYNC_CALL"
+    ],
+    "claims": [],
+    "how_established": "source_code_audit",
+    "fixture_source": "synthetic_sync_calls",
+    "human_authored_explanation": "Neither function is async."
+  },
+  "tags": [
+    "correctness",
+    "clean"
+  ]
+}

@@ -1,0 +1,57 @@
+{
+  "case_id": "SEC-PATH-01A",
+  "benchmark_version": "1.0.0",
+  "case_family": "SEC-PATH-01",
+  "category": "SECURITY",
+  "difficulty": "EASY",
+  "split": "FROZEN_PUBLIC_EVAL",
+  "target_pipeline": "REPOSITORY_SCAN",
+  "evaluation_stage": "ANALYSIS_CANDIDATE",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "files": {
+      "app/storage/reader.py": "import os\n\ndef read_user_asset(filename: str):\n    target_path = os.path.join('/var/app/uploads', filename)\n    with open(target_path, 'r') as f:\n        return f.read()\n"
+    },
+    "description": "User controlled filename joined with upload path and passed directly to open()"
+  },
+  "annotation": {
+    "expected_verdict": "ISSUE",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "INTERPROCEDURAL_FLOW_PATH_TRAVERSAL"
+    ],
+    "claims": [
+      {
+        "rule_id": "INTERPROCEDURAL_FLOW_PATH_TRAVERSAL",
+        "permitted_files": [
+          "app/storage/reader.py"
+        ],
+        "permitted_symbols": [
+          "read_user_asset"
+        ],
+        "permitted_spans": [
+          [
+            3,
+            6
+          ]
+        ],
+        "required_structural_facts": {
+          "sink_kind": "INPUT_TO_FILESYSTEM",
+          "flow_required": true
+        },
+        "forbidden_structural_facts": {},
+        "expected_severity": "HIGH"
+      }
+    ],
+    "how_established": "source_code_audit",
+    "fixture_source": "novel_frozen_path_traversal",
+    "human_authored_explanation": "Unsanitized file path reaches filesystem sink open() allowing directory traversal."
+  },
+  "tags": [
+    "path-traversal",
+    "filesystem",
+    "frozen-eval"
+  ]
+}

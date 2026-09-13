@@ -1,0 +1,49 @@
+{
+  "benchmark_version": "1.0.0",
+  "catalog_version": "1.0.0",
+  "canonical_dataset_hash": "1611efec9c34421b19d862427241fde5061170d7268602103fd5585e66b317bf",
+  "total_cases": 90,
+  "total_families": 24,
+  "splits": {
+    "DEV": {
+      "cases": 68,
+      "families": 18
+    },
+    "FROZEN_PUBLIC_EVAL": {
+      "cases": 22,
+      "families": 6
+    }
+  },
+  "categories": {
+    "CHANGE_IMPACT": 24,
+    "CONTRACT": 19,
+    "CORRECTNESS": 16,
+    "SECURITY": 31
+  },
+  "family_split_map": {
+    "BUG-ASYNC-BLOCK-01": "DEV",
+    "BUG-EXCEPT-01": "DEV",
+    "BUG-EXCEPT-02": "FROZEN_PUBLIC_EVAL",
+    "BUG-UNAWAITED-01": "DEV",
+    "CONTRACT-METHOD-01": "DEV",
+    "CONTRACT-METHOD-PATH-01": "DEV",
+    "CONTRACT-ROUTE-PATH-01": "DEV",
+    "CONTRACT-SCHEMA-ADD-01": "DEV",
+    "CONTRACT-SCHEMA-TYPE-01": "FROZEN_PUBLIC_EVAL",
+    "IMPACT-DELETED-CALLER-01": "DEV",
+    "IMPACT-DELETED-CALLER-02": "FROZEN_PUBLIC_EVAL",
+    "IMPACT-DIRECT-01": "DEV",
+    "IMPACT-ISOLATED-01": "DEV",
+    "IMPACT-MULTI-01": "DEV",
+    "IMPACT-MULTI-02": "FROZEN_PUBLIC_EVAL",
+    "IMPACT-SIGNATURE-01": "DEV",
+    "SEC-AUTH-01": "DEV",
+    "SEC-AUTH-02": "DEV",
+    "SEC-CMDI-01": "DEV",
+    "SEC-CRED-01": "DEV",
+    "SEC-CRED-02": "DEV",
+    "SEC-PATH-01": "FROZEN_PUBLIC_EVAL",
+    "SEC-SQLI-01": "DEV",
+    "SEC-SQLI-02": "FROZEN_PUBLIC_EVAL"
+  }
+}

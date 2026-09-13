@@ -1,0 +1,54 @@
+{
+  "case_id": "BUG-EXCEPT-01A",
+  "benchmark_version": "1.0.0",
+  "case_family": "BUG-EXCEPT-01",
+  "category": "CORRECTNESS",
+  "difficulty": "EASY",
+  "split": "DEV",
+  "target_pipeline": "REPOSITORY_SCAN",
+  "evaluation_stage": "ANALYSIS_CANDIDATE",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "files": {
+      "app/services/payment.py": "def process_transaction(account_id: str, amount: float):\n    try:\n        ledger.charge(account_id, amount)\n    except Exception:\n        pass\n"
+    },
+    "description": "Broad exception handler with bare pass statement swallowing failure"
+  },
+  "annotation": {
+    "expected_verdict": "ISSUE",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "BROAD_EXCEPTION_SWALLOW"
+    ],
+    "claims": [
+      {
+        "rule_id": "BROAD_EXCEPTION_SWALLOW",
+        "permitted_files": [
+          "app/services/payment.py"
+        ],
+        "permitted_symbols": [
+          "process_transaction"
+        ],
+        "permitted_spans": [
+          [
+            4,
+            5
+          ]
+        ],
+        "required_structural_facts": {},
+        "forbidden_structural_facts": {},
+        "expected_severity": "MEDIUM"
+      }
+    ],
+    "how_established": "source_code_audit",
+    "fixture_source": "synthetic_broad_except_pass",
+    "human_authored_explanation": "except Exception with pass body completely suppresses payment errors without recovery."
+  },
+  "tags": [
+    "correctness",
+    "exceptions",
+    "python"
+  ]
+}

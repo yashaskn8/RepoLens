@@ -1,0 +1,51 @@
+{
+  "case_id": "SEC-CRED-02A",
+  "benchmark_version": "1.0.0",
+  "case_family": "SEC-CRED-02",
+  "category": "SECURITY",
+  "difficulty": "EASY",
+  "split": "DEV",
+  "target_pipeline": "REPOSITORY_SCAN",
+  "evaluation_stage": "STATIC_FINDING",
+  "benchmark_languages": [
+    "tf"
+  ],
+  "fixture": {
+    "files": {
+      "terraform/db.tf": "resource \"aws_db_instance\" \"default\" {\n  allocated_storage = 20\n  engine            = \"postgres\"\n  username          = \"dbadmin\"\n  password          = \"SuperSecretMasterPassword123!\"\n}\n"
+    },
+    "description": "Terraform resource with hardcoded plaintext database password"
+  },
+  "annotation": {
+    "expected_verdict": "ISSUE",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "HARDCODED_CREDENTIAL"
+    ],
+    "claims": [
+      {
+        "rule_id": "HARDCODED_CREDENTIAL",
+        "permitted_files": [
+          "terraform/db.tf"
+        ],
+        "permitted_spans": [
+          [
+            5,
+            5
+          ]
+        ],
+        "required_structural_facts": {},
+        "forbidden_structural_facts": {},
+        "expected_severity": "HIGH"
+      }
+    ],
+    "how_established": "source_code_audit",
+    "fixture_source": "synthetic_terraform_secret",
+    "human_authored_explanation": "Literal plaintext password in terraform resource."
+  },
+  "tags": [
+    "secret",
+    "terraform",
+    "iac"
+  ]
+}

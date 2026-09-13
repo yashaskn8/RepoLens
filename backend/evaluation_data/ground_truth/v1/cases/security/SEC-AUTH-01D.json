@@ -1,0 +1,35 @@
+{
+  "case_id": "SEC-AUTH-01D",
+  "benchmark_version": "1.0.0",
+  "case_family": "SEC-AUTH-01",
+  "category": "SECURITY",
+  "difficulty": "HARD",
+  "split": "DEV",
+  "target_pipeline": "REPOSITORY_SCAN",
+  "evaluation_stage": "STATIC_FINDING",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "files": {
+      "app/routes/orders.py": "from fastapi import APIRouter, Request\nrouter = APIRouter()\n\n@router.post('/orders')\ndef create_order(request: Request):\n    # Tenant context resolved by external dynamic provider\n    ctx = resolve_opaque_context(request)\n    return {'status': 'created'}\n"
+    },
+    "description": "FastAPI endpoint with unresolved external context provider; evidence is ambiguous"
+  },
+  "annotation": {
+    "expected_verdict": "UNKNOWN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "CLIENT_CONTROLLED_AUTH_HEADER"
+    ],
+    "claims": [],
+    "how_established": "expert_review",
+    "fixture_source": "synthetic_ambiguous_context_provider",
+    "human_authored_explanation": "Dynamic context resolver hides header reads; cannot establish vulnerability or safety with static evidence."
+  },
+  "tags": [
+    "auth",
+    "ambiguous",
+    "unknown"
+  ]
+}

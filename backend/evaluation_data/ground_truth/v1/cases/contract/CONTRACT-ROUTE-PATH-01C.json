@@ -1,0 +1,38 @@
+{
+  "case_id": "CONTRACT-ROUTE-PATH-01C",
+  "benchmark_version": "1.0.0",
+  "case_family": "CONTRACT-ROUTE-PATH-01",
+  "category": "CONTRACT",
+  "difficulty": "MEDIUM",
+  "split": "DEV",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "CHANGE_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "app/api/users.py": "from fastapi import APIRouter\nrouter = APIRouter()\n@router.get('/api/v1/users')\ndef get_users():\n    return []\n"
+    },
+    "head_files": {
+      "app/api/users.py": "from fastapi import APIRouter\nrouter = APIRouter()\n@router.get('/api/v1/users')\ndef get_users():\n    # Formatting update only\n    return []\n"
+    },
+    "description": "Formatting change in route file"
+  },
+  "annotation": {
+    "expected_verdict": "CLEAN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "ROUTE_PATH_MISMATCH"
+    ],
+    "claims": [],
+    "how_established": "diff_engine_ground_truth",
+    "fixture_source": "phase6_route_formatting",
+    "human_authored_explanation": "No route contract delta."
+  },
+  "tags": [
+    "contract",
+    "route",
+    "clean"
+  ]
+}

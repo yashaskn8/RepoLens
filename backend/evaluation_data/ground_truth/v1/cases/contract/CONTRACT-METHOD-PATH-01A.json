@@ -1,0 +1,53 @@
+{
+  "case_id": "CONTRACT-METHOD-PATH-01A",
+  "benchmark_version": "1.0.0",
+  "case_family": "CONTRACT-METHOD-PATH-01",
+  "category": "CONTRACT",
+  "difficulty": "MEDIUM",
+  "split": "DEV",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "CHANGE_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "app/api/orders.py": "from fastapi import APIRouter\nrouter = APIRouter()\n@router.get('/api/v1/orders')\ndef get_orders():\n    return []\n"
+    },
+    "head_files": {
+      "app/api/orders.py": "from fastapi import APIRouter\nrouter = APIRouter()\n@router.post('/api/v2/orders')\ndef get_orders():\n    return []\n"
+    },
+    "description": "Route modified with both method change (GET -> POST) and path change (/v1 -> /v2)"
+  },
+  "annotation": {
+    "expected_verdict": "ISSUE",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "ROUTE_METHOD_AND_PATH_CHANGED"
+    ],
+    "claims": [
+      {
+        "rule_id": "ROUTE_METHOD_AND_PATH_CHANGED",
+        "permitted_files": [
+          "app/api/orders.py"
+        ],
+        "permitted_symbols": [
+          "get_orders"
+        ],
+        "required_structural_facts": {
+          "change_type": "METHOD_AND_PATH_CHANGED"
+        },
+        "forbidden_structural_facts": {},
+        "expected_severity": "HIGH"
+      }
+    ],
+    "how_established": "diff_engine_ground_truth",
+    "fixture_source": "phase6_method_and_path_change",
+    "human_authored_explanation": "Simultaneous method and path change emitted as METHOD_AND_PATH_CHANGED delta."
+  },
+  "tags": [
+    "contract",
+    "route",
+    "diff"
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "case_id": "CONTRACT-ROUTE-PATH-01B",
+  "benchmark_version": "1.0.0",
+  "case_family": "CONTRACT-ROUTE-PATH-01",
+  "category": "CONTRACT",
+  "difficulty": "EASY",
+  "split": "DEV",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "CHANGE_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "app/api/users.py": "from fastapi import APIRouter\nrouter = APIRouter()\n@router.get('/api/v1/users')\ndef get_users():\n    return []\n"
+    },
+    "head_files": {
+      "app/api/users.py": "from fastapi import APIRouter\nrouter = APIRouter()\n@router.get('/api/v1/users')\ndef get_users():\n    # Unchanged route definition\n    return [{'id': 1}]\n"
+    },
+    "description": "Internal handler body changed with zero route path modification"
+  },
+  "annotation": {
+    "expected_verdict": "CLEAN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "ROUTE_PATH_MISMATCH"
+    ],
+    "claims": [],
+    "how_established": "diff_engine_ground_truth",
+    "fixture_source": "phase6_route_path_unchanged",
+    "human_authored_explanation": "Route path is unchanged."
+  },
+  "tags": [
+    "contract",
+    "route",
+    "clean"
+  ]
+}

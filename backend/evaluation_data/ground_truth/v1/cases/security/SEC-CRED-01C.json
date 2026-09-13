@@ -1,0 +1,35 @@
+{
+  "case_id": "SEC-CRED-01C",
+  "benchmark_version": "1.0.0",
+  "case_family": "SEC-CRED-01",
+  "category": "SECURITY",
+  "difficulty": "MEDIUM",
+  "split": "DEV",
+  "target_pipeline": "REPOSITORY_SCAN",
+  "evaluation_stage": "STATIC_FINDING",
+  "benchmark_languages": [
+    "yaml"
+  ],
+  "fixture": {
+    "files": {
+      "deploy/config.yaml": "# Deployment configuration\napp:\n  name: payment-service\n  api_key: \"changeme_dummy_key\"\n"
+    },
+    "description": "YAML configuration using dummy changeme placeholder"
+  },
+  "annotation": {
+    "expected_verdict": "CLEAN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "HARDCODED_CREDENTIAL"
+    ],
+    "claims": [],
+    "how_established": "source_code_audit",
+    "fixture_source": "synthetic_yaml_placeholder",
+    "human_authored_explanation": "changeme_dummy_key is an obvious template placeholder recognized by secret filters."
+  },
+  "tags": [
+    "secret",
+    "config",
+    "clean"
+  ]
+}

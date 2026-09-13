@@ -1,0 +1,35 @@
+{
+  "case_id": "BUG-UNAWAITED-01B",
+  "benchmark_version": "1.0.0",
+  "case_family": "BUG-UNAWAITED-01",
+  "category": "CORRECTNESS",
+  "difficulty": "EASY",
+  "split": "DEV",
+  "target_pipeline": "REPOSITORY_SCAN",
+  "evaluation_stage": "ANALYSIS_CANDIDATE",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "files": {
+      "app/services/audit.py": "async def log_audit_event(event_name: str):\n    pass\n\nasync def record_user_login(user_id: str):\n    # Correctly awaited\n    await log_audit_event('USER_LOGGED_IN')\n    return {'status': 'ok'}\n"
+    },
+    "description": "Async function properly called with await keyword"
+  },
+  "annotation": {
+    "expected_verdict": "CLEAN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "UNAWAITED_ASYNC_CALL"
+    ],
+    "claims": [],
+    "how_established": "source_code_audit",
+    "fixture_source": "synthetic_awaited_async_call",
+    "human_authored_explanation": "await keyword properly executes the coroutine."
+  },
+  "tags": [
+    "correctness",
+    "async",
+    "clean"
+  ]
+}

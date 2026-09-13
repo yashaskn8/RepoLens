@@ -1,0 +1,38 @@
+{
+  "case_id": "CONTRACT-SCHEMA-TYPE-01C",
+  "benchmark_version": "1.0.0",
+  "case_family": "CONTRACT-SCHEMA-TYPE-01",
+  "category": "CONTRACT",
+  "difficulty": "MEDIUM",
+  "split": "FROZEN_PUBLIC_EVAL",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "CHANGE_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "models/billing.py": "from pydantic import BaseModel\n\nclass InvoiceOut(BaseModel):\n    invoice_id: str\n"
+    },
+    "head_files": {
+      "models/billing.py": "from pydantic import BaseModel\n\nclass InvoiceOut(BaseModel):\n    # Formatting only\n    invoice_id: str\n"
+    },
+    "description": "Whitespace update in model"
+  },
+  "annotation": {
+    "expected_verdict": "CLEAN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "SCHEMA_FIELD_TYPE_CHANGED"
+    ],
+    "claims": [],
+    "how_established": "diff_engine_ground_truth",
+    "fixture_source": "novel_frozen_schema_ws",
+    "human_authored_explanation": "No type modification."
+  },
+  "tags": [
+    "contract",
+    "clean",
+    "frozen-eval"
+  ]
+}

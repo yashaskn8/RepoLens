@@ -1,0 +1,51 @@
+{
+  "case_id": "SEC-CRED-01A",
+  "benchmark_version": "1.0.0",
+  "case_family": "SEC-CRED-01",
+  "category": "SECURITY",
+  "difficulty": "EASY",
+  "split": "DEV",
+  "target_pipeline": "REPOSITORY_SCAN",
+  "evaluation_stage": "STATIC_FINDING",
+  "benchmark_languages": [
+    "yaml"
+  ],
+  "fixture": {
+    "files": {
+      "deploy/config.yaml": "# Deployment configuration\napp:\n  name: payment-service\n  api_key: \"live_sk_94827104928174918237\"\n"
+    },
+    "description": "YAML configuration containing literal secret API key"
+  },
+  "annotation": {
+    "expected_verdict": "ISSUE",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "HARDCODED_CREDENTIAL"
+    ],
+    "claims": [
+      {
+        "rule_id": "HARDCODED_CREDENTIAL",
+        "permitted_files": [
+          "deploy/config.yaml"
+        ],
+        "permitted_spans": [
+          [
+            4,
+            4
+          ]
+        ],
+        "required_structural_facts": {},
+        "forbidden_structural_facts": {},
+        "expected_severity": "HIGH"
+      }
+    ],
+    "how_established": "source_code_audit",
+    "fixture_source": "synthetic_yaml_secret",
+    "human_authored_explanation": "Fixed literal credential assigned to sensitive key api_key in yaml configuration."
+  },
+  "tags": [
+    "secret",
+    "config",
+    "yaml"
+  ]
+}

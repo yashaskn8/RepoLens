@@ -1,0 +1,40 @@
+{
+  "case_id": "IMPACT-DIRECT-01D",
+  "benchmark_version": "1.0.0",
+  "case_family": "IMPACT-DIRECT-01",
+  "category": "CHANGE_IMPACT",
+  "difficulty": "HARD",
+  "split": "DEV",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "IMPACT_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "app/auth/verifier.py": "def verify_credentials(user_id: str) -> bool:\n    return True\n",
+      "app/api/login.py": "def login_endpoint(user_id: str):\n    # Dynamic getattr call\n    fn = getattr(importlib.import_module('app.auth.verifier'), 'verify_credentials')\n    return fn(user_id)\n"
+    },
+    "head_files": {
+      "app/auth/verifier.py": "def verify_credentials(user_id: str) -> bool:\n    return len(user_id) > 0\n",
+      "app/api/login.py": "def login_endpoint(user_id: str):\n    fn = getattr(importlib.import_module('app.auth.verifier'), 'verify_credentials')\n    return fn(user_id)\n"
+    },
+    "description": "Callee called dynamically via getattr; call edge cannot be resolved statically"
+  },
+  "annotation": {
+    "expected_verdict": "UNKNOWN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "BLAST_RADIUS_DIRECT_CALLER"
+    ],
+    "claims": [],
+    "how_established": "expert_review",
+    "fixture_source": "synthetic_dynamic_getattr_call",
+    "human_authored_explanation": "Static AST parser cannot resolve dynamic getattr import into a repository graph edge."
+  },
+  "tags": [
+    "impact",
+    "dynamic",
+    "unknown"
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "case_id": "BUG-ASYNC-BLOCK-01D",
+  "benchmark_version": "1.0.0",
+  "case_family": "BUG-ASYNC-BLOCK-01",
+  "category": "CORRECTNESS",
+  "difficulty": "MEDIUM",
+  "split": "DEV",
+  "target_pipeline": "REPOSITORY_SCAN",
+  "evaluation_stage": "ANALYSIS_CANDIDATE",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "files": {
+      "app/workers/event_consumer.py": "async def handle_incoming_message(message_data: dict):\n    # Non-blocking async calculation\n    total = sum(message_data.get('items', []))\n    return {'total': total}\n"
+    },
+    "description": "Pure in-memory computation in async function"
+  },
+  "annotation": {
+    "expected_verdict": "CLEAN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "BLOCKING_API_IN_ASYNC"
+    ],
+    "claims": [],
+    "how_established": "source_code_audit",
+    "fixture_source": "synthetic_async_cpu_pure",
+    "human_authored_explanation": "In-memory list comprehension is safe in async function."
+  },
+  "tags": [
+    "correctness",
+    "clean"
+  ]
+}

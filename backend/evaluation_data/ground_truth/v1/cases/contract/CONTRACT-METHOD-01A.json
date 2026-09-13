@@ -1,0 +1,53 @@
+{
+  "case_id": "CONTRACT-METHOD-01A",
+  "benchmark_version": "1.0.0",
+  "case_family": "CONTRACT-METHOD-01",
+  "category": "CONTRACT",
+  "difficulty": "EASY",
+  "split": "DEV",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "CHANGE_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "app/api/items.py": "from fastapi import APIRouter\nrouter = APIRouter()\n@router.get('/api/items')\ndef list_items():\n    return []\n"
+    },
+    "head_files": {
+      "app/api/items.py": "from fastapi import APIRouter\nrouter = APIRouter()\n@router.post('/api/items')\ndef list_items():\n    return []\n"
+    },
+    "description": "Endpoint HTTP method changed from GET to POST"
+  },
+  "annotation": {
+    "expected_verdict": "ISSUE",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "HTTP_METHOD_MISMATCH"
+    ],
+    "claims": [
+      {
+        "rule_id": "HTTP_METHOD_MISMATCH",
+        "permitted_files": [
+          "app/api/items.py"
+        ],
+        "permitted_symbols": [
+          "list_items"
+        ],
+        "required_structural_facts": {
+          "change_type": "METHOD_CHANGED"
+        },
+        "forbidden_structural_facts": {},
+        "expected_severity": "HIGH"
+      }
+    ],
+    "how_established": "diff_engine_ground_truth",
+    "fixture_source": "phase6_method_change",
+    "human_authored_explanation": "Incompatible HTTP method alteration emitted as METHOD_CHANGED."
+  },
+  "tags": [
+    "contract",
+    "http-method",
+    "diff"
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "case_id": "IMPACT-DELETED-CALLER-01C",
+  "benchmark_version": "1.0.0",
+  "case_family": "IMPACT-DELETED-CALLER-01",
+  "category": "CHANGE_IMPACT",
+  "difficulty": "MEDIUM",
+  "split": "DEV",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "IMPACT_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "app/auth.py": "def verify_user(token: str) -> bool:\n    return bool(token)\n"
+    },
+    "head_files": {
+      "app/auth.py": "def helper():\n    pass\n"
+    },
+    "description": "Deleted function that had zero callers in the repository"
+  },
+  "annotation": {
+    "expected_verdict": "CLEAN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "DELETED_SYMBOL_WITH_CALLERS"
+    ],
+    "claims": [],
+    "expected_impact_count": 0,
+    "how_established": "impact_engine_ground_truth",
+    "fixture_source": "phase6_deleted_unused_function",
+    "human_authored_explanation": "Function had 0 callers, so deletion breaks no active consumers."
+  },
+  "tags": [
+    "impact",
+    "clean"
+  ]
+}

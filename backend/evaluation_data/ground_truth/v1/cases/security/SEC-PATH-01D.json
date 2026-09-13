@@ -1,0 +1,35 @@
+{
+  "case_id": "SEC-PATH-01D",
+  "benchmark_version": "1.0.0",
+  "case_family": "SEC-PATH-01",
+  "category": "SECURITY",
+  "difficulty": "HARD",
+  "split": "FROZEN_PUBLIC_EVAL",
+  "target_pipeline": "REPOSITORY_SCAN",
+  "evaluation_stage": "ANALYSIS_CANDIDATE",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "files": {
+      "app/storage/reader.py": "def read_storage_entry(opaque_id: str):\n    # Sanitization happens in external C extension or opaque provider\n    resolved = c_ext_resolve_path(opaque_id)\n    with open(resolved, 'r') as f:\n        return f.read()\n"
+    },
+    "description": "Path resolution delegated to opaque C extension"
+  },
+  "annotation": {
+    "expected_verdict": "UNKNOWN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "INTERPROCEDURAL_FLOW_PATH_TRAVERSAL"
+    ],
+    "claims": [],
+    "how_established": "expert_review",
+    "fixture_source": "novel_frozen_path_opaque_ext",
+    "human_authored_explanation": "Opaque C extension behavior cannot be determined statically."
+  },
+  "tags": [
+    "path-traversal",
+    "unknown",
+    "frozen-eval"
+  ]
+}

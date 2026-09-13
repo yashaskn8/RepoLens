@@ -1,0 +1,40 @@
+{
+  "case_id": "IMPACT-DELETED-CALLER-01B",
+  "benchmark_version": "1.0.0",
+  "case_family": "IMPACT-DELETED-CALLER-01",
+  "category": "CHANGE_IMPACT",
+  "difficulty": "EASY",
+  "split": "DEV",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "IMPACT_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "app/auth.py": "def verify_user(token: str) -> bool:\n    return bool(token)\n",
+      "app/api.py": "from app.auth import verify_user\ndef login_endpoint(token: str):\n    if verify_user(token):\n        return True\n"
+    },
+    "head_files": {
+      "app/auth.py": "# verify_user replaced by new_verify\ndef new_verify(token: str) -> bool:\n    return bool(token)\n",
+      "app/api.py": "from app.auth import new_verify\ndef login_endpoint(token: str):\n    if new_verify(token):\n        return True\n"
+    },
+    "description": "Deleted function refactored synchronously across callee and caller"
+  },
+  "annotation": {
+    "expected_verdict": "CLEAN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "DELETED_SYMBOL_WITH_CALLERS"
+    ],
+    "claims": [],
+    "expected_impact_count": 0,
+    "how_established": "impact_engine_ground_truth",
+    "fixture_source": "phase6_deleted_caller_safe_refactor",
+    "human_authored_explanation": "Caller in head branch calls new_verify, so no active caller is broken."
+  },
+  "tags": [
+    "impact",
+    "clean"
+  ]
+}

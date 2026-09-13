@@ -1,0 +1,54 @@
+{
+  "case_id": "BUG-ASYNC-BLOCK-01A",
+  "benchmark_version": "1.0.0",
+  "case_family": "BUG-ASYNC-BLOCK-01",
+  "category": "CORRECTNESS",
+  "difficulty": "EASY",
+  "split": "DEV",
+  "target_pipeline": "REPOSITORY_SCAN",
+  "evaluation_stage": "ANALYSIS_CANDIDATE",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "files": {
+      "app/workers/event_consumer.py": "import time\n\nasync def handle_incoming_message(message_data: dict):\n    # Blocking call inside event loop\n    time.sleep(2.0)\n    return {'processed': True}\n"
+    },
+    "description": "time.sleep() blocking the asyncio event loop inside async def"
+  },
+  "annotation": {
+    "expected_verdict": "ISSUE",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "BLOCKING_API_IN_ASYNC"
+    ],
+    "claims": [
+      {
+        "rule_id": "BLOCKING_API_IN_ASYNC",
+        "permitted_files": [
+          "app/workers/event_consumer.py"
+        ],
+        "permitted_symbols": [
+          "handle_incoming_message"
+        ],
+        "permitted_spans": [
+          [
+            3,
+            6
+          ]
+        ],
+        "required_structural_facts": {},
+        "forbidden_structural_facts": {},
+        "expected_severity": "MEDIUM"
+      }
+    ],
+    "how_established": "source_code_audit",
+    "fixture_source": "synthetic_async_blocking_sleep",
+    "human_authored_explanation": "time.sleep blocks the single-threaded asyncio event loop preventing concurrent request processing."
+  },
+  "tags": [
+    "correctness",
+    "async",
+    "python"
+  ]
+}

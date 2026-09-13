@@ -1,0 +1,286 @@
+{
+  "catalog_version": "1.0.0",
+  "capabilities": [
+    {
+      "rule_id": "CLIENT_CONTROLLED_AUTH_HEADER",
+      "subsystem": "security",
+      "rule_type": "ISSUE_SIGNAL",
+      "evaluation_stage": "STATIC_FINDING",
+      "implementation": "backend/app/analysis/core.py:_authorization_header_findings",
+      "implementation_languages": ["python"],
+      "benchmark_languages": ["python"],
+      "output_kind": "static_scanner",
+      "evidence_level": "ast_line_range",
+      "existing_test": "backend/tests/test_scanner_adapters.py",
+      "native_predicate": "rule_id.startswith('python.security.client-controlled-')",
+      "limitations": [
+        "Detects FastAPI Header(...) dependencies and request.headers.get(...) assignments used in authorization, tenant, or user identity boundaries without visible cryptographic verification markers"
+      ]
+    },
+    {
+      "rule_id": "HARDCODED_CREDENTIAL",
+      "subsystem": "security",
+      "rule_type": "ISSUE_SIGNAL",
+      "evaluation_stage": "STATIC_FINDING",
+      "implementation": "backend/app/analysis/core.py:_hardcoded_credential_findings",
+      "implementation_languages": ["tf", "tfvars", "yaml", "yml", "toml", "ini", "conf", "rules", "tpl", "mako", "sh", "bash"],
+      "benchmark_languages": ["tf", "yaml", "toml"],
+      "output_kind": "deterministic_secret",
+      "evidence_level": "exact_line",
+      "existing_test": "backend/tests/test_phase6_correctness_dataset.py",
+      "native_predicate": "rule_id.startswith('iac.security.hardcoded-')",
+      "limitations": [
+        "Config/IaC suffixes matching _CONFIG_SUFFIXES; excludes placeholders, variable syntax, and .env/.json"
+      ]
+    },
+    {
+      "rule_id": "INTERPROCEDURAL_FLOW_SQLI",
+      "subsystem": "security",
+      "rule_type": "ISSUE_SIGNAL",
+      "evaluation_stage": "ANALYSIS_CANDIDATE",
+      "implementation": "backend/app/semantics/flow.py:analyze_security_flows",
+      "implementation_languages": ["python", "typescript", "javascript"],
+      "benchmark_languages": ["python"],
+      "output_kind": "semantic_candidate",
+      "evidence_level": "interprocedural_call_path",
+      "existing_test": "backend/tests/test_candidate_first_analysis.py",
+      "native_predicate": "flow.sink.kind == 'INPUT_TO_DATABASE'",
+      "limitations": [
+        "Sinks: execute, executemany, executescript without parameterization or query builder"
+      ]
+    },
+    {
+      "rule_id": "INTERPROCEDURAL_FLOW_CMDI",
+      "subsystem": "security",
+      "rule_type": "ISSUE_SIGNAL",
+      "evaluation_stage": "ANALYSIS_CANDIDATE",
+      "implementation": "backend/app/semantics/flow.py:analyze_security_flows",
+      "implementation_languages": ["python", "typescript", "javascript"],
+      "benchmark_languages": ["python", "javascript"],
+      "output_kind": "semantic_candidate",
+      "evidence_level": "interprocedural_call_path",
+      "existing_test": "backend/tests/test_candidate_first_analysis.py",
+      "native_predicate": "flow.sink.kind == 'INPUT_TO_COMMAND'",
+      "limitations": [
+        "Sinks: subprocess.run, subprocess.call, os.system, child_process.exec without argument array isolation"
+      ]
+    },
+    {
+      "rule_id": "INTERPROCEDURAL_FLOW_PATH_TRAVERSAL",
+      "subsystem": "security",
+      "rule_type": "ISSUE_SIGNAL",
+      "evaluation_stage": "ANALYSIS_CANDIDATE",
+      "implementation": "backend/app/semantics/flow.py:analyze_security_flows",
+      "implementation_languages": ["python", "typescript", "javascript"],
+      "benchmark_languages": ["python"],
+      "output_kind": "semantic_candidate",
+      "evidence_level": "interprocedural_call_path",
+      "existing_test": "backend/tests/test_candidate_first_analysis.py",
+      "native_predicate": "flow.sink.kind == 'INPUT_TO_FILESYSTEM'",
+      "limitations": [
+        "Sinks: open, fs.readfilesync without resolve_safe_path sanitizer"
+      ]
+    },
+    {
+      "rule_id": "BROAD_EXCEPTION_SWALLOW",
+      "subsystem": "correctness",
+      "rule_type": "ISSUE_SIGNAL",
+      "evaluation_stage": "ANALYSIS_CANDIDATE",
+      "implementation": "backend/app/specialist_candidates.py:build_bug_candidates",
+      "implementation_languages": ["python"],
+      "benchmark_languages": ["python"],
+      "output_kind": "bug_candidate",
+      "evidence_level": "ast_try_except",
+      "existing_test": "backend/tests/test_candidate_first_analysis.py",
+      "native_predicate": "candidate.candidate_kind == 'BROAD_EXCEPTION_SWALLOW'",
+      "limitations": [
+        "Broad empty exception handlers; Python fallback recognizes pass-only broad handlers. Does not claim arbitrary continue/return swallowing unless independently verified."
+      ]
+    },
+    {
+      "rule_id": "BLOCKING_API_IN_ASYNC",
+      "subsystem": "correctness",
+      "rule_type": "ISSUE_SIGNAL",
+      "evaluation_stage": "ANALYSIS_CANDIDATE",
+      "implementation": "backend/app/specialist_candidates.py:build_bug_candidates",
+      "implementation_languages": ["python", "javascript", "typescript"],
+      "benchmark_languages": ["python", "javascript"],
+      "output_kind": "bug_candidate",
+      "evidence_level": "ast_call_in_async_func",
+      "existing_test": "backend/tests/test_candidate_first_analysis.py",
+      "native_predicate": "candidate.candidate_kind == 'BLOCKING_CALL_IN_ASYNC'",
+      "limitations": [
+        "Known blocking calls (time.sleep, subprocess.*, fs.*Sync) directly inside async functions"
+      ]
+    },
+    {
+      "rule_id": "UNAWAITED_ASYNC_CALL",
+      "subsystem": "correctness",
+      "rule_type": "ISSUE_SIGNAL",
+      "evaluation_stage": "ANALYSIS_CANDIDATE",
+      "implementation": "backend/app/specialist_candidates.py:build_bug_candidates",
+      "implementation_languages": ["python"],
+      "benchmark_languages": ["python"],
+      "output_kind": "bug_candidate",
+      "evidence_level": "ast_unawaited_call",
+      "existing_test": "backend/tests/test_candidate_first_analysis.py",
+      "native_predicate": "candidate.candidate_kind == 'UNAWAITED_ASYNC_CALL'",
+      "limitations": [
+        "Python-only detector condition; same-file async function calls not wrapped in await or create_task"
+      ]
+    },
+    {
+      "rule_id": "ROUTE_PATH_MISMATCH",
+      "subsystem": "contract",
+      "rule_type": "ISSUE_SIGNAL",
+      "evaluation_stage": "CHANGE_FACT",
+      "implementation": "backend/app/analysis/diff_engine.py:ChangeDiffEngine.compute_structural_diff",
+      "output_field": "route_deltas",
+      "implementation_languages": ["python", "typescript"],
+      "benchmark_languages": ["python", "typescript"],
+      "output_kind": "route_contract_delta",
+      "evidence_level": "route_spec_delta",
+      "existing_test": "backend/tests/test_phase6_correctness_dataset.py",
+      "native_predicate": "delta.change_type == 'PATH_CHANGED'",
+      "limitations": [
+        "FastAPI and Express route definitions; route path changed while client or router remains on old path"
+      ]
+    },
+    {
+      "rule_id": "HTTP_METHOD_MISMATCH",
+      "subsystem": "contract",
+      "rule_type": "ISSUE_SIGNAL",
+      "evaluation_stage": "CHANGE_FACT",
+      "implementation": "backend/app/analysis/diff_engine.py:ChangeDiffEngine.compute_structural_diff",
+      "output_field": "route_deltas",
+      "implementation_languages": ["python", "typescript"],
+      "benchmark_languages": ["python", "typescript"],
+      "output_kind": "route_contract_delta",
+      "evidence_level": "http_method_delta",
+      "existing_test": "backend/tests/test_phase6_correctness_dataset.py",
+      "native_predicate": "delta.change_type == 'METHOD_CHANGED'",
+      "limitations": [
+        "Incompatible HTTP verb change on matched route path"
+      ]
+    },
+    {
+      "rule_id": "ROUTE_METHOD_AND_PATH_CHANGED",
+      "subsystem": "contract",
+      "rule_type": "ISSUE_SIGNAL",
+      "evaluation_stage": "CHANGE_FACT",
+      "implementation": "backend/app/analysis/diff_engine.py:ChangeDiffEngine.compute_structural_diff",
+      "output_field": "route_deltas",
+      "implementation_languages": ["python", "typescript"],
+      "benchmark_languages": ["python", "typescript"],
+      "output_kind": "route_contract_delta",
+      "evidence_level": "route_spec_delta",
+      "existing_test": "backend/tests/test_phase6_correctness_dataset.py",
+      "native_predicate": "delta.change_type == 'METHOD_AND_PATH_CHANGED'",
+      "limitations": [
+        "Both HTTP method and route path altered simultaneously"
+      ]
+    },
+    {
+      "rule_id": "SCHEMA_FIELD_ADDED",
+      "subsystem": "contract",
+      "rule_type": "STRUCTURAL_FACT",
+      "evaluation_stage": "CHANGE_FACT",
+      "implementation": "backend/app/analysis/diff_engine.py:ChangeDiffEngine.compute_structural_diff",
+      "output_field": "schema_deltas",
+      "implementation_languages": ["python"],
+      "benchmark_languages": ["python"],
+      "output_kind": "schema_delta",
+      "evidence_level": "pydantic_field_fact",
+      "existing_test": "backend/tests/test_phase6_correctness_dataset.py",
+      "native_predicate": "delta.change_type == 'ADDED_FIELD'",
+      "limitations": [
+        "Field added to schema model; structural fact that is non-breaking if optional/defaulted"
+      ]
+    },
+    {
+      "rule_id": "SCHEMA_FIELD_TYPE_CHANGED",
+      "subsystem": "contract",
+      "rule_type": "ISSUE_SIGNAL",
+      "evaluation_stage": "CHANGE_FACT",
+      "implementation": "backend/app/analysis/diff_engine.py:ChangeDiffEngine.compute_structural_diff",
+      "output_field": "schema_deltas",
+      "implementation_languages": ["python"],
+      "benchmark_languages": ["python"],
+      "output_kind": "schema_delta",
+      "evidence_level": "pydantic_type_break",
+      "existing_test": "backend/tests/test_phase6_correctness_dataset.py",
+      "native_predicate": "delta.change_type == 'MODIFIED_TYPE'",
+      "limitations": [
+        "Incompatible Pydantic field type alteration; classified as breaking schema delta"
+      ]
+    },
+    {
+      "rule_id": "BLAST_RADIUS_DIRECT_CALLER",
+      "subsystem": "impact",
+      "rule_type": "STRUCTURAL_FACT",
+      "evaluation_stage": "IMPACT_FACT",
+      "implementation": "backend/app/analysis/impact_engine.py:ChangeImpactEngine.compute_blast_radius",
+      "output_field": "impacts",
+      "implementation_languages": ["python", "typescript"],
+      "benchmark_languages": ["python"],
+      "output_kind": "blast_radius_report",
+      "evidence_level": "graph_reachability",
+      "existing_test": "backend/tests/test_change_impact_engine.py",
+      "native_predicate": "len(impacts) == 1",
+      "limitations": [
+        "Modified symbol with callers emits ChangeImpact records"
+      ]
+    },
+    {
+      "rule_id": "BLAST_RADIUS_MULTI_CONSUMER",
+      "subsystem": "impact",
+      "rule_type": "STRUCTURAL_FACT",
+      "evaluation_stage": "IMPACT_FACT",
+      "implementation": "backend/app/analysis/impact_engine.py:ChangeImpactEngine.compute_blast_radius",
+      "output_field": "impacts",
+      "implementation_languages": ["python", "typescript"],
+      "benchmark_languages": ["python"],
+      "output_kind": "blast_radius_report",
+      "evidence_level": "graph_reachability",
+      "existing_test": "backend/tests/test_change_impact_engine.py",
+      "native_predicate": "len(impacts) >= 2",
+      "limitations": [
+        "Shared symbol modification affecting 2+ downstream modules"
+      ]
+    },
+    {
+      "rule_id": "DELETED_SYMBOL_WITH_CALLERS",
+      "subsystem": "impact",
+      "rule_type": "ISSUE_SIGNAL",
+      "evaluation_stage": "IMPACT_FACT",
+      "implementation": "backend/app/analysis/impact_engine.py:ChangeImpactEngine.compute_blast_radius",
+      "output_field": "impacts",
+      "implementation_languages": ["python"],
+      "benchmark_languages": ["python"],
+      "output_kind": "blast_radius_report",
+      "evidence_level": "graph_reachability",
+      "existing_test": "backend/tests/test_phase6_correctness_dataset.py",
+      "native_predicate": "any(i.evidence_payload.get('change_type') == 'DELETED' or 'deleted symbol' in i.title.lower() for i in impacts)",
+      "limitations": [
+        "Deleted public function with active callers in other files produces caller broken impact"
+      ]
+    },
+    {
+      "rule_id": "SIGNATURE_BREAK_CALLERS",
+      "subsystem": "impact",
+      "rule_type": "ISSUE_SIGNAL",
+      "evaluation_stage": "IMPACT_FACT",
+      "implementation": "backend/app/analysis/impact_engine.py:ChangeImpactEngine.compute_blast_radius",
+      "output_field": "impacts",
+      "implementation_languages": ["python"],
+      "benchmark_languages": ["python"],
+      "output_kind": "blast_radius_report",
+      "evidence_level": "graph_reachability",
+      "existing_test": "backend/tests/test_phase6_correctness_dataset.py",
+      "native_predicate": "any('signature_diff' in i.evidence_payload or 'signature change' in i.title.lower() for i in impacts)",
+      "limitations": [
+        "Required argument added to function called by existing callers produces signature mismatch impact"
+      ]
+    }
+  ]
+}

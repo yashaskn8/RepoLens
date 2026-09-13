@@ -1,0 +1,35 @@
+{
+  "case_id": "SEC-CMDI-01D",
+  "benchmark_version": "1.0.0",
+  "case_family": "SEC-CMDI-01",
+  "category": "SECURITY",
+  "difficulty": "HARD",
+  "split": "DEV",
+  "target_pipeline": "REPOSITORY_SCAN",
+  "evaluation_stage": "ANALYSIS_CANDIDATE",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "files": {
+      "app/utils/network.py": "import subprocess\n\ndef execute_task(task_spec):\n    # External sanitizer cleans command string\n    clean = sanitize_external_command(task_spec)\n    return subprocess.run(clean, shell=True)\n"
+    },
+    "description": "Subprocess call with unknown external sanitizer function"
+  },
+  "annotation": {
+    "expected_verdict": "UNKNOWN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "INTERPROCEDURAL_FLOW_CMDI"
+    ],
+    "claims": [],
+    "how_established": "expert_review",
+    "fixture_source": "synthetic_cmdi_ambiguous_sanitizer",
+    "human_authored_explanation": "Unresolved external sanitizer cannot be verified statically."
+  },
+  "tags": [
+    "cmdi",
+    "ambiguous",
+    "unknown"
+  ]
+}

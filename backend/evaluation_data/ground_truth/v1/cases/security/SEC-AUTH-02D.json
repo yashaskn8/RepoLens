@@ -1,0 +1,35 @@
+{
+  "case_id": "SEC-AUTH-02D",
+  "benchmark_version": "1.0.0",
+  "case_family": "SEC-AUTH-02",
+  "category": "SECURITY",
+  "difficulty": "HARD",
+  "split": "DEV",
+  "target_pipeline": "REPOSITORY_SCAN",
+  "evaluation_stage": "STATIC_FINDING",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "files": {
+      "app/routes/admin.py": "from fastapi import APIRouter, Request\nrouter = APIRouter()\n\n@router.post('/admin/action')\ndef execute_action(request: Request):\n    # Role verification delegated to upstream middleware\n    check_permission_header(request.headers)\n    return {'status': 'ok'}\n"
+    },
+    "description": "FastAPI endpoint delegating check to helper whose implementation is not visible"
+  },
+  "annotation": {
+    "expected_verdict": "UNKNOWN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "CLIENT_CONTROLLED_AUTH_HEADER"
+    ],
+    "claims": [],
+    "how_established": "expert_review",
+    "fixture_source": "synthetic_ambiguous_helper",
+    "human_authored_explanation": "Cannot determine whether check_permission_header validates tokens or merely passes unverified header."
+  },
+  "tags": [
+    "auth",
+    "ambiguous",
+    "unknown"
+  ]
+}

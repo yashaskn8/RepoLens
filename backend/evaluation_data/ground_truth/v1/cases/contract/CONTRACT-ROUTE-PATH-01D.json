@@ -1,0 +1,38 @@
+{
+  "case_id": "CONTRACT-ROUTE-PATH-01D",
+  "benchmark_version": "1.0.0",
+  "case_family": "CONTRACT-ROUTE-PATH-01",
+  "category": "CONTRACT",
+  "difficulty": "HARD",
+  "split": "DEV",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "CHANGE_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "app/api/users.py": "from fastapi import APIRouter\nrouter = APIRouter()\nrouter.add_api_route(build_dynamic_path('users'), handler)\n"
+    },
+    "head_files": {
+      "app/api/users.py": "from fastapi import APIRouter\nrouter = APIRouter()\nrouter.add_api_route(build_dynamic_path('users_v2'), handler)\n"
+    },
+    "description": "Dynamic route path registration using runtime helper"
+  },
+  "annotation": {
+    "expected_verdict": "UNKNOWN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "ROUTE_PATH_MISMATCH"
+    ],
+    "claims": [],
+    "how_established": "expert_review",
+    "fixture_source": "synthetic_dynamic_route_registration",
+    "human_authored_explanation": "Dynamic route helper build_dynamic_path cannot be resolved by static AST parser."
+  },
+  "tags": [
+    "contract",
+    "route",
+    "unknown"
+  ]
+}

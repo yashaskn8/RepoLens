@@ -1,0 +1,37 @@
+{
+  "case_id": "IMPACT-ISOLATED-01A",
+  "benchmark_version": "1.0.0",
+  "case_family": "IMPACT-ISOLATED-01",
+  "category": "CHANGE_IMPACT",
+  "difficulty": "EASY",
+  "split": "DEV",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "IMPACT_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "app/utils/math_helper.py": "def _private_calculate(a: int, b: int) -> int:\n    return a + b\n"
+    },
+    "head_files": {
+      "app/utils/math_helper.py": "def _private_calculate(a: int, b: int) -> int:\n    # Refactored implementation with no external callers\n    val = a + b\n    return val\n"
+    },
+    "description": "Private helper modified with zero callers anywhere in repository"
+  },
+  "annotation": {
+    "expected_verdict": "CLEAN",
+    "evaluation_scope": "ALL_SUPPORTED",
+    "target_rule_ids": [],
+    "claims": [],
+    "expected_impact_count": 0,
+    "how_established": "impact_engine_ground_truth",
+    "fixture_source": "phase6_isolated_helper",
+    "human_authored_explanation": "Function has 0 callers, blast radius impact count is 0."
+  },
+  "tags": [
+    "impact",
+    "isolated",
+    "clean"
+  ]
+}

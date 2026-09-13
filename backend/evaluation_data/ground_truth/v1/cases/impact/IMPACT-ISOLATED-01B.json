@@ -1,0 +1,36 @@
+{
+  "case_id": "IMPACT-ISOLATED-01B",
+  "benchmark_version": "1.0.0",
+  "case_family": "IMPACT-ISOLATED-01",
+  "category": "CHANGE_IMPACT",
+  "difficulty": "EASY",
+  "split": "DEV",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "IMPACT_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "app/utils/math_helper.py": "def _private_calculate(a: int, b: int) -> int:\n    return a + b\n"
+    },
+    "head_files": {
+      "app/utils/math_helper.py": "def _private_calculate(a: int, b: int) -> int:\n    return a + b\n"
+    },
+    "description": "Zero change across files"
+  },
+  "annotation": {
+    "expected_verdict": "CLEAN",
+    "evaluation_scope": "ALL_SUPPORTED",
+    "target_rule_ids": [],
+    "claims": [],
+    "expected_impact_count": 0,
+    "how_established": "impact_engine_ground_truth",
+    "fixture_source": "phase6_isolated_clean",
+    "human_authored_explanation": "Zero impact facts."
+  },
+  "tags": [
+    "impact",
+    "clean"
+  ]
+}

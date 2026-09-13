@@ -1,0 +1,35 @@
+{
+  "case_id": "BUG-EXCEPT-02B",
+  "benchmark_version": "1.0.0",
+  "case_family": "BUG-EXCEPT-02",
+  "category": "CORRECTNESS",
+  "difficulty": "EASY",
+  "split": "FROZEN_PUBLIC_EVAL",
+  "target_pipeline": "REPOSITORY_SCAN",
+  "evaluation_stage": "ANALYSIS_CANDIDATE",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "files": {
+      "core/caching/memcache.py": "def invalidate_user_session(session_id: str):\n    try:\n        cache_client.delete(session_id)\n    except CacheConnectionError as err:\n        logger.warning(f'Cache unavailable during invalidation: {err}')\n"
+    },
+    "description": "Specific CacheConnectionError caught and logged"
+  },
+  "annotation": {
+    "expected_verdict": "CLEAN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "BROAD_EXCEPTION_SWALLOW"
+    ],
+    "claims": [],
+    "how_established": "source_code_audit",
+    "fixture_source": "novel_frozen_targeted_cache_error",
+    "human_authored_explanation": "Targeted exception handled with logging."
+  },
+  "tags": [
+    "correctness",
+    "frozen-eval",
+    "clean"
+  ]
+}

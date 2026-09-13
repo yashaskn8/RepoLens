@@ -1,0 +1,57 @@
+{
+  "case_id": "SEC-CMDI-01A",
+  "benchmark_version": "1.0.0",
+  "case_family": "SEC-CMDI-01",
+  "category": "SECURITY",
+  "difficulty": "EASY",
+  "split": "DEV",
+  "target_pipeline": "REPOSITORY_SCAN",
+  "evaluation_stage": "ANALYSIS_CANDIDATE",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "files": {
+      "app/utils/network.py": "import subprocess\n\ndef ping_host(host_address: str):\n    cmd = f'ping -c 1 {host_address}'\n    return subprocess.run(cmd, shell=True, check=False)\n"
+    },
+    "description": "Command string formatted with user parameter and executed via shell=True"
+  },
+  "annotation": {
+    "expected_verdict": "ISSUE",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "INTERPROCEDURAL_FLOW_CMDI"
+    ],
+    "claims": [
+      {
+        "rule_id": "INTERPROCEDURAL_FLOW_CMDI",
+        "permitted_files": [
+          "app/utils/network.py"
+        ],
+        "permitted_symbols": [
+          "ping_host"
+        ],
+        "permitted_spans": [
+          [
+            3,
+            5
+          ]
+        ],
+        "required_structural_facts": {
+          "sink_kind": "INPUT_TO_COMMAND",
+          "flow_required": true
+        },
+        "forbidden_structural_facts": {},
+        "expected_severity": "HIGH"
+      }
+    ],
+    "how_established": "source_code_audit",
+    "fixture_source": "synthetic_cmdi_subprocess",
+    "human_authored_explanation": "Arbitrary command injection via shell=True and untrusted argument concatenation."
+  },
+  "tags": [
+    "cmdi",
+    "command-injection",
+    "python"
+  ]
+}

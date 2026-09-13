@@ -1,0 +1,34 @@
+{
+  "case_id": "BUG-EXCEPT-01B",
+  "benchmark_version": "1.0.0",
+  "case_family": "BUG-EXCEPT-01",
+  "category": "CORRECTNESS",
+  "difficulty": "EASY",
+  "split": "DEV",
+  "target_pipeline": "REPOSITORY_SCAN",
+  "evaluation_stage": "ANALYSIS_CANDIDATE",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "files": {
+      "app/services/payment.py": "def process_transaction(account_id: str, amount: float):\n    try:\n        ledger.charge(account_id, amount)\n    except PaymentGatewayTimeout as exc:\n        logger.error(f'Gateway timeout for {account_id}: {exc}')\n        raise\n"
+    },
+    "description": "Targeted exception handler logging error and re-raising"
+  },
+  "annotation": {
+    "expected_verdict": "CLEAN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "BROAD_EXCEPTION_SWALLOW"
+    ],
+    "claims": [],
+    "how_established": "source_code_audit",
+    "fixture_source": "synthetic_targeted_except_reraise",
+    "human_authored_explanation": "Targeted exception type logged and re-raised."
+  },
+  "tags": [
+    "correctness",
+    "clean"
+  ]
+}

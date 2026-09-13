@@ -1,0 +1,38 @@
+{
+  "case_id": "CONTRACT-SCHEMA-ADD-01D",
+  "benchmark_version": "1.0.0",
+  "case_family": "CONTRACT-SCHEMA-ADD-01",
+  "category": "CONTRACT",
+  "difficulty": "HARD",
+  "split": "DEV",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "CHANGE_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "app/schemas/user.py": "class UserData(dict):\n    pass\n"
+    },
+    "head_files": {
+      "app/schemas/user.py": "class UserData(dict):\n    def __init__(self):\n        self['extra'] = True\n"
+    },
+    "description": "Plain Python dict subclass modified dynamically rather than declared as Pydantic model"
+  },
+  "annotation": {
+    "expected_verdict": "UNKNOWN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "SCHEMA_FIELD_ADDED"
+    ],
+    "claims": [],
+    "how_established": "expert_review",
+    "fixture_source": "synthetic_dynamic_dict_subclass",
+    "human_authored_explanation": "Arbitrary dict subclasses without type annotations cannot be resolved as structured Pydantic schema deltas."
+  },
+  "tags": [
+    "contract",
+    "schema",
+    "unknown"
+  ]
+}

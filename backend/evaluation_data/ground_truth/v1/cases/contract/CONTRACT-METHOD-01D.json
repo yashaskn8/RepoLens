@@ -1,0 +1,37 @@
+{
+  "case_id": "CONTRACT-METHOD-01D",
+  "benchmark_version": "1.0.0",
+  "case_family": "CONTRACT-METHOD-01",
+  "category": "CONTRACT",
+  "difficulty": "MEDIUM",
+  "split": "DEV",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "CHANGE_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "app/api/items.py": "from fastapi import APIRouter\nrouter = APIRouter()\n@router.get('/api/items')\ndef list_items():\n    return []\n"
+    },
+    "head_files": {
+      "app/api/items.py": "from fastapi import APIRouter\nrouter = APIRouter()\n@router.get('/api/items')\ndef list_items():\n    return []\n"
+    },
+    "description": "Identical base and head files"
+  },
+  "annotation": {
+    "expected_verdict": "CLEAN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "HTTP_METHOD_MISMATCH"
+    ],
+    "claims": [],
+    "how_established": "diff_engine_ground_truth",
+    "fixture_source": "phase6_method_identity",
+    "human_authored_explanation": "Zero changes."
+  },
+  "tags": [
+    "contract",
+    "clean"
+  ]
+}

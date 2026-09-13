@@ -1,0 +1,43 @@
+{
+  "case_id": "IMPACT-MULTI-02C",
+  "benchmark_version": "1.0.0",
+  "case_family": "IMPACT-MULTI-02",
+  "category": "CHANGE_IMPACT",
+  "difficulty": "MEDIUM",
+  "split": "FROZEN_PUBLIC_EVAL",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "IMPACT_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "core/auth/token_util.py": "def decode_token_claims(t: str) -> dict:\n    return {'user': t}\n",
+      "services/api/gateway.py": "from core.auth.token_util import decode_token_claims\ndef route_gateway(t: str):\n    return decode_token_claims(t)\n",
+      "services/jobs/worker.py": "from core.auth.token_util import decode_token_claims\ndef process_job(t: str):\n    return decode_token_claims(t)\n"
+    },
+    "head_files": {
+      "core/auth/token_util.py": "def decode_token_claims(t: str) -> dict:\n    return {'user': t}\n",
+      "services/api/gateway.py": "from core.auth.token_util import decode_token_claims\ndef route_gateway(t: str):\n    # caller comment only\n    return decode_token_claims(t)\n",
+      "services/jobs/worker.py": "from core.auth.token_util import decode_token_claims\ndef process_job(t: str):\n    return decode_token_claims(t)\n"
+    },
+    "description": "Callee untouched; comment added in single caller only"
+  },
+  "annotation": {
+    "expected_verdict": "CLEAN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "BLAST_RADIUS_MULTI_CONSUMER"
+    ],
+    "claims": [],
+    "expected_impact_count": 0,
+    "how_established": "impact_engine_ground_truth",
+    "fixture_source": "novel_frozen_multi_caller_comment",
+    "human_authored_explanation": "Callee decode_token_claims is untouched."
+  },
+  "tags": [
+    "impact",
+    "clean",
+    "frozen-eval"
+  ]
+}

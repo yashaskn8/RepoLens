@@ -1,0 +1,53 @@
+{
+  "case_id": "CONTRACT-ROUTE-PATH-01A",
+  "benchmark_version": "1.0.0",
+  "case_family": "CONTRACT-ROUTE-PATH-01",
+  "category": "CONTRACT",
+  "difficulty": "EASY",
+  "split": "DEV",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "CHANGE_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "app/api/users.py": "from fastapi import APIRouter\nrouter = APIRouter()\n@router.get('/api/v1/users')\ndef get_users():\n    return []\n"
+    },
+    "head_files": {
+      "app/api/users.py": "from fastapi import APIRouter\nrouter = APIRouter()\n@router.get('/api/v2/users')\ndef get_users():\n    return []\n"
+    },
+    "description": "Backend FastAPI route path changed from /api/v1/users to /api/v2/users"
+  },
+  "annotation": {
+    "expected_verdict": "ISSUE",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "ROUTE_PATH_MISMATCH"
+    ],
+    "claims": [
+      {
+        "rule_id": "ROUTE_PATH_MISMATCH",
+        "permitted_files": [
+          "app/api/users.py"
+        ],
+        "permitted_symbols": [
+          "get_users"
+        ],
+        "required_structural_facts": {
+          "change_type": "PATH_CHANGED"
+        },
+        "forbidden_structural_facts": {},
+        "expected_severity": "HIGH"
+      }
+    ],
+    "how_established": "diff_engine_ground_truth",
+    "fixture_source": "phase6_route_path_change",
+    "human_authored_explanation": "Breaking route path change emitted by ChangeDiffEngine as PATH_CHANGED delta."
+  },
+  "tags": [
+    "contract",
+    "route",
+    "diff"
+  ]
+}

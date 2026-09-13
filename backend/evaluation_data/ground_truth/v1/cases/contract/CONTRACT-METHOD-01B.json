@@ -1,0 +1,38 @@
+{
+  "case_id": "CONTRACT-METHOD-01B",
+  "benchmark_version": "1.0.0",
+  "case_family": "CONTRACT-METHOD-01",
+  "category": "CONTRACT",
+  "difficulty": "EASY",
+  "split": "DEV",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "CHANGE_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "app/api/items.py": "from fastapi import APIRouter\nrouter = APIRouter()\n@router.post('/api/items')\ndef list_items():\n    return []\n"
+    },
+    "head_files": {
+      "app/api/items.py": "from fastapi import APIRouter\nrouter = APIRouter()\n@router.post('/api/items')\ndef list_items():\n    return [{'ok': True}]\n"
+    },
+    "description": "HTTP method remains POST; only internal logic modified"
+  },
+  "annotation": {
+    "expected_verdict": "CLEAN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "HTTP_METHOD_MISMATCH"
+    ],
+    "claims": [],
+    "how_established": "diff_engine_ground_truth",
+    "fixture_source": "phase6_method_unchanged",
+    "human_authored_explanation": "No HTTP method delta."
+  },
+  "tags": [
+    "contract",
+    "http-method",
+    "clean"
+  ]
+}

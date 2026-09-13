@@ -1,0 +1,39 @@
+{
+  "case_id": "IMPACT-DELETED-CALLER-01D",
+  "benchmark_version": "1.0.0",
+  "case_family": "IMPACT-DELETED-CALLER-01",
+  "category": "CHANGE_IMPACT",
+  "difficulty": "HARD",
+  "split": "DEV",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "IMPACT_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "app/auth.py": "def verify_user(token: str) -> bool:\n    return bool(token)\n",
+      "app/api.py": "def login_endpoint(token: str):\n    # Conditional string import\n    mod = __import__('app.auth')\n    return getattr(mod, 'verify_user')(token)\n"
+    },
+    "head_files": {
+      "app/auth.py": "def helper():\n    pass\n",
+      "app/api.py": "def login_endpoint(token: str):\n    mod = __import__('app.auth')\n    return getattr(mod, 'verify_user')(token)\n"
+    },
+    "description": "Caller imports deleted function via __import__ string call"
+  },
+  "annotation": {
+    "expected_verdict": "UNKNOWN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "DELETED_SYMBOL_WITH_CALLERS"
+    ],
+    "claims": [],
+    "how_established": "expert_review",
+    "fixture_source": "synthetic_dunder_import_caller",
+    "human_authored_explanation": "Static AST builder cannot track dynamic __import__ call."
+  },
+  "tags": [
+    "impact",
+    "unknown"
+  ]
+}

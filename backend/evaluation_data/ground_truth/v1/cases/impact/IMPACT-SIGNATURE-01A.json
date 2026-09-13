@@ -1,0 +1,56 @@
+{
+  "case_id": "IMPACT-SIGNATURE-01A",
+  "benchmark_version": "1.0.0",
+  "case_family": "IMPACT-SIGNATURE-01",
+  "category": "CHANGE_IMPACT",
+  "difficulty": "EASY",
+  "split": "DEV",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "IMPACT_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "app/billing.py": "def calculate_fee(amount: float) -> float:\n    return amount * 0.05\n",
+      "app/checkout.py": "from app.billing import calculate_fee\ndef checkout(amt: float):\n    return calculate_fee(amt)\n"
+    },
+    "head_files": {
+      "app/billing.py": "def calculate_fee(amount: float, tier: str, country: str) -> float:\n    return amount * 0.05\n",
+      "app/checkout.py": "from app.billing import calculate_fee\ndef checkout(amt: float):\n    return calculate_fee(amt)\n"
+    },
+    "description": "calculate_fee adds required arguments tier and country breaking existing caller"
+  },
+  "annotation": {
+    "expected_verdict": "ISSUE",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "SIGNATURE_BREAK_CALLERS"
+    ],
+    "claims": [
+      {
+        "rule_id": "SIGNATURE_BREAK_CALLERS",
+        "permitted_files": [
+          "app/checkout.py"
+        ],
+        "permitted_symbols": [
+          "checkout"
+        ],
+        "required_structural_facts": {
+          "impact_type": "SIGNATURE_MISMATCH"
+        },
+        "forbidden_structural_facts": {},
+        "expected_severity": "HIGH"
+      }
+    ],
+    "expected_impact_count": 1,
+    "how_established": "impact_engine_ground_truth",
+    "fixture_source": "phase6_signature_break",
+    "human_authored_explanation": "ChangeImpactEngine detects SIGNATURE_MISMATCH for checkout."
+  },
+  "tags": [
+    "impact",
+    "signature",
+    "diff"
+  ]
+}

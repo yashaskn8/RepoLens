@@ -1,0 +1,40 @@
+{
+  "case_id": "IMPACT-SIGNATURE-01C",
+  "benchmark_version": "1.0.0",
+  "case_family": "IMPACT-SIGNATURE-01",
+  "category": "CHANGE_IMPACT",
+  "difficulty": "MEDIUM",
+  "split": "DEV",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "IMPACT_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "app/billing.py": "def calculate_fee(amount: float) -> float:\n    return amount * 0.05\n",
+      "app/checkout.py": "from app.billing import calculate_fee\ndef checkout(amt: float):\n    return calculate_fee(amt)\n"
+    },
+    "head_files": {
+      "app/billing.py": "def calculate_fee(amount: float) -> float:\n    # Refactored body with unchanged signature\n    rate = 0.05\n    return amount * rate\n",
+      "app/checkout.py": "from app.billing import calculate_fee\ndef checkout(amt: float):\n    return calculate_fee(amt)\n"
+    },
+    "description": "Internal implementation change with zero signature delta"
+  },
+  "annotation": {
+    "expected_verdict": "CLEAN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "SIGNATURE_BREAK_CALLERS"
+    ],
+    "claims": [],
+    "expected_impact_count": 1,
+    "how_established": "impact_engine_ground_truth",
+    "fixture_source": "phase6_signature_unchanged",
+    "human_authored_explanation": "Signature preserved exactly."
+  },
+  "tags": [
+    "impact",
+    "clean"
+  ]
+}

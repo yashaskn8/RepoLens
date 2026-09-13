@@ -1,0 +1,38 @@
+{
+  "case_id": "IMPACT-MULTI-01D",
+  "benchmark_version": "1.0.0",
+  "case_family": "IMPACT-MULTI-01",
+  "category": "CHANGE_IMPACT",
+  "difficulty": "MEDIUM",
+  "split": "DEV",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "IMPACT_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "app/common/format.py": "def format_name(first: str, last: str) -> str:\n    return f'{first} {last}'\n"
+    },
+    "head_files": {
+      "app/common/format.py": "# comments only\ndef format_name(first: str, last: str) -> str:\n    return f'{first} {last}'\n"
+    },
+    "description": "Comment added to format_name with zero implementation changes"
+  },
+  "annotation": {
+    "expected_verdict": "CLEAN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "BLAST_RADIUS_MULTI_CONSUMER"
+    ],
+    "claims": [],
+    "expected_impact_count": 0,
+    "how_established": "impact_engine_ground_truth",
+    "fixture_source": "phase6_format_comment",
+    "human_authored_explanation": "Symbol implementation unchanged."
+  },
+  "tags": [
+    "impact",
+    "clean"
+  ]
+}

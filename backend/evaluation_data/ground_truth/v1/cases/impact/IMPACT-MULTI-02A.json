@@ -1,0 +1,58 @@
+{
+  "case_id": "IMPACT-MULTI-02A",
+  "benchmark_version": "1.0.0",
+  "case_family": "IMPACT-MULTI-02",
+  "category": "CHANGE_IMPACT",
+  "difficulty": "MEDIUM",
+  "split": "FROZEN_PUBLIC_EVAL",
+  "target_pipeline": "CHANGE_ANALYSIS",
+  "evaluation_stage": "IMPACT_FACT",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "base_files": {
+      "core/auth/token_util.py": "def decode_token_claims(t: str) -> dict:\n    return {'user': t}\n",
+      "services/api/gateway.py": "from core.auth.token_util import decode_token_claims\ndef route_gateway(t: str):\n    return decode_token_claims(t)\n",
+      "services/jobs/worker.py": "from core.auth.token_util import decode_token_claims\ndef process_job(t: str):\n    return decode_token_claims(t)\n"
+    },
+    "head_files": {
+      "core/auth/token_util.py": "def decode_token_claims(t: str) -> dict:\n    # Modified parsing algorithm\n    return {'user': t, 'v': 2}\n",
+      "services/api/gateway.py": "from core.auth.token_util import decode_token_claims\ndef route_gateway(t: str):\n    return decode_token_claims(t)\n",
+      "services/jobs/worker.py": "from core.auth.token_util import decode_token_claims\ndef process_job(t: str):\n    return decode_token_claims(t)\n"
+    },
+    "description": "Shared token_util modified affecting gateway and worker consumers"
+  },
+  "annotation": {
+    "expected_verdict": "ISSUE",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "BLAST_RADIUS_MULTI_CONSUMER"
+    ],
+    "claims": [
+      {
+        "rule_id": "BLAST_RADIUS_MULTI_CONSUMER",
+        "permitted_files": [
+          "services/api/gateway.py",
+          "services/jobs/worker.py"
+        ],
+        "permitted_symbols": [
+          "route_gateway",
+          "process_job"
+        ],
+        "required_structural_facts": {},
+        "forbidden_structural_facts": {},
+        "expected_severity": "MEDIUM"
+      }
+    ],
+    "expected_impact_count": 2,
+    "how_established": "impact_engine_ground_truth",
+    "fixture_source": "novel_frozen_multi_caller",
+    "human_authored_explanation": "Reachability affects multiple consumer modules."
+  },
+  "tags": [
+    "impact",
+    "multi-caller",
+    "frozen-eval"
+  ]
+}

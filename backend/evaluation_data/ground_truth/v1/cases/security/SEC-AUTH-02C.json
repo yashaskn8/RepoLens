@@ -1,0 +1,34 @@
+{
+  "case_id": "SEC-AUTH-02C",
+  "benchmark_version": "1.0.0",
+  "case_family": "SEC-AUTH-02",
+  "category": "SECURITY",
+  "difficulty": "MEDIUM",
+  "split": "DEV",
+  "target_pipeline": "REPOSITORY_SCAN",
+  "evaluation_stage": "STATIC_FINDING",
+  "benchmark_languages": [
+    "python"
+  ],
+  "fixture": {
+    "files": {
+      "app/routes/admin.py": "from fastapi import APIRouter, Request\nrouter = APIRouter()\n\n@router.get('/health/role')\ndef get_role_probe(request: Request):\n    # Echo header purely for frontend diagnostic badge\n    raw_val = request.headers.get('X-User-Role')\n    return {'echo': raw_val}\n"
+    },
+    "description": "FastAPI endpoint echoing header with zero authorization logic"
+  },
+  "annotation": {
+    "expected_verdict": "CLEAN",
+    "evaluation_scope": "RULE_SCOPED",
+    "target_rule_ids": [
+      "CLIENT_CONTROLLED_AUTH_HEADER"
+    ],
+    "claims": [],
+    "how_established": "source_code_audit",
+    "fixture_source": "synthetic_fastapi_echo_header",
+    "human_authored_explanation": "Echoing header does not gate access to resources or operations."
+  },
+  "tags": [
+    "auth",
+    "clean"
+  ]
+}
