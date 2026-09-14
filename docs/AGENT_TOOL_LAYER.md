@@ -54,6 +54,12 @@ Evidence records identify their type, production component, repository-relative 
 
 `verify_finding` uses four closed, discriminated claim schemas: exact `SECURITY_FINDING`, `DATAFLOW`, `CALL_RELATIONSHIP`, and `STRUCTURAL_CHANGE`. Every claim requires evidence. A claim is `SUPPORTED` only when its coordinates match a production fact and every supplied evidence reference resolves to that exact fact in the authorized snapshot context. Foreign, stale, fake, or unrelated references cannot be silently ignored. Security verification applies file, rule, and symbol scope before result bounding; incomplete or resource-bounded absence never becomes `UNSUPPORTED`. Otherwise the verdict is `UNSUPPORTED`, `INSUFFICIENT_EVIDENCE`, or `INVALID_CLAIM`. It never reads benchmark annotations or ground truth.
 
+Exact evidence identity for `SECURITY_FINDING` is constructed using canonical JSON material capturing snapshot identity, artifact digest, tool, source tool, rule ID, detector ID, detector kind, normalized file path, start line, and end line before SHA-256 hashing. This prevents evidence ID collisions between distinct detectors sharing the same span when `rule_id` is omitted.
+
+For `CALL_RELATIONSHIP`, verification supports both symbol-level endpoints (`source_symbol_id`/`target_symbol_id`) and graph entity endpoints (`source_entity_id`/`target_entity_id`), allowing top-level `FILE -> SYMBOL` calls emitted by the production graph builder and returned by `find_callers` to round-trip seamlessly through verification. Entity IDs are path-confined and validated against the snapshot manifest.
+
+Change and impact facts involving long symbol names, routes, or schema definitions (>1024 characters) derive deterministic bounded `change-subject:<sha256>` or `impact-subject:<sha256>` evidence identities with truncated previews in metadata, ensuring public serialization and `model_dump_json()` never fail schema bounds while preserving exact claim verification.
+
 The frozen `RepositoryGraph` uses a directed graph and retains at most one `CALLS` edge for a given source-target pair. Repeated call-site multiplicity is therefore not guaranteed in Phase A. A retained exact call-site edge can support a positive claim, but a non-matching line on an existing caller/callee pair returns `INSUFFICIENT_EVIDENCE` with `CALL_SITE_MULTIPLICITY_NOT_PRESERVED`; it is never treated as proven absence.
 
 ## Security and limits

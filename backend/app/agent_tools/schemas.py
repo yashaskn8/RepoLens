@@ -87,8 +87,8 @@ class EvidenceRecord(ToolModel):
     start_line: int | None = Field(default=None, ge=1)
     end_line: int | None = Field(default=None, ge=1)
     relationship: str | None = Field(default=None, max_length=128)
-    source_id: str | None = Field(default=None, max_length=1024)
-    target_id: str | None = Field(default=None, max_length=1024)
+    source_id: str | None = Field(default=None, max_length=2048)
+    target_id: str | None = Field(default=None, max_length=2048)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -216,8 +216,10 @@ class DataflowClaim(ToolModel):
 class CallRelationshipClaim(ToolModel):
     claim_type: Literal[ClaimType.CALL_RELATIONSHIP]
     snapshot_id: str = Field(min_length=1, max_length=128)
-    source_symbol_id: str = Field(min_length=1, max_length=2048)
-    target_symbol_id: str = Field(min_length=1, max_length=2048)
+    source_symbol_id: str | None = Field(default=None, min_length=1, max_length=2048)
+    target_symbol_id: str | None = Field(default=None, min_length=1, max_length=2048)
+    source_entity_id: str | None = Field(default=None, min_length=1, max_length=2048)
+    target_entity_id: str | None = Field(default=None, min_length=1, max_length=2048)
     relationship_type: Literal["CALLS"] = "CALLS"
     call_site_file: str | None = Field(default=None, min_length=1, max_length=1024)
     call_site_line: int | None = Field(default=None, ge=1)
@@ -281,7 +283,7 @@ class SymbolSearchOutput(ToolModel):
 
 
 class GraphEntityRecord(ToolModel):
-    entity_id: str
+    entity_id: str = Field(min_length=1, max_length=2048)
     kind: str
     label: str
     file_path: str | None = None

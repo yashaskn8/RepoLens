@@ -254,6 +254,35 @@ def _entity(snapshot: RepositorySnapshot, node: GraphNode) -> GraphEntityRecord:
     )
 
 
+
+
+def _resolve_graph_entity(snapshot: RepositorySnapshot, entity_id: str) -> str | None:
+    """Resolve a public graph entity ID (symbol ID or file entity ID) to internal graph node ID.
+
+    Returns the exact internal graph node ID if valid and present in the snapshot graph,
+    or None if unresolved/invalid/foreign.
+    """
+    if not entity_id or snapshot.graph is None:
+        return None
+    if entity_id in snapshot.symbol_internal_ids:
+        internal_id = snapshot.symbol_internal_ids[entity_id]
+        if snapshot.graph.get_node(internal_id) is not None:
+            return internal_id
+        return None
+    if entity_id.startswith("file:"):
+        raw_path = entity_id[len("file:"):]
+        try:
+            normalized = snapshot.normalize_path(raw_path, require_manifest_entry=True)
+        except (PathTraversalError, FileNotFoundError, ValueError):
+            return None
+        candidate_id = f"file:{normalized}"
+        node = snapshot.graph.get_node(candidate_id)
+        if node is not None and node.kind == NodeKind.FILE:
+            return candidate_id
+        return None
+    return None
+
+
 def _relationship(snapshot: RepositorySnapshot, edge: GraphEdge) -> GraphRelationship | None:
     if snapshot.graph is None:
         return None
@@ -306,7 +335,7 @@ def _location_evidence(
 
 def _edge_evidence(snapshot: RepositorySnapshot, relationship: GraphRelationship) -> EvidenceRecord:
     def bounded_identity(value: str) -> str:
-        return value if len(value) <= 1024 else f"sha256:{hashlib.sha256(value.encode('utf-8')).hexdigest()}"
+        return value if len(value) <= 2048 else f"sha256:{hashlib.sha256(value.encode('utf-8')).hexdigest()}"
 
     material = json.dumps(
         {
@@ -784,16 +813,21 @@ def trace_dataflow(arguments: TraceDataflowInput, context: AgentToolContext) -> 
 
 def _finding_id(snapshot: RepositorySnapshot, finding) -> str:
     evidence = finding.evidence
-    material = "\0".join([
-        snapshot.snapshot_id,
-        snapshot.artifact_digest,
-        finding.tool,
-        finding.rule_id or "",
-        evidence.file_path,
-        str(evidence.start_line or ""),
-        str(evidence.end_line or ""),
-    ])
-    return f"finding:{hashlib.sha256(material.encode()).hexdigest()[:24]}"
+    norm_path = evidence.file_path.replace("\\", "/")
+    data = {
+        "artifact_digest": snapshot.artifact_digest,
+        "detector_id": finding.detector_id,
+        "detector_kind": finding.detector_kind,
+        "end_line": evidence.end_line,
+        "file_path": norm_path,
+        "rule_id": finding.rule_id,
+        "snapshot_id": snapshot.snapshot_id,
+        "source_tool": finding.source_tool or finding.tool,
+        "start_line": evidence.start_line,
+        "tool": finding.tool,
+    }
+    material = json.dumps(data, sort_keys=True, separators=(",", ":"), default=str)
+    return f"finding:{hashlib.sha256(material.encode('utf-8')).hexdigest()[:24]}"
 
 
 def _finding_record(snapshot: RepositorySnapshot, finding) -> SecurityFindingRecord:
@@ -1062,22 +1096,31 @@ def _change_evidence(
 ) -> EvidenceRecord:
     data = _json(item)
     file_path = data.get("file_path") or data.get("manifest_file") or ""
-    identity = repr(sorted(data.items()))
+    identity = json.dumps(data, sort_keys=True, separators=(",", ":"), default=str)
     namespace = f"{base_snapshot_id or ''}:{snapshot.snapshot_id}:{snapshot.artifact_digest}"
     evidence_id = f"change:{hashlib.sha256((namespace + category + identity).encode()).hexdigest()[:24]}"
     location = data.get("head_location") or data.get("base_location") or {}
+    raw_symbol = data.get("symbol_name") or data.get("model_name") or data.get("route_name") or data.get("setting_name") or data.get("package_name")
+    bounded_symbol: str | None = None
+    if raw_symbol is not None:
+        raw_symbol = str(raw_symbol)
+        if len(raw_symbol) <= 1024:
+            bounded_symbol = raw_symbol
+        else:
+            bounded_symbol = f"change-subject:{hashlib.sha256(raw_symbol.encode('utf-8')).hexdigest()[:48]}"
     return EvidenceRecord(
         evidence_id=evidence_id,
         evidence_type=EvidenceType.CHANGE_FACT,
         source_component="change_diff_engine",
         file_path=file_path,
-        symbol=data.get("symbol_name") or data.get("model_name") or data.get("route_name"),
+        symbol=bounded_symbol,
         start_line=location.get("start_line"),
         end_line=location.get("end_line"),
         relationship=category,
         metadata={
             "change_type": data.get("change_type"),
             **({"base_snapshot": base_snapshot_id} if base_snapshot_id else {}),
+            **({"symbol_name_truncated": raw_symbol[:128] + "..."} if raw_symbol is not None and len(raw_symbol) > 1024 else {}),
         },
     )
 
@@ -1189,14 +1232,21 @@ def _impact_evidence(
     *,
     base_snapshot_id: str | None = None,
 ) -> EvidenceRecord:
-    material = repr(record.model_dump(mode="json"))
+    material = json.dumps(record.model_dump(mode="json"), sort_keys=True, separators=(",", ":"), default=str)
     namespace = f"{base_snapshot_id or ''}:{snapshot.snapshot_id}:{snapshot.artifact_digest}"
+    raw_symbol = record.affected_symbol or record.source_symbol
+    bounded_symbol: str | None = None
+    if raw_symbol is not None:
+        if len(raw_symbol) <= 1024:
+            bounded_symbol = raw_symbol
+        else:
+            bounded_symbol = f"impact-subject:{hashlib.sha256(raw_symbol.encode('utf-8')).hexdigest()[:48]}"
     return EvidenceRecord(
         evidence_id=f"impact:{hashlib.sha256((namespace + material).encode()).hexdigest()[:24]}",
         evidence_type=EvidenceType.IMPACT_RELATIONSHIP,
         source_component="change_impact_engine",
         file_path=record.affected_file or record.source_file,
-        symbol=record.affected_symbol or record.source_symbol,
+        symbol=bounded_symbol,
         relationship=record.impact_type,
         metadata={
             "direction": record.direction,
@@ -1474,22 +1524,46 @@ def verify_finding(arguments: VerifyFindingInput, context: AgentToolContext) -> 
 
     if claim.claim_type == ClaimType.CALL_RELATIONSHIP:
         snapshot = _snapshot(context, claim.snapshot_id)
+        # Resolve effective source/target identifiers: symbol IDs take precedence,
+        # then entity IDs (supporting FILE-level graph nodes).
+        effective_source = claim.source_symbol_id or claim.source_entity_id
+        effective_target = claim.target_symbol_id or claim.target_entity_id
+        if not effective_source or not effective_target:
+            return _finish_verification(claim, snapshot, verdict=VerificationVerdict.INVALID_CLAIM, reason="SOURCE_OR_TARGET_REQUIRED", components=("repository_graph",))
+        source_internal_id: str | None = None
+        target_internal_id: str | None = None
+        # Try symbol resolution first
         try:
-            _find_symbol(snapshot, claim.source_symbol_id)
-            _find_symbol(snapshot, claim.target_symbol_id)
+            if claim.source_symbol_id:
+                _find_symbol(snapshot, claim.source_symbol_id)
+                source_internal_id = snapshot.internal_symbol_id(claim.source_symbol_id)
+        except (ToolFailure, KeyError):
+            source_internal_id = None
+        try:
+            if claim.target_symbol_id:
+                _find_symbol(snapshot, claim.target_symbol_id)
+                target_internal_id = snapshot.internal_symbol_id(claim.target_symbol_id)
+        except (ToolFailure, KeyError):
+            target_internal_id = None
+        # Fall back to entity ID resolution for graph nodes (e.g. file:path)
+        if source_internal_id is None and effective_source:
+            source_internal_id = _resolve_graph_entity(snapshot, effective_source)
+        if target_internal_id is None and effective_target:
+            target_internal_id = _resolve_graph_entity(snapshot, effective_target)
+        if source_internal_id is None or target_internal_id is None:
+            return _finish_verification(claim, snapshot, verdict=VerificationVerdict.INVALID_CLAIM, reason="SOURCE_OR_TARGET_UNRESOLVED", components=("repository_graph",))
+        try:
             call_site_file = (
                 _normalize_path(snapshot, claim.call_site_file)
                 if claim.call_site_file is not None
                 else None
             )
         except ToolFailure:
-            return _finish_verification(claim, snapshot, verdict=VerificationVerdict.INVALID_CLAIM, reason="SOURCE_OR_TARGET_UNRESOLVED", components=("repository_graph",))
+            return _finish_verification(claim, snapshot, verdict=VerificationVerdict.INVALID_CLAIM, reason="CALL_SITE_UNRESOLVED", components=("repository_graph",))
         if snapshot.graph is None:
             return _finish_verification(claim, snapshot, verdict=VerificationVerdict.INSUFFICIENT_EVIDENCE, reason="GRAPH_UNAVAILABLE", components=("repository_graph",))
         if claim.relationship_type != EdgeKind.CALLS.value:
             return _finish_verification(claim, snapshot, verdict=VerificationVerdict.INVALID_CLAIM, reason="CALL_RELATIONSHIP_MUST_BE_CALLS", components=("repository_graph",))
-        source_internal_id = snapshot.internal_symbol_id(claim.source_symbol_id)
-        target_internal_id = snapshot.internal_symbol_id(claim.target_symbol_id)
         pair_edges = [
             edge for edge in snapshot.graph.get_outgoing_edges(source_internal_id)
             if edge.target == target_internal_id and edge.kind == EdgeKind.CALLS
