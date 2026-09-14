@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import heapq
+import json
+import math
 from dataclasses import dataclass, field
+from datetime import date, datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable
 from uuid import NAMESPACE_URL, uuid5
@@ -50,7 +55,6 @@ from app.agent_tools.schemas import (
     VerifyFindingInput,
     VerifyFindingOutput,
 )
-from app.analysis.diff_engine import get_diff_engine
 from app.analysis.impact_engine import get_impact_engine
 from app.core.path_confinement import PathTraversalError
 from app.graph.schemas import EdgeKind, GraphEdge, GraphNode, NodeKind
@@ -59,6 +63,14 @@ from app.schemas.change_analysis import StructuralDiffResult, SymbolChangeType
 from app.schemas.static_finding import ToolStatus
 from app.security.redaction import redact_secrets
 from app.semantics import FlowLimits, SemanticFlow, analyze_security_flows
+
+
+_SENSITIVE_METADATA_KEYS = ("secret", "token", "password", "credential", "api_key", "private_key")
+
+
+def _is_sensitive_metadata_key(value: object) -> bool:
+    normalized = str(value).lower().replace("-", "_")
+    return any(marker in normalized for marker in _SENSITIVE_METADATA_KEYS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,13 +93,44 @@ class ToolFailure(Exception):
 
 def _snapshot(context: AgentToolContext, snapshot_id: str | None) -> RepositorySnapshot:
     try:
-        return context.get_snapshot(snapshot_id)
+        snapshot = context.get_snapshot(snapshot_id)
     except KeyError as exc:
         raise ToolFailure(
             ToolResultStatus.NOT_FOUND,
             "SNAPSHOT_NOT_FOUND",
             "The requested repository snapshot is not registered.",
         ) from exc
+    if not snapshot.integrity_valid():
+        raise ToolFailure(
+            ToolResultStatus.INTERNAL_ERROR,
+            "SNAPSHOT_ARTIFACT_INTEGRITY_FAILED",
+            "The registered repository snapshot artifact failed its integrity check.",
+        )
+    if len(snapshot.manifest.files) > context.limits.max_files:
+        raise ToolFailure(
+            ToolResultStatus.RESOURCE_LIMIT,
+            "FILE_SCOPE_LIMIT_REACHED",
+            "The registered snapshot exceeds the configured file-count limit for this tool context.",
+            observed_files=len(snapshot.manifest.files),
+            max_files=context.limits.max_files,
+        )
+    oversized = next(
+        (
+            entry for entry in snapshot.manifest.files
+            if entry.size_bytes > context.limits.max_file_size_bytes and not entry.skipped_reason
+        ),
+        None,
+    )
+    if oversized is not None:
+        raise ToolFailure(
+            ToolResultStatus.RESOURCE_LIMIT,
+            "FILE_SIZE_LIMIT_REACHED",
+            "The registered snapshot contains a file larger than the configured file-size limit.",
+            file_path=oversized.path,
+            size_bytes=oversized.size_bytes,
+            max_file_size_bytes=context.limits.max_file_size_bytes,
+        )
+    return snapshot
 
 
 def _normalize_path(snapshot: RepositorySnapshot, path: str, *, require_entry: bool = True) -> str:
@@ -114,7 +157,12 @@ def _json(value: Any, depth: int = 0) -> Any:
         return _json(value.model_dump(mode="json"), depth + 1)
     if isinstance(value, dict):
         items = sorted(value.items(), key=lambda pair: str(pair[0]))
-        result = {str(key): _json(item, depth + 1) for key, item in items[:100]}
+        result = {
+            redact_secrets(str(key))[:256]: (
+                "[REDACTED]" if _is_sensitive_metadata_key(key) else _json(item, depth + 1)
+            )
+            for key, item in items[:100]
+        }
         if len(items) > 100:
             result["_truncated"] = True
         return result
@@ -127,8 +175,24 @@ def _json(value: Any, depth: int = 0) -> Any:
         return [_json(item, depth + 1) for item in sorted(value, key=str)[:100]]
     if isinstance(value, str):
         cleaned = redact_secrets(value)
+        if len(cleaned) >= 3 and cleaned[1] == ":" and cleaned[2] in {"/", "\\"}:
+            return "[redacted absolute path]"
+        if cleaned.startswith("\\\\"):
+            return "[redacted absolute path]"
         return cleaned if len(cleaned) <= 2_048 else f"{cleaned[:2_048]}...[truncated]"
-    return value
+    if isinstance(value, Enum):
+        return _json(value.value, depth + 1)
+    if isinstance(value, Path):
+        return "[redacted absolute path]" if value.is_absolute() else _json(value.as_posix(), depth + 1)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, bytes):
+        return f"[bytes redacted: {len(value)} bytes]"
+    if isinstance(value, float) and not math.isfinite(value):
+        return f"[non-finite float: {value!r}]"
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return f"[unsupported metadata type: {type(value).__name__}]"
 
 
 def _symbol_id(file_path: str, symbol: ParsedSymbol) -> str:
@@ -154,9 +218,12 @@ def _symbol_record(file_path: str, symbol: ParsedSymbol) -> SymbolRecord:
     )
 
 
-def _all_symbols(snapshot: RepositorySnapshot) -> list[SymbolRecord]:
-    records = [_symbol_record(path, symbol) for path, symbol in snapshot.symbol_records()]
-    return sorted(records, key=lambda item: (item.file_path, item.start_line, item.kind.value, item.name))
+def _iter_symbols(snapshot: RepositorySnapshot):
+    """Yield manifest symbols in stable order without materializing the repository index."""
+    for entry in sorted(snapshot.manifest.files, key=lambda item: item.path.replace("\\", "/")):
+        path = entry.path.replace("\\", "/")
+        for symbol in sorted(entry.symbols, key=lambda item: (item.start_line, item.kind.value, item.name)):
+            yield _symbol_record(path, symbol)
 
 
 def _find_symbol(snapshot: RepositorySnapshot, symbol_id: str) -> SymbolRecord:
@@ -171,10 +238,11 @@ def _find_symbol(snapshot: RepositorySnapshot, symbol_id: str) -> SymbolRecord:
 
 
 def _entity(node: GraphNode) -> GraphEntityRecord:
+    label = _json(node.label)
     return GraphEntityRecord(
         entity_id=node.id,
         kind=node.kind.value,
-        label=node.label,
+        label=label if isinstance(label, str) else str(label),
         file_path=node.file_path,
         start_line=node.start_line,
         end_line=node.end_line,
@@ -211,9 +279,15 @@ def _location_evidence(
     symbol: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> EvidenceRecord:
-    material = "\0".join(
-        [snapshot.snapshot_id, component, file_path, str(start_line or ""), str(end_line or ""), symbol or ""]
-    )
+    material = "\0".join([
+        snapshot.snapshot_id,
+        snapshot.artifact_digest,
+        component,
+        file_path,
+        str(start_line or ""),
+        str(end_line or ""),
+        symbol or "",
+    ])
     return EvidenceRecord(
         evidence_id=f"evidence:{hashlib.sha256(material.encode()).hexdigest()[:24]}",
         evidence_type=evidence_type,
@@ -227,8 +301,24 @@ def _location_evidence(
 
 
 def _edge_evidence(snapshot: RepositorySnapshot, relationship: GraphRelationship) -> EvidenceRecord:
+    def bounded_identity(value: str) -> str:
+        return value if len(value) <= 1024 else f"sha256:{hashlib.sha256(value.encode('utf-8')).hexdigest()}"
+
+    material = json.dumps(
+        {
+            "snapshot": snapshot.snapshot_id,
+            "snapshot_artifact": snapshot.artifact_digest,
+            "relationship": relationship.relationship,
+            "source": relationship.source.entity_id,
+            "target": relationship.target.entity_id,
+            "file": relationship.evidence_file,
+            "line": relationship.evidence_line,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return EvidenceRecord(
-        evidence_id=f"edge:{relationship.relationship}:{relationship.source.entity_id}->{relationship.target.entity_id}",
+        evidence_id=f"edge:{hashlib.sha256(material.encode('utf-8')).hexdigest()}",
         evidence_type=(
             EvidenceType.CALL_RELATIONSHIP
             if relationship.relationship == EdgeKind.CALLS.value
@@ -239,8 +329,8 @@ def _edge_evidence(snapshot: RepositorySnapshot, relationship: GraphRelationship
         start_line=relationship.evidence_line,
         end_line=relationship.evidence_line,
         relationship=relationship.relationship,
-        source_id=relationship.source.entity_id,
-        target_id=relationship.target.entity_id,
+        source_id=bounded_identity(relationship.source.entity_id),
+        target_id=bounded_identity(relationship.target.entity_id),
         metadata={"repository_snapshot": snapshot.snapshot_id},
     )
 
@@ -255,10 +345,21 @@ def inspect_file(arguments: InspectFileInput, context: AgentToolContext) -> Tool
     entry = snapshot.evidence_store.get_file_entry(path)
     if entry is None:
         raise ToolFailure(ToolResultStatus.NOT_FOUND, "FILE_NOT_FOUND", "File is not present in the manifest.")
-    records = sorted(
-        (_symbol_record(path, symbol) for symbol in entry.symbols),
-        key=lambda item: (item.start_line, item.kind.value, item.name),
-    )
+    if entry.size_bytes > context.limits.max_file_size_bytes:
+        raise ToolFailure(
+            ToolResultStatus.RESOURCE_LIMIT,
+            "FILE_SIZE_LIMIT_REACHED",
+            "The requested file exceeds the configured agent-tool file-size limit.",
+            size_bytes=entry.size_bytes,
+            max_file_size_bytes=context.limits.max_file_size_bytes,
+        )
+    effective = context.limits.max_results
+    records: list[SymbolRecord] = []
+    for symbol in sorted(entry.symbols, key=lambda item: (item.start_line, item.kind.value, item.name)):
+        if len(records) < effective:
+            records.append(_symbol_record(path, symbol))
+    total_symbols = len(entry.symbols)
+    truncated = total_symbols > effective
     evidence = tuple(
         _location_evidence(
             snapshot,
@@ -274,8 +375,9 @@ def inspect_file(arguments: InspectFileInput, context: AgentToolContext) -> Tool
     warnings = ()
     if entry.skipped_reason:
         warnings = (_warning("FILE_NOT_PARSED", "The manifest records this file as unparsed.", reason=entry.skipped_reason),)
+    status = ToolResultStatus.RESOURCE_LIMIT if truncated else ToolResultStatus.SUCCESS
     return ToolExecution(
-        status=ToolResultStatus.SUCCESS,
+        status=status,
         output=FileInspectionOutput(
             file_path=path,
             language=entry.language,
@@ -285,26 +387,21 @@ def inspect_file(arguments: InspectFileInput, context: AgentToolContext) -> Tool
             skipped_reason=entry.skipped_reason,
             symbols=records,
             imports=[item for item in records if item.kind == SymbolKind.IMPORT],
+            total_symbols=total_symbols,
+            returned_symbols=len(records),
+            truncated=truncated,
             manifest_scope_complete=snapshot.manifest_complete,
         ),
         snapshot=snapshot,
         components=("repository_manifest", "tree_sitter_parser"),
         stage="file_inspection",
         evidence=evidence,
-        warnings=warnings,
+        warnings=warnings + ((_warning("RESULT_LIMIT_REACHED", "File symbols were truncated.", limit=effective),) if truncated else ()),
     )
 
 
 def search_symbol(arguments: SearchSymbolInput, context: AgentToolContext) -> ToolExecution:
     snapshot = _snapshot(context, arguments.snapshot_id)
-    if len(snapshot.manifest.files) > context.limits.max_files:
-        raise ToolFailure(
-            ToolResultStatus.RESOURCE_LIMIT,
-            "FILE_SCOPE_LIMIT_REACHED",
-            "Symbol search cannot exhaustively inspect this snapshot within the configured file limit.",
-            observed_files=len(snapshot.manifest.files),
-            max_files=context.limits.max_files,
-        )
     scope = _normalize_path(snapshot, arguments.file_path) if arguments.file_path else None
     query = arguments.query
 
@@ -315,17 +412,24 @@ def search_symbol(arguments: SearchSymbolInput, context: AgentToolContext) -> To
             return name.startswith(query)
         return query in name
 
-    found = [
-        record for record in _all_symbols(snapshot)
-        if (scope is None or record.file_path == scope)
-        and (arguments.kind is None or record.kind == arguments.kind)
-        and matches(record.name)
-    ]
     effective = min(arguments.max_results, context.limits.max_results)
-    returned = found[:effective]
-    truncated = len(found) > effective
+    found_count = 0
+    returned: list[SymbolRecord] = []
+    for entry in sorted(snapshot.manifest.files, key=lambda item: item.path.replace("\\", "/")):
+        entry_path = entry.path.replace("\\", "/")
+        if scope is not None and entry_path != scope:
+            continue
+        for raw_symbol in sorted(entry.symbols, key=lambda item: (item.start_line, item.kind.value, item.name)):
+            if arguments.kind is not None and raw_symbol.kind != arguments.kind:
+                continue
+            if not matches(raw_symbol.name):
+                continue
+            found_count += 1
+            if len(returned) < effective:
+                returned.append(_symbol_record(entry_path, raw_symbol))
+    truncated = found_count > effective
     status = ToolResultStatus.RESOURCE_LIMIT if truncated else (
-        ToolResultStatus.NOT_FOUND if not found else ToolResultStatus.SUCCESS
+        ToolResultStatus.NOT_FOUND if not found_count else ToolResultStatus.SUCCESS
     )
     evidence = tuple(
         _location_evidence(
@@ -344,7 +448,7 @@ def search_symbol(arguments: SearchSymbolInput, context: AgentToolContext) -> To
             query=query,
             match_mode=arguments.match_mode,
             matches=returned,
-            total_matches=len(found),
+            total_matches=found_count,
             returned_matches=len(returned),
             truncated=truncated,
         ),
@@ -362,23 +466,61 @@ def search_symbol(arguments: SearchSymbolInput, context: AgentToolContext) -> To
 def inspect_symbol(arguments: InspectSymbolInput, context: AgentToolContext) -> ToolExecution:
     snapshot = _snapshot(context, arguments.snapshot_id)
     symbol = _find_symbol(snapshot, arguments.symbol_id)
-    parents = [
-        candidate for candidate in _all_symbols(snapshot)
-        if candidate.file_path == symbol.file_path
-        and candidate.kind == SymbolKind.CLASS
-        and candidate.symbol_id != symbol.symbol_id
-        and candidate.start_line <= symbol.start_line
-        and candidate.end_line >= symbol.end_line
-    ]
-    parents.sort(key=lambda item: (item.end_line - item.start_line, item.start_line, item.symbol_id))
-    incoming: list[GraphRelationship] = []
-    outgoing: list[GraphRelationship] = []
+    effective = min(context.limits.max_results, 200)
+    parents: list[SymbolRecord] = []
+    total_parents = 0
+    for candidate in _iter_symbols(snapshot):
+        if (
+            candidate.file_path == symbol.file_path
+            and candidate.kind == SymbolKind.CLASS
+            and candidate.symbol_id != symbol.symbol_id
+            and candidate.start_line <= symbol.start_line
+            and candidate.end_line >= symbol.end_line
+        ):
+            total_parents += 1
+            if len(parents) < effective:
+                parents.append(candidate)
+    bounded_relationships: list[GraphRelationship] = []
+    incoming_ids: set[int] = set()
+    total_relationships = 0
+    remaining = max(0, effective - len(parents))
     if snapshot.graph is not None and snapshot.graph.get_node(symbol.symbol_id) is not None:
-        incoming = [item for edge in snapshot.graph.get_incoming_edges(symbol.symbol_id) if (item := _relationship(snapshot, edge))]
-        outgoing = [item for edge in snapshot.graph.get_outgoing_edges(symbol.symbol_id) if (item := _relationship(snapshot, edge))]
-    incoming.sort(key=lambda item: (item.relationship, item.source.entity_id, item.target.entity_id))
-    outgoing.sort(key=lambda item: (item.relationship, item.source.entity_id, item.target.entity_id))
-    relationships = [*incoming, *outgoing]
+        sequence = 0
+
+        def candidates():
+            nonlocal total_relationships, sequence
+            for is_incoming, edges in (
+                (True, snapshot.graph.get_incoming_edges(symbol.symbol_id)),
+                (False, snapshot.graph.get_outgoing_edges(symbol.symbol_id)),
+            ):
+                for edge in edges:
+                    relationship = _relationship(snapshot, edge)
+                    if relationship is None:
+                        continue
+                    total_relationships += 1
+                    sequence += 1
+                    key = (
+                        relationship.relationship,
+                        relationship.source.entity_id,
+                        relationship.target.entity_id,
+                        relationship.evidence_line or 0,
+                        0 if is_incoming else 1,
+                        sequence,
+                    )
+                    yield key, is_incoming, relationship
+
+        if remaining:
+            selected = heapq.nsmallest(remaining, candidates(), key=lambda item: item[0])
+        else:
+            selected = []
+            for _ in candidates():
+                pass
+        for _, is_incoming, relationship in selected:
+            if is_incoming:
+                incoming_ids.add(id(relationship))
+            bounded_relationships.append(relationship)
+    bounded_parents = parents[:effective]
+    truncated = total_relationships > remaining or total_parents > len(bounded_parents)
     evidence = [
         _location_evidence(
             snapshot,
@@ -390,24 +532,30 @@ def inspect_symbol(arguments: InspectSymbolInput, context: AgentToolContext) -> 
             symbol=symbol.symbol_id,
         )
     ]
-    evidence.extend(_edge_evidence(snapshot, item) for item in relationships)
+    evidence.extend(_edge_evidence(snapshot, item) for item in bounded_relationships)
     warnings = () if snapshot.graph is not None else (
         _warning("GRAPH_UNAVAILABLE", "Call and dependency relationships were not available."),
     )
+    status = ToolResultStatus.RESOURCE_LIMIT if truncated else ToolResultStatus.SUCCESS
     return ToolExecution(
-        status=ToolResultStatus.SUCCESS,
+        status=status,
         output=SymbolInspectionOutput(
             symbol=symbol,
-            parents=parents,
-            incoming=incoming,
-            outgoing=outgoing,
+            parents=bounded_parents,
+            total_parents=total_parents,
+            returned_parents=len(bounded_parents),
+            incoming=[item for item in bounded_relationships if id(item) in incoming_ids],
+            outgoing=[item for item in bounded_relationships if id(item) not in incoming_ids],
+            total_relationships=total_relationships,
+            returned_relationships=len(bounded_relationships),
             graph_complete=snapshot.graph_complete,
+            truncated=truncated,
         ),
         snapshot=snapshot,
         components=("repository_manifest", "repository_graph"),
         stage="symbol_inspection",
         evidence=tuple(evidence),
-        warnings=warnings,
+        warnings=warnings + ((_warning("RESULT_LIMIT_REACHED", "Symbol relationships were truncated.", limit=effective),) if truncated else ()),
     )
 
 
@@ -431,18 +579,33 @@ def _find_relationships(
             "SYMBOL_NOT_INDEXED_IN_GRAPH",
             "The symbol exists in the manifest but has no graph identity.",
         )
-    edges = snapshot.graph.get_incoming_edges(symbol.symbol_id) if incoming else snapshot.graph.get_outgoing_edges(symbol.symbol_id)
-    relationships = [
-        relationship for edge in edges
-        if edge.kind == EdgeKind.CALLS and (relationship := _relationship(snapshot, edge)) is not None
-    ]
-    relationships.sort(key=lambda item: (item.source.entity_id, item.target.entity_id, item.evidence_line or 0))
     effective = min(arguments.max_results, context.limits.max_results)
-    returned = relationships[:effective]
-    truncated = len(relationships) > effective
+    total_relationships = 0
+
+    def candidates():
+        nonlocal total_relationships
+        edges = snapshot.graph.get_incoming_edges(symbol.symbol_id) if incoming else snapshot.graph.get_outgoing_edges(symbol.symbol_id)
+        for sequence, edge in enumerate(edges):
+            if edge.kind != EdgeKind.CALLS:
+                continue
+            relationship = _relationship(snapshot, edge)
+            if relationship is None:
+                continue
+            total_relationships += 1
+            key = (
+                relationship.source.entity_id,
+                relationship.target.entity_id,
+                relationship.evidence_line or 0,
+                sequence,
+            )
+            yield key, relationship
+
+    selected = heapq.nsmallest(effective, candidates(), key=lambda item: item[0])
+    returned = [relationship for _, relationship in selected]
+    truncated = total_relationships > effective
     if truncated:
         status = ToolResultStatus.RESOURCE_LIMIT
-    elif relationships:
+    elif total_relationships:
         status = ToolResultStatus.SUCCESS
     elif snapshot.graph_complete:
         status = ToolResultStatus.SUCCESS
@@ -453,7 +616,7 @@ def _find_relationships(
         output=RelationshipOutput(
             symbol=symbol,
             relationships=returned,
-            total_relationships=len(relationships),
+            total_relationships=total_relationships,
             returned_relationships=len(returned),
             graph_complete=snapshot.graph_complete,
             truncated=truncated,
@@ -521,6 +684,7 @@ def _flow_path(flow: SemanticFlow) -> DataflowPath:
 def _flow_evidence(snapshot: RepositorySnapshot, path: DataflowPath) -> EvidenceRecord:
     material = "\0".join([
         snapshot.snapshot_id,
+        snapshot.artifact_digest,
         path.source.fact_id,
         path.sink.fact_id,
         *path.evidence_refs,
@@ -566,9 +730,11 @@ def trace_dataflow(arguments: TraceDataflowInput, context: AgentToolContext) -> 
         paths = [path for path in paths if path.sink.kind == arguments.sink_category]
     paths.sort(key=lambda item: (item.source.fact_id, item.sink.fact_id, tuple(item.evidence_refs)))
     coverage = _json(getattr(raw, "coverage", snapshot.semantic_program.coverage))
-    resource_reasons = {"path_budget", "flow_budget", "flow_nodes", "call_depth"}
-    resource_hit = any(reason in resource_reasons for reason in coverage.get("stop_reasons", []))
+    resource_reasons = {"path_budget", "flow_budget", "flow_nodes", "call_depth", "alias_budget"}
+    limit_clamped = arguments.max_depth > depth or arguments.max_paths > path_limit
+    resource_hit = limit_clamped or any(reason in resource_reasons for reason in coverage.get("stop_reasons", []))
     truncated = resource_hit or not bool(coverage.get("complete", False))
+    coverage["limit_clamped"] = limit_clamped
     if paths:
         outcome = FlowOutcome.FOUND
     elif coverage.get("complete") is True:
@@ -610,6 +776,7 @@ def _finding_id(snapshot: RepositorySnapshot, finding) -> str:
     evidence = finding.evidence
     material = "\0".join([
         snapshot.snapshot_id,
+        snapshot.artifact_digest,
         finding.tool,
         finding.rule_id or "",
         evidence.file_path,
@@ -677,6 +844,7 @@ def scan_security(arguments: ScanSecurityInput, context: AgentToolContext) -> To
         name: snapshot.evidence_store.scanner_results[name].status.value for name in selected
     }
     findings = []
+    total_findings = 0
     rules = set(arguments.rules)
     categories = {category.lower() for category in arguments.categories}
     for name in selected:
@@ -684,26 +852,29 @@ def scan_security(arguments: ScanSecurityInput, context: AgentToolContext) -> To
         if result.status != ToolStatus.COMPLETED:
             continue
         for finding in result.findings:
-            record = _finding_record(snapshot, finding)
-            if path and record.file_path != path:
+            finding_path = finding.evidence.file_path.replace("\\", "/")
+            if path and finding_path != path:
                 continue
             if symbol and not (
-                record.file_path == symbol.file_path
-                and record.start_line is not None
-                and record.end_line is not None
-                and record.start_line <= symbol.end_line
-                and record.end_line >= symbol.start_line
+                finding_path == symbol.file_path
+                and finding.evidence.start_line is not None
+                and finding.evidence.end_line is not None
+                and finding.evidence.start_line <= symbol.end_line
+                and finding.evidence.end_line >= symbol.start_line
             ):
                 continue
-            if rules and record.rule not in rules:
+            finding_rule = finding.rule_id or finding.detector_id
+            if rules and finding_rule not in rules:
                 continue
-            if categories and record.category.lower() not in categories:
+            if categories and finding.category.lower() not in categories:
                 continue
-            findings.append(record)
+            total_findings += 1
+            if len(findings) < min(arguments.max_results, context.limits.max_results):
+                findings.append(_finding_record(snapshot, finding))
     findings.sort(key=lambda item: (item.file_path, item.start_line or 0, item.rule or "", item.finding_id))
     effective = min(arguments.max_results, context.limits.max_results)
     returned = findings[:effective]
-    truncated = len(findings) > effective
+    truncated = total_findings > effective
     coverage_complete = snapshot.manifest_complete and bool(selected) and all(
         snapshot.evidence_store.scanner_results[name].status == ToolStatus.COMPLETED for name in selected
     )
@@ -722,7 +893,7 @@ def scan_security(arguments: ScanSecurityInput, context: AgentToolContext) -> To
         status=status,
         output=SecurityScanOutput(
             findings=returned,
-            total_findings=len(findings),
+            total_findings=total_findings,
             returned_findings=len(returned),
             analyzer_status=statuses,
             coverage_complete=coverage_complete,
@@ -762,23 +933,21 @@ def _obtain_diff(
     head = _snapshot(context, head_id)
     if base.manifest.repository_url != head.manifest.repository_url:
         raise ToolFailure(ToolResultStatus.INVALID_INPUT, "REPOSITORY_MISMATCH", "Base and head snapshots belong to different repositories.")
-    existing = context.get_diff(base_id, head_id)
-    if existing is not None:
-        return base, head, existing
-    if (base.repository_root / ".git").exists() or (head.repository_root / ".git").exists():
+    try:
+        existing = context.get_diff(base_id, head_id)
+    except ValueError as exc:
         raise ToolFailure(
-            ToolResultStatus.UNSUPPORTED,
-            "MATERIALIZED_SNAPSHOTS_REQUIRED",
-            "Diff computation requires precomputed facts or materialized snapshots without Git metadata; tool execution never invokes Git.",
+            ToolResultStatus.INTERNAL_ERROR,
+            "DIFF_ARTIFACT_INTEGRITY_FAILED",
+            "The registered structural diff failed its integrity check.",
+        ) from exc
+    if existing is None:
+        raise ToolFailure(
+            ToolResultStatus.INSUFFICIENT_EVIDENCE,
+            "PRECOMPUTED_DIFF_REQUIRED",
+            "Change tools require a trusted precomputed structural diff bound to both registered snapshots.",
         )
-    diff = get_diff_engine().compute_structural_diff(
-        base_workspace=str(base.repository_root),
-        head_workspace=str(head.repository_root),
-        base_commit_sha=base.snapshot_id,
-        head_commit_sha=head.snapshot_id,
-        repository_url=base.manifest.repository_url,
-    )
-    return base, head, diff
+    return base, head, existing
 
 
 def _in_scope(path: str, scopes: list[str]) -> bool:
@@ -787,34 +956,53 @@ def _in_scope(path: str, scopes: list[str]) -> bool:
 
 
 def _bounded_diff(diff: StructuralDiffResult, scopes: list[str], limit: int) -> tuple[StructuralDiffResult, int, int]:
-    file_facts = sorted(
-        [item for item in diff.changed_files if _in_scope(item.file_path, scopes) or (item.old_path and _in_scope(item.old_path, scopes))],
-        key=lambda item: (item.file_path, item.change_type.value, item.old_path or ""),
+    def bounded_collection(items, predicate, key):
+        total_matches = 0
+        selected = []
+        for item in items:
+            if not predicate(item):
+                continue
+            total_matches += 1
+            if len(selected) < limit:
+                selected.append(item)
+        selected.sort(key=key)
+        return selected, total_matches
+
+    file_facts, file_total = bounded_collection(
+        diff.changed_files,
+        lambda item: _in_scope(item.file_path, scopes) or (item.old_path and _in_scope(item.old_path, scopes)),
+        lambda item: (item.file_path, item.change_type.value, item.old_path or ""),
     )
-    symbol_facts = sorted(
-        [item for item in diff.changed_symbols if _in_scope(item.file_path, scopes)],
-        key=lambda item: (item.file_path, item.symbol_name, item.symbol_kind, item.change_type.value),
+    symbol_facts, symbol_total = bounded_collection(
+        diff.changed_symbols,
+        lambda item: _in_scope(item.file_path, scopes),
+        lambda item: (item.file_path, item.symbol_name, item.symbol_kind, item.change_type.value),
     )
-    dependency = sorted(
-        [item for item in diff.dependency_deltas if _in_scope(item.manifest_file, scopes)],
-        key=lambda item: (item.manifest_file, item.package_name, item.change_type),
+    dependency, dependency_total = bounded_collection(
+        diff.dependency_deltas,
+        lambda item: _in_scope(item.manifest_file, scopes),
+        lambda item: (item.manifest_file, item.package_name, item.change_type),
     )
-    config = sorted(
-        [item for item in diff.config_deltas if _in_scope(item.file_path, scopes)],
-        key=lambda item: (item.file_path, item.key, item.change_type),
+    config, config_total = bounded_collection(
+        diff.config_deltas,
+        lambda item: _in_scope(item.file_path, scopes),
+        lambda item: (item.file_path, item.key, item.change_type),
     )
-    routes = sorted(
-        [item for item in diff.route_deltas if _in_scope(item.file_path, scopes)],
-        key=lambda item: (item.file_path, item.route_name, item.change_type),
+    routes, routes_total = bounded_collection(
+        diff.route_deltas,
+        lambda item: _in_scope(item.file_path, scopes),
+        lambda item: (item.file_path, item.route_name, item.change_type),
     )
-    schemas = sorted(
-        [item for item in diff.schema_deltas if _in_scope(item.file_path, scopes)],
-        key=lambda item: (item.file_path, item.model_name, item.field_name, item.change_type),
+    schemas, schemas_total = bounded_collection(
+        diff.schema_deltas,
+        lambda item: _in_scope(item.file_path, scopes),
+        lambda item: (item.file_path, item.model_name, item.field_name, item.change_type),
     )
-    collections = [file_facts, symbol_facts, dependency, config, routes, schemas]
-    total = sum(len(items) for items in collections)
+    totals = [file_total, symbol_total, dependency_total, config_total, routes_total, schemas_total]
+    total = sum(totals)
     budget = limit
     bounded = []
+    collections = [file_facts, symbol_facts, dependency, config, routes, schemas]
     for items in collections:
         taken = items[:budget]
         bounded.append(taken)
@@ -828,6 +1016,10 @@ def _bounded_diff(diff: StructuralDiffResult, scopes: list[str], limit: int) -> 
     deleted_symbols = [item for item in symbols if item.change_type == SymbolChangeType.DELETED]
     modified_symbols = [item for item in symbols if item.change_type not in {SymbolChangeType.ADDED, SymbolChangeType.DELETED}]
     returned = sum(len(items) for items in bounded)
+    coverage = dict(diff.discovery_coverage or {})
+    if total > returned:
+        coverage["complete"] = False
+        coverage["stop_reasons"] = sorted(set([*(coverage.get("stop_reasons") or []), "max_results"]))
     result = diff.model_copy(
         update={
             "changed_files": files,
@@ -844,17 +1036,25 @@ def _bounded_diff(diff: StructuralDiffResult, scopes: list[str], limit: int) -> 
             "route_deltas": routes,
             "schema_deltas": schemas,
             "summary": {"total_facts": returned},
+            "discovery_coverage": coverage,
         },
         deep=True,
     )
     return result, total, returned
 
 
-def _change_evidence(snapshot: RepositorySnapshot, category: str, item: Any) -> EvidenceRecord:
+def _change_evidence(
+    snapshot: RepositorySnapshot,
+    category: str,
+    item: Any,
+    *,
+    base_snapshot_id: str | None = None,
+) -> EvidenceRecord:
     data = _json(item)
     file_path = data.get("file_path") or data.get("manifest_file") or ""
     identity = repr(sorted(data.items()))
-    evidence_id = f"change:{hashlib.sha256((snapshot.snapshot_id + category + identity).encode()).hexdigest()[:24]}"
+    namespace = f"{base_snapshot_id or ''}:{snapshot.snapshot_id}:{snapshot.artifact_digest}"
+    evidence_id = f"change:{hashlib.sha256((namespace + category + identity).encode()).hexdigest()[:24]}"
     location = data.get("head_location") or data.get("base_location") or {}
     return EvidenceRecord(
         evidence_id=evidence_id,
@@ -865,7 +1065,10 @@ def _change_evidence(snapshot: RepositorySnapshot, category: str, item: Any) -> 
         start_line=location.get("start_line"),
         end_line=location.get("end_line"),
         relationship=category,
-        metadata={"change_type": data.get("change_type")},
+        metadata={
+            "change_type": data.get("change_type"),
+            **({"base_snapshot": base_snapshot_id} if base_snapshot_id else {}),
+        },
     )
 
 
@@ -879,7 +1082,7 @@ def _diff_evidence(snapshot: RepositorySnapshot, diff: StructuralDiffResult) -> 
         ("ROUTE", diff.route_deltas),
         ("SCHEMA", diff.schema_deltas),
     ):
-        result.extend(_change_evidence(snapshot, category, item) for item in items)
+        result.extend(_change_evidence(snapshot, category, item, base_snapshot_id=diff.base_commit_sha) for item in items)
     return tuple(result)
 
 
@@ -888,15 +1091,22 @@ def analyze_change(arguments: AnalyzeChangeInput, context: AgentToolContext) -> 
     scopes = _authorize_change_scope(base, head, arguments.scope_paths)
     effective = min(arguments.max_results, context.limits.max_results)
     bounded, total, returned = _bounded_diff(diff, scopes, effective)
-    truncated = total > returned or not bool(diff.discovery_coverage.get("complete", True))
+    limit_clamped = arguments.max_results > effective
+    truncated = total > returned or not bool(bounded.discovery_coverage.get("complete", True))
     status = ToolResultStatus.RESOURCE_LIMIT if total > returned else (
         ToolResultStatus.INSUFFICIENT_EVIDENCE
-        if diff.discovery_coverage and diff.discovery_coverage.get("complete") is False
+        if bounded.discovery_coverage and bounded.discovery_coverage.get("complete") is False
         else ToolResultStatus.SUCCESS
     )
     warnings = ()
-    if truncated:
-        warnings = (_warning("CHANGE_COVERAGE_PARTIAL", "Change facts are bounded or discovery coverage is incomplete.", total=total, returned=returned),)
+    if truncated or limit_clamped:
+        warnings = (_warning(
+            "CHANGE_COVERAGE_PARTIAL",
+            "Change facts are bounded or discovery coverage is incomplete.",
+            total=total,
+            returned=returned,
+            limit_clamped=limit_clamped,
+        ),)
     return ToolExecution(
         status=status,
         output=AnalyzeChangeOutput(
@@ -904,6 +1114,7 @@ def analyze_change(arguments: AnalyzeChangeInput, context: AgentToolContext) -> 
             total_facts=total,
             returned_facts=returned,
             truncated=truncated,
+            limit_clamped=limit_clamped,
         ),
         snapshot=head,
         components=("change_diff_engine",),
@@ -952,24 +1163,35 @@ def _impact_record(impact) -> ImpactRecord:
     )
 
 
-def _impact_evidence(snapshot: RepositorySnapshot, record: ImpactRecord) -> EvidenceRecord:
+def _impact_evidence(
+    snapshot: RepositorySnapshot,
+    record: ImpactRecord,
+    *,
+    base_snapshot_id: str | None = None,
+) -> EvidenceRecord:
     material = repr(record.model_dump(mode="json"))
+    namespace = f"{base_snapshot_id or ''}:{snapshot.snapshot_id}:{snapshot.artifact_digest}"
     return EvidenceRecord(
-        evidence_id=f"impact:{hashlib.sha256((snapshot.snapshot_id + material).encode()).hexdigest()[:24]}",
+        evidence_id=f"impact:{hashlib.sha256((namespace + material).encode()).hexdigest()[:24]}",
         evidence_type=EvidenceType.IMPACT_RELATIONSHIP,
         source_component="change_impact_engine",
         file_path=record.affected_file or record.source_file,
         symbol=record.affected_symbol or record.source_symbol,
         relationship=record.impact_type,
-        metadata={"direction": record.direction, "depth": record.depth},
+        metadata={
+            "direction": record.direction,
+            "depth": record.depth,
+            **({"base_snapshot": base_snapshot_id} if base_snapshot_id else {}),
+        },
     )
 
 
 def analyze_impact(arguments: AnalyzeImpactInput, context: AgentToolContext) -> ToolExecution:
     base, head, diff = _obtain_diff(context, arguments.base_snapshot_id, arguments.head_snapshot_id)
     scopes = _authorize_change_scope(base, head, arguments.scope_paths)
-    if scopes:
-        diff, _, _ = _bounded_diff(diff, scopes, 1_000_000_000)
+    effective_results = min(arguments.max_results, context.limits.max_results)
+    effective_depth = min(arguments.max_depth, context.limits.max_graph_depth)
+    diff, _, _ = _bounded_diff(diff, scopes, effective_results)
     if base.graph is None:
         raise ToolFailure(ToolResultStatus.INSUFFICIENT_EVIDENCE, "GRAPH_UNAVAILABLE", "The base repository graph is unavailable.")
     if arguments.changed_symbol_id:
@@ -978,8 +1200,6 @@ def analyze_impact(arguments: AnalyzeImpactInput, context: AgentToolContext) -> 
         except ToolFailure:
             symbol = _find_symbol(base, arguments.changed_symbol_id)
         diff = _narrow_diff_to_symbol(diff, symbol)
-    effective_results = min(arguments.max_results, context.limits.max_results)
-    effective_depth = min(arguments.max_depth, context.limits.max_graph_depth)
     report = get_impact_engine().compute_blast_radius(
         analysis_id=uuid5(NAMESPACE_URL, f"{base.snapshot_id}:{head.snapshot_id}"),
         diff_result=diff,
@@ -992,8 +1212,32 @@ def analyze_impact(arguments: AnalyzeImpactInput, context: AgentToolContext) -> 
         (_impact_record(item) for item in report.impacts),
         key=lambda item: (item.depth or 0, item.source_file or "", item.affected_file or "", item.impact_type, item.title),
     )
+    diff_coverage = diff.discovery_coverage or {"complete": True}
+    structural_complete = diff_coverage.get("complete") is not False
+    base_graph_complete = base.graph_complete
+    head_graph_complete = head.graph_complete if head.graph is not None else False
+    traversal_complete = not report.is_truncated
+    stop_reasons = [
+        str(reason) for reason in diff_coverage.get("stop_reasons", [])
+        if reason
+    ]
+    if not structural_complete:
+        stop_reasons.append("structural_diff_incomplete")
+    if not base_graph_complete:
+        stop_reasons.append("base_graph_incomplete")
+    if head.graph is not None and not head_graph_complete:
+        stop_reasons.append("head_graph_incomplete")
+    if report.truncation_reason:
+        stop_reasons.append(report.truncation_reason)
+    stop_reasons = sorted(set(stop_reasons))
+    resource_reasons = {"MAX_IMPACTS_REACHED", "MAX_DEPTH_REACHED", "path_budget", "flow_budget", "max_results", "max_depth"}
+    limit_clamped = arguments.max_results > effective_results or arguments.max_depth > effective_depth
+    resource_limited = report.is_truncated or limit_clamped or any(reason in resource_reasons for reason in stop_reasons)
+    coverage_complete = structural_complete and base_graph_complete and (head.graph is None or head_graph_complete) and traversal_complete
     truncated = report.is_truncated
-    status = ToolResultStatus.RESOURCE_LIMIT if truncated else ToolResultStatus.SUCCESS
+    status = ToolResultStatus.RESOURCE_LIMIT if resource_limited else (
+        ToolResultStatus.INSUFFICIENT_EVIDENCE if not coverage_complete else ToolResultStatus.SUCCESS
+    )
     return ToolExecution(
         status=status,
         output=AnalyzeImpactOutput(
@@ -1006,14 +1250,23 @@ def analyze_impact(arguments: AnalyzeImpactInput, context: AgentToolContext) -> 
             overall_risk_level=report.overall_risk_level.value,
             truncated=truncated,
             truncation_reason=report.truncation_reason,
+            coverage={
+                "complete": coverage_complete,
+                "structural_diff_complete": structural_complete,
+                "base_graph_complete": base_graph_complete,
+                "head_graph_complete": head_graph_complete,
+                "traversal_complete": traversal_complete,
+                "limit_clamped": limit_clamped,
+                "stop_reasons": stop_reasons,
+            },
         ),
         snapshot=head,
         components=("change_diff_engine", "change_impact_engine", "repository_graph"),
         stage="impact_analysis",
-        evidence=tuple(_impact_evidence(head, item) for item in impacts),
+        evidence=tuple(_impact_evidence(head, item, base_snapshot_id=base.snapshot_id) for item in impacts),
         warnings=(
-            (_warning("IMPACT_TRAVERSAL_PARTIAL", "Impact traversal reached a configured resource boundary."),)
-            if truncated else ()
+            (_warning("IMPACT_COVERAGE_PARTIAL", "Impact output does not prove absence when structural or graph coverage is incomplete.", stop_reasons=stop_reasons),)
+            if not coverage_complete else ()
         ),
     )
 
@@ -1035,34 +1288,42 @@ def _finish_verification(
     reason: str,
     evidence: Iterable[EvidenceRecord] = (),
     components: tuple[str, ...],
+    status: ToolResultStatus = ToolResultStatus.SUCCESS,
 ) -> ToolExecution:
     available = tuple(evidence)
     available_ids = {item.evidence_id for item in available}
-    matched = available_ids.intersection(claim.evidence_refs)
-    if verdict == VerificationVerdict.SUPPORTED and not claim.evidence_refs:
+    requested = list(dict.fromkeys(claim.evidence_refs))
+    unknown = [ref for ref in requested if ref not in available_ids]
+    matched = [ref for ref in requested if ref in available_ids]
+    if verdict == VerificationVerdict.SUPPORTED and not requested:
         verdict, reason = VerificationVerdict.INVALID_CLAIM, "EVIDENCE_REFERENCES_REQUIRED"
-    elif verdict == VerificationVerdict.SUPPORTED and not matched:
-        verdict, reason = VerificationVerdict.INSUFFICIENT_EVIDENCE, "EVIDENCE_REFERENCE_UNRESOLVED"
+    elif verdict == VerificationVerdict.SUPPORTED and unknown:
+        verdict, reason = VerificationVerdict.INSUFFICIENT_EVIDENCE, "EVIDENCE_REFERENCE_UNRESOLVED_OR_FOREIGN"
     return ToolExecution(
-        status=ToolResultStatus.SUCCESS,
+        status=status,
         output=_verification_result(claim, verdict, reason, matched),
         snapshot=snapshot,
         components=components,
         stage="deterministic_claim_verification",
-        evidence=tuple(item for item in available if item.evidence_id in matched),
+        evidence=tuple(item for item in available if item.evidence_id in set(matched)),
     )
 
 
 def verify_finding(arguments: VerifyFindingInput, context: AgentToolContext) -> ToolExecution:
     claim = arguments.claim
     if claim.claim_type == ClaimType.SECURITY_FINDING:
-        if not claim.rule or not claim.file_path:
-            snapshot = _snapshot(context, claim.snapshot_id)
-            return _finish_verification(claim, snapshot, verdict=VerificationVerdict.INVALID_CLAIM, reason="RULE_AND_FILE_REQUIRED", components=("evidence_store",))
-        execution = scan_security(
-            ScanSecurityInput(snapshot_id=claim.snapshot_id, file_path=claim.file_path, rules=[claim.rule], max_results=context.limits.max_results),
-            context,
-        )
+        snapshot = _snapshot(context, claim.snapshot_id)
+        try:
+            if claim.symbol_id:
+                _find_symbol(snapshot, claim.symbol_id)
+            execution = scan_security(
+                ScanSecurityInput(snapshot_id=claim.snapshot_id, file_path=claim.file_path, rules=[claim.rule], max_results=context.limits.max_results),
+                context,
+            )
+        except ToolFailure as failure:
+            if failure.status in {ToolResultStatus.INTERNAL_ERROR, ToolResultStatus.RESOURCE_LIMIT}:
+                raise
+            return _finish_verification(claim, snapshot, verdict=VerificationVerdict.INVALID_CLAIM, reason="SECURITY_COORDINATE_UNRESOLVED", components=("evidence_store",))
         assert isinstance(execution.output, SecurityScanOutput)
         matches = execution.output.findings
         if claim.symbol_id:
@@ -1076,18 +1337,31 @@ def verify_finding(arguments: VerifyFindingInput, context: AgentToolContext) -> 
 
     if claim.claim_type == ClaimType.DATAFLOW:
         snapshot = _snapshot(context, claim.snapshot_id)
-        if not claim.source_symbol_id or not claim.sink_category:
-            return _finish_verification(claim, snapshot, verdict=VerificationVerdict.INVALID_CLAIM, reason="SOURCE_AND_SINK_REQUIRED", components=("semantic_flow_analysis",))
-        execution = trace_dataflow(
-            TraceDataflowInput(
-                snapshot_id=snapshot.snapshot_id,
-                source_symbol_id=claim.source_symbol_id,
-                sink_category=claim.sink_category,
-                max_depth=context.limits.max_graph_depth,
-                max_paths=context.limits.max_dataflow_paths,
-            ),
-            context,
-        )
+        try:
+            _find_symbol(snapshot, claim.source_symbol_id)
+        except ToolFailure:
+            return _finish_verification(claim, snapshot, verdict=VerificationVerdict.INVALID_CLAIM, reason="SOURCE_SYMBOL_UNRESOLVED", components=("semantic_flow_analysis",))
+        try:
+            execution = trace_dataflow(
+                TraceDataflowInput(
+                    snapshot_id=snapshot.snapshot_id,
+                    source_symbol_id=claim.source_symbol_id,
+                    sink_category=claim.sink_category,
+                    max_depth=context.limits.max_graph_depth,
+                    max_paths=context.limits.max_dataflow_paths,
+                ),
+                context,
+            )
+        except ToolFailure as failure:
+            if failure.status == ToolResultStatus.INSUFFICIENT_EVIDENCE:
+                return _finish_verification(
+                    claim,
+                    snapshot,
+                    verdict=VerificationVerdict.INSUFFICIENT_EVIDENCE,
+                    reason=failure.error.code,
+                    components=("semantic_flow_analysis",),
+                )
+            raise
         assert isinstance(execution.output, TraceDataflowOutput)
         if execution.output.paths:
             return _finish_verification(claim, snapshot, verdict=VerificationVerdict.SUPPORTED, reason="EXACT_PRODUCTION_FLOW", evidence=execution.evidence, components=execution.components)
@@ -1096,13 +1370,25 @@ def verify_finding(arguments: VerifyFindingInput, context: AgentToolContext) -> 
 
     if claim.claim_type == ClaimType.CALL_RELATIONSHIP:
         snapshot = _snapshot(context, claim.snapshot_id)
-        if not claim.source_symbol_id or not claim.target_symbol_id:
-            return _finish_verification(claim, snapshot, verdict=VerificationVerdict.INVALID_CLAIM, reason="SOURCE_AND_TARGET_REQUIRED", components=("repository_graph",))
+        try:
+            _find_symbol(snapshot, claim.source_symbol_id)
+            _find_symbol(snapshot, claim.target_symbol_id)
+            call_site_file = (
+                _normalize_path(snapshot, claim.call_site_file)
+                if claim.call_site_file is not None
+                else None
+            )
+        except ToolFailure:
+            return _finish_verification(claim, snapshot, verdict=VerificationVerdict.INVALID_CLAIM, reason="SOURCE_OR_TARGET_UNRESOLVED", components=("repository_graph",))
         if snapshot.graph is None:
             return _finish_verification(claim, snapshot, verdict=VerificationVerdict.INSUFFICIENT_EVIDENCE, reason="GRAPH_UNAVAILABLE", components=("repository_graph",))
+        if claim.relationship_type != EdgeKind.CALLS.value:
+            return _finish_verification(claim, snapshot, verdict=VerificationVerdict.INVALID_CLAIM, reason="CALL_RELATIONSHIP_MUST_BE_CALLS", components=("repository_graph",))
         edges = [
             edge for edge in snapshot.graph.get_outgoing_edges(claim.source_symbol_id)
-            if edge.target == claim.target_symbol_id and edge.kind.value == (claim.relationship_type or EdgeKind.CALLS.value)
+            if edge.target == claim.target_symbol_id and edge.kind == EdgeKind.CALLS
+            and (call_site_file is None or str((edge.metadata or {}).get("call_site_file", "")).replace("\\", "/") == call_site_file)
+            and (claim.call_site_line is None or (edge.metadata or {}).get("call_site_line") == claim.call_site_line)
         ]
         relationships = [item for edge in edges if (item := _relationship(snapshot, edge))]
         evidence = [_edge_evidence(snapshot, item) for item in relationships]
@@ -1115,12 +1401,55 @@ def verify_finding(arguments: VerifyFindingInput, context: AgentToolContext) -> 
         if not claim.base_snapshot_id or not claim.head_snapshot_id or not claim.file_path or not claim.change_type:
             snapshot = _snapshot(context, claim.head_snapshot_id or claim.snapshot_id)
             return _finish_verification(claim, snapshot, verdict=VerificationVerdict.INVALID_CLAIM, reason="CHANGE_COORDINATES_REQUIRED", components=("change_diff_engine",))
-        base, head, diff = _obtain_diff(context, claim.base_snapshot_id, claim.head_snapshot_id)
-        path = _authorize_change_scope(base, head, [claim.file_path])[0]
+        try:
+            base, head, diff = _obtain_diff(context, claim.base_snapshot_id, claim.head_snapshot_id)
+            path = _authorize_change_scope(base, head, [claim.file_path])[0]
+        except ToolFailure as failure:
+            snapshot = _snapshot(context, claim.head_snapshot_id)
+            if failure.status == ToolResultStatus.INSUFFICIENT_EVIDENCE:
+                return _finish_verification(
+                    claim,
+                    snapshot,
+                    verdict=VerificationVerdict.INSUFFICIENT_EVIDENCE,
+                    reason=failure.error.code,
+                    components=("change_diff_engine",),
+                )
+            if failure.status in {ToolResultStatus.INTERNAL_ERROR, ToolResultStatus.RESOURCE_LIMIT}:
+                raise
+            return _finish_verification(
+                claim,
+                snapshot,
+                verdict=VerificationVerdict.INVALID_CLAIM,
+                reason="CHANGE_COORDINATES_UNRESOLVED",
+                components=("change_diff_engine",),
+            )
+        if claim.symbol_id and claim.symbol_id not in base.symbol_index and claim.symbol_id not in head.symbol_index:
+            return _finish_verification(claim, head, verdict=VerificationVerdict.INVALID_CLAIM, reason="STRUCTURAL_SYMBOL_ID_UNRESOLVED", components=("change_diff_engine",))
         facts: list[tuple[str, Any]] = []
-        facts.extend(("FILE", item) for item in diff.changed_files if item.file_path == path and item.change_type.value == claim.change_type)
-        facts.extend(("SYMBOL", item) for item in diff.changed_symbols if item.file_path == path and item.change_type.value == claim.change_type and (not claim.symbol_id or claim.symbol_id.endswith(f":{item.symbol_name}:{(item.head_location or item.base_location or {}).get('start_line', '')}")))
-        evidence = [_change_evidence(head, category, item) for category, item in facts]
+        if claim.symbol_id:
+            requested_change_type = claim.change_type.value if hasattr(claim.change_type, "value") else str(claim.change_type)
+            for item in diff.changed_symbols:
+                if item.file_path.replace("\\", "/") != path or item.change_type.value != requested_change_type:
+                    continue
+                locations: list[tuple[dict[str, Any] | None, RepositorySnapshot]] = []
+                if item.change_type.value == SymbolChangeType.ADDED.value:
+                    locations.append((item.head_location, head))
+                elif item.change_type.value == SymbolChangeType.DELETED.value:
+                    locations.append((item.base_location, base))
+                else:
+                    locations.extend(((item.base_location, base), (item.head_location, head)))
+                for location, candidate in locations:
+                    if not location:
+                        continue
+                    start_line = location.get("start_line")
+                    exact_id = f"symbol:{path}:{item.symbol_kind}:{item.symbol_name}:{start_line}"
+                    if exact_id == claim.symbol_id and exact_id in candidate.symbol_index:
+                        facts.append(("SYMBOL", item))
+                        break
+        else:
+            requested_change_type = claim.change_type.value if hasattr(claim.change_type, "value") else str(claim.change_type)
+            facts.extend(("FILE", item) for item in diff.changed_files if item.file_path.replace("\\", "/") == path and item.change_type.value == requested_change_type)
+        evidence = [_change_evidence(head, category, item, base_snapshot_id=base.snapshot_id) for category, item in facts]
         if facts:
             return _finish_verification(claim, head, verdict=VerificationVerdict.SUPPORTED, reason="EXACT_STRUCTURAL_CHANGE_FACT", evidence=evidence, components=("change_diff_engine",))
         complete = not diff.discovery_coverage or diff.discovery_coverage.get("complete") is True

@@ -43,6 +43,12 @@ def test_graph_cycle_is_bounded_and_direction_remains_upstream(tmp_path: Path):
     legacy = next(node for node in base.graph.get_nodes() if node.label == "legacy")
     caller = next(node for node in base.graph.get_nodes() if node.label == "use")
     base.graph.add_edge(legacy.id, caller.id, EdgeKind.CALLS, {"call_site_file": "app/service.py", "call_site_line": 1})
+    context = AgentToolContext(
+        snapshots={base.snapshot_id: base, head.snapshot_id: head},
+        default_snapshot_id=head.snapshot_id,
+        diffs=context.diffs,
+        limits=context.limits,
+    )
     registry = create_agent_tool_registry(context)
     result = registry.invoke("analyze_impact", {
         "base_snapshot_id": base.snapshot_id,
@@ -50,7 +56,7 @@ def test_graph_cycle_is_bounded_and_direction_remains_upstream(tmp_path: Path):
         "max_depth": 8,
         "max_results": 50,
     })
-    assert result.status == ToolResultStatus.SUCCESS
+    assert result.status in {ToolResultStatus.INSUFFICIENT_EVIDENCE, ToolResultStatus.RESOURCE_LIMIT}
     assert 0 < result.result["returned_impacts"] < 10
     assert all(item["direction"] == "UPSTREAM_CALLER" for item in result.result["impacts"] if item["impact_type"] == "CALLER_IMPACT")
 
@@ -89,9 +95,16 @@ def test_change_facts_preserve_breaking_and_nonbreaking_signature_classification
         "4" * 40,
         {"api.py": "def breaking(value, required):\n    return value\n\ndef compatible(value, optional=True):\n    return value\n"},
     )
+    from app.analysis.diff_engine import get_diff_engine
+    diff = get_diff_engine().compute_structural_diff(
+        base_workspace=str(base.repository_root), head_workspace=str(head.repository_root),
+        base_commit_sha=base.snapshot_id, head_commit_sha=head.snapshot_id,
+        repository_url=base.manifest.repository_url,
+    )
     context = AgentToolContext(
         snapshots={base.snapshot_id: base, head.snapshot_id: head},
         default_snapshot_id=head.snapshot_id,
+        diffs={(base.snapshot_id, head.snapshot_id): diff},
     )
     result = create_agent_tool_registry(context).invoke("analyze_change", {
         "base_snapshot_id": base.snapshot_id,

@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.ingestion.schemas import SymbolKind
-from app.schemas.change_analysis import StructuralDiffResult
+from app.schemas.change_analysis import FileChangeType, StructuralDiffResult, SymbolChangeType
 
 
-AGENT_TOOL_CONTRACT_VERSION = "1.0.0"
-AGENT_TOOL_VERSION = "1.0.0"
+AGENT_TOOL_CONTRACT_VERSION = "1.1.0"
+AGENT_TOOL_VERSION = "1.1.0"
 
 
 class ToolModel(BaseModel):
@@ -79,7 +79,7 @@ class ToolError(ToolModel):
 
 
 class EvidenceRecord(ToolModel):
-    evidence_id: str = Field(min_length=1, max_length=512)
+    evidence_id: str = Field(min_length=1, max_length=128)
     evidence_type: EvidenceType
     source_component: str = Field(min_length=1, max_length=128)
     file_path: str | None = Field(default=None, max_length=1024)
@@ -95,7 +95,10 @@ class EvidenceRecord(ToolModel):
 class ToolProvenance(ToolModel):
     production_components: list[str] = Field(min_length=1)
     component_versions: dict[str, str] = Field(default_factory=dict)
+    component_version_trust: Literal["DECLARED"] = "DECLARED"
     repository_snapshot: str = Field(min_length=1, max_length=128)
+    snapshot_identity_trust: Literal["DECLARED"] = "DECLARED"
+    snapshot_artifact_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     analysis_stage: str = Field(min_length=1, max_length=128)
     deterministic: Literal[True] = True
 
@@ -103,7 +106,7 @@ class ToolProvenance(ToolModel):
 class ToolInvocationResult(ToolModel):
     """Common deterministic envelope; ``result`` is validated by each tool spec."""
 
-    contract_version: Literal["1.0.0"] = AGENT_TOOL_CONTRACT_VERSION
+    contract_version: Literal["1.1.0"] = AGENT_TOOL_CONTRACT_VERSION
     tool: str = Field(min_length=1, max_length=128)
     tool_version: str = Field(min_length=1, max_length=32)
     status: ToolResultStatus
@@ -168,16 +171,16 @@ class TraceDataflowInput(SnapshotInput):
 class ScanSecurityInput(SnapshotInput):
     file_path: str | None = Field(default=None, min_length=1, max_length=1024)
     symbol_id: str | None = Field(default=None, min_length=1, max_length=2048)
-    rules: list[str] = Field(default_factory=list, max_length=64)
-    categories: list[str] = Field(default_factory=list, max_length=32)
-    analyzers: list[str] = Field(default_factory=list, max_length=16)
+    rules: list[Annotated[str, Field(min_length=1, max_length=512)]] = Field(default_factory=list, max_length=64)
+    categories: list[Annotated[str, Field(min_length=1, max_length=128)]] = Field(default_factory=list, max_length=32)
+    analyzers: list[Annotated[str, Field(min_length=1, max_length=128)]] = Field(default_factory=list, max_length=16)
     max_results: int = Field(default=100, ge=1, le=500)
 
 
 class AnalyzeChangeInput(ToolModel):
     base_snapshot_id: str = Field(min_length=1, max_length=128)
     head_snapshot_id: str = Field(min_length=1, max_length=128)
-    scope_paths: list[str] = Field(default_factory=list, max_length=100)
+    scope_paths: list[Annotated[str, Field(min_length=1, max_length=1024)]] = Field(default_factory=list, max_length=100)
     max_results: int = Field(default=200, ge=1, le=1000)
 
 
@@ -193,24 +196,49 @@ class ClaimType(str, Enum):
     STRUCTURAL_CHANGE = "STRUCTURAL_CHANGE"
 
 
-class ProposedFinding(ToolModel):
-    claim_type: ClaimType
-    snapshot_id: str | None = Field(default=None, min_length=1, max_length=128)
-    base_snapshot_id: str | None = Field(default=None, min_length=1, max_length=128)
-    head_snapshot_id: str | None = Field(default=None, min_length=1, max_length=128)
-    rule: str | None = Field(default=None, min_length=1, max_length=512)
-    file_path: str | None = Field(default=None, min_length=1, max_length=1024)
+class SecurityFindingClaim(ToolModel):
+    claim_type: Literal[ClaimType.SECURITY_FINDING]
+    snapshot_id: str = Field(min_length=1, max_length=128)
+    rule: str = Field(min_length=1, max_length=512)
+    file_path: str = Field(min_length=1, max_length=1024)
     symbol_id: str | None = Field(default=None, min_length=1, max_length=2048)
-    source_symbol_id: str | None = Field(default=None, min_length=1, max_length=2048)
-    target_symbol_id: str | None = Field(default=None, min_length=1, max_length=2048)
-    sink_category: str | None = Field(default=None, min_length=1, max_length=128)
-    relationship_type: str | None = Field(default=None, min_length=1, max_length=128)
-    change_type: str | None = Field(default=None, min_length=1, max_length=128)
-    evidence_refs: list[str] = Field(default_factory=list, max_length=64)
+    evidence_refs: list[Annotated[str, Field(min_length=1, max_length=128)]] = Field(min_length=1, max_length=64)
+
+
+class DataflowClaim(ToolModel):
+    claim_type: Literal[ClaimType.DATAFLOW]
+    snapshot_id: str = Field(min_length=1, max_length=128)
+    source_symbol_id: str = Field(min_length=1, max_length=2048)
+    sink_category: str = Field(min_length=1, max_length=128)
+    evidence_refs: list[Annotated[str, Field(min_length=1, max_length=128)]] = Field(min_length=1, max_length=64)
+
+
+class CallRelationshipClaim(ToolModel):
+    claim_type: Literal[ClaimType.CALL_RELATIONSHIP]
+    snapshot_id: str = Field(min_length=1, max_length=128)
+    source_symbol_id: str = Field(min_length=1, max_length=2048)
+    target_symbol_id: str = Field(min_length=1, max_length=2048)
+    relationship_type: Literal["CALLS"] = "CALLS"
+    call_site_file: str | None = Field(default=None, min_length=1, max_length=1024)
+    call_site_line: int | None = Field(default=None, ge=1)
+    evidence_refs: list[Annotated[str, Field(min_length=1, max_length=128)]] = Field(min_length=1, max_length=64)
+
+
+class StructuralChangeClaim(ToolModel):
+    claim_type: Literal[ClaimType.STRUCTURAL_CHANGE]
+    base_snapshot_id: str = Field(min_length=1, max_length=128)
+    head_snapshot_id: str = Field(min_length=1, max_length=128)
+    file_path: str = Field(min_length=1, max_length=1024)
+    change_type: FileChangeType | SymbolChangeType
+    symbol_id: str | None = Field(default=None, min_length=1, max_length=2048)
+    evidence_refs: list[Annotated[str, Field(min_length=1, max_length=128)]] = Field(min_length=1, max_length=64)
+
+
+ProposedFinding = SecurityFindingClaim | DataflowClaim | CallRelationshipClaim | StructuralChangeClaim
 
 
 class VerifyFindingInput(ToolModel):
-    claim: ProposedFinding
+    claim: Annotated[ProposedFinding, Field(discriminator="claim_type")]
 
 
 class SymbolRecord(ToolModel):
@@ -237,6 +265,9 @@ class FileInspectionOutput(ToolModel):
     skipped_reason: str | None
     symbols: list[SymbolRecord]
     imports: list[SymbolRecord]
+    total_symbols: int
+    returned_symbols: int
+    truncated: bool
     manifest_scope_complete: bool
 
 
@@ -271,9 +302,14 @@ class GraphRelationship(ToolModel):
 class SymbolInspectionOutput(ToolModel):
     symbol: SymbolRecord
     parents: list[SymbolRecord] = Field(default_factory=list)
+    total_parents: int
+    returned_parents: int
     incoming: list[GraphRelationship] = Field(default_factory=list)
     outgoing: list[GraphRelationship] = Field(default_factory=list)
+    total_relationships: int
+    returned_relationships: int
     graph_complete: bool
+    truncated: bool
 
 
 class RelationshipOutput(ToolModel):
@@ -368,6 +404,7 @@ class AnalyzeChangeOutput(ToolModel):
     total_facts: int
     returned_facts: int
     truncated: bool
+    limit_clamped: bool = False
 
 
 class ImpactRecord(ToolModel):
@@ -396,6 +433,17 @@ class AnalyzeImpactOutput(ToolModel):
     overall_risk_level: str
     truncated: bool
     truncation_reason: str | None
+    coverage: "ImpactCoverage"
+
+
+class ImpactCoverage(ToolModel):
+    complete: bool
+    structural_diff_complete: bool
+    base_graph_complete: bool
+    head_graph_complete: bool
+    traversal_complete: bool
+    limit_clamped: bool = False
+    stop_reasons: list[str] = Field(default_factory=list)
 
 
 class VerifyFindingOutput(ToolModel):

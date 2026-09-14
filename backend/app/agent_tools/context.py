@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import copy
+import hashlib
+import json
 from pathlib import Path
 import time
 from types import MappingProxyType
@@ -28,6 +31,60 @@ def _confined_relative(root: Path, value: str) -> str:
     if normalized in {"", "."}:
         raise ValueError("analysis component must reference a repository-relative file")
     return normalized
+
+
+def _clone_graph(graph: RepositoryGraph) -> RepositoryGraph:
+    cloned = RepositoryGraph()
+    for node in sorted(graph.get_nodes(), key=lambda item: item.id):
+        cloned.add_node(
+            node.id,
+            node.kind,
+            node.label,
+            file_path=node.file_path,
+            start_line=node.start_line,
+            end_line=node.end_line,
+            metadata=copy.deepcopy(node.metadata),
+        )
+    for edge in sorted(graph.get_edges(), key=lambda item: (item.source, item.target, item.kind.value)):
+        cloned.add_edge(edge.source, edge.target, edge.kind, copy.deepcopy(edge.metadata))
+    return cloned
+
+
+def _digest_payload(value: object) -> str:
+    raw = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _diff_digest(diff: StructuralDiffResult) -> str:
+    return _digest_payload(diff.model_dump(mode="json"))
+
+
+def _snapshot_artifact_payload(
+    snapshot_id: str,
+    manifest: RepositoryManifest,
+    evidence_store: EvidenceStore,
+    graph: RepositoryGraph | None,
+    semantic_program: SemanticProgram | None,
+    component_versions: Mapping[str, str],
+) -> dict[str, object]:
+    return {
+        "snapshot_id": snapshot_id,
+        "manifest": manifest.model_dump(mode="json"),
+        "scanners": {
+            name: result.model_dump(mode="json")
+            for name, result in sorted(evidence_store.scanner_results.items())
+        },
+        "graph_nodes": [
+            item.model_dump(mode="json")
+            for item in sorted(graph.get_nodes(), key=lambda value: value.id)
+        ] if graph is not None else [],
+        "graph_edges": [
+            item.model_dump(mode="json")
+            for item in sorted(graph.get_edges(), key=lambda value: (value.source, value.target, value.kind.value))
+        ] if graph is not None else [],
+        "semantic_program": semantic_program.model_dump(mode="json") if semantic_program is not None else None,
+        "component_versions": dict(sorted(component_versions.items())),
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +122,9 @@ class RepositorySnapshot:
     semantic_program: SemanticProgram | None = None
     component_versions: Mapping[str, str] = field(default_factory=dict)
     symbol_index: Mapping[str, tuple[str, ParsedSymbol]] = field(default_factory=dict, repr=False)
+    manifest_paths: frozenset[str] = field(default_factory=frozenset, repr=False)
+    artifact_digest: str = field(default="", repr=False)
+    admission_limits: ToolResourceLimits = field(default_factory=ToolResourceLimits, repr=False, compare=False)
     initialization_duration_ms: float = field(default=0.0, compare=False)
 
     @classmethod
@@ -78,6 +138,7 @@ class RepositorySnapshot:
         chunks: Iterable[CodeChunk] | None = None,
         semantic_program: SemanticProgram | None = None,
         component_versions: Mapping[str, str] | None = None,
+        limits: ToolResourceLimits | None = None,
     ) -> "RepositorySnapshot":
         started = time.perf_counter()
         root = Path(repository_root).resolve()
@@ -85,7 +146,15 @@ class RepositorySnapshot:
             raise ValueError("repository root does not exist or is not a directory")
         if not snapshot_id or not snapshot_id.strip():
             raise ValueError("snapshot_id is required")
-        manifest = evidence_store.manifest
+        manifest = evidence_store.manifest.model_copy(deep=True)
+        registration_limits = limits or ToolResourceLimits()
+        if len(manifest.files) > registration_limits.max_files:
+            raise ValueError("repository manifest exceeds the configured max_files limit")
+        if any(
+            entry.size_bytes > registration_limits.max_file_size_bytes and not entry.skipped_reason
+            for entry in manifest.files
+        ):
+            raise ValueError("repository manifest contains an unbounded file larger than max_file_size_bytes")
         if snapshot_id != (manifest.commit_sha or manifest.commit_hash):
             raise ValueError("snapshot_id must match the manifest commit identity")
         authorized_paths: set[str] = set()
@@ -94,23 +163,34 @@ class RepositorySnapshot:
             if normalized in authorized_paths:
                 raise ValueError("repository manifest contains duplicate normalized file paths")
             authorized_paths.add(normalized)
-        for result in evidence_store.scanner_results.values():
+        scanner_results = {
+            str(name): result.model_copy(deep=True)
+            for name, result in sorted(evidence_store.scanner_results.items())
+        }
+        frozen_store = EvidenceStore(manifest, scanner_results)
+        for result in frozen_store.scanner_results.values():
             for finding in result.findings:
-                _confined_relative(root, finding.evidence.file_path)
-        built_graph = graph if graph is not None else build_repository_graph(manifest, evidence_store)
+                normalized = _confined_relative(root, finding.evidence.file_path)
+                if normalized not in authorized_paths:
+                    raise ValueError("scanner finding is not authorized by the repository manifest")
+        built_graph = _clone_graph(graph) if graph is not None else build_repository_graph(manifest, frozen_store)
         for node in built_graph.get_nodes():
             if node.file_path:
-                _confined_relative(root, node.file_path)
+                normalized = _confined_relative(root, node.file_path)
+                if normalized not in authorized_paths:
+                    raise ValueError("graph node is not authorized by the repository manifest")
         for edge in built_graph.get_edges():
             call_site_file = (edge.metadata or {}).get("call_site_file")
             if call_site_file:
-                _confined_relative(root, str(call_site_file))
+                normalized = _confined_relative(root, str(call_site_file))
+                if normalized not in authorized_paths:
+                    raise ValueError("graph call site is not authorized by the repository manifest")
         chunk_values = tuple(chunks) if chunks is not None else None
         for chunk in chunk_values or ():
             normalized = _confined_relative(root, chunk.file_path)
             if normalized not in authorized_paths:
                 raise ValueError("semantic chunk is not authorized by the repository manifest")
-        program = semantic_program
+        program = semantic_program.model_copy(deep=True) if semantic_program is not None else None
         if program is None and chunk_values is not None:
             program = build_semantic_program(manifest, chunk_values)
         if program is not None:
@@ -123,23 +203,55 @@ class RepositorySnapshot:
                             normalized = _confined_relative(root, file_path)
                             if normalized not in authorized_paths:
                                 raise ValueError("semantic fact is not authorized by the repository manifest")
+                        commit_sha = getattr(fact, "commit_sha", snapshot_id)
+                        if commit_sha != snapshot_id:
+                            raise ValueError("semantic fact snapshot identity does not match the repository snapshot")
         symbol_index: dict[str, tuple[str, ParsedSymbol]] = {}
         for entry in manifest.files:
             path = entry.path.replace("\\", "/")
             for symbol in entry.symbols:
                 identity = f"symbol:{path}:{symbol.kind.value}:{symbol.name}:{symbol.start_line}"
                 symbol_index[identity] = (path, symbol)
+        versions = {str(key): str(value) for key, value in sorted((component_versions or {}).items())}
+        artifact_payload = _snapshot_artifact_payload(
+            snapshot_id, manifest, frozen_store, built_graph, program, versions
+        )
         return cls(
             snapshot_id=snapshot_id,
             repository_root=root,
             manifest=manifest,
-            evidence_store=evidence_store,
+            evidence_store=frozen_store,
             graph=built_graph,
             semantic_program=program,
-            component_versions=MappingProxyType(dict(component_versions or {})),
+            component_versions=MappingProxyType(versions),
             symbol_index=MappingProxyType(symbol_index),
+            manifest_paths=frozenset(authorized_paths),
+            artifact_digest=_digest_payload(artifact_payload),
+            admission_limits=registration_limits,
             initialization_duration_ms=(time.perf_counter() - started) * 1000.0,
         )
+
+    def detached_copy(self) -> "RepositorySnapshot":
+        """Copy all caller-owned mutable artifacts before registry registration."""
+        return RepositorySnapshot.create(
+            snapshot_id=self.snapshot_id,
+            repository_root=self.repository_root,
+            evidence_store=self.evidence_store,
+            graph=self.graph,
+            semantic_program=self.semantic_program,
+            component_versions=self.component_versions,
+            limits=self.admission_limits,
+        )
+
+    def integrity_valid(self) -> bool:
+        return _digest_payload(_snapshot_artifact_payload(
+            self.snapshot_id,
+            self.manifest,
+            self.evidence_store,
+            self.graph,
+            self.semantic_program,
+            self.component_versions,
+        )) == self.artifact_digest
 
     @property
     def manifest_complete(self) -> bool:
@@ -165,9 +277,7 @@ class RepositorySnapshot:
             raise PathTraversalError("repository path is outside the authorized snapshot") from exc
         if normalized in {"", "."}:
             raise PathTraversalError("a repository file path is required")
-        if require_manifest_entry and normalized not in {
-            entry.path.replace("\\", "/") for entry in self.manifest.files
-        }:
+        if require_manifest_entry and normalized not in self.manifest_paths:
             raise FileNotFoundError(normalized)
         return normalized
 
@@ -185,34 +295,86 @@ class AgentToolContext:
     default_snapshot_id: str
     diffs: Mapping[tuple[str, str], StructuralDiffResult] = field(default_factory=dict)
     limits: ToolResourceLimits = field(default_factory=ToolResourceLimits)
+    diff_digests: Mapping[tuple[str, str], str] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
-        snapshots = MappingProxyType(dict(self.snapshots))
-        diffs = MappingProxyType(dict(self.diffs))
+        snapshots = MappingProxyType({
+            key: snapshot.detached_copy() for key, snapshot in sorted(self.snapshots.items())
+        })
+        diff_values = {
+            key: diff.model_copy(deep=True) for key, diff in sorted(self.diffs.items())
+        }
         if not snapshots:
             raise ValueError("at least one repository snapshot is required")
+        if any(key != snapshot.snapshot_id for key, snapshot in snapshots.items()):
+            raise ValueError("snapshot registry key does not match snapshot identity")
         if self.default_snapshot_id not in snapshots:
             raise ValueError("default snapshot is not registered")
-        for (base_id, head_id), diff in diffs.items():
+        for (base_id, head_id), diff in diff_values.items():
             if base_id not in snapshots or head_id not in snapshots:
                 raise ValueError("precomputed diff references an unregistered snapshot")
             if diff.base_commit_sha != base_id or diff.head_commit_sha != head_id:
                 raise ValueError("precomputed diff identity does not match its registered snapshots")
             if diff.repository_url != snapshots[base_id].manifest.repository_url:
                 raise ValueError("precomputed diff repository does not match its registered snapshots")
-            paths = [
-                *(item.file_path for item in diff.changed_files),
-                *(item.old_path for item in diff.changed_files if item.old_path),
-                *(item.file_path for item in diff.changed_symbols),
-                *(item.manifest_file for item in diff.dependency_deltas),
-                *(item.file_path for item in diff.config_deltas),
-                *(item.file_path for item in diff.route_deltas),
-                *(item.file_path for item in diff.schema_deltas),
-            ]
-            for value in paths:
-                snapshots[head_id].normalize_path(value, require_manifest_entry=False)
+            base_paths = snapshots[base_id].manifest_paths
+            head_paths = snapshots[head_id].manifest_paths
+
+            def require(value: str, *, base: bool, head: bool) -> None:
+                normalized = snapshots[head_id if head else base_id].normalize_path(
+                    value, require_manifest_entry=False
+                )
+                if base and normalized not in base_paths:
+                    raise ValueError("precomputed diff path is not authorized by the base manifest")
+                if head and normalized not in head_paths:
+                    raise ValueError("precomputed diff path is not authorized by the head manifest")
+
+            for value in diff.added_files:
+                require(value, base=False, head=True)
+            for value in diff.deleted_files:
+                require(value, base=True, head=False)
+            for value in diff.modified_files:
+                require(value, base=True, head=True)
+            for pair in diff.renamed_files:
+                if len(pair) != 2:
+                    raise ValueError("renamed precomputed diff path must contain old and new paths")
+                require(pair[0], base=True, head=False)
+                require(pair[1], base=False, head=True)
+
+            for item in diff.changed_files:
+                kind = item.change_type.value
+                if kind == "ADDED":
+                    require(item.file_path, base=False, head=True)
+                elif kind == "DELETED":
+                    require(item.file_path, base=True, head=False)
+                elif kind == "RENAMED":
+                    if not item.old_path:
+                        raise ValueError("renamed precomputed diff fact requires an old path")
+                    require(item.old_path, base=True, head=False)
+                    require(item.file_path, base=False, head=True)
+                else:
+                    require(item.file_path, base=True, head=True)
+            for item in diff.changed_symbols:
+                kind = item.change_type.value
+                require(item.file_path, base=kind != "ADDED", head=kind != "DELETED")
+            for collection, path_attr, change_attr in (
+                (diff.dependency_deltas, "manifest_file", "change_type"),
+                (diff.config_deltas, "file_path", "change_type"),
+                (diff.route_deltas, "file_path", "change_type"),
+                (diff.schema_deltas, "file_path", "change_type"),
+            ):
+                for item in collection:
+                    kind = str(getattr(item, change_attr)).upper()
+                    require(
+                        str(getattr(item, path_attr)),
+                        base=not kind.startswith("ADD"),
+                        head=not (kind.startswith("REMOV") or kind.startswith("DELET")),
+                    )
+        diffs = MappingProxyType(diff_values)
+        diff_digests = MappingProxyType({key: _diff_digest(value) for key, value in diff_values.items()})
         object.__setattr__(self, "snapshots", snapshots)
         object.__setattr__(self, "diffs", diffs)
+        object.__setattr__(self, "diff_digests", diff_digests)
 
     @classmethod
     def from_snapshot(
@@ -235,7 +397,11 @@ class AgentToolContext:
             raise KeyError("repository snapshot is not registered") from exc
 
     def get_diff(self, base_snapshot_id: str, head_snapshot_id: str) -> StructuralDiffResult | None:
-        return self.diffs.get((base_snapshot_id, head_snapshot_id))
+        key = (base_snapshot_id, head_snapshot_id)
+        value = self.diffs.get(key)
+        if value is not None and _diff_digest(value) != self.diff_digests[key]:
+            raise ValueError("registered precomputed diff integrity check failed")
+        return value
 
 
 __all__ = ["AgentToolContext", "RepositorySnapshot", "ToolResourceLimits"]

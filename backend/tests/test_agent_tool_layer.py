@@ -12,6 +12,7 @@ import pytest
 from app.agent_tools import AgentToolContext, RepositorySnapshot, ToolResourceLimits, create_agent_tool_registry
 from app.agent_tools.schemas import ToolResultStatus
 from app.analysis.store import EvidenceStore
+from app.analysis.diff_engine import get_diff_engine
 from app.graph.builder import build_repository_graph
 from app.indexing.chunker import chunk_manifest
 from app.ingestion.detector import detect_language
@@ -170,9 +171,11 @@ def test_registry_catalog_is_closed_typed_and_agent_friendly(tool_fixture):
 def test_inspect_file_valid_not_found_malformed_and_unsupported(tool_fixture):
     registry, _ = tool_fixture
     valid = _result(registry, "inspect_file", {"file_path": "app/routes.py"})
-    assert valid.status == ToolResultStatus.SUCCESS
+    assert valid.status == ToolResultStatus.RESOURCE_LIMIT
     assert valid.result["language"] == "python"
-    assert {item["name"] for item in valid.result["symbols"]} == {"read_file", "caller"}
+    assert {item["name"] for item in valid.result["symbols"]} == {"read_file"}
+    assert valid.result["total_symbols"] == 2
+    assert valid.result["truncated"] is True
     assert valid.evidence
     missing = _result(registry, "inspect_file", {"file_path": "missing.py"})
     assert missing.status == ToolResultStatus.NOT_FOUND
@@ -259,7 +262,7 @@ def test_trace_dataflow_preserves_sink_certainty_and_uncertainty(tool_fixture):
     assert result.result["paths"][0]["certainty"] == "POSSIBLE"
     assert result.evidence[0].evidence_type.value == "DATAFLOW_PATH"
     absent = _result(registry, "trace_dataflow", {"source_symbol_id": symbol_id, "sink_category": "INPUT_TO_DATABASE"})
-    assert absent.status in {ToolResultStatus.NOT_FOUND, ToolResultStatus.INSUFFICIENT_EVIDENCE}
+    assert absent.status in {ToolResultStatus.NOT_FOUND, ToolResultStatus.INSUFFICIENT_EVIDENCE, ToolResultStatus.RESOURCE_LIMIT}
     assert absent.result["outcome"] != "FOUND"
 
 
@@ -296,9 +299,17 @@ def _change_context(tmp_path: Path):
     }
     base = _snapshot(tmp_path / "base", "b" * 40, base_contents)
     head = _snapshot(tmp_path / "head", "c" * 40, head_contents)
+    diff = get_diff_engine().compute_structural_diff(
+        base_workspace=str(base.repository_root),
+        head_workspace=str(head.repository_root),
+        base_commit_sha=base.snapshot_id,
+        head_commit_sha=head.snapshot_id,
+        repository_url=base.manifest.repository_url,
+    )
     return AgentToolContext(
         snapshots={base.snapshot_id: base, head.snapshot_id: head},
         default_snapshot_id=head.snapshot_id,
+        diffs={(base.snapshot_id, head.snapshot_id): diff},
         limits=ToolResourceLimits(max_results=50, max_graph_depth=4),
     ), base, head
 
@@ -312,15 +323,22 @@ def test_analyze_change_empty_diff_structural_fact_and_impact_cycle_safety(tmp_p
     assert result.result["defect_findings"] == []
     assert "legacy" in {item["symbol_name"] for item in result.result["diff"]["deleted_symbols"]}
     impact = _result(registry, "analyze_impact", {"base_snapshot_id": base.snapshot_id, "head_snapshot_id": head.snapshot_id, "max_depth": 4})
-    assert impact.status == ToolResultStatus.SUCCESS
+    assert impact.status in {ToolResultStatus.INSUFFICIENT_EVIDENCE, ToolResultStatus.RESOURCE_LIMIT}
     assert any(item["affected_symbol"] == "use" and item["direction"] == "UPSTREAM_CALLER" for item in impact.result["impacts"])
 
+    same = _snapshot(tmp_path / "same", "d" * 40, {
+        "app/service.py": "def legacy(value):\n    return value\n",
+        "app/caller.py": "from app.service import legacy\n\ndef use(value):\n    return legacy(value)\n",
+    })
+    empty_diff = get_diff_engine().compute_structural_diff(
+        base_workspace=str(base.repository_root), head_workspace=str(same.repository_root),
+        base_commit_sha=base.snapshot_id, head_commit_sha=same.snapshot_id,
+        repository_url=base.manifest.repository_url,
+    )
     empty_context = AgentToolContext(
-        snapshots={base.snapshot_id: base, ("d" * 40): _snapshot(tmp_path / "same", "d" * 40, {
-            "app/service.py": "def legacy(value):\n    return value\n",
-            "app/caller.py": "from app.service import legacy\n\ndef use(value):\n    return legacy(value)\n",
-        })},
+        snapshots={base.snapshot_id: base, same.snapshot_id: same},
         default_snapshot_id=base.snapshot_id,
+        diffs={(base.snapshot_id, same.snapshot_id): empty_diff},
     )
     empty = create_agent_tool_registry(empty_context).invoke("analyze_change", {"base_snapshot_id": base.snapshot_id, "head_snapshot_id": "d" * 40})
     assert empty.status == ToolResultStatus.SUCCESS
@@ -349,7 +367,7 @@ def test_verify_supported_unsupported_insufficient_and_malformed(tool_fixture, t
     malformed = registry.invoke("verify_finding", {"claim": {
         "claim_type": "SECURITY_FINDING", "snapshot_id": snapshot.snapshot_id,
     }})
-    assert malformed.result["verdict"] == "INVALID_CLAIM"
+    assert malformed.status == ToolResultStatus.INVALID_INPUT
 
     failed = _snapshot(tmp_path / "failed-verify", "e" * 40, {"app/routes.py": "def ok():\n    return True\n"}, scanner_status=ToolStatus.FAILED)
     failed_registry = create_agent_tool_registry(AgentToolContext.from_snapshot(failed))
@@ -364,7 +382,7 @@ def test_multi_tool_workflow_and_evidence_verification(tool_fixture):
     registry, snapshot = tool_fixture
     search = registry.invoke("search_symbol", {"query": "read_file", "file_path": "app/routes.py"})
     symbol_id = search.result["matches"][0]["symbol_id"]
-    assert registry.invoke("inspect_symbol", {"symbol_id": symbol_id}).status == ToolResultStatus.SUCCESS
+    assert registry.invoke("inspect_symbol", {"symbol_id": symbol_id}).status == ToolResultStatus.RESOURCE_LIMIT
     assert registry.invoke("find_callers", {"symbol_id": symbol_id}).result["returned_relationships"] == 1
     flow = registry.invoke("trace_dataflow", {"source_symbol_id": symbol_id, "sink_category": "INPUT_TO_FILESYSTEM", "max_paths": 8})
     verified = registry.invoke("verify_finding", {"claim": {

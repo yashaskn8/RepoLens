@@ -15,7 +15,7 @@ Adapters only validate, scope, invoke, normalize, bound, and package output from
 - structural diff engine;
 - graph-aware impact engine.
 
-The tool contract version is `1.0.0`. Tool inputs and outputs use closed Pydantic models and JSON-compatible values so a later MCP adapter can project the schemas without changing analyzer semantics.
+The tool contract version is `1.1.0`. Tool inputs and outputs use closed Pydantic models and JSON-compatible values so a later MCP adapter can project the schemas without changing analyzer semantics. Snapshot artifacts are detached and integrity-digested at registration; caller-declared component versions are explicitly marked `DECLARED`, not cryptographically verified.
 
 ## Tool catalog
 
@@ -52,13 +52,13 @@ Evidence records identify their type, production component, repository-relative 
 
 ## Verification claims
 
-`verify_finding` supports exact `SECURITY_FINDING`, `DATAFLOW`, `CALL_RELATIONSHIP`, and `STRUCTURAL_CHANGE` claims. A claim is `SUPPORTED` only when its coordinates match a production fact and at least one supplied evidence reference resolves to that fact. Otherwise the verdict is `UNSUPPORTED`, `INSUFFICIENT_EVIDENCE`, or `INVALID_CLAIM`. It never reads benchmark annotations or ground truth.
+`verify_finding` uses four closed, discriminated claim schemas: exact `SECURITY_FINDING`, `DATAFLOW`, `CALL_RELATIONSHIP`, and `STRUCTURAL_CHANGE`. Every claim requires evidence. A claim is `SUPPORTED` only when its coordinates match a production fact and every supplied evidence reference resolves to that exact fact in the authorized snapshot context. Foreign, stale, fake, or unrelated references cannot be silently ignored. Otherwise the verdict is `UNSUPPORTED`, `INSUFFICIENT_EVIDENCE`, or `INVALID_CLAIM`. It never reads benchmark annotations or ground truth.
 
 ## Security and limits
 
 All tools are read-only. Repository content is untrusted data and is never imported, executed, interpreted as instructions, installed, sent to a network, or passed to a shell. The registry cannot dispatch arbitrary Python names. Paths pass through RepoLens path confinement, which rejects traversal, absolute paths, drive escapes, UNC paths, sibling-prefix attacks, and symlink escapes. Source payloads are not returned by file inspection, and agent-visible strings are secret-redacted and bounded.
 
-Context and request limits bound file-scope searches, result counts, graph depth, flow paths, flow states, and alias propagation. A reached limit is signalled as `RESOURCE_LIMIT`; it is not silently reported as exhaustive.
+Context and request limits bound manifest registration, file-size/file-count admission, file and symbol result materialization, graph result materialization, flow paths/nodes/depth/aliases, scanner results, structural facts, and impact traversal. A reached computation or result limit is signalled as `RESOURCE_LIMIT`; configured clamping is visible in coverage and is never silently reported as exhaustive. Registered scanner, graph, semantic, and diff artifacts must reference manifest-authorized paths.
 
 ## Example
 
@@ -79,4 +79,4 @@ symbol_id = matches.result["matches"][0]["symbol_id"]
 callers = registry.invoke("find_callers", {"symbol_id": symbol_id})
 ```
 
-For change analysis, register both authorized snapshots and optionally a precomputed `StructuralDiffResult`. Direct tool-side diff computation is allowed only for materialized snapshots without `.git`; this guarantees the tool layer never invokes Git or any subprocess.
+For change and impact analysis, register both authorized snapshots and a trusted precomputed `StructuralDiffResult` bound to their snapshot IDs. The Phase-A boundary deliberately does not rescan mutable workspaces or invoke Git/subprocesses, so identical snapshot IDs cannot silently acquire different live-file results. Missing or stale diff artifacts return explicit insufficient/integrity errors.

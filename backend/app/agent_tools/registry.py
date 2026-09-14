@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from datetime import date
+from enum import Enum
+from pathlib import Path
 from uuid import uuid4
 
 from pydantic import BaseModel, ValidationError
+from app.security.redaction import redact_secrets
 
 from app.agent_tools.context import AgentToolContext
 from app.agent_tools.schemas import (
@@ -57,6 +62,21 @@ from app.agent_tools.tools import (
 )
 
 logger = logging.getLogger(__name__)
+_SENSITIVE_DETAIL_KEYS = ("secret", "token", "password", "credential", "api_key", "private_key")
+
+
+def _safe_text(value: str, limit: int = 512) -> str:
+    cleaned = redact_secrets(value)
+    if len(cleaned) >= 3 and cleaned[1] == ":" and cleaned[2] in {"/", "\\"}:
+        return "[redacted absolute path]"
+    if cleaned.startswith("\\\\"):
+        return "[redacted absolute path]"
+    return cleaned[:limit]
+
+
+def _is_sensitive_detail_key(value: object) -> bool:
+    normalized = str(value).lower().replace("-", "_")
+    return any(marker in normalized for marker in _SENSITIVE_DETAIL_KEYS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +105,33 @@ def _metadata(
         timeout_class=timeout,
         evidence_required=True,
     )
+
+
+def _safe_detail(value: object, depth: int = 0) -> object:
+    if depth > 4:
+        return "[truncated: max detail depth]"
+    if value is None or isinstance(value, (bool, int, str)):
+        return value if not isinstance(value, str) else _safe_text(value)
+    if isinstance(value, float):
+        return value if math.isfinite(value) else "[non-finite float]"
+    if isinstance(value, Path):
+        return "[redacted absolute path]" if value.is_absolute() else value.as_posix()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, Enum):
+        return _safe_detail(value.value, depth + 1)
+    if isinstance(value, Mapping):
+        return {
+            _safe_text(str(key), 128): (
+                "[REDACTED]" if _is_sensitive_detail_key(key) else _safe_detail(item, depth + 1)
+            )
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))[:32]
+        }
+    if isinstance(value, set):
+        return [_safe_detail(item, depth + 1) for item in sorted(value, key=str)[:32]]
+    if isinstance(value, (list, tuple)):
+        return [_safe_detail(item, depth + 1) for item in list(value)[:32]]
+    return f"[unsupported detail type: {type(value).__name__}]"
 
 
 _SPECS = (
@@ -239,19 +286,20 @@ class AgentToolRegistry:
         invocation_id = str(uuid4())
         started_at = datetime.now(timezone.utc).isoformat()
         started = time.perf_counter()
-        spec = self._specs.get(name)
+        safe_name = name if isinstance(name, str) else "unknown"
+        spec = self._specs.get(safe_name)
         if spec is None:
             result = ToolInvocationResult(
-                tool=name or "unknown",
+                tool=safe_name[:128] or "unknown",
                 tool_version=AGENT_TOOL_VERSION,
                 status=ToolResultStatus.UNSUPPORTED,
                 errors=[ToolError(code="UNKNOWN_TOOL", message="The requested tool is not registered.")],
             )
-            self._log(invocation_id, started_at, started, result, 0)
+            self._log(invocation_id, started_at, started, result, 0, None)
             return result
         if not isinstance(arguments, Mapping):
             result = self._error_result(spec, ToolResultStatus.INVALID_INPUT, "ARGUMENTS_NOT_OBJECT", "Tool arguments must be a JSON object.")
-            self._log(invocation_id, started_at, started, result, 0)
+            self._log(invocation_id, started_at, started, result, 0, None)
             return result
         try:
             parsed = spec.input_model.model_validate(dict(arguments))
@@ -267,8 +315,16 @@ class AgentToolRegistry:
                 "Tool arguments do not match the declared input schema.",
                 validation_errors=details,
             )
-            self._log(invocation_id, started_at, started, result, 0)
+            self._log(invocation_id, started_at, started, result, 0, None)
             return result
+        observability_snapshot = next(
+            (
+                str(parsed_value)
+                for field_name in ("snapshot_id", "head_snapshot_id", "base_snapshot_id")
+                if (parsed_value := getattr(parsed, field_name, None))
+            ),
+            None,
+        )
         try:
             execution = spec.handler(parsed, self._context)
             output = None
@@ -279,12 +335,18 @@ class AgentToolRegistry:
             if execution.snapshot is not None:
                 provenance = ToolProvenance(
                     production_components=list(execution.components),
-                    component_versions=dict(execution.snapshot.component_versions),
+                    component_versions={
+                        _safe_text(str(key), 128): (
+                            "[REDACTED]" if _is_sensitive_detail_key(key) else _safe_text(str(value), 256)
+                        )
+                        for key, value in execution.snapshot.component_versions.items()
+                    },
+                    snapshot_artifact_digest=execution.snapshot.artifact_digest,
                     repository_snapshot=execution.snapshot.snapshot_id,
                     analysis_stage=execution.stage,
                 )
             result = ToolInvocationResult(
-                tool=name,
+                tool=safe_name,
                 tool_version=spec.metadata.tool_version,
                 status=execution.status,
                 result=output,
@@ -305,7 +367,7 @@ class AgentToolRegistry:
                 "TOOL_EXECUTION_FAILED",
                 "The deterministic tool failed internally.",
             )
-        self._log(invocation_id, started_at, started, result, self._result_count(result))
+        self._log(invocation_id, started_at, started, result, self._result_count(result), observability_snapshot)
         return result
 
     @staticmethod
@@ -320,7 +382,7 @@ class AgentToolRegistry:
             tool=spec.metadata.tool_name,
             tool_version=spec.metadata.tool_version,
             status=status,
-            errors=[ToolError(code=code, message=message, details=dict(details))],
+            errors=[ToolError(code=code, message=message, details=_safe_detail(details))],
         )
 
     @staticmethod
@@ -333,7 +395,7 @@ class AgentToolRegistry:
         return 1 if payload else 0
 
     @staticmethod
-    def _log(invocation_id: str, started_at: str, started: float, result: ToolInvocationResult, count: int) -> None:
+    def _log(invocation_id: str, started_at: str, started: float, result: ToolInvocationResult, count: int, snapshot_id: str | None) -> None:
         logger.info(
             "agent_tool_invocation",
             extra={
@@ -344,7 +406,7 @@ class AgentToolRegistry:
                 "status": result.status.value,
                 "result_count": count,
                 "error_code": result.errors[0].code if result.errors else None,
-                "repository_snapshot": result.provenance.repository_snapshot if result.provenance else None,
+                "repository_snapshot": result.provenance.repository_snapshot if result.provenance else snapshot_id,
             },
         )
 
