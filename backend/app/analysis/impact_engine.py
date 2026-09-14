@@ -164,6 +164,35 @@ class ChangeImpactEngine:
                             # Cycle detected!
                             continue
 
+                        # If head_graph exists and caller's file was modified in head,
+                        # check if the caller was refactored to no longer call the deleted symbol
+                        mod_files = set(diff_result.modified_files) | {cf.file_path for cf in getattr(diff_result, "changed_files", [])}
+                        caller_f = caller_node.file_path.replace("\\", "/")
+                        caller_f_raw = caller_node.file_path
+                        if head_graph and (caller_f in mod_files or caller_f_raw in mod_files):
+                            head_file_node = head_graph.get_node(f"file:{caller_node.file_path}") or head_graph.get_node(f"file:{caller_f}")
+                            still_calls = False
+                            if head_file_node:
+                                unresolved = head_file_node.metadata.get("unresolved_calls", [])
+                                for uc in unresolved:
+                                    if uc.get("callee_name") == del_sym.symbol_name:
+                                        uc_caller = uc.get("caller_id", "")
+                                        if not uc_caller or caller_node.label in uc_caller:
+                                            still_calls = True
+                                            break
+                            if not still_calls:
+                                for h_node in head_graph.get_nodes():
+                                    if h_node.file_path == caller_node.file_path and h_node.label == caller_node.label:
+                                        h_nid = h_node.id
+                                        for out_edge in head_graph.get_outgoing_edges(h_nid):
+                                            tgt = head_graph.get_node(out_edge.target)
+                                            if tgt and tgt.label == del_sym.symbol_name:
+                                                still_calls = True
+                                                break
+                            if not still_calls:
+                                # Safe synchronous refactor in head branch
+                                continue
+
                         is_security = _is_security_sensitive(del_sym.file_path, del_sym.symbol_name)
                         if depth == 1:
                             sev = Severity.CRITICAL if is_security else Severity.HIGH
@@ -223,7 +252,9 @@ class ChangeImpactEngine:
         # 2. Trace Signature-Changed Symbols & Direct / Transitive Callers
         # ---------------------------------------------------------------------
         for mod_sym in diff_result.modified_symbols:
-            if mod_sym.change_type != SymbolChangeType.SIGNATURE_CHANGED:
+            if mod_sym.change_type not in (SymbolChangeType.SIGNATURE_CHANGED, SymbolChangeType.MODIFIED):
+                continue
+            if mod_sym.change_type == SymbolChangeType.SIGNATURE_CHANGED and mod_sym.evidence.get("is_breaking") is False:
                 continue
 
             clean_f = mod_sym.file_path.replace("\\", "/")
@@ -256,21 +287,36 @@ class ChangeImpactEngine:
                             continue
 
                         is_security = _is_security_sensitive(mod_sym.file_path, mod_sym.symbol_name)
+                        is_sig = mod_sym.change_type == SymbolChangeType.SIGNATURE_CHANGED
+                        change_name = "signature change" if is_sig else "modification"
+
                         if depth == 1:
-                            sev = Severity.HIGH if is_security else Severity.MEDIUM
-                            title = f"Direct caller '{caller_node.label}' affected by signature change in '{mod_sym.symbol_name}'"
+                            sev = Severity.HIGH if is_security else (Severity.MEDIUM if is_sig else Severity.LOW)
+                            title = f"Direct caller '{caller_node.label}' affected by {change_name} in '{mod_sym.symbol_name}'"
                             desc = (
                                 f"Direct caller '{caller_node.label}' in {caller_node.file_path} invokes "
-                                f"'{mod_sym.symbol_name}' whose parameter list or return type changed: "
-                                f"{mod_sym.evidence.get('diff', '')}"
+                                f"'{mod_sym.symbol_name}' whose implementation or signature changed."
                             )
                         else:
                             sev = Severity.LOW
-                            title = f"Transitive caller '{caller_node.label}' affected by signature change in '{mod_sym.symbol_name}' ({depth} hops)"
+                            title = f"Transitive caller '{caller_node.label}' affected by {change_name} in '{mod_sym.symbol_name}' ({depth} hops)"
                             desc = (
                                 f"Transitive caller '{caller_node.label}' in {caller_node.file_path} at depth {depth} "
                                 f"depends on '{mod_sym.symbol_name}'."
                             )
+
+                        payload = {
+                            "edge_type": EdgeKind.CALLS.value,
+                            "depth": depth,
+                            "caller_file": caller_node.file_path,
+                            "caller_symbol": caller_node.label,
+                            "callee_file": mod_sym.file_path,
+                            "callee_symbol": mod_sym.symbol_name,
+                            "call_path": path + [caller_id],
+                        }
+                        if is_sig:
+                            payload["signature_diff"] = mod_sym.evidence.get("diff", "")
+                            payload["is_breaking"] = mod_sym.evidence.get("is_breaking", True)
 
                         impacts.append(
                             ChangeImpact(
@@ -284,16 +330,7 @@ class ChangeImpactEngine:
                                 source_symbol=mod_sym.symbol_name,
                                 affected_file=caller_node.file_path,
                                 affected_symbol=caller_node.label,
-                                evidence_payload={
-                                    "edge_type": EdgeKind.CALLS.value,
-                                    "depth": depth,
-                                    "caller_file": caller_node.file_path,
-                                    "caller_symbol": caller_node.label,
-                                    "callee_file": mod_sym.file_path,
-                                    "callee_symbol": mod_sym.symbol_name,
-                                    "call_path": path + [caller_id],
-                                    "signature_diff": mod_sym.evidence.get("diff", ""),
-                                },
+                                evidence_payload=payload,
                                 confidence=1.0,
                                 verification_status=ImpactVerificationStatus.FACT,
                                 created_at=datetime.now(timezone.utc),

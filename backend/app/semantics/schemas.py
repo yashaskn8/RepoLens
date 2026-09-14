@@ -50,6 +50,8 @@ class SemanticCallSite(SemanticFact):
 class SemanticAssignment(SemanticFact):
     target: str
     source_names: list[str] = Field(default_factory=list, max_length=32)
+    is_call: bool = False
+    callee: str | None = None
 
 
 class SemanticReturn(SemanticFact):

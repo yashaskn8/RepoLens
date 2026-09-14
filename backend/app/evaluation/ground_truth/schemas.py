@@ -88,6 +88,55 @@ class ExecutionStatus(str, Enum):
     FAILED = "FAILED"
 
 
+class ExecutionScope(str, Enum):
+    """Explicit scope classification for benchmark executions."""
+
+    OFFICIAL_DEV = "OFFICIAL_DEV"
+    OFFICIAL_PUBLIC_EVAL = "OFFICIAL_PUBLIC_EVAL"
+    OFFICIAL_FULL_DIAGNOSTIC = "OFFICIAL_FULL_DIAGNOSTIC"
+    CUSTOM = "CUSTOM"
+
+
+class ContractChangeSemantic(str, Enum):
+    """Semantic classification of contract compatibility."""
+
+    BREAKING = "BREAKING"
+    NON_BREAKING = "NON_BREAKING"
+    CONDITIONALLY_BREAKING = "CONDITIONALLY_BREAKING"
+    UNKNOWN = "UNKNOWN"
+
+
+class StructuredImpactMetrics(BaseModel):
+    """Graph-structured impact evaluation metrics comparing affected nodes and edges."""
+
+    impact_node_tp: int = 0
+    impact_node_fp: int = 0
+    impact_node_fn: int = 0
+    impact_node_precision: Optional[float] = None
+    impact_node_recall: Optional[float] = None
+    impact_node_f1: Optional[float] = None
+
+    impact_edge_tp: int = 0
+    impact_edge_fp: int = 0
+    impact_edge_fn: int = 0
+    impact_edge_precision: Optional[float] = None
+    impact_edge_recall: Optional[float] = None
+    impact_edge_f1: Optional[float] = None
+
+
+class BenchmarkContract(BaseModel):
+    """Cryptographic binding contract identifying dataset, evaluator, and execution parameters."""
+
+    benchmark_version: str = "1.0.1"
+    dataset_canonical_hash: str = "1611efec9c34421b19d862427241fde5061170d7268602103fd5585e66b317bf"
+    catalog_hash: str = "835c22b4f9355738413b0c390c29e6f78b4b082c6a76151161388256b3d1b1ab"
+    matcher_version: str = "1.0.1"
+    metrics_version: str = "1.0.1"
+    git_commit_sha: str = "aede4587ca195a7b072210589b1a3daa3b4d6778"
+    execution_scope: ExecutionScope
+    benchmark_contract_id: str
+
+
 class FindingClaimSpec(BaseModel):
     """Explicit structural specification for an expected ground-truth claim."""
 

@@ -37,8 +37,10 @@ from app.evaluation.ground_truth.metrics import (
 )
 from app.evaluation.ground_truth.schemas import (
     BenchmarkCase,
+    BenchmarkContract,
     BenchmarkSplit,
     EvaluationStage,
+    ExecutionScope,
     ExecutionStatus,
     TargetPipeline,
 )
@@ -51,6 +53,13 @@ from app.specialist_candidates import (
     build_bug_candidates,
     build_security_flow_candidates,
 )
+
+# Neutral repository URL and commit hashes for sandbox analysis.
+# These must not contain benchmark-specific markers to avoid environment leakage.
+_NEUTRAL_REPO_URL = "https://github.com/workspace/repo"
+_NEUTRAL_NULL_COMMIT = "0000000000000000000000000000000000000000"
+_NEUTRAL_BASE_COMMIT = "base000000000000000000000000000000000000"
+_NEUTRAL_HEAD_COMMIT = "head000000000000000000000000000000000000"
 
 
 def _get_git_commit_sha() -> str:
@@ -72,7 +81,7 @@ def _get_git_commit_sha() -> str:
 class BenchmarkRunReport(BaseModel):
     """Complete machine-readable artifact of a benchmark evaluation run."""
 
-    benchmark_version: str = "1.0.0"
+    benchmark_version: str = "1.0.1"
     dataset_version: str = "1.0.0"
     canonical_dataset_hash: str
     git_commit_sha: str
@@ -82,6 +91,10 @@ class BenchmarkRunReport(BaseModel):
     duration_seconds: float
     mode: str = "DETERMINISTIC_ONLY"
     live_model_provider: str = "MODEL_NOT_EXECUTED"
+
+    # Execution scope and contract
+    execution_scope: ExecutionScope
+    benchmark_contract: Optional[BenchmarkContract] = None
 
     # Execution status gating
     execution_status: ExecutionStatus
@@ -122,8 +135,8 @@ class BenchmarkRunner:
             # 1. Manifest
             manifest = build_manifest(
                 sandbox_dir,
-                repository_url="local://benchmark",
-                commit_hash="0000000000000000000000000000000000000000",
+                repository_url=_NEUTRAL_REPO_URL,
+                commit_hash=_NEUTRAL_NULL_COMMIT,
             )
 
             emitted: List[EvaluatedFinding] = []
@@ -135,10 +148,25 @@ class BenchmarkRunner:
                     rule_id = "CLIENT_CONTROLLED_AUTH_HEADER" if "client-controlled" in f.rule_id else (
                         "HARDCODED_CREDENTIAL" if "hardcoded" in f.rule_id else f.rule_id
                     )
+                    sym = None
+                    if manifest and f.evidence.file_path and f.evidence.start_line:
+                        norm_ev_f = f.evidence.file_path.replace("\\", "/").strip().lstrip("/").lower()
+                        for fe in manifest.files:
+                            if fe.path.replace("\\", "/").strip().lstrip("/").lower() == norm_ev_f:
+                                for s in fe.symbols:
+                                    if s.start_line <= f.evidence.start_line <= s.end_line:
+                                        kind_str = getattr(s.kind, "value", str(s.kind))
+                                        if kind_str in ("FUNCTION", "METHOD"):
+                                            sym = s.name
+                                            break
+                                        elif kind_str == "FASTAPI_ROUTE" and s.details.get("handler"):
+                                            sym = s.details["handler"]
+                                            break
                     emitted.append(
                         EvaluatedFinding(
                             rule_id=rule_id,
                             file_path=f.evidence.file_path,
+                            symbol=sym,
                             start_line=f.evidence.start_line,
                             end_line=f.evidence.end_line,
                             stage=EvaluationStage.STATIC_FINDING,
@@ -155,7 +183,9 @@ class BenchmarkRunner:
                 # Security interprocedural flows
                 flows = analyze_security_flows(program)
                 for flow in flows:
-                    sink_kind = getattr(flow.sink, "kind", "")
+                    if flow.sanitizers or any(t.startswith("OPAQUE_CALL:") for t in flow.transformations):
+                        continue
+                    sink_kind = getattr(flow.sink, "sink_kind", getattr(flow.sink, "kind", ""))
                     if sink_kind == "INPUT_TO_DATABASE":
                         rule_id = "INTERPROCEDURAL_FLOW_SQLI"
                     elif sink_kind == "INPUT_TO_COMMAND":
@@ -248,9 +278,9 @@ class BenchmarkRunner:
             diff_result = diff_engine.compute_structural_diff(
                 base_sandbox,
                 head_sandbox,
-                base_commit_sha="base000000000000000000000000000000000000",
-                head_commit_sha="head000000000000000000000000000000000000",
-                repository_url="local://benchmark",
+                base_commit_sha=_NEUTRAL_BASE_COMMIT,
+                head_commit_sha=_NEUTRAL_HEAD_COMMIT,
+                repository_url=_NEUTRAL_REPO_URL,
             )
 
             emitted: List[EvaluatedFinding] = []
@@ -267,10 +297,17 @@ class BenchmarkRunner:
                     else:
                         r_id = f"ROUTE_{r_delta.change_type}"
 
+                    sym = None
+                    if r_delta.details and r_delta.details.startswith("Changed "):
+                        sym = r_delta.details.split("Changed ", 1)[1].split(":", 1)[0].strip()
+                    if not sym:
+                        sym = r_delta.route_name
+
                     emitted.append(
                         EvaluatedFinding(
                             rule_id=r_id,
                             file_path=r_delta.file_path,
+                            symbol=sym,
                             stage=EvaluationStage.CHANGE_FACT,
                             structural_facts={"change_type": r_delta.change_type},
                             raw_title=f"Route {r_delta.head_path or r_delta.base_path or r_delta.route_name} delta {r_delta.change_type}",
@@ -300,13 +337,13 @@ class BenchmarkRunner:
             elif case.evaluation_stage == EvaluationStage.IMPACT_FACT:
                 base_manifest = build_manifest(
                     base_sandbox,
-                    repository_url="local://benchmark",
-                    commit_hash="base000000000000000000000000000000000000",
+                    repository_url=_NEUTRAL_REPO_URL,
+                    commit_hash=_NEUTRAL_BASE_COMMIT,
                 )
                 head_manifest = build_manifest(
                     head_sandbox,
-                    repository_url="local://benchmark",
-                    commit_hash="head000000000000000000000000000000000000",
+                    repository_url=_NEUTRAL_REPO_URL,
+                    commit_hash=_NEUTRAL_HEAD_COMMIT,
                 )
                 base_graph = build_repository_graph(base_manifest)
                 head_graph = build_repository_graph(head_manifest)
@@ -319,6 +356,7 @@ class BenchmarkRunner:
                     head_graph=head_graph,
                 )
 
+                seen_multi_consumer: Set[str] = set()
                 for impact in blast_radius.impacts:
                     impact_type_str = getattr(impact.impact_type, "value", str(impact.impact_type))
                     payload = impact.evidence_payload or {}
@@ -326,12 +364,16 @@ class BenchmarkRunner:
                     if payload.get("change_type") == "DELETED" or "deleted symbol" in title_lower:
                         rule_id = "DELETED_SYMBOL_WITH_CALLERS"
                         semantic_type = "CALLER_BROKEN_BY_DELETION"
-                    elif "signature_diff" in payload or "signature change" in title_lower:
+                    elif ("signature_diff" in payload or "signature change" in title_lower) and payload.get("is_breaking", True):
                         rule_id = "SIGNATURE_BREAK_CALLERS"
                         semantic_type = "SIGNATURE_MISMATCH"
                     elif len(blast_radius.impacts) >= 2:
                         rule_id = "BLAST_RADIUS_MULTI_CONSUMER"
                         semantic_type = impact_type_str
+                        sym_key = impact.source_symbol or ""
+                        if sym_key in seen_multi_consumer:
+                            continue
+                        seen_multi_consumer.add(sym_key)
                     elif len(blast_radius.impacts) == 1:
                         rule_id = "BLAST_RADIUS_DIRECT_CALLER"
                         semantic_type = impact_type_str
@@ -408,6 +450,16 @@ class BenchmarkRunner:
         eligible_cases = loaded_cases if split is None else filter_by_split(loaded_cases, split)
         dataset_hash = compute_canonical_benchmark_hash(loaded_cases)
 
+        # Determine execution scope from split
+        if split == BenchmarkSplit.FROZEN_PUBLIC_EVAL:
+            exec_scope = ExecutionScope.OFFICIAL_PUBLIC_EVAL
+        elif split == BenchmarkSplit.DEV:
+            exec_scope = ExecutionScope.OFFICIAL_DEV
+        elif split is None:
+            exec_scope = ExecutionScope.OFFICIAL_FULL_DIAGNOSTIC
+        else:
+            exec_scope = ExecutionScope.CUSTOM
+
         results: List[CaseEvaluationResult] = []
         failed_cases = 0
 
@@ -428,16 +480,26 @@ class BenchmarkRunner:
         )
 
         agg_metrics = aggregate_case_metrics(results, run_bootstrap=True)
+        commit_sha = _get_git_commit_sha()
+
+        # Build cryptographic binding contract
+        contract = BenchmarkContract(
+            git_commit_sha=commit_sha,
+            execution_scope=exec_scope,
+            benchmark_contract_id=f"{exec_scope.value}:{dataset_hash[:16]}:{commit_sha[:12]}",
+        )
 
         return BenchmarkRunReport(
-            benchmark_version="1.0.0",
+            benchmark_version="1.0.1",
             dataset_version="1.0.0",
             canonical_dataset_hash=dataset_hash,
-            git_commit_sha=_get_git_commit_sha(),
+            git_commit_sha=commit_sha,
             python_version=platform.python_version(),
             platform=f"{platform.system()} {platform.release()}",
             timestamp=datetime.now(timezone.utc).isoformat(),
             duration_seconds=elapsed,
+            execution_scope=exec_scope,
+            benchmark_contract=contract,
             execution_status=status,
             total_cases=total_count,
             eligible_cases=eligible_count,

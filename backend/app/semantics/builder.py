@@ -265,6 +265,11 @@ def build_semantic_program(
                 normalized = callee.lower()
                 short_name = normalized.rsplit(".", 1)[-1]
                 sanitizer_kind = _SANITIZERS.get(normalized) or _SANITIZERS.get(short_name)
+                if not sanitizer_kind and any(
+                    marker in short_name
+                    for marker in ("sanit", "clean", "escape", "resolve_safe", "safe_path", "validate", "allowlist")
+                ):
+                    sanitizer_kind = "SANITIZER"
                 flat_names = sorted({name for group in argument_names for name in group})
                 if sanitizer_kind:
                     append(program.sanitizers, SemanticSanitizer(
@@ -281,6 +286,15 @@ def build_semantic_program(
                         referenced_names=flat_names,
                     ))
                 sink_kind = _SINKS.get(normalized) or _SINKS.get(short_name)
+                if sink_kind == "INPUT_TO_COMMAND" and normalized in ("subprocess.run", "subprocess.call", "subprocess.popen"):
+                    first_arg_is_list = bool(named_arguments and (
+                        named_arguments[0].type in ("list", "array") or
+                        (argument_expressions and argument_expressions[0].startswith("["))
+                    ))
+                    has_shell_true = any("shell=true" in expr.lower().replace(" ", "") for expr in argument_expressions)
+                    if first_arg_is_list and not has_shell_true:
+                        sink_kind = None
+
                 if sink_kind:
                     append(program.sinks, SemanticSink(**base, sink_kind=sink_kind, name=callee))
                     append(program.resources, SemanticResourceUse(
@@ -296,10 +310,17 @@ def build_semantic_program(
                 targets = _identifiers(target, source)
                 if targets and value is not None:
                     base = fact_base(node, "assignment", targets[0])
+                    callee_val = None
+                    is_call_val = False
+                    if value.type in _CALL_NODES:
+                        is_call_val = True
+                        callee_val = _callee_name(value, source)
                     append(program.assignments, SemanticAssignment(
                         **base,
                         target=targets[0],
                         source_names=_identifiers(value, source)[:32],
+                        is_call=is_call_val,
+                        callee=callee_val,
                     ))
 
             elif node.type in _RETURN_NODES:

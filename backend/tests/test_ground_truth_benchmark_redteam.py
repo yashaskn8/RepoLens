@@ -14,10 +14,12 @@ Simulates 11 active cheating strategies and adversarial attacks:
 11. Fixture mutation isolation: ensuring mutations don't alter test truth
 """
 
+import base64
+import urllib.parse
 import pytest
 
 from app.evaluation.ground_truth.catalog import load_capability_catalog
-from app.evaluation.ground_truth.leakage import LeakageDetector
+from app.evaluation.ground_truth.leakage import LeakageDetector, create_neutral_sandbox
 from app.evaluation.ground_truth.matcher import (
     EvaluatedFinding,
     IndependentBenchmarkJudge,
@@ -36,6 +38,7 @@ from app.evaluation.ground_truth.schemas import (
     EvaluationAnnotation,
     EvaluationScope,
     EvaluationStage,
+    ExecutionScope,
     ExecutionStatus,
     ExpectedVerdict,
     FindingClaimSpec,
@@ -332,3 +335,57 @@ def test_attack_fixture_mutation_isolation():
     # Annotation must remain unchanged
     current_claims = [c.model_dump() for c in case.annotation.claims]
     assert original_claims == current_claims
+
+
+# --- Attack 12: Obfuscated / Encoded Leakage Smuggling Defense ---
+def test_attack_obfuscated_leakage_detection_catches_encoded_markers():
+    """Attackers attempting to smuggle forbidden benchmark markers via encoding must be caught."""
+    # 1. Base64-encoded marker
+    b64_marker = base64.b64encode(b"EXPECTED_FINDING").decode("ascii")
+    with pytest.raises(ValueError, match="Forbidden benchmark marker"):
+        LeakageDetector.check_text(f"dummy_payload = '{b64_marker}'", source_context="b64 test")
+
+    # 2. Hex-encoded marker
+    hex_marker = "EXPECTED_FINDING".encode("utf-8").hex()
+    with pytest.raises(ValueError, match="Forbidden benchmark marker"):
+        LeakageDetector.check_text(f"hex_data = '{hex_marker}'", source_context="hex test")
+
+    # 3. URL-encoded marker
+    url_marker = urllib.parse.quote("EXPECTED_FINDING")
+    with pytest.raises(ValueError, match="Forbidden benchmark marker"):
+        LeakageDetector.check_text(f"url = 'https://example.com/?q={url_marker}'", source_context="url test")
+
+    # 4. Unicode full-width homoglyph marker
+    fullwidth_marker = "ＥＸＰＥＣＴＥＤ＿ＦＩＮＤＩＮＧ"
+    with pytest.raises(ValueError, match="Forbidden benchmark marker"):
+        LeakageDetector.check_text(f"# check {fullwidth_marker}", source_context="unicode test")
+
+
+# --- Attack 13: Neutral Sandbox Environment Fingerprinting Defense ---
+def test_attack_neutral_sandbox_isolation():
+    """Sandbox workspaces must look like generic workspaces without leaking benchmark identity."""
+    sandbox_path = create_neutral_sandbox({"app/main.py": "x = 1\n"})
+    try:
+        # Must not contain benchmark identifiers
+        assert "repolens_eval" not in sandbox_path
+        assert "benchmark" not in sandbox_path.lower()
+        assert "ground_truth" not in sandbox_path.lower()
+        assert "repo_workspace_" in sandbox_path
+    finally:
+        import shutil
+        shutil.rmtree(sandbox_path, ignore_errors=True)
+
+
+# --- Attack 14: Execution Scope and Cryptographic Binding ---
+def test_attack_execution_scope_and_cryptographic_binding(catalog):
+    """Running under FROZEN_PUBLIC_EVAL must produce OFFICIAL_PUBLIC_EVAL scope and a bound BenchmarkContract."""
+    runner = BenchmarkRunner(catalog=catalog)
+    cases = [_make_sample_case("SCOPE-01A", is_issue=True)]
+    cases[0].split = BenchmarkSplit.FROZEN_PUBLIC_EVAL
+
+    report = runner.run_benchmark(cases=cases, split=BenchmarkSplit.FROZEN_PUBLIC_EVAL)
+    assert report.execution_scope == ExecutionScope.OFFICIAL_PUBLIC_EVAL
+    assert report.benchmark_contract is not None
+    assert report.benchmark_contract.execution_scope == ExecutionScope.OFFICIAL_PUBLIC_EVAL
+    assert report.benchmark_contract.benchmark_contract_id.startswith("OFFICIAL_PUBLIC_EVAL:")
+    assert report.benchmark_version == "1.0.1"

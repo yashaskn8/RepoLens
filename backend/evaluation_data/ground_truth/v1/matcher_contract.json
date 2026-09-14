@@ -1,0 +1,22 @@
+{
+  "schema_version": "1.0.0",
+  "contract_type": "MATCHER_CONTRACT",
+  "status": "FROZEN",
+  "timestamp": "2026-09-14T13:30:00Z",
+  "description": "Definitive evaluation contract specifying matching semantics, accounting rules, and adjudication logic.",
+  "semantics": {
+    "file_matching": "Normalized lowercase, forward-slash, without leading slashes. Exact match against claim permitted_files required.",
+    "symbol_matching": "Normalized bare symbol name comparison. Qualified paths stripped to function/method identifier. If claim permitted_symbols is empty, file match suffices.",
+    "span_tolerance": "Integer line tolerance of +/- 5 lines around claim permitted_spans. If permitted_spans is empty or finding has no start_line, symbol match is required.",
+    "one_to_one_matching": "Strict 1-to-1 matching. At most 1 emitted finding can match a given ground-truth claim. Matched claims are consumed.",
+    "duplicate_fp_accounting": "Any subsequent finding matching an already-consumed claim is accounted as duplicate_fp and penalized as an empirical FP.",
+    "unmatched_prediction_accounting": "Any emitted finding on an ISSUE case that matches no ground-truth claim is penalized as an empirical FP.",
+    "unmatched_claim_accounting": "Any ground-truth claim not matched by any emitted finding is penalized as an empirical FN.",
+    "clean_case_specificity": "CLEAN cases must emit zero findings within evaluation scope. Emitting any finding is penalized as clean_case_fp.",
+    "structural_fact_exemption": "STRUCTURAL_FACT findings (e.g. CONTRACT_*, IMPACT_*) are not counted as false alarms on CLEAN security/bug cases unless specifically scoped.",
+    "unknown_case_handling": "UNKNOWN cases must emit zero positive defect findings. Emitting positive findings is penalized as incorrect_confident_positive (FP). Zero emissions scored as no_positive_publication.",
+    "reference_validity": "Findings referencing non-existent files or out-of-bounds line numbers are flagged as invalid_reference and penalized as FP.",
+    "unsupported_claims": "Findings violating forbidden_structural_facts or missing required_structural_facts are flagged as unsupported_claim and penalized as FP."
+  },
+  "matcher_contract_id": "3fd344c6f547f501fcb9cdcf6d22225cfe369b7425e573edf9d7063915307cf8"
+}

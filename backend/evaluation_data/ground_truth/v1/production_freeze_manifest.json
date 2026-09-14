@@ -1,0 +1,86 @@
+{
+  "schema_version": "1.0.0",
+  "freeze_type": "PRODUCTION_ANALYZER",
+  "freeze_status": "FROZEN",
+  "freeze_timestamp": "2026-09-14T13:30:00Z",
+  "production_commit_sha": "aede4587ca195a7b072210589b1a3daa3b4d6778",
+  "python_version": "3.12.3",
+  "platform": "Windows 11",
+  "requirements_lock_hash": "d81a909b3601f15c5638dd5967556c5f5f3df431894eb61debaf46b69aedd542",
+  "execution_mode": "DETERMINISTIC_ONLY",
+  "feature_flags": {
+    "llm_enabled": false,
+    "verifier_enabled": false,
+    "embedding_enabled": false,
+    "docker_required": false
+  },
+  "configuration": {
+    "line_tolerance": 5,
+    "bootstrap_iterations": 1000,
+    "bootstrap_seed": 42,
+    "confidence_level": 0.95
+  },
+  "components": {
+    "backend/app/semantics/flow.py": {
+      "sha256": "28a082b25ad3d0b663f30d4178758a4748d2f236cd307b54f3f5c03fecddc134",
+      "role": "Interprocedural security flow analysis (SQLi, CmdI, Path Traversal)",
+      "scoring_critical": true
+    },
+    "backend/app/semantics/builder.py": {
+      "sha256": "9e7d9eaf9beb60d427d49f948572594a7c5f09da002bd86b6b1111a426bbfe1a",
+      "role": "Semantic program construction with sanitizer recognition",
+      "scoring_critical": true
+    },
+    "backend/app/semantics/schemas.py": {
+      "sha256": "985abc7ef6f7d163aab062f6d3689232f2cef7bb19b8ef32d6e60f108416acfb",
+      "role": "Semantic model schemas",
+      "scoring_critical": true
+    },
+    "backend/app/analysis/diff_engine.py": {
+      "sha256": "660a8bf203abc0ff1291d2863ce9045e01e100c4a76380a790d2e16d8e420641",
+      "role": "Change structural diff computation (route deltas, schema deltas, signature diffs)",
+      "scoring_critical": true
+    },
+    "backend/app/analysis/impact_engine.py": {
+      "sha256": "88f20f6391bcc209b2617e3b0f5adff36d09afd3c211e5092e383dd543f49666",
+      "role": "Blast radius and caller impact computation",
+      "scoring_critical": true
+    },
+    "backend/app/analysis/core.py": {
+      "sha256": "9377555975546102433b2dd7430a3f6abced2b158aa4123e9c4dbbffa5090a17",
+      "role": "Static findings scanner (auth headers, hardcoded credentials)",
+      "scoring_critical": true
+    },
+    "backend/app/specialist_candidates.py": {
+      "sha256": "ab6cc25562fd22002bd823fd49dd74cf5dcec67439149c5a81357e03ab3503d7",
+      "role": "Bug candidate generation (exception swallow, blocking async, unawaited calls)",
+      "scoring_critical": true
+    },
+    "backend/app/graph/builder.py": {
+      "sha256": "aa282a4d4c193377fd14f1858f56ca9216ee91331f6387c0830e8f1332e195e5",
+      "role": "Repository graph construction",
+      "scoring_critical": true
+    },
+    "backend/app/graph/repository_graph.py": {
+      "sha256": "3880fa098a5ccedb55785b2939eead06800919d468c03cd19d266c1a5b7abc61",
+      "role": "Repository graph data structure and queries",
+      "scoring_critical": true
+    },
+    "backend/app/graph/schemas.py": {
+      "sha256": "c7514ed914f65c58dded416e166c7b3a6b94d54b52580645996575d025aa2567",
+      "role": "Graph node and edge schemas",
+      "scoring_critical": false
+    },
+    "backend/app/ingestion/manifest.py": {
+      "sha256": "84d9f8dc20e81985beb5bfb61b2f6594d67c78c1ddca846ec8e1a2310a02799c",
+      "role": "Repository manifest and AST symbol extraction",
+      "scoring_critical": true
+    },
+    "backend/app/indexing/chunker.py": {
+      "sha256": "2fe99c1d9642988b7c502d83e5ad356785618948d2059d1b2fc4adfef0450b50",
+      "role": "Code chunking for semantic analysis",
+      "scoring_critical": true
+    }
+  },
+  "production_freeze_id": "e54409eb0ea30e70cde4ff9abe3143c8a775e04c2b0c330db6819e6a57d1a516"
+}

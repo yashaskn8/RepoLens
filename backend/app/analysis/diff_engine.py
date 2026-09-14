@@ -64,6 +64,60 @@ _ENV_KEY_VAL_REGEX = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
 _REQ_PKG_REGEX = re.compile(r"^\s*([a-zA-Z0-9_\-\.]+)\s*([=><~^!].*)?$")
 
 
+def _is_breaking_signature_change(b_params_str: str, h_params_str: str, b_ret: str, h_ret: str) -> bool:
+    """Determine if a function signature change is backwards-incompatible for existing callers."""
+    b_str = b_params_str.strip()
+    if b_str.startswith("(") and b_str.endswith(")"):
+        b_str = b_str[1:-1].strip()
+    h_str = h_params_str.strip()
+    if h_str.startswith("(") and h_str.endswith(")"):
+        h_str = h_str[1:-1].strip()
+
+    def split_params(p_str: str) -> List[str]:
+        if not p_str:
+            return []
+        parts: List[str] = []
+        current: List[str] = []
+        depth = 0
+        in_quote: Optional[str] = None
+        for ch in p_str:
+            if in_quote:
+                current.append(ch)
+                if ch == in_quote:
+                    in_quote = None
+            elif ch in ("'", '"'):
+                in_quote = ch
+                current.append(ch)
+            elif ch in "([{<":
+                depth += 1
+                current.append(ch)
+            elif ch in ")]}>":
+                depth = max(0, depth - 1)
+                current.append(ch)
+            elif ch == "," and depth == 0:
+                parts.append("".join(current).strip())
+                current = []
+            else:
+                current.append(ch)
+        if current:
+            parts.append("".join(current).strip())
+        return [p for p in parts if p and p not in ("self", "cls")]
+
+    b_parts = split_params(b_str)
+    h_parts = split_params(h_str)
+
+    if len(h_parts) < len(b_parts):
+        return True
+
+    for i in range(len(b_parts), len(h_parts)):
+        new_param = h_parts[i]
+        is_optional = ("=" in new_param) or ("?" in new_param) or new_param.startswith("*")
+        if not is_optional:
+            return True
+
+    return False
+
+
 def _extract_line_ranges_from_diff(
     base_lines: List[str],
     head_lines: List[str],
@@ -539,6 +593,7 @@ class ChangeDiffEngine:
 
             # Check for signature change
             if b_params != h_params or b_ret != h_ret:
+                is_breaking = _is_breaking_signature_change(b_params, h_params, b_ret, h_ret)
                 modified_symbols.append(
                     SymbolDiffFact(
                         file_path=f_path,
@@ -552,6 +607,7 @@ class ChangeDiffEngine:
                             "head_parameters": h_params,
                             "base_return_type": b_ret,
                             "head_return_type": h_ret,
+                            "is_breaking": is_breaking,
                             "diff": f"Parameters: '{b_params}' -> '{h_params}', Returns: '{b_ret}' -> '{h_ret}'",
                         },
                     )
@@ -886,6 +942,22 @@ class ChangeDiffEngine:
             h_fields: Dict[str, str] = h_c.details.get("fields", {})
             b_supers: List[str] = b_c.details.get("superclasses", [])
             h_supers: List[str] = h_c.details.get("superclasses", [])
+
+            recognized_bases = {
+                "BaseModel", "Model", "Base", "Entity", "Schema",
+                "SQLModel", "DeclarativeBase", "TypedDict", "NamedTuple",
+            }
+            all_supers = set(b_supers) | set(h_supers)
+            is_schema = any(
+                s in recognized_bases or s.endswith(("Model", "Schema", "Entity", "Base"))
+                for s in all_supers
+            )
+            if not is_schema and f_path.endswith((".ts", ".js")):
+                if "schema" in f_path.lower() or "model" in f_path.lower() or "dto" in f_path.lower():
+                    is_schema = True
+
+            if not is_schema:
+                continue
 
             model_kind = "PYDANTIC_MODEL" if "BaseModel" in (h_supers or b_supers) else "MODEL"
 

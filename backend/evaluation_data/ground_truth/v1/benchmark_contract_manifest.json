@@ -1,0 +1,80 @@
+{
+  "schema_version": "1.0.0",
+  "freeze_type": "BENCHMARK_CONTRACT",
+  "freeze_status": "FROZEN",
+  "freeze_timestamp": "2026-09-14T13:30:00Z",
+  "benchmark_version": "1.1.0",
+  "canonical_dataset_hash": "1611efec9c34421b19d862427241fde5061170d7268602103fd5585e66b317bf",
+  "catalog_hash": "835c22b4f9355738413b0c390c29e6f78b4b082c6a76151161388256b3d1b1ab",
+  "case_count": 90,
+  "family_count": 24,
+  "case_accounting": {
+    "positive_cases": 23,
+    "clean_negative_cases": 55,
+    "unknown_ambiguous_cases": 12,
+    "non_applicable_cases": 0,
+    "total_cases": 90
+  },
+  "bootstrap_configuration": {
+    "bootstrap_iterations": 1000,
+    "bootstrap_seed": 42,
+    "confidence_level": 0.95
+  },
+  "evaluation_scope_definitions": {
+    "RULE_SCOPED": "Evaluates emitted findings matching case target_rule_ids",
+    "ALL_SUPPORTED": "Evaluates all ISSUE_SIGNAL findings against clean negative baseline",
+    "OFFICIAL_FULL_DIAGNOSTIC": "Complete 90-case diagnostic regression execution"
+  },
+  "claim_schema": "FindingClaimSpec (v1.0.0)",
+  "normalization_contract_id": "34931c5a88dc8f100518f93e70a6daa5845731c50b4d8a6d7ff963d853cf99c0",
+  "matcher_contract_id": "3fd344c6f547f501fcb9cdcf6d22225cfe369b7425e573edf9d7063915307cf8",
+  "production_freeze_id": "e54409eb0ea30e70cde4ff9abe3143c8a775e04c2b0c330db6819e6a57d1a516",
+  "components": {
+    "backend/app/evaluation/ground_truth/catalog.py": {
+      "sha256": "7121aa5b61b39b7ca6e351d8e773c9d6bef8f03664e34f58aa6510e776898634",
+      "role": "Capability catalog model and loader",
+      "scoring_critical": true
+    },
+    "backend/app/evaluation/ground_truth/loader.py": {
+      "sha256": "c38ecb07ef955789a3d528ee700fd0fd0fd7765d7544a57c179322870719040a",
+      "role": "Benchmark case loader and canonical dataset hasher",
+      "scoring_critical": true
+    },
+    "backend/app/evaluation/ground_truth/runner.py": {
+      "sha256": "87c63240588ecce96088723a1656b1c47ff76dba11228ab28ab81452aa042abd",
+      "role": "Benchmark execution runner and sandbox coordinator",
+      "scoring_critical": true
+    },
+    "backend/app/evaluation/ground_truth/matcher.py": {
+      "sha256": "573e64581032b11caeb86d493ba48f0d1b11302908099763d23ffdb532f8745c",
+      "role": "Independent benchmark judge and 1-to-1 matcher",
+      "scoring_critical": true
+    },
+    "backend/app/evaluation/ground_truth/metrics.py": {
+      "sha256": "fc87c2c7168e16a62184ae7a77ab558acede9b3dfc0134c6aec5e268a927a654",
+      "role": "Confusion matrix, localization, Wilson score, and cluster bootstrap CI calculator",
+      "scoring_critical": true
+    },
+    "backend/app/evaluation/ground_truth/schemas.py": {
+      "sha256": "3849bb6dc7b145190206af18cbc4ba912d16e3f8524c2c5a22e898fb3be48030",
+      "role": "Pydantic schemas for cases, annotations, claims, and contracts",
+      "scoring_critical": true
+    },
+    "backend/app/evaluation/ground_truth/report.py": {
+      "sha256": "9bb96c0b8b642eb013ee7359a2ed8b5c3f26aed50ae32ecfdb67ab106a4bd1db",
+      "role": "Auditable markdown and JSON report formatter",
+      "scoring_critical": false
+    },
+    "backend/app/evaluation/ground_truth/leakage.py": {
+      "sha256": "8d47ba04ffdaca892b2341942058940c7c95bc91413c7bab79cddf60a59c8940",
+      "role": "Hostile anti-leakage detector and sandbox hygiene enforcer",
+      "scoring_critical": true
+    },
+    "backend/evaluation_data/ground_truth/v1/catalog.json": {
+      "sha256": "835c22b4f9355738413b0c390c29e6f78b4b082c6a76151161388256b3d1b1ab",
+      "role": "Canonical capability catalog definition",
+      "scoring_critical": true
+    }
+  },
+  "benchmark_contract_id": "9685a5e2d0eff38659552a42c894e4f2db2c23031e77a376734b5a8fed2f76a8"
+}

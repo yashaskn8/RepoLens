@@ -21,6 +21,7 @@ def format_markdown_report(report: BenchmarkRunReport) -> str:
         f"- **Benchmark Version**: `{report.benchmark_version}`",
         f"- **Dataset Version**: `{report.dataset_version}`",
         f"- **Canonical Dataset Hash**: `{report.canonical_dataset_hash}`",
+        f"- **Execution Scope**: `{report.execution_scope.value}`",
         f"- **Git Commit SHA**: `{report.git_commit_sha}`",
         f"- **Mode**: `{report.mode}`",
         f"- **Live Model Execution**: `{report.live_model_provider}`",
@@ -28,6 +29,15 @@ def format_markdown_report(report: BenchmarkRunReport) -> str:
         f"- **Cases Executed**: {report.executed_cases} of {report.eligible_cases} eligible ({report.total_cases} total in dataset)",
         f"- **Platform**: `{report.platform}` | Python `{report.python_version}`",
         f"- **Timestamp**: `{report.timestamp}` (Duration: `{report.duration_seconds}s`)",
+    ]
+
+    if report.benchmark_contract:
+        md.extend([
+            f"- **Benchmark Contract ID**: `{report.benchmark_contract.benchmark_contract_id}`",
+            f"- **Matcher Version**: `{report.benchmark_contract.matcher_version}`",
+        ])
+
+    md.extend([
         "",
         "---",
         "",
@@ -52,7 +62,7 @@ def format_markdown_report(report: BenchmarkRunReport) -> str:
         "",
         "| Evaluation Layer | Native Stage | Status | Precision | Recall | F1 | Duplicate FP | Invalid Refs |",
         "|---|---|---|---|---|---|---|---|",
-    ]
+    ])
 
     for stage_name, layer in agg.layer_metrics.items():
         if layer.status == "NOT_EXECUTED":

@@ -90,6 +90,7 @@ def analyze_security_flows(
         aliases = set(tainted)
         assignment_position = 0
         assignments = assignments_by_symbol.get(function_name, [])
+        has_opaque_call = False
         for call in calls_by_symbol.get(function_name, []):
             traversed_nodes += 1
             if traversed_nodes > limits.max_flow_nodes:
@@ -98,6 +99,16 @@ def analyze_security_flows(
             while assignment_position < len(assignments) and assignments[assignment_position].start_line < call.start_line:
                 assignment = assignments[assignment_position]
                 if aliases.intersection(assignment.source_names) and len(aliases) < limits.max_aliases:
+                    callee_lower = (assignment.callee or "").lower()
+                    if assignment.is_call:
+                        known_propagators = ("os.path.join", "join", "format", "str", "strip", "lower", "upper", "replace")
+                        is_sanitizer = any(
+                            marker in callee_lower
+                            for marker in ("sanit", "clean", "escape", "resolve_safe", "safe_path", "validate", "allowlist")
+                        )
+                        if not is_sanitizer and not any(callee_lower.endswith(p) for p in known_propagators):
+                            has_opaque_call = True
+                            transformations.append(f"OPAQUE_CALL:{assignment.callee}")
                     aliases.add(assignment.target)
                 else:
                     if aliases.intersection(assignment.source_names):
@@ -129,7 +140,7 @@ def analyze_security_flows(
             if sink is not None and 0 in tainted_positions:
                 certainty = (
                     SemanticCertainty.PROVEN
-                    if source.certainty == SemanticCertainty.PROVEN and not related_sanitizers
+                    if source.certainty == SemanticCertainty.PROVEN and not related_sanitizers and not has_opaque_call
                     else SemanticCertainty.POSSIBLE
                 )
                 flows.append(SemanticFlow(

@@ -1,0 +1,91 @@
+{
+  "schema_version": "1.0.0",
+  "contract_type": "NORMALIZATION_CONTRACT",
+  "status": "FROZEN",
+  "timestamp": "2026-09-14T13:30:00Z",
+  "description": "Exhaustive specification of allowed vocabulary translations and format normalizations performed by the benchmark runner.",
+  "transformations": [
+    {
+      "transformation_id": "RULE_VOCAB_STATIC_SCANNER",
+      "input_source": "Finding.rule_id (core.py static scanner)",
+      "output_field": "EvaluatedFinding.rule_id",
+      "reason": "Production scanner uses internal rule IDs; maps direct or prefixed IDs to capability catalog rule IDs",
+      "scoring_critical": true,
+      "is_semantic_enrichment": false,
+      "enrichment_justification": "Direct 1-to-1 vocabulary mapping; does not create, modify, or verify defect predicates"
+    },
+    {
+      "transformation_id": "SYMBOL_AST_LOOKUP",
+      "input_source": "Finding.start_line / end_line + manifest AST symbol table",
+      "output_field": "EvaluatedFinding.symbol",
+      "reason": "Production static scanner operates on raw tokens/lines; encloses finding within AST function/class name for symbol localization evaluation",
+      "scoring_critical": true,
+      "is_semantic_enrichment": false,
+      "enrichment_justification": "Deterministic AST geometry lookup from submitted code; does not infer defects or synthesize evidence"
+    },
+    {
+      "transformation_id": "FLOW_SINK_VOCAB_MAPPING",
+      "input_source": "SecurityFlowCandidate.sink_kind (flow.py flow analysis)",
+      "output_field": "EvaluatedFinding.rule_id",
+      "reason": "Maps sink_kind (SQLI, CMDI, PATH_TRAVERSAL) to INTERPROCEDURAL_FLOW_* catalog rule identifiers",
+      "scoring_critical": true,
+      "is_semantic_enrichment": false,
+      "enrichment_justification": "Direct vocabulary translation of production flow detector category; no synthetic filtering"
+    },
+    {
+      "transformation_id": "SPECIALIST_CANDIDATE_VOCAB_MAPPING",
+      "input_source": "BugCandidate.candidate_kind / category (specialist_candidates.py)",
+      "output_field": "EvaluatedFinding.rule_id",
+      "reason": "Maps bug candidate kind to catalog rule identifiers (BROAD_EXCEPTION_SWALLOW, BLOCKING_API_IN_ASYNC, UNENFORCED_AUTH_HEADER, UNCHECKED_PERMISSION)",
+      "scoring_critical": true,
+      "is_semantic_enrichment": false,
+      "enrichment_justification": "Vocabulary translation of production candidate kind; line ranges and files preserved exactly"
+    },
+    {
+      "transformation_id": "EVIDENCE_REF_FILE_EXTRACTION",
+      "input_source": "BugCandidate.evidence_refs (specialist_candidates.py)",
+      "output_field": "EvaluatedFinding.file_path",
+      "reason": "Extracts relative file path from candidate evidence references when top-level file_path is omitted",
+      "scoring_critical": true,
+      "is_semantic_enrichment": false,
+      "enrichment_justification": "Format extraction of path string already present in production candidate object"
+    },
+    {
+      "transformation_id": "DIFF_ENGINE_DELTA_MAPPING",
+      "input_source": "ChangeAnalysis.route_deltas, schema_deltas, signature_diffs (diff_engine.py)",
+      "output_field": "EvaluatedFinding.rule_id and structural_facts",
+      "reason": "Translates structured diff engine deltas into CONTRACT_* benchmark findings and fact dictionaries",
+      "scoring_critical": true,
+      "is_semantic_enrichment": false,
+      "enrichment_justification": "Deterministic projection of production structural diff fields; no heuristic inference"
+    },
+    {
+      "transformation_id": "IMPACT_ENGINE_BLAST_RADIUS_MAPPING",
+      "input_source": "ImpactReport.impacted_callers, deleted_callers, cross_package_impacts (impact_engine.py)",
+      "output_field": "EvaluatedFinding.rule_id and structural_facts",
+      "reason": "Maps blast radius node/edge impact entries to IMPACT_* benchmark evaluation findings",
+      "scoring_critical": true,
+      "is_semantic_enrichment": false,
+      "enrichment_justification": "Deterministic formatting of graph reachability outputs; preserves source and target symbols verbatim"
+    },
+    {
+      "transformation_id": "SEMANTIC_FACT_DEDUPLICATION",
+      "input_source": "Multiple candidate/finding emitters traversing overlapping AST scopes",
+      "output_field": "EvaluatedFinding stream (de-duplicated)",
+      "reason": "Consolidates findings that represent the identical physical semantic fact (same rule_id, file_path, symbol, start_line)",
+      "scoring_critical": true,
+      "is_semantic_enrichment": false,
+      "enrichment_justification": "Preserves 1-to-1 semantic fact correspondence without altering finding attributes"
+    },
+    {
+      "transformation_id": "PATH_NORMALIZATION",
+      "input_source": "Raw string file paths from all production components",
+      "output_field": "EvaluatedFinding.file_path (normalized)",
+      "reason": "Standardizes Windows backslashes, leading slashes, and case casing for cross-platform deterministic evaluation",
+      "scoring_critical": true,
+      "is_semantic_enrichment": false,
+      "enrichment_justification": "Platform-neutral path canonicalization; no path alteration"
+    }
+  ],
+  "normalization_contract_id": "34931c5a88dc8f100518f93e70a6daa5845731c50b4d8a6d7ff963d853cf99c0"
+}

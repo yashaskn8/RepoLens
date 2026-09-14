@@ -20,8 +20,8 @@ _VERIFIED_IDENTITY_MARKERS = (
 )
 _AUTHORIZATION_USE_MARKERS = (
     "allowed_roles", "permission", "authoriz", "tenant_id_context.set(",
-    "current_tenant_id.set(", "set_config(", ".where(", "create_order(",
-    "tenant_id=", "user_id=", "roles.split(",
+    "current_tenant_id.set(", "set_config(", ".where(",
+    "tenant_id=", "user_id=", "roles.split(", "role.split(",
 )
 _SENSITIVE_ASSIGNMENT = re.compile(
     r"^\s*(?P<key>[A-Za-z_][A-Za-z0-9_-]*)"

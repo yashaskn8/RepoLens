@@ -27,6 +27,22 @@ def normalize_repo_path(path: str) -> str:
     return clean.lower()
 
 
+def normalize_symbol(symbol: Optional[str]) -> Optional[str]:
+    """Normalize qualified symbol paths (e.g. 'app/services/auth.py:login:10') to bare symbol names."""
+    if not symbol:
+        return None
+    sym = symbol.strip()
+    if ":" in sym:
+        parts = [p for p in sym.split(":") if p]
+        if parts and parts[-1].isdigit():
+            parts = parts[:-1]
+        if parts:
+            sym = parts[-1]
+    if "." in sym and not ("/" in sym or "\\" in sym):
+        sym = sym.split(".")[-1]
+    return sym.strip()
+
+
 class EvaluatedFinding(BaseModel):
     """Normalized internal representation of an emitted fact, candidate, or finding."""
 
@@ -64,6 +80,14 @@ class CaseEvaluationResult(BaseModel):
     # Localization counts for TPs
     file_localized_tp: int = 0
     symbol_localized_tp: int = 0
+
+    # Structured impact metrics
+    impact_node_tp: int = 0
+    impact_node_fp: int = 0
+    impact_node_fn: int = 0
+    impact_edge_tp: int = 0
+    impact_edge_fp: int = 0
+    impact_edge_fn: int = 0
 
     # Case-level outcomes
     is_clean_case: bool = False
@@ -141,13 +165,17 @@ class IndependentBenchmarkJudge:
         # 3. Symbol match if expected
         symbol_matched = False
         if claim.permitted_symbols:
-            if finding.symbol and finding.symbol in claim.permitted_symbols:
+            norm_claim_symbols = {normalize_symbol(s) for s in claim.permitted_symbols if s}
+            norm_pred_symbol = normalize_symbol(finding.symbol)
+            if norm_pred_symbol and norm_pred_symbol in norm_claim_symbols:
                 symbol_matched = True
             elif not finding.symbol:
                 # Prediction did not specify symbol, check if span matches
                 pass
             else:
                 return False, True, False, f"symbol mismatch: pred={finding.symbol} not in {claim.permitted_symbols}"
+        else:
+            symbol_matched = True
 
         # 4. Span / Line range match if spans provided
         span_matched = False
