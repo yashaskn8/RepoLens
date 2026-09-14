@@ -11,8 +11,8 @@ from app.ingestion.schemas import SymbolKind
 from app.schemas.change_analysis import FileChangeType, StructuralDiffResult, SymbolChangeType
 
 
-AGENT_TOOL_CONTRACT_VERSION = "1.2.0"
-AGENT_TOOL_VERSION = "1.2.0"
+AGENT_TOOL_CONTRACT_VERSION = "2.0.0"
+AGENT_TOOL_VERSION = "2.0.0"
 MAX_PUBLIC_PATH_LENGTH = 1024
 
 
@@ -107,7 +107,7 @@ class ToolProvenance(ToolModel):
 class ToolInvocationResult(ToolModel):
     """Common deterministic envelope; ``result`` is validated by each tool spec."""
 
-    contract_version: Literal["1.2.0"] = AGENT_TOOL_CONTRACT_VERSION
+    contract_version: Literal["2.0.0"] = AGENT_TOOL_CONTRACT_VERSION
     tool: str = Field(min_length=1, max_length=128)
     tool_version: str = Field(min_length=1, max_length=32)
     status: ToolResultStatus
@@ -214,7 +214,54 @@ class DataflowClaim(ToolModel):
     evidence_refs: list[Annotated[str, Field(min_length=1, max_length=128)]] = Field(min_length=1, max_length=64)
 
 
+# -- JSON Schema extra: encode the "exactly one" XOR rules for source/target endpoints
+# so schema-only consumers (MCP, OpenAPI, etc.) see structural constraints, not just
+# four independent optional fields.  The runtime model_validator remains the authority.
+_CALL_RELATIONSHIP_SCHEMA_EXTRA = {
+    "allOf": [
+        {
+            "oneOf": [
+                {
+                    "required": ["source_symbol_id"],
+                    "properties": {
+                        "source_symbol_id": {"not": {"type": "null"}},
+                        "source_entity_id": {"type": "null"},
+                    },
+                },
+                {
+                    "required": ["source_entity_id"],
+                    "properties": {
+                        "source_entity_id": {"not": {"type": "null"}},
+                        "source_symbol_id": {"type": "null"},
+                    },
+                },
+            ]
+        },
+        {
+            "oneOf": [
+                {
+                    "required": ["target_symbol_id"],
+                    "properties": {
+                        "target_symbol_id": {"not": {"type": "null"}},
+                        "target_entity_id": {"type": "null"},
+                    },
+                },
+                {
+                    "required": ["target_entity_id"],
+                    "properties": {
+                        "target_entity_id": {"not": {"type": "null"}},
+                        "target_symbol_id": {"type": "null"},
+                    },
+                },
+            ]
+        },
+    ]
+}
+
+
 class CallRelationshipClaim(ToolModel):
+    model_config = ConfigDict(extra="forbid", json_schema_extra=_CALL_RELATIONSHIP_SCHEMA_EXTRA)
+
     claim_type: Literal[ClaimType.CALL_RELATIONSHIP]
     snapshot_id: str = Field(min_length=1, max_length=128)
     source_symbol_id: str | None = Field(default=None, min_length=1, max_length=2048)
