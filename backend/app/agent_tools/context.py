@@ -7,9 +7,11 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import re
 import time
 from types import MappingProxyType
 from typing import Iterable, Mapping
+from urllib.parse import urlparse
 
 from app.analysis.store import EvidenceStore
 from app.core.path_confinement import PathTraversalError, resolve_safe_path
@@ -20,6 +22,65 @@ from app.indexing.schemas import CodeChunk
 from app.ingestion.schemas import ParsedSymbol, RepositoryManifest
 from app.schemas.change_analysis import StructuralDiffResult
 from app.semantics import SemanticProgram, build_semantic_program
+
+
+_GITHUB_REPOSITORY_SEGMENT = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def canonical_repository_identity(value: str) -> str:
+    """Return a comparison-only GitHub identity without trusting cosmetic URL form."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("repository identity must be a non-empty GitHub HTTPS URL")
+    parsed = urlparse(value.strip())
+    if (
+        parsed.scheme.lower() != "https"
+        or (parsed.hostname or "").lower() not in {"github.com", "www.github.com"}
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.port is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("repository identity must be an uncredentialed GitHub HTTPS URL")
+    parts = [part for part in parsed.path.rstrip("/").split("/") if part]
+    if len(parts) != 2:
+        raise ValueError("repository identity must contain exactly an owner and repository")
+    owner, repository = parts
+    if repository.lower().endswith(".git"):
+        repository = repository[:-4]
+    if not owner or not repository or not all(
+        _GITHUB_REPOSITORY_SEGMENT.fullmatch(part) for part in (owner, repository)
+    ):
+        raise ValueError("repository identity contains an invalid owner or repository")
+    return f"github.com/{owner.lower()}/{repository.lower()}"
+
+
+def internal_symbol_identity(file_path: str, symbol: ParsedSymbol) -> str:
+    """Return the frozen analyzer's exact manifest/graph symbol identity."""
+    return f"symbol:{file_path}:{symbol.kind.value}:{symbol.name}:{symbol.start_line}"
+
+
+def public_symbol_identity(
+    repository_identity: str,
+    snapshot_id: str,
+    file_path: str,
+    symbol: ParsedSymbol,
+) -> str:
+    """Return a bounded, snapshot-bound public identity for one exact manifest symbol."""
+    material = json.dumps(
+        {
+            "repository": repository_identity,
+            "snapshot": snapshot_id,
+            "file": file_path,
+            "kind": symbol.kind.value,
+            "name": symbol.name,
+            "start_line": symbol.start_line,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return f"symbol:{hashlib.sha256(material.encode('utf-8')).hexdigest()}"
 
 
 def _confined_relative(root: Path, value: str) -> str:
@@ -122,7 +183,10 @@ class RepositorySnapshot:
     semantic_program: SemanticProgram | None = None
     component_versions: Mapping[str, str] = field(default_factory=dict)
     symbol_index: Mapping[str, tuple[str, ParsedSymbol]] = field(default_factory=dict, repr=False)
+    symbol_internal_ids: Mapping[str, str] = field(default_factory=dict, repr=False)
+    public_symbol_ids: Mapping[str, str] = field(default_factory=dict, repr=False)
     manifest_paths: frozenset[str] = field(default_factory=frozenset, repr=False)
+    repository_identity: str = field(default="", repr=False)
     artifact_digest: str = field(default="", repr=False)
     admission_limits: ToolResourceLimits = field(default_factory=ToolResourceLimits, repr=False, compare=False)
     initialization_duration_ms: float = field(default=0.0, compare=False)
@@ -157,6 +221,7 @@ class RepositorySnapshot:
             raise ValueError("repository manifest contains an unbounded file larger than max_file_size_bytes")
         if snapshot_id != (manifest.commit_sha or manifest.commit_hash):
             raise ValueError("snapshot_id must match the manifest commit identity")
+        repository_identity = canonical_repository_identity(manifest.repository_url)
         authorized_paths: set[str] = set()
         for entry in manifest.files:
             normalized = _confined_relative(root, entry.path)
@@ -207,11 +272,23 @@ class RepositorySnapshot:
                         if commit_sha != snapshot_id:
                             raise ValueError("semantic fact snapshot identity does not match the repository snapshot")
         symbol_index: dict[str, tuple[str, ParsedSymbol]] = {}
+        symbol_internal_ids: dict[str, str] = {}
+        public_symbol_ids: dict[str, str] = {}
         for entry in manifest.files:
             path = entry.path.replace("\\", "/")
             for symbol in entry.symbols:
-                identity = f"symbol:{path}:{symbol.kind.value}:{symbol.name}:{symbol.start_line}"
-                symbol_index[identity] = (path, symbol)
+                internal_identity = internal_symbol_identity(path, symbol)
+                public_identity = public_symbol_identity(
+                    repository_identity,
+                    snapshot_id,
+                    path,
+                    symbol,
+                )
+                if internal_identity in public_symbol_ids or public_identity in symbol_index:
+                    raise ValueError("repository manifest contains a duplicate symbol identity")
+                symbol_index[public_identity] = (path, symbol)
+                symbol_internal_ids[public_identity] = internal_identity
+                public_symbol_ids[internal_identity] = public_identity
         versions = {str(key): str(value) for key, value in sorted((component_versions or {}).items())}
         artifact_payload = _snapshot_artifact_payload(
             snapshot_id, manifest, frozen_store, built_graph, program, versions
@@ -225,7 +302,10 @@ class RepositorySnapshot:
             semantic_program=program,
             component_versions=MappingProxyType(versions),
             symbol_index=MappingProxyType(symbol_index),
+            symbol_internal_ids=MappingProxyType(symbol_internal_ids),
+            public_symbol_ids=MappingProxyType(public_symbol_ids),
             manifest_paths=frozenset(authorized_paths),
+            repository_identity=repository_identity,
             artifact_digest=_digest_payload(artifact_payload),
             admission_limits=registration_limits,
             initialization_duration_ms=(time.perf_counter() - started) * 1000.0,
@@ -286,6 +366,15 @@ class RepositorySnapshot:
         for identity in sorted(self.symbol_index):
             yield self.symbol_index[identity]
 
+    def internal_symbol_id(self, public_id: str) -> str:
+        try:
+            return self.symbol_internal_ids[public_id]
+        except KeyError as exc:
+            raise KeyError("public symbol identity is not registered") from exc
+
+    def public_symbol_id(self, internal_id: str) -> str | None:
+        return self.public_symbol_ids.get(internal_id)
+
 
 @dataclass(frozen=True, slots=True)
 class AgentToolContext:
@@ -315,7 +404,10 @@ class AgentToolContext:
                 raise ValueError("precomputed diff references an unregistered snapshot")
             if diff.base_commit_sha != base_id or diff.head_commit_sha != head_id:
                 raise ValueError("precomputed diff identity does not match its registered snapshots")
-            if diff.repository_url != snapshots[base_id].manifest.repository_url:
+            base_repository = snapshots[base_id].repository_identity
+            head_repository = snapshots[head_id].repository_identity
+            diff_repository = canonical_repository_identity(diff.repository_url)
+            if len({base_repository, head_repository, diff_repository}) != 1:
                 raise ValueError("precomputed diff repository does not match its registered snapshots")
             base_paths = snapshots[base_id].manifest_paths
             head_paths = snapshots[head_id].manifest_paths
@@ -404,4 +496,11 @@ class AgentToolContext:
         return value
 
 
-__all__ = ["AgentToolContext", "RepositorySnapshot", "ToolResourceLimits"]
+__all__ = [
+    "AgentToolContext",
+    "RepositorySnapshot",
+    "ToolResourceLimits",
+    "canonical_repository_identity",
+    "internal_symbol_identity",
+    "public_symbol_identity",
+]

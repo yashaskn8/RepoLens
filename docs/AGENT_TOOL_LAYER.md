@@ -15,7 +15,7 @@ Adapters only validate, scope, invoke, normalize, bound, and package output from
 - structural diff engine;
 - graph-aware impact engine.
 
-The tool contract version is `1.1.0`. Tool inputs and outputs use closed Pydantic models and JSON-compatible values so a later MCP adapter can project the schemas without changing analyzer semantics. Snapshot artifacts are detached and integrity-digested at registration; caller-declared component versions are explicitly marked `DECLARED`, not cryptographically verified.
+The tool contract version is `1.2.0`. Tool inputs and outputs use closed Pydantic models and JSON-compatible values so a later MCP adapter can project the schemas without changing analyzer semantics. Snapshot artifacts are detached and integrity-digested at registration; caller-declared component versions are explicitly marked `DECLARED`, not cryptographically verified. Public symbol IDs are bounded opaque `symbol:<sha256>` values derived from the canonical repository identity, snapshot ID, and exact manifest coordinates. An immutable mapping resolves them to the frozen analyzer's internal symbol identities, so every emitted public symbol ID round-trips through every consuming Phase-A schema without truncation or fuzzy lookup.
 
 ## Tool catalog
 
@@ -48,11 +48,13 @@ Every invocation returns `tool`, `tool_version`, `status`, `deterministic`, a va
 
 `NOT_FOUND` means an addressed identity or fact was not found. `INSUFFICIENT_EVIDENCE` means coverage cannot prove the requested conclusion. Empty complete scanner output is not fabricated evidence, and partial output is never represented as complete.
 
-Evidence records identify their type, production component, repository-relative source location, symbol or graph endpoints, relationship, and a stable evidence ID. Provenance identifies the repository snapshot, production components, supplied component versions, and analysis stage. Agent-visible failures never include raw stack traces or host repository roots.
+Evidence records identify their type, production component, repository-relative source location, symbol or graph endpoints, relationship, and a stable evidence ID. Provenance identifies the repository snapshot, production components, supplied component versions, and analysis stage. Agent-visible failures never include raw stack traces or host repository roots. Verification output accounts for every caller-supplied reference through `matched_evidence_refs`, `unresolved_evidence_refs`, `duplicate_evidence_refs`, and `evidence_refs_complete`; unresolved or foreign references also produce a structured warning even when the semantic verdict is already `UNSUPPORTED`, `INSUFFICIENT_EVIDENCE`, or `INVALID_CLAIM`.
 
 ## Verification claims
 
-`verify_finding` uses four closed, discriminated claim schemas: exact `SECURITY_FINDING`, `DATAFLOW`, `CALL_RELATIONSHIP`, and `STRUCTURAL_CHANGE`. Every claim requires evidence. A claim is `SUPPORTED` only when its coordinates match a production fact and every supplied evidence reference resolves to that exact fact in the authorized snapshot context. Foreign, stale, fake, or unrelated references cannot be silently ignored. Otherwise the verdict is `UNSUPPORTED`, `INSUFFICIENT_EVIDENCE`, or `INVALID_CLAIM`. It never reads benchmark annotations or ground truth.
+`verify_finding` uses four closed, discriminated claim schemas: exact `SECURITY_FINDING`, `DATAFLOW`, `CALL_RELATIONSHIP`, and `STRUCTURAL_CHANGE`. Every claim requires evidence. A claim is `SUPPORTED` only when its coordinates match a production fact and every supplied evidence reference resolves to that exact fact in the authorized snapshot context. Foreign, stale, fake, or unrelated references cannot be silently ignored. Security verification applies file, rule, and symbol scope before result bounding; incomplete or resource-bounded absence never becomes `UNSUPPORTED`. Otherwise the verdict is `UNSUPPORTED`, `INSUFFICIENT_EVIDENCE`, or `INVALID_CLAIM`. It never reads benchmark annotations or ground truth.
+
+The frozen `RepositoryGraph` uses a directed graph and retains at most one `CALLS` edge for a given source-target pair. Repeated call-site multiplicity is therefore not guaranteed in Phase A. A retained exact call-site edge can support a positive claim, but a non-matching line on an existing caller/callee pair returns `INSUFFICIENT_EVIDENCE` with `CALL_SITE_MULTIPLICITY_NOT_PRESERVED`; it is never treated as proven absence.
 
 ## Security and limits
 
@@ -79,4 +81,4 @@ symbol_id = matches.result["matches"][0]["symbol_id"]
 callers = registry.invoke("find_callers", {"symbol_id": symbol_id})
 ```
 
-For change and impact analysis, register both authorized snapshots and a trusted precomputed `StructuralDiffResult` bound to their snapshot IDs. The Phase-A boundary deliberately does not rescan mutable workspaces or invoke Git/subprocesses, so identical snapshot IDs cannot silently acquire different live-file results. Missing or stale diff artifacts return explicit insufficient/integrity errors.
+For change and impact analysis, register both authorized snapshots and a trusted precomputed `StructuralDiffResult` bound to their snapshot IDs. Base snapshot, head snapshot, and diff repository identities must canonicalize to the same GitHub owner/repository, and their commit identities must match exactly; cross-repository and fork comparisons fail closed. The Phase-A boundary deliberately does not rescan mutable workspaces or invoke Git/subprocesses, so identical snapshot IDs cannot silently acquire different live-file results. Missing or stale diff artifacts return explicit insufficient/integrity errors.

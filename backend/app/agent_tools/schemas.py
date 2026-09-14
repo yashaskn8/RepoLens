@@ -11,8 +11,8 @@ from app.ingestion.schemas import SymbolKind
 from app.schemas.change_analysis import FileChangeType, StructuralDiffResult, SymbolChangeType
 
 
-AGENT_TOOL_CONTRACT_VERSION = "1.1.0"
-AGENT_TOOL_VERSION = "1.1.0"
+AGENT_TOOL_CONTRACT_VERSION = "1.2.0"
+AGENT_TOOL_VERSION = "1.2.0"
 
 
 class ToolModel(BaseModel):
@@ -106,7 +106,7 @@ class ToolProvenance(ToolModel):
 class ToolInvocationResult(ToolModel):
     """Common deterministic envelope; ``result`` is validated by each tool spec."""
 
-    contract_version: Literal["1.1.0"] = AGENT_TOOL_CONTRACT_VERSION
+    contract_version: Literal["1.2.0"] = AGENT_TOOL_CONTRACT_VERSION
     tool: str = Field(min_length=1, max_length=128)
     tool_version: str = Field(min_length=1, max_length=32)
     status: ToolResultStatus
@@ -242,7 +242,7 @@ class VerifyFindingInput(ToolModel):
 
 
 class SymbolRecord(ToolModel):
-    symbol_id: str
+    symbol_id: str = Field(pattern=r"^symbol:[0-9a-f]{64}$", max_length=71)
     qualified_name: str
     name: str
     kind: SymbolKind
@@ -450,4 +450,7 @@ class VerifyFindingOutput(ToolModel):
     verdict: VerificationVerdict
     claim_type: ClaimType
     matched_evidence_refs: list[str]
+    unresolved_evidence_refs: list[str]
+    duplicate_evidence_refs: list[str]
+    evidence_refs_complete: bool
     reason_code: str

@@ -163,7 +163,8 @@ def test_registered_snapshot_isolated_from_retained_graph_and_scanner_references
     before_callers = registry.invoke("find_callers", {"symbol_id": target}).model_dump(mode="json")
     before_scan = registry.invoke("scan_security", {}).model_dump(mode="json")
     other = next(node for node in snapshot.graph.get_nodes() if node.label == "other")
-    snapshot.graph.add_edge(other.id, target, EdgeKind.CALLS, {"call_site_file": "b.py", "call_site_line": 1})
+    target_internal = next(node for node in snapshot.graph.get_nodes() if node.label == "target")
+    snapshot.graph.add_edge(other.id, target_internal.id, EdgeKind.CALLS, {"call_site_file": "b.py", "call_site_line": 1})
     snapshot.evidence_store.add_scanner_result(ScannerResult(tool="late", status=ToolStatus.COMPLETED, findings=[]))
     assert registry.invoke("find_callers", {"symbol_id": target}).model_dump(mode="json") == before_callers
     assert registry.invoke("scan_security", {}).model_dump(mode="json") == before_scan
@@ -350,6 +351,16 @@ def test_alias_budget_is_reported_as_resource_limit(tmp_path: Path, monkeypatch)
     )
     result = registry.invoke("trace_dataflow", {"source_symbol_id": source})
     assert result.status == ToolResultStatus.RESOURCE_LIMIT
+    verification = registry.invoke("verify_finding", {"claim": {
+        "claim_type": "DATAFLOW",
+        "snapshot_id": snapshot.snapshot_id,
+        "source_symbol_id": source,
+        "sink_category": "SQL",
+        "evidence_refs": ["flow:unresolved"],
+    }})
+    assert verification.status == ToolResultStatus.RESOURCE_LIMIT
+    assert verification.result["verdict"] == "INSUFFICIENT_EVIDENCE"
+    assert verification.result["unresolved_evidence_refs"] == ["flow:unresolved"]
 
 
 def test_inspect_file_enforces_symbol_result_boundary(tmp_path: Path):

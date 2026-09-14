@@ -15,7 +15,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import BaseModel
 
-from app.agent_tools.context import AgentToolContext, RepositorySnapshot
+from app.agent_tools.context import AgentToolContext, RepositorySnapshot, internal_symbol_identity
 from app.agent_tools.schemas import (
     AnalyzeChangeInput,
     AnalyzeChangeOutput,
@@ -195,15 +195,19 @@ def _json(value: Any, depth: int = 0) -> Any:
     return f"[unsupported metadata type: {type(value).__name__}]"
 
 
-def _symbol_id(file_path: str, symbol: ParsedSymbol) -> str:
-    return f"symbol:{file_path}:{symbol.kind.value}:{symbol.name}:{symbol.start_line}"
-
-
-def _symbol_record(file_path: str, symbol: ParsedSymbol) -> SymbolRecord:
+def _symbol_record(snapshot: RepositorySnapshot, file_path: str, symbol: ParsedSymbol) -> SymbolRecord:
     details = _json(symbol.details)
     signature = details.get("parameters")
+    internal_id = internal_symbol_identity(file_path, symbol)
+    public_id = snapshot.public_symbol_id(internal_id)
+    if public_id is None:
+        raise ToolFailure(
+            ToolResultStatus.INTERNAL_ERROR,
+            "SYMBOL_IDENTITY_MAP_INCOMPLETE",
+            "A manifest symbol is missing from the immutable public identity map.",
+        )
     return SymbolRecord(
-        symbol_id=_symbol_id(file_path, symbol),
+        symbol_id=public_id,
         qualified_name=f"{file_path}::{symbol.name}",
         name=symbol.name,
         kind=symbol.kind,
@@ -223,7 +227,7 @@ def _iter_symbols(snapshot: RepositorySnapshot):
     for entry in sorted(snapshot.manifest.files, key=lambda item: item.path.replace("\\", "/")):
         path = entry.path.replace("\\", "/")
         for symbol in sorted(entry.symbols, key=lambda item: (item.start_line, item.kind.value, item.name)):
-            yield _symbol_record(path, symbol)
+            yield _symbol_record(snapshot, path, symbol)
 
 
 def _find_symbol(snapshot: RepositorySnapshot, symbol_id: str) -> SymbolRecord:
@@ -234,13 +238,13 @@ def _find_symbol(snapshot: RepositorySnapshot, symbol_id: str) -> SymbolRecord:
             "SYMBOL_NOT_FOUND",
             "No symbol matched the supplied stable symbol identity.",
         )
-    return _symbol_record(*found)
+    return _symbol_record(snapshot, *found)
 
 
-def _entity(node: GraphNode) -> GraphEntityRecord:
+def _entity(snapshot: RepositorySnapshot, node: GraphNode) -> GraphEntityRecord:
     label = _json(node.label)
     return GraphEntityRecord(
-        entity_id=node.id,
+        entity_id=snapshot.public_symbol_id(node.id) or node.id,
         kind=node.kind.value,
         label=label if isinstance(label, str) else str(label),
         file_path=node.file_path,
@@ -260,8 +264,8 @@ def _relationship(snapshot: RepositorySnapshot, edge: GraphEdge) -> GraphRelatio
     metadata = _json(edge.metadata)
     return GraphRelationship(
         relationship=edge.kind.value,
-        source=_entity(source),
-        target=_entity(target),
+        source=_entity(snapshot, source),
+        target=_entity(snapshot, target),
         evidence_file=metadata.get("call_site_file") or source.file_path,
         evidence_line=metadata.get("call_site_line") or source.start_line,
         metadata=metadata,
@@ -357,7 +361,7 @@ def inspect_file(arguments: InspectFileInput, context: AgentToolContext) -> Tool
     records: list[SymbolRecord] = []
     for symbol in sorted(entry.symbols, key=lambda item: (item.start_line, item.kind.value, item.name)):
         if len(records) < effective:
-            records.append(_symbol_record(path, symbol))
+            records.append(_symbol_record(snapshot, path, symbol))
     total_symbols = len(entry.symbols)
     truncated = total_symbols > effective
     evidence = tuple(
@@ -426,7 +430,7 @@ def search_symbol(arguments: SearchSymbolInput, context: AgentToolContext) -> To
                 continue
             found_count += 1
             if len(returned) < effective:
-                returned.append(_symbol_record(entry_path, raw_symbol))
+                returned.append(_symbol_record(snapshot, entry_path, raw_symbol))
     truncated = found_count > effective
     status = ToolResultStatus.RESOURCE_LIMIT if truncated else (
         ToolResultStatus.NOT_FOUND if not found_count else ToolResultStatus.SUCCESS
@@ -466,6 +470,7 @@ def search_symbol(arguments: SearchSymbolInput, context: AgentToolContext) -> To
 def inspect_symbol(arguments: InspectSymbolInput, context: AgentToolContext) -> ToolExecution:
     snapshot = _snapshot(context, arguments.snapshot_id)
     symbol = _find_symbol(snapshot, arguments.symbol_id)
+    internal_symbol_id = snapshot.internal_symbol_id(symbol.symbol_id)
     effective = min(context.limits.max_results, 200)
     parents: list[SymbolRecord] = []
     total_parents = 0
@@ -484,14 +489,14 @@ def inspect_symbol(arguments: InspectSymbolInput, context: AgentToolContext) -> 
     incoming_ids: set[int] = set()
     total_relationships = 0
     remaining = max(0, effective - len(parents))
-    if snapshot.graph is not None and snapshot.graph.get_node(symbol.symbol_id) is not None:
+    if snapshot.graph is not None and snapshot.graph.get_node(internal_symbol_id) is not None:
         sequence = 0
 
         def candidates():
             nonlocal total_relationships, sequence
             for is_incoming, edges in (
-                (True, snapshot.graph.get_incoming_edges(symbol.symbol_id)),
-                (False, snapshot.graph.get_outgoing_edges(symbol.symbol_id)),
+                (True, snapshot.graph.get_incoming_edges(internal_symbol_id)),
+                (False, snapshot.graph.get_outgoing_edges(internal_symbol_id)),
             ):
                 for edge in edges:
                     relationship = _relationship(snapshot, edge)
@@ -567,13 +572,14 @@ def _find_relationships(
 ) -> ToolExecution:
     snapshot = _snapshot(context, arguments.snapshot_id)
     symbol = _find_symbol(snapshot, arguments.symbol_id)
+    internal_symbol_id = snapshot.internal_symbol_id(symbol.symbol_id)
     if snapshot.graph is None:
         raise ToolFailure(
             ToolResultStatus.INSUFFICIENT_EVIDENCE,
             "GRAPH_UNAVAILABLE",
             "The repository graph is unavailable for this snapshot.",
         )
-    if snapshot.graph.get_node(symbol.symbol_id) is None:
+    if snapshot.graph.get_node(internal_symbol_id) is None:
         raise ToolFailure(
             ToolResultStatus.INSUFFICIENT_EVIDENCE,
             "SYMBOL_NOT_INDEXED_IN_GRAPH",
@@ -584,7 +590,7 @@ def _find_relationships(
 
     def candidates():
         nonlocal total_relationships
-        edges = snapshot.graph.get_incoming_edges(symbol.symbol_id) if incoming else snapshot.graph.get_outgoing_edges(symbol.symbol_id)
+        edges = snapshot.graph.get_incoming_edges(internal_symbol_id) if incoming else snapshot.graph.get_outgoing_edges(internal_symbol_id)
         for sequence, edge in enumerate(edges):
             if edge.kind != EdgeKind.CALLS:
                 continue
@@ -681,7 +687,11 @@ def _flow_path(flow: SemanticFlow) -> DataflowPath:
     )
 
 
-def _flow_evidence(snapshot: RepositorySnapshot, path: DataflowPath) -> EvidenceRecord:
+def _flow_evidence(
+    snapshot: RepositorySnapshot,
+    path: DataflowPath,
+    public_source_symbol_id: str,
+) -> EvidenceRecord:
     material = "\0".join([
         snapshot.snapshot_id,
         snapshot.artifact_digest,
@@ -694,7 +704,7 @@ def _flow_evidence(snapshot: RepositorySnapshot, path: DataflowPath) -> Evidence
         evidence_type=EvidenceType.DATAFLOW_PATH,
         source_component="semantic_flow_analysis",
         file_path=path.sink.file_path,
-        symbol=path.source.symbol,
+        symbol=public_source_symbol_id,
         start_line=path.source.start_line,
         end_line=path.sink.end_line,
         relationship=f"{path.source.kind}->{path.sink.kind}",
@@ -749,7 +759,7 @@ def trace_dataflow(arguments: TraceDataflowInput, context: AgentToolContext) -> 
         status = ToolResultStatus.INSUFFICIENT_EVIDENCE
     else:
         status = ToolResultStatus.SUCCESS
-    evidence = tuple(_flow_evidence(snapshot, path) for path in paths)
+    evidence = tuple(_flow_evidence(snapshot, path, source_symbol.symbol_id) for path in paths)
     return ToolExecution(
         status=status,
         output=TraceDataflowOutput(
@@ -931,7 +941,7 @@ def _obtain_diff(
         raise ToolFailure(ToolResultStatus.INVALID_INPUT, "IDENTICAL_SNAPSHOTS", "Base and head snapshots must differ.")
     base = _snapshot(context, base_id)
     head = _snapshot(context, head_id)
-    if base.manifest.repository_url != head.manifest.repository_url:
+    if base.repository_identity != head.repository_identity:
         raise ToolFailure(ToolResultStatus.INVALID_INPUT, "REPOSITORY_MISMATCH", "Base and head snapshots belong to different repositories.")
     try:
         existing = context.get_diff(base_id, head_id)
@@ -1124,10 +1134,20 @@ def analyze_change(arguments: AnalyzeChangeInput, context: AgentToolContext) -> 
     )
 
 
-def _narrow_diff_to_symbol(diff: StructuralDiffResult, symbol: SymbolRecord) -> StructuralDiffResult:
+def _narrow_diff_to_symbol(
+    diff: StructuralDiffResult,
+    symbol: SymbolRecord,
+    *,
+    snapshot_role: str,
+) -> StructuralDiffResult:
+    location_field = "head_location" if snapshot_role == "head" else "base_location"
     matches = [
         item for item in diff.changed_symbols
-        if item.file_path.replace("\\", "/") == symbol.file_path and item.symbol_name == symbol.name
+        if item.file_path.replace("\\", "/") == symbol.file_path
+        and item.symbol_name == symbol.name
+        and item.symbol_kind == symbol.kind.value
+        and bool(getattr(item, location_field))
+        and getattr(item, location_field).get("start_line") == symbol.start_line
     ]
     if not matches:
         raise ToolFailure(ToolResultStatus.NOT_FOUND, "CHANGED_SYMBOL_NOT_FOUND", "The supplied symbol is not changed in this diff.")
@@ -1197,9 +1217,11 @@ def analyze_impact(arguments: AnalyzeImpactInput, context: AgentToolContext) -> 
     if arguments.changed_symbol_id:
         try:
             symbol = _find_symbol(head, arguments.changed_symbol_id)
+            snapshot_role = "head"
         except ToolFailure:
             symbol = _find_symbol(base, arguments.changed_symbol_id)
-        diff = _narrow_diff_to_symbol(diff, symbol)
+            snapshot_role = "base"
+        diff = _narrow_diff_to_symbol(diff, symbol, snapshot_role=snapshot_role)
     report = get_impact_engine().compute_blast_radius(
         analysis_id=uuid5(NAMESPACE_URL, f"{base.snapshot_id}:{head.snapshot_id}"),
         diff_result=diff,
@@ -1271,11 +1293,22 @@ def analyze_impact(arguments: AnalyzeImpactInput, context: AgentToolContext) -> 
     )
 
 
-def _verification_result(claim: ProposedFinding, verdict: VerificationVerdict, reason: str, refs: Iterable[str] = ()) -> VerifyFindingOutput:
+def _verification_result(
+    claim: ProposedFinding,
+    verdict: VerificationVerdict,
+    reason: str,
+    matched_refs: Iterable[str] = (),
+    unresolved_refs: Iterable[str] = (),
+    duplicate_refs: Iterable[str] = (),
+) -> VerifyFindingOutput:
+    unresolved = sorted(set(unresolved_refs))
     return VerifyFindingOutput(
         verdict=verdict,
         claim_type=claim.claim_type,
-        matched_evidence_refs=sorted(set(refs)),
+        matched_evidence_refs=sorted(set(matched_refs)),
+        unresolved_evidence_refs=unresolved,
+        duplicate_evidence_refs=sorted(set(duplicate_refs)),
+        evidence_refs_complete=not unresolved,
         reason_code=reason,
     )
 
@@ -1289,23 +1322,47 @@ def _finish_verification(
     evidence: Iterable[EvidenceRecord] = (),
     components: tuple[str, ...],
     status: ToolResultStatus = ToolResultStatus.SUCCESS,
+    warnings: Iterable[ToolError] = (),
 ) -> ToolExecution:
     available = tuple(evidence)
     available_ids = {item.evidence_id for item in available}
-    requested = list(dict.fromkeys(claim.evidence_refs))
-    unknown = [ref for ref in requested if ref not in available_ids]
-    matched = [ref for ref in requested if ref in available_ids]
+    requested: list[str] = []
+    duplicate_refs: set[str] = set()
+    for ref in claim.evidence_refs:
+        if ref in requested:
+            duplicate_refs.add(ref)
+        else:
+            requested.append(ref)
+    unknown = sorted(ref for ref in requested if ref not in available_ids)
+    matched = sorted(ref for ref in requested if ref in available_ids)
     if verdict == VerificationVerdict.SUPPORTED and not requested:
         verdict, reason = VerificationVerdict.INVALID_CLAIM, "EVIDENCE_REFERENCES_REQUIRED"
     elif verdict == VerificationVerdict.SUPPORTED and unknown:
         verdict, reason = VerificationVerdict.INSUFFICIENT_EVIDENCE, "EVIDENCE_REFERENCE_UNRESOLVED_OR_FOREIGN"
+    reference_warnings = ()
+    if unknown:
+        reference_warnings = (
+            _warning(
+                "EVIDENCE_REFERENCE_UNRESOLVED_OR_FOREIGN",
+                "One or more supplied evidence references do not support the exact claim context.",
+                unresolved_evidence_refs=unknown,
+            ),
+        )
     return ToolExecution(
         status=status,
-        output=_verification_result(claim, verdict, reason, matched),
+        output=_verification_result(
+            claim,
+            verdict,
+            reason,
+            matched,
+            unknown,
+            duplicate_refs,
+        ),
         snapshot=snapshot,
         components=components,
         stage="deterministic_claim_verification",
         evidence=tuple(item for item in available if item.evidence_id in set(matched)),
+        warnings=tuple(warnings) + reference_warnings,
     )
 
 
@@ -1317,7 +1374,13 @@ def verify_finding(arguments: VerifyFindingInput, context: AgentToolContext) -> 
             if claim.symbol_id:
                 _find_symbol(snapshot, claim.symbol_id)
             execution = scan_security(
-                ScanSecurityInput(snapshot_id=claim.snapshot_id, file_path=claim.file_path, rules=[claim.rule], max_results=context.limits.max_results),
+                ScanSecurityInput(
+                    snapshot_id=claim.snapshot_id,
+                    file_path=claim.file_path,
+                    symbol_id=claim.symbol_id,
+                    rules=[claim.rule],
+                    max_results=context.limits.max_results,
+                ),
                 context,
             )
         except ToolFailure as failure:
@@ -1331,9 +1394,33 @@ def verify_finding(arguments: VerifyFindingInput, context: AgentToolContext) -> 
             matches = [item for item in matches if item.file_path == symbol.file_path and item.start_line is not None and item.end_line is not None and item.start_line <= symbol.end_line and item.end_line >= symbol.start_line]
         if matches:
             evidence = [_finding_evidence(execution.snapshot, item) for item in matches]  # type: ignore[arg-type]
-            return _finish_verification(claim, execution.snapshot, verdict=VerificationVerdict.SUPPORTED, reason="EXACT_SCANNER_FACT", evidence=evidence, components=execution.components)  # type: ignore[arg-type]
-        verdict = VerificationVerdict.UNSUPPORTED if execution.output.coverage_complete else VerificationVerdict.INSUFFICIENT_EVIDENCE
-        return _finish_verification(claim, execution.snapshot, verdict=verdict, reason="NO_MATCHING_SCANNER_FACT", components=execution.components)  # type: ignore[arg-type]
+            return _finish_verification(
+                claim,
+                execution.snapshot,  # type: ignore[arg-type]
+                verdict=VerificationVerdict.SUPPORTED,
+                reason="EXACT_SCANNER_FACT",
+                evidence=evidence,
+                components=execution.components,
+                status=execution.status,
+                warnings=execution.warnings,
+            )
+        if execution.status == ToolResultStatus.RESOURCE_LIMIT or execution.output.truncated:
+            verdict = VerificationVerdict.INSUFFICIENT_EVIDENCE
+            reason = "SECURITY_SEARCH_RESOURCE_LIMIT"
+            status = ToolResultStatus.RESOURCE_LIMIT
+        else:
+            verdict = VerificationVerdict.UNSUPPORTED if execution.output.coverage_complete else VerificationVerdict.INSUFFICIENT_EVIDENCE
+            reason = "NO_MATCHING_SCANNER_FACT"
+            status = ToolResultStatus.SUCCESS
+        return _finish_verification(
+            claim,
+            execution.snapshot,  # type: ignore[arg-type]
+            verdict=verdict,
+            reason=reason,
+            components=execution.components,
+            status=status,
+            warnings=execution.warnings,
+        )
 
     if claim.claim_type == ClaimType.DATAFLOW:
         snapshot = _snapshot(context, claim.snapshot_id)
@@ -1364,9 +1451,26 @@ def verify_finding(arguments: VerifyFindingInput, context: AgentToolContext) -> 
             raise
         assert isinstance(execution.output, TraceDataflowOutput)
         if execution.output.paths:
-            return _finish_verification(claim, snapshot, verdict=VerificationVerdict.SUPPORTED, reason="EXACT_PRODUCTION_FLOW", evidence=execution.evidence, components=execution.components)
+            return _finish_verification(
+                claim,
+                snapshot,
+                verdict=VerificationVerdict.SUPPORTED,
+                reason="EXACT_PRODUCTION_FLOW",
+                evidence=execution.evidence,
+                components=execution.components,
+                status=execution.status,
+                warnings=execution.warnings,
+            )
         verdict = VerificationVerdict.UNSUPPORTED if execution.output.outcome == FlowOutcome.NOT_FOUND else VerificationVerdict.INSUFFICIENT_EVIDENCE
-        return _finish_verification(claim, snapshot, verdict=verdict, reason="NO_MATCHING_PRODUCTION_FLOW", components=execution.components)
+        return _finish_verification(
+            claim,
+            snapshot,
+            verdict=verdict,
+            reason="NO_MATCHING_PRODUCTION_FLOW",
+            components=execution.components,
+            status=execution.status,
+            warnings=execution.warnings,
+        )
 
     if claim.claim_type == ClaimType.CALL_RELATIONSHIP:
         snapshot = _snapshot(context, claim.snapshot_id)
@@ -1384,16 +1488,29 @@ def verify_finding(arguments: VerifyFindingInput, context: AgentToolContext) -> 
             return _finish_verification(claim, snapshot, verdict=VerificationVerdict.INSUFFICIENT_EVIDENCE, reason="GRAPH_UNAVAILABLE", components=("repository_graph",))
         if claim.relationship_type != EdgeKind.CALLS.value:
             return _finish_verification(claim, snapshot, verdict=VerificationVerdict.INVALID_CLAIM, reason="CALL_RELATIONSHIP_MUST_BE_CALLS", components=("repository_graph",))
+        source_internal_id = snapshot.internal_symbol_id(claim.source_symbol_id)
+        target_internal_id = snapshot.internal_symbol_id(claim.target_symbol_id)
+        pair_edges = [
+            edge for edge in snapshot.graph.get_outgoing_edges(source_internal_id)
+            if edge.target == target_internal_id and edge.kind == EdgeKind.CALLS
+        ]
         edges = [
-            edge for edge in snapshot.graph.get_outgoing_edges(claim.source_symbol_id)
-            if edge.target == claim.target_symbol_id and edge.kind == EdgeKind.CALLS
-            and (call_site_file is None or str((edge.metadata or {}).get("call_site_file", "")).replace("\\", "/") == call_site_file)
+            edge for edge in pair_edges
+            if (call_site_file is None or str((edge.metadata or {}).get("call_site_file", "")).replace("\\", "/") == call_site_file)
             and (claim.call_site_line is None or (edge.metadata or {}).get("call_site_line") == claim.call_site_line)
         ]
         relationships = [item for edge in edges if (item := _relationship(snapshot, edge))]
         evidence = [_edge_evidence(snapshot, item) for item in relationships]
         if relationships:
             return _finish_verification(claim, snapshot, verdict=VerificationVerdict.SUPPORTED, reason="EXACT_GRAPH_EDGE", evidence=evidence, components=("repository_graph",))
+        if pair_edges and (claim.call_site_file is not None or claim.call_site_line is not None):
+            return _finish_verification(
+                claim,
+                snapshot,
+                verdict=VerificationVerdict.INSUFFICIENT_EVIDENCE,
+                reason="CALL_SITE_MULTIPLICITY_NOT_PRESERVED",
+                components=("repository_graph",),
+            )
         verdict = VerificationVerdict.UNSUPPORTED if snapshot.graph_complete else VerificationVerdict.INSUFFICIENT_EVIDENCE
         return _finish_verification(claim, snapshot, verdict=verdict, reason="NO_MATCHING_GRAPH_EDGE", components=("repository_graph",))
 
@@ -1442,7 +1559,8 @@ def verify_finding(arguments: VerifyFindingInput, context: AgentToolContext) -> 
                     if not location:
                         continue
                     start_line = location.get("start_line")
-                    exact_id = f"symbol:{path}:{item.symbol_kind}:{item.symbol_name}:{start_line}"
+                    internal_id = f"symbol:{path}:{item.symbol_kind}:{item.symbol_name}:{start_line}"
+                    exact_id = candidate.public_symbol_id(internal_id)
                     if exact_id == claim.symbol_id and exact_id in candidate.symbol_index:
                         facts.append(("SYMBOL", item))
                         break
