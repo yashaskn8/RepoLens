@@ -15,7 +15,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import BaseModel
 
-from app.agent_tools.context import AgentToolContext, RepositorySnapshot, internal_symbol_identity
+from app.agent_tools.context import AgentToolContext, RepositorySnapshot, internal_symbol_identity, public_graph_entity_identity
 from app.agent_tools.schemas import (
     AnalyzeChangeInput,
     AnalyzeChangeOutput,
@@ -243,8 +243,18 @@ def _find_symbol(snapshot: RepositorySnapshot, symbol_id: str) -> SymbolRecord:
 
 def _entity(snapshot: RepositorySnapshot, node: GraphNode) -> GraphEntityRecord:
     label = _json(node.label)
+    pub_id = snapshot.public_graph_entity_id(node.id)
+    if pub_id is None:
+        if node.id in snapshot.public_symbol_ids:
+            pub_id = snapshot.public_symbol_ids[node.id]
+        else:
+            pub_id = public_graph_entity_identity(
+                snapshot.repository_identity,
+                snapshot.snapshot_id,
+                node,
+            )
     return GraphEntityRecord(
-        entity_id=snapshot.public_symbol_id(node.id) or node.id,
+        entity_id=pub_id,
         kind=node.kind.value,
         label=label if isinstance(label, str) else str(label),
         file_path=node.file_path,
@@ -264,22 +274,12 @@ def _resolve_graph_entity(snapshot: RepositorySnapshot, entity_id: str) -> str |
     """
     if not entity_id or snapshot.graph is None:
         return None
-    if entity_id in snapshot.symbol_internal_ids:
-        internal_id = snapshot.symbol_internal_ids[entity_id]
-        if snapshot.graph.get_node(internal_id) is not None:
-            return internal_id
+    try:
+        internal_id = snapshot.internal_graph_entity_id(entity_id)
+    except KeyError:
         return None
-    if entity_id.startswith("file:"):
-        raw_path = entity_id[len("file:"):]
-        try:
-            normalized = snapshot.normalize_path(raw_path, require_manifest_entry=True)
-        except (PathTraversalError, FileNotFoundError, ValueError):
-            return None
-        candidate_id = f"file:{normalized}"
-        node = snapshot.graph.get_node(candidate_id)
-        if node is not None and node.kind == NodeKind.FILE:
-            return candidate_id
-        return None
+    if snapshot.graph.get_node(internal_id) is not None:
+        return internal_id
     return None
 
 
@@ -1524,32 +1524,34 @@ def verify_finding(arguments: VerifyFindingInput, context: AgentToolContext) -> 
 
     if claim.claim_type == ClaimType.CALL_RELATIONSHIP:
         snapshot = _snapshot(context, claim.snapshot_id)
-        # Resolve effective source/target identifiers: symbol IDs take precedence,
-        # then entity IDs (supporting FILE-level graph nodes).
-        effective_source = claim.source_symbol_id or claim.source_entity_id
-        effective_target = claim.target_symbol_id or claim.target_entity_id
-        if not effective_source or not effective_target:
+        has_source_symbol = claim.source_symbol_id is not None
+        has_source_entity = claim.source_entity_id is not None
+        has_target_symbol = claim.target_symbol_id is not None
+        has_target_entity = claim.target_entity_id is not None
+        if (has_source_symbol == has_source_entity) or (has_target_symbol == has_target_entity):
             return _finish_verification(claim, snapshot, verdict=VerificationVerdict.INVALID_CLAIM, reason="SOURCE_OR_TARGET_REQUIRED", components=("repository_graph",))
+
         source_internal_id: str | None = None
         target_internal_id: str | None = None
-        # Try symbol resolution first
-        try:
-            if claim.source_symbol_id:
+
+        if claim.source_symbol_id is not None:
+            try:
                 _find_symbol(snapshot, claim.source_symbol_id)
                 source_internal_id = snapshot.internal_symbol_id(claim.source_symbol_id)
-        except (ToolFailure, KeyError):
-            source_internal_id = None
-        try:
-            if claim.target_symbol_id:
+            except (ToolFailure, KeyError):
+                source_internal_id = None
+        elif claim.source_entity_id is not None:
+            source_internal_id = _resolve_graph_entity(snapshot, claim.source_entity_id)
+
+        if claim.target_symbol_id is not None:
+            try:
                 _find_symbol(snapshot, claim.target_symbol_id)
                 target_internal_id = snapshot.internal_symbol_id(claim.target_symbol_id)
-        except (ToolFailure, KeyError):
-            target_internal_id = None
-        # Fall back to entity ID resolution for graph nodes (e.g. file:path)
-        if source_internal_id is None and effective_source:
-            source_internal_id = _resolve_graph_entity(snapshot, effective_source)
-        if target_internal_id is None and effective_target:
-            target_internal_id = _resolve_graph_entity(snapshot, effective_target)
+            except (ToolFailure, KeyError):
+                target_internal_id = None
+        elif claim.target_entity_id is not None:
+            target_internal_id = _resolve_graph_entity(snapshot, claim.target_entity_id)
+
         if source_internal_id is None or target_internal_id is None:
             return _finish_verification(claim, snapshot, verdict=VerificationVerdict.INVALID_CLAIM, reason="SOURCE_OR_TARGET_UNRESOLVED", components=("repository_graph",))
         try:

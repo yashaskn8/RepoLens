@@ -17,7 +17,8 @@ from app.analysis.store import EvidenceStore
 from app.core.path_confinement import PathTraversalError, resolve_safe_path
 from app.graph.builder import build_repository_graph
 from app.graph.repository_graph import RepositoryGraph
-from app.graph.schemas import NodeKind
+from app.graph.schemas import GraphNode, NodeKind
+from app.agent_tools.schemas import MAX_PUBLIC_PATH_LENGTH
 from app.indexing.schemas import CodeChunk
 from app.ingestion.schemas import ParsedSymbol, RepositoryManifest
 from app.schemas.change_analysis import StructuralDiffResult
@@ -81,6 +82,27 @@ def public_symbol_identity(
         separators=(",", ":"),
     )
     return f"symbol:{hashlib.sha256(material.encode('utf-8')).hexdigest()}"
+
+
+def public_graph_entity_identity(
+    repository_identity: str,
+    snapshot_id: str,
+    node: GraphNode,
+) -> str:
+    """Return a bounded, snapshot-bound public identity for one non-symbol graph node."""
+    kind_value = node.kind.value if hasattr(node.kind, "value") else str(node.kind)
+    material = json.dumps(
+        {
+            "internal_id": node.id,
+            "kind": kind_value,
+            "repository": repository_identity,
+            "snapshot": snapshot_id,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return f"entity:{hashlib.sha256(material.encode('utf-8')).hexdigest()}"
 
 
 def _confined_relative(root: Path, value: str) -> str:
@@ -185,6 +207,8 @@ class RepositorySnapshot:
     symbol_index: Mapping[str, tuple[str, ParsedSymbol]] = field(default_factory=dict, repr=False)
     symbol_internal_ids: Mapping[str, str] = field(default_factory=dict, repr=False)
     public_symbol_ids: Mapping[str, str] = field(default_factory=dict, repr=False)
+    graph_entity_internal_ids: Mapping[str, str] = field(default_factory=dict, repr=False)
+    graph_entity_public_ids: Mapping[str, str] = field(default_factory=dict, repr=False)
     manifest_paths: frozenset[str] = field(default_factory=frozenset, repr=False)
     repository_identity: str = field(default="", repr=False)
     artifact_digest: str = field(default="", repr=False)
@@ -225,6 +249,8 @@ class RepositorySnapshot:
         authorized_paths: set[str] = set()
         for entry in manifest.files:
             normalized = _confined_relative(root, entry.path)
+            if len(normalized) > MAX_PUBLIC_PATH_LENGTH:
+                raise ValueError("repository manifest path exceeds Phase-A public path limit")
             if normalized in authorized_paths:
                 raise ValueError("repository manifest contains duplicate normalized file paths")
             authorized_paths.add(normalized)
@@ -289,6 +315,20 @@ class RepositorySnapshot:
                 symbol_index[public_identity] = (path, symbol)
                 symbol_internal_ids[public_identity] = internal_identity
                 public_symbol_ids[internal_identity] = public_identity
+        graph_entity_internal_ids: dict[str, str] = {}
+        graph_entity_public_ids: dict[str, str] = {}
+        if built_graph is not None:
+            for node in sorted(built_graph.get_nodes(), key=lambda item: item.id):
+                if node.id in public_symbol_ids:
+                    pub_id = public_symbol_ids[node.id]
+                else:
+                    pub_id = public_graph_entity_identity(
+                        repository_identity,
+                        snapshot_id,
+                        node,
+                    )
+                graph_entity_internal_ids[pub_id] = node.id
+                graph_entity_public_ids[node.id] = pub_id
         versions = {str(key): str(value) for key, value in sorted((component_versions or {}).items())}
         artifact_payload = _snapshot_artifact_payload(
             snapshot_id, manifest, frozen_store, built_graph, program, versions
@@ -304,6 +344,8 @@ class RepositorySnapshot:
             symbol_index=MappingProxyType(symbol_index),
             symbol_internal_ids=MappingProxyType(symbol_internal_ids),
             public_symbol_ids=MappingProxyType(public_symbol_ids),
+            graph_entity_internal_ids=MappingProxyType(graph_entity_internal_ids),
+            graph_entity_public_ids=MappingProxyType(graph_entity_public_ids),
             manifest_paths=frozenset(authorized_paths),
             repository_identity=repository_identity,
             artifact_digest=_digest_payload(artifact_payload),
@@ -357,6 +399,8 @@ class RepositorySnapshot:
             raise PathTraversalError("repository path is outside the authorized snapshot") from exc
         if normalized in {"", "."}:
             raise PathTraversalError("a repository file path is required")
+        if len(normalized) > MAX_PUBLIC_PATH_LENGTH:
+            raise ValueError("repository path exceeds Phase-A public path limit")
         if require_manifest_entry and normalized not in self.manifest_paths:
             raise FileNotFoundError(normalized)
         return normalized
@@ -374,6 +418,15 @@ class RepositorySnapshot:
 
     def public_symbol_id(self, internal_id: str) -> str | None:
         return self.public_symbol_ids.get(internal_id)
+
+    def internal_graph_entity_id(self, public_id: str) -> str:
+        try:
+            return self.graph_entity_internal_ids[public_id]
+        except KeyError as exc:
+            raise KeyError("public graph entity identity is not registered") from exc
+
+    def public_graph_entity_id(self, internal_id: str) -> str | None:
+        return self.graph_entity_public_ids.get(internal_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -498,9 +551,11 @@ class AgentToolContext:
 
 __all__ = [
     "AgentToolContext",
+    "MAX_PUBLIC_PATH_LENGTH",
     "RepositorySnapshot",
     "ToolResourceLimits",
     "canonical_repository_identity",
     "internal_symbol_identity",
+    "public_graph_entity_identity",
     "public_symbol_identity",
 ]

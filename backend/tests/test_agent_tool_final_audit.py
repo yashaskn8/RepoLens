@@ -261,7 +261,9 @@ def test_audit_05_and_06_top_level_file_to_symbol_calls_and_round_trip(tmp_path:
 
     # Verify source is the FILE node
     assert rel["source"]["kind"] == "FILE"
-    assert rel["source"]["entity_id"] == "file:main.py"
+    assert rel["source"]["entity_id"].startswith("entity:")
+    assert len(rel["source"]["entity_id"]) == 71
+    assert rel["source"]["file_path"] == "main.py"
     assert rel["relationship"] == "CALLS"
 
     # 6. Round-trip into verify_finding using source_entity_id

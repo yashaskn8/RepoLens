@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.ingestion.schemas import SymbolKind
 from app.schemas.change_analysis import FileChangeType, StructuralDiffResult, SymbolChangeType
@@ -13,6 +13,7 @@ from app.schemas.change_analysis import FileChangeType, StructuralDiffResult, Sy
 
 AGENT_TOOL_CONTRACT_VERSION = "1.2.0"
 AGENT_TOOL_VERSION = "1.2.0"
+MAX_PUBLIC_PATH_LENGTH = 1024
 
 
 class ToolModel(BaseModel):
@@ -82,7 +83,7 @@ class EvidenceRecord(ToolModel):
     evidence_id: str = Field(min_length=1, max_length=128)
     evidence_type: EvidenceType
     source_component: str = Field(min_length=1, max_length=128)
-    file_path: str | None = Field(default=None, max_length=1024)
+    file_path: str | None = Field(default=None, max_length=MAX_PUBLIC_PATH_LENGTH)
     symbol: str | None = Field(default=None, max_length=1024)
     start_line: int | None = Field(default=None, ge=1)
     end_line: int | None = Field(default=None, ge=1)
@@ -136,7 +137,7 @@ class SnapshotInput(ToolModel):
 
 
 class InspectFileInput(SnapshotInput):
-    file_path: str = Field(min_length=1, max_length=1024)
+    file_path: str = Field(min_length=1, max_length=MAX_PUBLIC_PATH_LENGTH)
 
 
 class SearchMode(str, Enum):
@@ -148,7 +149,7 @@ class SearchMode(str, Enum):
 class SearchSymbolInput(SnapshotInput):
     query: str = Field(min_length=1, max_length=256)
     kind: SymbolKind | None = None
-    file_path: str | None = Field(default=None, min_length=1, max_length=1024)
+    file_path: str | None = Field(default=None, min_length=1, max_length=MAX_PUBLIC_PATH_LENGTH)
     match_mode: SearchMode = SearchMode.EXACT
     max_results: int = Field(default=50, ge=1, le=500)
 
@@ -221,16 +222,34 @@ class CallRelationshipClaim(ToolModel):
     source_entity_id: str | None = Field(default=None, min_length=1, max_length=2048)
     target_entity_id: str | None = Field(default=None, min_length=1, max_length=2048)
     relationship_type: Literal["CALLS"] = "CALLS"
-    call_site_file: str | None = Field(default=None, min_length=1, max_length=1024)
+    call_site_file: str | None = Field(default=None, min_length=1, max_length=MAX_PUBLIC_PATH_LENGTH)
     call_site_line: int | None = Field(default=None, ge=1)
     evidence_refs: list[Annotated[str, Field(min_length=1, max_length=128)]] = Field(min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def validate_endpoints(self) -> CallRelationshipClaim:
+        has_source_symbol = self.source_symbol_id is not None
+        has_source_entity = self.source_entity_id is not None
+        if has_source_symbol == has_source_entity:
+            if has_source_symbol:
+                raise ValueError("CallRelationshipClaim cannot contain both source_symbol_id and source_entity_id")
+            raise ValueError("CallRelationshipClaim must contain exactly one of source_symbol_id or source_entity_id")
+
+        has_target_symbol = self.target_symbol_id is not None
+        has_target_entity = self.target_entity_id is not None
+        if has_target_symbol == has_target_entity:
+            if has_target_symbol:
+                raise ValueError("CallRelationshipClaim cannot contain both target_symbol_id and target_entity_id")
+            raise ValueError("CallRelationshipClaim must contain exactly one of target_symbol_id or target_entity_id")
+
+        return self
 
 
 class StructuralChangeClaim(ToolModel):
     claim_type: Literal[ClaimType.STRUCTURAL_CHANGE]
     base_snapshot_id: str = Field(min_length=1, max_length=128)
     head_snapshot_id: str = Field(min_length=1, max_length=128)
-    file_path: str = Field(min_length=1, max_length=1024)
+    file_path: str = Field(min_length=1, max_length=MAX_PUBLIC_PATH_LENGTH)
     change_type: FileChangeType | SymbolChangeType
     symbol_id: str | None = Field(default=None, min_length=1, max_length=2048)
     evidence_refs: list[Annotated[str, Field(min_length=1, max_length=128)]] = Field(min_length=1, max_length=64)
