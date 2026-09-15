@@ -978,6 +978,15 @@ def _obtain_diff(
     if base.repository_identity != head.repository_identity:
         raise ToolFailure(ToolResultStatus.INVALID_INPUT, "REPOSITORY_MISMATCH", "Base and head snapshots belong to different repositories.")
     try:
+        base.assert_change_workspace_confined()
+        head.assert_change_workspace_confined()
+    except (PathTraversalError, OSError, ValueError) as exc:
+        raise ToolFailure(
+            ToolResultStatus.INSUFFICIENT_EVIDENCE,
+            "PRECOMPUTED_DIFF_REQUIRED",
+            "The registered diff cannot be trusted while a repository workspace boundary is unsafe.",
+        ) from exc
+    try:
         existing = context.get_diff(base_id, head_id)
     except ValueError as exc:
         raise ToolFailure(

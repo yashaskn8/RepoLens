@@ -55,7 +55,10 @@ def test_change_tools_never_recompute_from_mutable_live_files(tmp_path: Path):
     assert first.model_dump(mode="json") == second.model_dump(mode="json")
 
 
-def test_untrusted_direct_diff_is_not_used_even_with_symlink_escape(tmp_path: Path):
+def test_untrusted_direct_diff_is_not_used_even_with_symlink_escape(
+    tmp_path: Path,
+    monkeypatch,
+):
     context, base, head = _change_context(tmp_path)
     outside = tmp_path / "outside.py"
     outside.write_text("secret = True\n", encoding="utf-8")
@@ -63,7 +66,19 @@ def test_untrusted_direct_diff_is_not_used_even_with_symlink_escape(tmp_path: Pa
     try:
         link.symlink_to(outside)
     except OSError:
-        pytest.skip("symlink creation is unavailable")
+        link.write_text("simulated link", encoding="utf-8")
+        original_resolve = Path.resolve
+
+        def simulated_resolve(path, *args, **kwargs):
+            if path == link:
+                return original_resolve(outside, *args, **kwargs)
+            return original_resolve(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", simulated_resolve)
+        monkeypatch.setattr(
+            "app.agent_tools.context._is_filesystem_indirection",
+            lambda path: path == link,
+        )
     result = create_agent_tool_registry(context).invoke("analyze_change", {
         "base_snapshot_id": base.snapshot_id,
         "head_snapshot_id": head.snapshot_id,

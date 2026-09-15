@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import time
@@ -26,6 +27,14 @@ from app.semantics import SemanticProgram, build_semantic_program
 
 
 _GITHUB_REPOSITORY_SEGMENT = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def _is_filesystem_indirection(path: Path) -> bool:
+    """Return whether *path* is a symlink or Windows junction/reparse directory."""
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    return bool(is_junction and is_junction())
 
 
 def canonical_repository_identity(value: str) -> str:
@@ -404,6 +413,45 @@ class RepositorySnapshot:
         if require_manifest_entry and normalized not in self.manifest_paths:
             raise FileNotFoundError(normalized)
         return normalized
+
+    def assert_change_workspace_confined(self) -> None:
+        """Fail closed if the materialized namespace contains an untrusted indirection.
+
+        Change tools never read source contents, but this check prevents a caller from
+        presenting a post-registration symlink/junction escape alongside a supposedly
+        trusted precomputed diff. Directory indirections are never traversed.
+        """
+        root = self.repository_root.resolve(strict=True)
+        pending = [root]
+        inspected = 0
+        max_entries = self.admission_limits.max_files * 2
+        while pending:
+            directory = pending.pop()
+            try:
+                entries = sorted(os.scandir(directory), key=lambda item: item.name)
+            except OSError as exc:
+                raise PathTraversalError("repository namespace cannot be verified") from exc
+            for entry in entries:
+                inspected += 1
+                if inspected > max_entries:
+                    raise PathTraversalError("repository namespace exceeds the verification limit")
+                candidate = Path(entry.path)
+                try:
+                    if _is_filesystem_indirection(candidate):
+                        resolved = candidate.resolve(strict=True)
+                        resolved.relative_to(root)
+                        relative_link = candidate.relative_to(root).as_posix()
+                        if relative_link not in self.manifest_paths:
+                            raise PathTraversalError(
+                                "repository indirection is not authorized by the snapshot manifest"
+                            )
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(candidate)
+                except (OSError, ValueError) as exc:
+                    raise PathTraversalError(
+                        "repository indirection escapes the authorized snapshot"
+                    ) from exc
 
     def symbol_records(self):
         """Yield manifest symbols with their containing file; no source reads."""
