@@ -821,13 +821,28 @@ async def test_github_delivery_disabled_by_feature_flag(db_session: Session, bas
     assert provider.delivery_enabled is False
     assert provider.is_configured is False
 
-    service = DeliveryService(provider=provider)
-    preview = await service.get_delivery_preview(db=db_session, patch_id=patch.id)
-    assert preview.github_delivery_configured is False
+    from contextlib import contextmanager
 
-    with pytest.raises(HTTPException) as exc_info:
-        await service.deliver_patch(db=db_session, patch_id=patch.id, payload=DeliveryRequest())
-    assert exc_info.value.status_code == 503
+    @contextmanager
+    def _fake_snapshot(scan_id, db=None):
+        with tempfile.TemporaryDirectory() as fresh_ws:
+            os.makedirs(os.path.join(fresh_ws, "app"), exist_ok=True)
+            with open(os.path.join(fresh_ws, "app", "storage.py"), "w", encoding="utf-8") as f:
+                f.write("def read_file(p):\n    return open(p)\n")
+            yield fresh_ws
+
+    with mock_patch("app.delivery.validator.get_snapshot_service") as mock_val_snap:
+        mock_inst = MagicMock()
+        mock_inst.snapshot_context.side_effect = _fake_snapshot
+        mock_val_snap.return_value = mock_inst
+
+        service = DeliveryService(provider=provider)
+        preview = await service.get_delivery_preview(db=db_session, patch_id=patch.id)
+        assert preview.github_delivery_configured is False
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service.deliver_patch(db=db_session, patch_id=patch.id, payload=DeliveryRequest())
+        assert exc_info.value.status_code == 503
 
 
 # 25. Fix 5: GITHUB_DELIVERY_ENABLED=True but token absent is unconfigured

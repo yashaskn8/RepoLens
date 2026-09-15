@@ -74,12 +74,20 @@ class RepositorySnapshotService:
             "git",
             "-c", "core.symlinks=false",
             "-c", "submodule.recurse=false",
+            "-c", "credential.helper=",
         ]
         full_cmd = base_cmd + args
+
+        env = {
+            **os.environ,
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_ASKPASS": "",
+        }
 
         res = subprocess.run(
             full_cmd,
             cwd=cwd,
+            env=env,
             shell=False,
             capture_output=True,
             text=True,

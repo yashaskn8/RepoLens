@@ -27,19 +27,21 @@ from app.evaluation.ground_truth.holdout_governance import (
     canonical_hash,
 )
 
-PROD_MANIFEST_PATH = Path("backend/evaluation_data/ground_truth/v1/production_freeze_manifest.json")
-BENCH_MANIFEST_PATH = Path("backend/evaluation_data/ground_truth/v1/benchmark_contract_manifest.json")
-CASES_DIR = Path("backend/evaluation_data/ground_truth/v1/cases")
+_BACKEND_DIR = Path(__file__).resolve().parent.parent
+_REPO_ROOT = _BACKEND_DIR.parent
+PROD_MANIFEST_PATH = _BACKEND_DIR / "evaluation_data" / "ground_truth" / "v1" / "production_freeze_manifest.json"
+BENCH_MANIFEST_PATH = _BACKEND_DIR / "evaluation_data" / "ground_truth" / "v1" / "benchmark_contract_manifest.json"
+CASES_DIR = _BACKEND_DIR / "evaluation_data" / "ground_truth" / "v1" / "cases"
 
 
 def test_frozen_baseline_passes_verification():
     """Verify that untampered production and benchmark manifests pass with zero mismatches."""
-    prod_res = HoldoutAuthorizationContract.verify_production_freeze(PROD_MANIFEST_PATH)
+    prod_res = HoldoutAuthorizationContract.verify_production_freeze(PROD_MANIFEST_PATH, root_dir=_REPO_ROOT)
     assert prod_res.valid is True
     assert prod_res.mismatches == []
 
     bench_res = HoldoutAuthorizationContract.verify_benchmark_contract(
-        BENCH_MANIFEST_PATH, cases_dir=CASES_DIR
+        BENCH_MANIFEST_PATH, cases_dir=CASES_DIR, root_dir=_REPO_ROOT
     )
     assert bench_res.valid is True
     assert bench_res.mismatches == []
@@ -56,7 +58,7 @@ def test_attack_1_production_file_changed(tmp_path):
     with open(tampered_manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f)
 
-    res = HoldoutAuthorizationContract.verify_production_freeze(tampered_manifest_path)
+    res = HoldoutAuthorizationContract.verify_production_freeze(tampered_manifest_path, root_dir=_REPO_ROOT)
     assert res.valid is False
     assert any("Component tampered" in m for m in res.mismatches)
 
@@ -71,7 +73,7 @@ def test_attack_2_matcher_changed(tmp_path):
     with open(tampered_manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f)
 
-    res = HoldoutAuthorizationContract.verify_benchmark_contract(tampered_manifest_path)
+    res = HoldoutAuthorizationContract.verify_benchmark_contract(tampered_manifest_path, root_dir=_REPO_ROOT)
     assert res.valid is False
     assert any("Benchmark component tampered" in m for m in res.mismatches)
 
@@ -86,7 +88,7 @@ def test_attack_3_metric_calculation_changed(tmp_path):
     with open(tampered_manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f)
 
-    res = HoldoutAuthorizationContract.verify_benchmark_contract(tampered_manifest_path)
+    res = HoldoutAuthorizationContract.verify_benchmark_contract(tampered_manifest_path, root_dir=_REPO_ROOT)
     assert res.valid is False
     assert any("Benchmark component tampered" in m for m in res.mismatches)
 
@@ -103,7 +105,7 @@ def test_attack_4_dataset_hash_changed(tmp_path):
         json.dump(manifest, f)
 
     res = HoldoutAuthorizationContract.verify_benchmark_contract(
-        tampered_manifest_path, cases_dir=CASES_DIR
+        tampered_manifest_path, cases_dir=CASES_DIR, root_dir=_REPO_ROOT
     )
     assert res.valid is False
     assert any("Canonical dataset hash mismatch" in m for m in res.mismatches)
@@ -120,7 +122,7 @@ def test_attack_5_normalization_contract_changed(tmp_path):
     with open(tampered_manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f)
 
-    res = HoldoutAuthorizationContract.verify_benchmark_contract(tampered_manifest_path)
+    res = HoldoutAuthorizationContract.verify_benchmark_contract(tampered_manifest_path, root_dir=_REPO_ROOT)
     assert res.valid is False
     assert any("Benchmark contract ID mismatch" in m for m in res.mismatches)
 
@@ -164,6 +166,7 @@ def test_attack_8_private_auth_wrong_production_id(tmp_path):
         holdout_metadata=None,
         ledger=ledger,
         cases_dir=CASES_DIR,
+        root_dir=_REPO_ROOT,
     )
     assert is_auth is False
     assert any("Production freeze ID mismatch" in r for r in reasons)
@@ -186,6 +189,7 @@ def test_attack_9_private_auth_wrong_benchmark_id(tmp_path):
         holdout_metadata=None,
         ledger=ledger,
         cases_dir=CASES_DIR,
+        root_dir=_REPO_ROOT,
     )
     assert is_auth is False
     assert any("Benchmark contract ID mismatch" in r for r in reasons)
@@ -235,6 +239,7 @@ def test_attack_10_reused_single_use_ledger_entry(tmp_path):
         holdout_metadata=meta,
         ledger=ledger,
         cases_dir=CASES_DIR,
+        root_dir=_REPO_ROOT,
     )
     assert is_auth is False
     assert any("already been consumed" in r for r in reasons)

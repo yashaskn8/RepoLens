@@ -74,8 +74,17 @@ class HoldoutAuthorizationContract:
     """Cryptographic authority governing whether execution against a private holdout is permitted."""
 
     @staticmethod
-    def verify_production_freeze(manifest_path: str | Path) -> FreezeValidationResult:
-        """Verify that every production component matches its registered SHA-256."""
+    def verify_production_freeze(
+        manifest_path: str | Path,
+        root_dir: Optional[str | Path] = None,
+    ) -> FreezeValidationResult:
+        """Verify that every production component matches its registered SHA-256.
+
+        Args:
+            manifest_path: Path to the production freeze manifest JSON.
+            root_dir: Repository root directory for resolving component paths.
+                      When None, component paths are resolved relative to CWD.
+        """
         p = Path(manifest_path)
         if not p.is_file():
             return FreezeValidationResult(
@@ -101,8 +110,9 @@ class HoldoutAuthorizationContract:
 
         for comp_path, comp_info in data.get("components", {}).items():
             expected_hash = comp_info.get("sha256")
+            resolved_path = Path(root_dir) / comp_path if root_dir else Path(comp_path)
             try:
-                actual_hash = compute_file_sha256(comp_path)
+                actual_hash = compute_file_sha256(resolved_path)
                 if actual_hash != expected_hash:
                     mismatches.append(
                         f"Component tampered: {comp_path} (recorded={expected_hash[:12]}..., actual={actual_hash[:12]}...)"
@@ -122,8 +132,16 @@ class HoldoutAuthorizationContract:
     def verify_benchmark_contract(
         manifest_path: str | Path,
         cases_dir: Optional[str | Path] = None,
+        root_dir: Optional[str | Path] = None,
     ) -> FreezeValidationResult:
-        """Verify that benchmark runner, matcher, metrics, and dataset match frozen signatures."""
+        """Verify that benchmark runner, matcher, metrics, and dataset match frozen signatures.
+
+        Args:
+            manifest_path: Path to the benchmark contract manifest JSON.
+            cases_dir: Directory containing benchmark case files.
+            root_dir: Repository root directory for resolving component paths.
+                      When None, component paths are resolved relative to CWD.
+        """
         p = Path(manifest_path)
         if not p.is_file():
             return FreezeValidationResult(
@@ -161,8 +179,9 @@ class HoldoutAuthorizationContract:
         # Verify benchmark component files
         for comp_path, comp_info in data.get("components", {}).items():
             expected_hash = comp_info.get("sha256")
+            resolved_path = Path(root_dir) / comp_path if root_dir else Path(comp_path)
             try:
-                actual_hash = compute_file_sha256(comp_path)
+                actual_hash = compute_file_sha256(resolved_path)
                 if actual_hash != expected_hash:
                     mismatches.append(
                         f"Benchmark component tampered: {comp_path} (recorded={expected_hash[:12]}..., actual={actual_hash[:12]}...)"
@@ -186,6 +205,7 @@ class HoldoutAuthorizationContract:
         holdout_metadata: Optional[PrivateHoldoutMetadata],
         ledger: SingleUseLedger,
         cases_dir: Optional[str | Path] = None,
+        root_dir: Optional[str | Path] = None,
     ) -> Tuple[bool, List[str]]:
         """Evaluate full authorization gate for executing unseen private holdout.
 
@@ -195,12 +215,14 @@ class HoldoutAuthorizationContract:
         reasons: List[str] = []
 
         # 1. Verify Production Freeze
-        prod_val = cls.verify_production_freeze(production_manifest_path)
+        prod_val = cls.verify_production_freeze(production_manifest_path, root_dir=root_dir)
         if not prod_val.valid:
             reasons.extend(prod_val.mismatches)
 
         # 2. Verify Benchmark Contract Freeze
-        bench_val = cls.verify_benchmark_contract(benchmark_manifest_path, cases_dir=cases_dir)
+        bench_val = cls.verify_benchmark_contract(
+            benchmark_manifest_path, cases_dir=cases_dir, root_dir=root_dir
+        )
         if not bench_val.valid:
             reasons.extend(bench_val.mismatches)
 

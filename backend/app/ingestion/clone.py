@@ -111,6 +111,8 @@ def clone_repository(
         "--no-recurse-submodules",
         "--config",
         "core.symlinks=false",
+        "--config",
+        "credential.helper=",
     ]
 
     if branch:
@@ -122,9 +124,16 @@ def clone_repository(
 
     cmd.extend(["--", normalized_url, dest_dir])
 
+    env = {
+        **os.environ,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_ASKPASS": "",
+    }
+
     try:
         result = subprocess.run(
             cmd,
+            env=env,
             shell=False,
             capture_output=True,
             text=True,
