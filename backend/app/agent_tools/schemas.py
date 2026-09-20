@@ -47,6 +47,7 @@ class FlowOutcome(str, Enum):
 
 class EvidenceType(str, Enum):
     SOURCE_LOCATION = "SOURCE_LOCATION"
+    SOURCE_SLICE = "SOURCE_SLICE"
     AST_FACT = "AST_FACT"
     GRAPH_EDGE = "GRAPH_EDGE"
     CALL_RELATIONSHIP = "CALL_RELATIONSHIP"
@@ -138,6 +139,17 @@ class SnapshotInput(ToolModel):
 
 class InspectFileInput(SnapshotInput):
     file_path: str = Field(min_length=1, max_length=MAX_PUBLIC_PATH_LENGTH)
+
+
+class ReadSourceSliceInput(InspectFileInput):
+    start_line: int = Field(ge=1)
+    end_line: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def validate_line_order(self) -> "ReadSourceSliceInput":
+        if self.end_line < self.start_line:
+            raise ValueError("end_line must be greater than or equal to start_line")
+        return self
 
 
 class SearchMode(str, Enum):
@@ -339,6 +351,17 @@ class FileInspectionOutput(ToolModel):
     manifest_scope_complete: bool
 
 
+class ReadSourceSliceOutput(ToolModel):
+    repository_snapshot: str = Field(min_length=1, max_length=128)
+    file_path: str = Field(min_length=1, max_length=MAX_PUBLIC_PATH_LENGTH)
+    start_line: int = Field(ge=1)
+    end_line: int = Field(ge=1)
+    content: str = Field(max_length=12_000)
+    content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    file_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    truncated: bool
+
+
 class SymbolSearchOutput(ToolModel):
     query: str
     match_mode: SearchMode
@@ -346,6 +369,7 @@ class SymbolSearchOutput(ToolModel):
     total_matches: int
     returned_matches: int
     truncated: bool
+    manifest_scope_complete: bool
 
 
 class GraphEntityRecord(ToolModel):

@@ -10,6 +10,16 @@ from app.agents.architecture import run_architecture_agent
 from app.agents.bug import run_bug_agent
 from app.agents.checkpointer import get_sqlite_checkpointer
 from app.agents.integration import run_integration_agent
+from app.agents.investigator import (
+    route_after_investigator_compact,
+    route_after_investigator_complete,
+    route_after_investigator_decide,
+    run_investigator_compact_node,
+    run_investigator_complete_node,
+    run_investigator_decide_node,
+    run_investigator_prepare_node,
+    run_investigator_tool_node,
+)
 from app.agents.mapper import run_repository_mapper
 from app.agents.mcp_enrichment import run_mcp_enrichment_node
 from app.agents.revision import run_revision_agent
@@ -18,6 +28,13 @@ from app.agents.state import AnalysisState
 from app.agents.verifier import run_verifier_agent
 from app.agents.helpers import safe_to_uuid
 from app.analysis.store import EvidenceStore
+from app.agent_tools import AgentToolContext, RepositorySnapshot, create_agent_tool_registry
+from app.agent_runtime.schemas import (
+    MAX_INVESTIGATOR_STEPS,
+    MAX_INVESTIGATOR_TARGETS,
+    MAX_INVESTIGATOR_TOOL_CALLS,
+)
+from app.core.config import get_settings
 from app.llm.admission import build_admission_map
 
 from app.context.engine import ContextEngine
@@ -45,6 +62,10 @@ from app.specialist_candidates import (
 )
 
 logger = logging.getLogger(__name__)
+
+ANALYSIS_RECURSION_LIMIT = 10 + MAX_INVESTIGATOR_TARGETS * (
+    2 + MAX_INVESTIGATOR_STEPS + 2 * MAX_INVESTIGATOR_TOOL_CALLS
+)
 
 
 def run_finalize_node(state: AnalysisState) -> Dict[str, Any]:
@@ -76,7 +97,7 @@ def route_after_verifier(state: AnalysisState) -> str:
     if decision == "verified":
         return "finalize"
     elif decision == "needs_revision" and revision_count < 1:
-        return "revise"
+        return "investigate" if state.get("agent_investigator_enabled", False) else "revise"
     return "finalize_uncertain"
 
 
@@ -121,6 +142,26 @@ async def _mcp_enrich_node(state: AnalysisState, runtime: Any = None) -> Dict[st
     return await _budgeted_node(run_mcp_enrichment_node, state, runtime)
 
 
+async def _investigator_prepare_node(state: AnalysisState, runtime: Any = None) -> Dict[str, Any]:
+    return await _budgeted_node(run_investigator_prepare_node, state, runtime)
+
+
+async def _investigator_decide_node(state: AnalysisState, runtime: Any = None) -> Dict[str, Any]:
+    return await _budgeted_node(run_investigator_decide_node, state, runtime)
+
+
+async def _investigator_tool_node(state: AnalysisState, runtime: Any = None) -> Dict[str, Any]:
+    return await _budgeted_node(run_investigator_tool_node, state, runtime)
+
+
+async def _investigator_compact_node(state: AnalysisState, runtime: Any = None) -> Dict[str, Any]:
+    return await _budgeted_node(run_investigator_compact_node, state, runtime)
+
+
+async def _investigator_complete_node(state: AnalysisState, runtime: Any = None) -> Dict[str, Any]:
+    return await _budgeted_node(run_investigator_complete_node, state, runtime)
+
+
 async def _revise_node(state: AnalysisState, runtime: Any = None) -> Dict[str, Any]:
     return await _budgeted_node(run_revision_agent, state, runtime)
 
@@ -137,6 +178,11 @@ def build_analysis_graph(checkpointer: Optional[Any] = None) -> Any:
     workflow.add_node("bug", _bug_node)
     workflow.add_node("verifier", _verifier_node)
     workflow.add_node("mcp_enrich", _mcp_enrich_node)
+    workflow.add_node("investigator_prepare", _investigator_prepare_node)
+    workflow.add_node("investigator_decide", _investigator_decide_node)
+    workflow.add_node("investigator_tool", _investigator_tool_node)
+    workflow.add_node("investigator_compact", _investigator_compact_node)
+    workflow.add_node("investigator_complete", _investigator_complete_node)
     workflow.add_node("revise", _revise_node)
     workflow.add_node("finalize", run_finalize_node)
     workflow.add_node("finalize_uncertain", run_finalize_uncertain_node)
@@ -160,12 +206,34 @@ def build_analysis_graph(checkpointer: Optional[Any] = None) -> Any:
         {
             "finalize": "finalize",
             "revise": "mcp_enrich",
+            "investigate": "investigator_prepare",
             "finalize_uncertain": "finalize_uncertain",
         },
     )
 
     # 4. Loop mcp_enrich -> revise -> verifier (bounded to at most 1 attempt by route_after_verifier and revision_count)
     workflow.add_edge("mcp_enrich", "revise")
+    workflow.add_edge("investigator_prepare", "investigator_decide")
+    workflow.add_conditional_edges(
+        "investigator_decide",
+        route_after_investigator_decide,
+        {"tool": "investigator_tool", "complete": "investigator_complete"},
+    )
+    workflow.add_edge("investigator_tool", "investigator_compact")
+    workflow.add_conditional_edges(
+        "investigator_compact",
+        route_after_investigator_compact,
+        {"decide": "investigator_decide", "complete": "investigator_complete"},
+    )
+    workflow.add_conditional_edges(
+        "investigator_complete",
+        route_after_investigator_complete,
+        {
+            "prepare": "investigator_prepare",
+            "revise": "revise",
+            "uncertain": "finalize_uncertain",
+        },
+    )
     workflow.add_edge("revise", "verifier")
 
     # 5. Terminal edges
@@ -195,7 +263,9 @@ async def run_analysis_workflow(
     """
     config = {
         "configurable": {"thread_id": scan_id},
-        "recursion_limit": 25,
+        # Worst case is four sequential targets, each with prepare/complete,
+        # six decisions, and five tool+compaction pairs, plus the base graph.
+        "recursion_limit": ANALYSIS_RECURSION_LIMIT,
     }
     app = build_analysis_graph(checkpointer=checkpointer)
 
@@ -244,8 +314,27 @@ async def run_analysis_workflow(
     mcp_client = MCPRuntimeClient(repo_server=mcp_server)
     mcp_executor = MCPToolExecutor(client=mcp_client)
 
+    agent_tools = None
+    if get_settings().AGENT_INVESTIGATOR_ENABLED:
+        try:
+            snapshot_id = evidence_store.manifest.commit_sha or evidence_store.manifest.commit_hash
+            tool_snapshot = RepositorySnapshot.create(
+                snapshot_id=snapshot_id,
+                repository_root=repo_dir,
+                evidence_store=evidence_store,
+                graph=runtime.repository_graph,
+                chunks=runtime.chunks or None,
+                component_versions={"agent_tools": "2.0.0"},
+                capture_source_digests=True,
+            )
+            agent_tools = create_agent_tool_registry(AgentToolContext.from_snapshot(tool_snapshot))
+        except Exception as exc:
+            safe_msg = redact_secrets(str(exc))[:512]
+            logger.warning("Evidence Investigator tools unavailable for scan %s: %s", scan_id, safe_msg)
+
     runtime_context = AnalysisRuntimeContext(
         scan_runtime=runtime,
+        agent_tools=agent_tools,
         mcp_executor=mcp_executor,
     )
     cloud_budget = WorkflowCloudBudget.from_settings()
@@ -284,7 +373,13 @@ async def run_analysis_workflow(
                 # monotonically.
                 cloud_budget.hydrate(current_state.values.get("ai_cloud_budget"))
                 checkpoint_authority = (current_state.values.get("manifest_summary") or {}).get("index_authority")
-                if index_authority != checkpoint_authority:
+                expected_commit = evidence_store.manifest.commit_hash
+                checkpoint_commit = current_state.values.get("commit_hash")
+                commit_incompatible = (
+                    (checkpoint_commit is not None and checkpoint_commit != expected_commit)
+                    or (checkpoint_commit is None and index_authority is None)
+                )
+                if index_authority != checkpoint_authority or commit_incompatible:
                     # Never apply checkpoint findings or evidence IDs to a different
                     # generation, including legacy checkpoints without provenance.
                     return {
@@ -406,6 +501,9 @@ async def run_analysis_workflow(
             "revision_count": 0,
             "verification_decision": None,
             "revision_target_ids": [],
+            "agent_investigator_enabled": get_settings().AGENT_INVESTIGATOR_ENABLED,
+            "investigator": {},
+            "investigation_evidence": {},
             "mcp_revision_evidence": {},
             "mcp_tool_events": [],
             "mcp_call_count": 0,

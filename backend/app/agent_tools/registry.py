@@ -28,6 +28,8 @@ from app.agent_tools.schemas import (
     InspectSymbolInput,
     RelationshipInput,
     RelationshipOutput,
+    ReadSourceSliceInput,
+    ReadSourceSliceOutput,
     ScanSecurityInput,
     SearchSymbolInput,
     SecurityScanOutput,
@@ -55,6 +57,7 @@ from app.agent_tools.tools import (
     find_callers,
     inspect_file,
     inspect_symbol,
+    read_source_slice,
     scan_security,
     search_symbol,
     trace_dataflow,
@@ -160,6 +163,19 @@ _SPECS = (
         SearchSymbolInput,
         SymbolSearchOutput,
         search_symbol,
+    ),
+    _ToolSpec(
+        _metadata(
+            "read_source_slice",
+            "Read one bounded UTF-8 source span from a manifest-authorized file. Use only when exact source text is necessary; output is snapshot-bound, secret-redacted, size-limited, and never executed.",
+            ReadSourceSliceInput,
+            ReadSourceSliceOutput,
+            ToolCapability.REPOSITORY,
+            TimeoutClass.FAST,
+        ),
+        ReadSourceSliceInput,
+        ReadSourceSliceOutput,
+        read_source_slice,
     ),
     _ToolSpec(
         _metadata(
@@ -281,6 +297,40 @@ class AgentToolRegistry:
     def get_tool(self, name: str) -> ToolMetadata | None:
         spec = self._specs.get(name)
         return spec.metadata.model_copy(deep=True) if spec else None
+
+    def validate_arguments(
+        self,
+        name: str,
+        arguments: Mapping[str, object] | None,
+    ) -> ToolError | None:
+        """Validate one request without executing it or consuming repository resources."""
+
+        spec = self._specs.get(name)
+        if spec is None:
+            return ToolError(code="UNKNOWN_TOOL", message="The requested tool is not registered.")
+        if not isinstance(arguments, Mapping):
+            return ToolError(code="ARGUMENTS_NOT_OBJECT", message="Tool arguments must be a JSON object.")
+        try:
+            spec.input_model.model_validate(dict(arguments))
+        except ValidationError as exc:
+            details = [
+                {
+                    "location": [str(part) for part in item["loc"]],
+                    "type": item["type"],
+                    "message": item["msg"][:256],
+                }
+                for item in exc.errors(
+                    include_url=False,
+                    include_input=False,
+                    include_context=False,
+                )[:16]
+            ]
+            return ToolError(
+                code="SCHEMA_VALIDATION_FAILED",
+                message="Tool arguments do not match the declared input schema.",
+                details={"validation_errors": details},
+            )
+        return None
 
     def invoke(self, name: str, arguments: Mapping[str, object] | None) -> ToolInvocationResult:
         invocation_id = str(uuid4())

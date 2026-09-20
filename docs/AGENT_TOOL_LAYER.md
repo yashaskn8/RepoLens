@@ -22,6 +22,7 @@ The tool contract version is `2.0.0`. Tool inputs and outputs use closed Pydanti
 | Tool | Use | Do not use for |
 | --- | --- | --- |
 | `inspect_file` | Manifest/parser facts for one file | Full file contents or behavioral inference |
+| `read_source_slice` | One snapshot-bound, bounded, secret-redacted UTF-8 source span | Whole-file access, execution, or bypassing manifest/path policy |
 | `search_symbol` | Exact, prefix, or substring symbol discovery | Fuzzy or semantic guessing |
 | `inspect_symbol` | One stable symbol identity and its available graph facts | Resolving an ambiguous name |
 | `find_callers` | Direct incoming production `CALLS` edges | Proving absence from a partial graph |
@@ -64,7 +65,7 @@ The frozen `RepositoryGraph` uses a directed graph and retains at most one `CALL
 
 ## Security and limits
 
-All tools are read-only. Repository content is untrusted data and is never imported, executed, interpreted as instructions, installed, sent to a network, or passed to a shell. The registry cannot dispatch arbitrary Python names. Paths pass through RepoLens path confinement, which rejects traversal, absolute paths, drive escapes, UNC paths, sibling-prefix attacks, and symlink escapes. Source payloads are not returned by file inspection, and agent-visible strings are secret-redacted and bounded.
+All tools are read-only. Repository content is untrusted data and is never imported, executed, interpreted as instructions, installed, sent to a network, or passed to a shell. The registry cannot dispatch arbitrary Python names. Paths pass through RepoLens path confinement, which rejects traversal, absolute paths, drive escapes, UNC paths, sibling-prefix attacks, and symlink escapes. `inspect_file` remains metadata-only; the separate `read_source_slice` capability requires an immutable captured source digest and returns only a line- and byte-bounded secret-redacted span.
 
 Context and request limits bound manifest registration, file-size/file-count admission, file and symbol result materialization, graph result materialization, flow paths/nodes/depth/aliases, scanner results, structural facts, and impact traversal. A reached computation or result limit is signalled as `RESOURCE_LIMIT`; configured clamping is visible in coverage and is never silently reported as exhaustive. Registered scanner, graph, semantic, and diff artifacts must reference manifest-authorized paths.
 
@@ -79,6 +80,7 @@ snapshot = RepositorySnapshot.create(
     evidence_store=evidence_store,
     graph=repository_graph,
     chunks=production_chunks,
+    capture_source_digests=True,  # required only when read_source_slice is authorized
 )
 registry = create_agent_tool_registry(AgentToolContext.from_snapshot(snapshot))
 

@@ -98,7 +98,7 @@ def sample_analysis_environment():
 
 
 def test_build_analysis_graph_compilation():
-    """Verify that LangGraph StateGraph compiles and contains all 9 nodes including revision & lifecycle."""
+    """Verify that the graph contains the durable investigator, revision, and lifecycle nodes."""
     graph = build_analysis_graph()
     assert graph is not None
     node_keys = graph.nodes.keys()
@@ -109,6 +109,11 @@ def test_build_analysis_graph_compilation():
         "security",
         "bug",
         "verifier",
+        "investigator_prepare",
+        "investigator_decide",
+        "investigator_tool",
+        "investigator_compact",
+        "investigator_complete",
         "revise",
         "finalize",
         "finalize_uncertain",
