@@ -66,6 +66,13 @@ logger = logging.getLogger(__name__)
 ANALYSIS_RECURSION_LIMIT = 10 + MAX_INVESTIGATOR_TARGETS * (
     2 + MAX_INVESTIGATOR_STEPS + 2 * MAX_INVESTIGATOR_TOOL_CALLS
 )
+_INVESTIGATOR_GRAPH_NODES = frozenset({
+    "investigator_prepare",
+    "investigator_decide",
+    "investigator_tool",
+    "investigator_compact",
+    "investigator_complete",
+})
 
 
 def run_finalize_node(state: AnalysisState) -> Dict[str, Any]:
@@ -99,6 +106,24 @@ def route_after_verifier(state: AnalysisState) -> str:
     elif decision == "needs_revision" and revision_count < 1:
         return "investigate" if state.get("agent_investigator_enabled", False) else "revise"
     return "finalize_uncertain"
+
+
+def _checkpoint_requires_investigator(checkpoint_state: Any) -> bool:
+    """Return whether a resumable checkpoint needs investigator services.
+
+    The persisted workflow mode is authoritative for existing executions.  A
+    node-level check is retained for older checkpoints that predate the mode
+    field, or for a partially written checkpoint already inside the durable
+    investigator loop.
+    """
+
+    values = getattr(checkpoint_state, "values", None)
+    if not isinstance(values, dict) or not values:
+        return False
+    if bool(values.get("agent_investigator_enabled", False)):
+        return True
+    next_nodes = getattr(checkpoint_state, "next", ()) or ()
+    return any(str(node) in _INVESTIGATOR_GRAPH_NODES for node in next_nodes)
 
 
 async def _budgeted_node(fn: Any, state: AnalysisState, runtime: Any = None) -> Dict[str, Any]:
@@ -304,6 +329,26 @@ async def run_analysis_workflow(
         )
         register_scan_runtime(scan_id, runtime)
 
+    # Inspect an existing checkpoint before constructing transient investigator
+    # services.  New scans use the current rollout flag; resumed scans use the
+    # checkpointed execution mode (or their next investigator node) instead.
+    current_state = None
+    if checkpointer is not None and resume_if_exists:
+        try:
+            current_state = await app.aget_state(config)
+        except Exception as exc:
+            safe_msg = redact_secrets(str(exc))[:2048]
+            logger.warning("Failed to retrieve existing checkpoint state for %s: %s", scan_id, safe_msg)
+
+    checkpoint_values = getattr(current_state, "values", None) if current_state is not None else None
+    checkpoint_has_values = isinstance(checkpoint_values, dict) and bool(checkpoint_values)
+    checkpoint_completed = checkpoint_has_values and not (getattr(current_state, "next", ()) or ())
+    investigator_runtime_required = bool(get_settings().AGENT_INVESTIGATOR_ENABLED)
+    if checkpoint_has_values:
+        investigator_runtime_required = (
+            False if checkpoint_completed else _checkpoint_requires_investigator(current_state)
+        )
+
     # Lazily initialized MCP runtime client & executor (connection opened only if mcp_enrich executes)
     mcp_server = MCPRepositoryServer(
         evidence_store=evidence_store,
@@ -315,7 +360,7 @@ async def run_analysis_workflow(
     mcp_executor = MCPToolExecutor(client=mcp_client)
 
     agent_tools = None
-    if get_settings().AGENT_INVESTIGATOR_ENABLED:
+    if investigator_runtime_required:
         try:
             snapshot_id = evidence_store.manifest.commit_sha or evidence_store.manifest.commit_hash
             tool_snapshot = RepositorySnapshot.create(
@@ -360,14 +405,7 @@ async def run_analysis_workflow(
     try:
         # Check for existing checkpoint state for this scan_id thread
         if checkpointer is not None and resume_if_exists:
-            current_state = None
-            try:
-                current_state = await app.aget_state(config)
-            except Exception as exc:
-                safe_msg = redact_secrets(str(exc))[:2048]
-                logger.warning("Failed to retrieve existing checkpoint state for %s: %s", scan_id, safe_msg)
-
-            if current_state and current_state.values:
+            if checkpoint_has_values:
                 # Hydrate usage before any resumed node can reserve capacity;
                 # checkpoint snapshots are authoritative and usage is merged
                 # monotonically.

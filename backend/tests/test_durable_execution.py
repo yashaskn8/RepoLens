@@ -5,11 +5,20 @@ import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 import aiosqlite
 import pytest
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.graph import END, START, StateGraph
 
 from app.agents.checkpointer import get_sqlite_checkpointer
-from app.agents.graph import build_analysis_graph, run_analysis_workflow
+from app.agents.graph import (
+    _checkpoint_requires_investigator,
+    build_analysis_graph,
+    run_analysis_workflow,
+)
+from app.agents.state import AnalysisState
 from app.analysis.store import EvidenceStore
+from app.context.runtime import AnalysisRuntimeContext
+from app.core.config import get_settings
 from app.ingestion.schemas import (
     FileEntry,
     FrameworkDetected,
@@ -254,3 +263,163 @@ async def test_resume_rejects_different_commit_without_persistent_index(sample_e
         assert "generation is incompatible" in result["errors"][0]
         assert not result.get("verified_findings")
         app.ainvoke.assert_not_awaited()
+
+
+def _checkpointed_resume_app(checkpointer, next_node, seen_runtime):
+    """Build a real checkpointer-backed app paused immediately before next_node."""
+
+    async def seed(state):
+        return {"completed_nodes": ["seed"]}
+
+    async def resume_node(state, runtime):
+        seen_runtime.append(runtime.context.agent_tools)
+        return {"status": "COMPLETED", "completed_nodes": [next_node]}
+
+    builder = StateGraph(AnalysisState, context_schema=AnalysisRuntimeContext)
+    builder.add_node("seed", seed)
+    builder.add_node(next_node, resume_node)
+    builder.add_edge(START, "seed")
+    builder.add_edge("seed", next_node)
+    builder.add_edge(next_node, END)
+    return builder.compile(checkpointer=checkpointer, interrupt_after=["seed"])
+
+
+def _checkpoint_values(sample_evidence_store, *, investigator_enabled):
+    return {
+        "scan_id": "resume-mode-test",
+        "commit_hash": sample_evidence_store.manifest.commit_hash,
+        "manifest_summary": {"index_authority": None},
+        "agent_investigator_enabled": investigator_enabled,
+        "investigator": {"active": {"budget": {"tool_calls": 1}}}
+        if investigator_enabled else {},
+        "status": "RUNNING",
+        "ai_cloud_budget": {},
+        "completed_nodes": ["seed"],
+        "errors": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_true_to_false_resume_reconstructs_investigator_runtime(sample_evidence_store):
+    """A checkpointed investigator workflow survives a later flag disablement."""
+
+    checkpointer = InMemorySaver()
+    seen_runtime = []
+    app = _checkpointed_resume_app(checkpointer, "investigator_decide", seen_runtime)
+    config = {"configurable": {"thread_id": "resume-mode-test"}}
+    await app.ainvoke(
+        _checkpoint_values(sample_evidence_store, investigator_enabled=True),
+        config=config,
+        context=AnalysisRuntimeContext(scan_runtime=object()),
+    )
+    saved = await app.aget_state(config)
+    assert saved.next == ("investigator_decide",)
+
+    settings_false = get_settings().model_copy(
+        update={"AGENT_INVESTIGATOR_ENABLED": False}
+    )
+    registry = object()
+    with (
+        patch("app.agents.graph.build_analysis_graph", return_value=app),
+        patch("app.agents.graph.RepositorySnapshot.create", return_value=object()),
+        patch("app.agents.graph.AgentToolContext.from_snapshot", return_value=object()),
+        patch("app.agents.graph.create_agent_tool_registry", return_value=registry) as create_registry,
+        patch("app.agents.graph.get_settings", return_value=settings_false),
+    ):
+        resumed = await run_analysis_workflow(
+            evidence_store=sample_evidence_store,
+            scan_id="resume-mode-test",
+            repo_dir=".",
+            checkpointer=checkpointer,
+            context_engine=MagicMock(),
+            repository_graph=MagicMock(),
+        )
+
+    assert resumed["status"] == "COMPLETED"
+    assert seen_runtime == [registry]
+    create_registry.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_false_to_true_resume_keeps_legacy_checkpoint_path(sample_evidence_store):
+    """Enabling the flag later cannot migrate a legacy checkpoint."""
+
+    checkpointer = InMemorySaver()
+    seen_runtime = []
+    app = _checkpointed_resume_app(checkpointer, "revise", seen_runtime)
+    config = {"configurable": {"thread_id": "legacy-resume-mode-test"}}
+    values = _checkpoint_values(sample_evidence_store, investigator_enabled=False)
+    values["scan_id"] = "legacy-resume-mode-test"
+    await app.ainvoke(values, config=config, context=AnalysisRuntimeContext(scan_runtime=object()))
+    saved = await app.aget_state(config)
+    assert saved.next == ("revise",)
+
+    settings_true = get_settings().model_copy(
+        update={"AGENT_INVESTIGATOR_ENABLED": True}
+    )
+    with (
+        patch("app.agents.graph.build_analysis_graph", return_value=app),
+        patch("app.agents.graph.create_agent_tool_registry") as create_registry,
+        patch("app.agents.graph.get_settings", return_value=settings_true),
+    ):
+        resumed = await run_analysis_workflow(
+            evidence_store=sample_evidence_store,
+            scan_id="legacy-resume-mode-test",
+            repo_dir=".",
+            checkpointer=checkpointer,
+            context_engine=MagicMock(),
+            repository_graph=MagicMock(),
+        )
+
+    assert resumed["status"] == "COMPLETED"
+    assert seen_runtime == [None]
+    create_registry.assert_not_called()
+
+
+def test_checkpoint_mode_detection_is_strict_and_node_aware():
+    assert _checkpoint_requires_investigator(
+        MagicMock(values={"agent_investigator_enabled": True}, next=("revise",))
+    )
+    assert not _checkpoint_requires_investigator(
+        MagicMock(values={"agent_investigator_enabled": False}, next=("revise",))
+    )
+    assert _checkpoint_requires_investigator(
+        MagicMock(values={"agent_investigator_enabled": False}, next=("investigator_decide",))
+    )
+
+
+@pytest.mark.asyncio
+async def test_completed_checkpoint_does_not_rebuild_investigator_runtime(sample_evidence_store):
+    """A completed workflow is returned directly even if the current flag is enabled."""
+
+    checkpointer = InMemorySaver()
+    config = {"configurable": {"thread_id": "completed-mode-test"}}
+    completed = _checkpoint_values(sample_evidence_store, investigator_enabled=True)
+    completed["scan_id"] = "completed-mode-test"
+    completed["status"] = "COMPLETED"
+    builder = StateGraph(AnalysisState, context_schema=AnalysisRuntimeContext)
+    builder.add_node("done", lambda state: {"status": "COMPLETED"})
+    builder.add_edge(START, "done")
+    builder.add_edge("done", END)
+    app = builder.compile(checkpointer=checkpointer)
+    await app.ainvoke(completed, config=config, context=AnalysisRuntimeContext(scan_runtime=object()))
+
+    settings_true = get_settings().model_copy(
+        update={"AGENT_INVESTIGATOR_ENABLED": True}
+    )
+    with (
+        patch("app.agents.graph.build_analysis_graph", return_value=app),
+        patch("app.agents.graph.create_agent_tool_registry") as create_registry,
+        patch("app.agents.graph.get_settings", return_value=settings_true),
+    ):
+        resumed = await run_analysis_workflow(
+            evidence_store=sample_evidence_store,
+            scan_id="completed-mode-test",
+            repo_dir=".",
+            checkpointer=checkpointer,
+            context_engine=MagicMock(),
+            repository_graph=MagicMock(),
+        )
+
+    assert resumed["status"] == "COMPLETED"
+    create_registry.assert_not_called()
