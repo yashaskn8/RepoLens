@@ -222,3 +222,35 @@ async def test_already_completed_scan_returns_immediately(sample_evidence_store)
                 )
                 assert second_state["status"] == "COMPLETED"
                 assert mock_gen.call_count == initial_call_count
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_different_commit_without_persistent_index(sample_evidence_store):
+    """A scan-local checkpoint cannot be replayed against a different repository generation."""
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        app_dir = os.path.join(tmpdir, "app")
+        os.makedirs(app_dir, exist_ok=True)
+        with open(os.path.join(app_dir, "main.py"), "w", encoding="utf-8") as source:
+            source.write("def root():\n    return 1\n")
+        checkpoint_state = {
+            "scan_id": "scan-drift",
+            "commit_hash": "b" * 40,
+            "status": "RUNNING",
+            "manifest_summary": {"index_authority": None},
+            "verified_findings": [{"id": "stale"}],
+        }
+        app = MagicMock()
+        app.aget_state = AsyncMock(return_value=MagicMock(values=checkpoint_state, next=("verifier",)))
+        app.ainvoke = AsyncMock(return_value=checkpoint_state)
+        with patch("app.agents.graph.build_analysis_graph", return_value=app):
+            result = await run_analysis_workflow(
+                evidence_store=sample_evidence_store,
+                scan_id="scan-drift",
+                repo_dir=tmpdir,
+                checkpointer=object(),
+            )
+        assert result["status"] == "FAILED"
+        assert "generation is incompatible" in result["errors"][0]
+        assert not result.get("verified_findings")
+        app.ainvoke.assert_not_awaited()

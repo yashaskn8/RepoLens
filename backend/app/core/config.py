@@ -96,6 +96,16 @@ class Settings(BaseSettings):
     AI_ECONOMY_QUALITY_MAX_CLOUD_CALLS: int = 16
     AI_ECONOMY_QUALITY_MAX_CLOUD_TOKENS: int = 100_000
 
+    # Bounded Evidence Investigator rollout and hard v1 limits.
+    AGENT_INVESTIGATOR_ENABLED: bool = False
+    AGENT_INVESTIGATOR_MAX_TARGETS: int = Field(default=4, ge=1, le=4)
+    AGENT_INVESTIGATOR_MAX_STEPS: int = Field(default=6, ge=1, le=6)
+    AGENT_INVESTIGATOR_MAX_TOOL_CALLS: int = Field(default=5, ge=1, le=5)
+    AGENT_INVESTIGATOR_CONTEXT_TOKENS: int = Field(default=5_000, ge=1_500, le=12_000)
+    AGENT_INVESTIGATOR_RECENT_OBSERVATIONS: int = Field(default=2, ge=1, le=2)
+    AGENT_INVESTIGATOR_MODEL_TIMEOUT_SECONDS: float = Field(default=30.0, ge=1.0, le=60.0)
+    AGENT_INVESTIGATOR_TOOL_TIMEOUT_SECONDS: float = Field(default=10.0, ge=1.0, le=30.0)
+
     # Repository Ingestion Limits
     CLONE_TIMEOUT_SECONDS: int = 120
     MAX_REPO_FILES: int = 5000

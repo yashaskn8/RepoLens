@@ -82,6 +82,11 @@ class AnalysisState(TypedDict, total=False):
     verification_decision: Optional[str]
     revision_target_ids: List[str]
 
+    # Bounded Evidence Investigator state and normalized trusted artifacts.
+    agent_investigator_enabled: bool
+    investigator: Dict[str, Any]
+    investigation_evidence: Dict[str, List[Dict[str, Any]]]
+
     # Runtime MCP enrichment tracking (serializable dicts, never runtime objects)
     mcp_revision_evidence: Dict[str, List[Dict[str, Any]]]
     mcp_tool_events: Annotated[List[Dict[str, Any]], operator.add]

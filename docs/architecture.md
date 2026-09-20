@@ -171,6 +171,7 @@ Workflow execution is driven by **LangGraph** state machines with typed state di
   - *LLM Reasoning Nodes*: Root-cause explanation, multi-file synthesis, architectural summarization, fix strategy generation, and PR review comments.
 - **Termination Guarantees**: State graphs have bounded iteration counts, explicit error edges, and graceful exit conditions to prevent infinite execution loops.
 - **Durable Checkpointing**: Intermediate graph checkpoints are written to `checkpoints.db`, allowing crash recovery and inspection.
+- **Optional Evidence Investigator**: When `AGENT_INVESTIGATOR_ENABLED=true`, only genuine verifier `POSSIBLE` targets enter a bounded `prepare -> decide -> tool -> compact` loop. The model selects one next evidence action, application policy authorizes and executes it through `AgentToolRegistry`, and revision plus the independent verifier remain authoritative. The disabled path continues to use deterministic MCP enrichment.
 
 ---
 

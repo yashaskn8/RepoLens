@@ -36,6 +36,8 @@ from app.agent_tools.schemas import (
     InspectFileInput,
     InspectSymbolInput,
     ProposedFinding,
+    ReadSourceSliceInput,
+    ReadSourceSliceOutput,
     RelationshipInput,
     RelationshipOutput,
     ScanSecurityInput,
@@ -56,7 +58,7 @@ from app.agent_tools.schemas import (
     VerifyFindingOutput,
 )
 from app.analysis.impact_engine import get_impact_engine
-from app.core.path_confinement import PathTraversalError
+from app.core.path_confinement import PathTraversalError, resolve_safe_path
 from app.graph.schemas import EdgeKind, GraphEdge, GraphNode, NodeKind
 from app.ingestion.schemas import ParsedSymbol, SymbolKind
 from app.schemas.change_analysis import StructuralDiffResult, SymbolChangeType
@@ -433,6 +435,117 @@ def inspect_file(arguments: InspectFileInput, context: AgentToolContext) -> Tool
     )
 
 
+def read_source_slice(
+    arguments: ReadSourceSliceInput,
+    context: AgentToolContext,
+) -> ToolExecution:
+    """Return one bounded, redacted source span from an immutable snapshot."""
+
+    snapshot = _snapshot(context, arguments.snapshot_id)
+    path = _normalize_path(snapshot, arguments.file_path)
+    entry = snapshot.evidence_store.get_file_entry(path)
+    if entry is None:
+        raise ToolFailure(ToolResultStatus.NOT_FOUND, "FILE_NOT_FOUND", "File is not present in the manifest.")
+    if entry.is_binary or entry.skipped_reason:
+        raise ToolFailure(
+            ToolResultStatus.UNSUPPORTED,
+            "SOURCE_FILE_NOT_TEXT",
+            "The requested file is binary or was skipped during repository ingestion.",
+        )
+    requested_span = arguments.end_line - arguments.start_line + 1
+    if requested_span > context.limits.max_source_slice_lines:
+        raise ToolFailure(
+            ToolResultStatus.RESOURCE_LIMIT,
+            "SOURCE_SLICE_LINE_LIMIT",
+            "The requested source span exceeds the configured line limit.",
+            max_lines=context.limits.max_source_slice_lines,
+        )
+    expected_digest = snapshot.source_digests.get(path)
+    if expected_digest is None:
+        raise ToolFailure(
+            ToolResultStatus.INSUFFICIENT_EVIDENCE,
+            "SOURCE_DIGEST_UNAVAILABLE",
+            "The authorized snapshot has no immutable source digest for this file.",
+        )
+    try:
+        source_path = resolve_safe_path(snapshot.repository_root, path)
+        payload = source_path.read_bytes()
+    except (OSError, PathTraversalError, ValueError) as exc:
+        raise ToolFailure(
+            ToolResultStatus.INVALID_INPUT,
+            "SOURCE_READ_BLOCKED",
+            "The authorized source file could not be read within the repository boundary.",
+        ) from exc
+    file_digest = hashlib.sha256(payload).hexdigest()
+    if file_digest != expected_digest:
+        raise ToolFailure(
+            ToolResultStatus.INSUFFICIENT_EVIDENCE,
+            "SOURCE_SNAPSHOT_DRIFT",
+            "The source file no longer matches the authorized repository snapshot.",
+        )
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ToolFailure(
+            ToolResultStatus.UNSUPPORTED,
+            "SOURCE_ENCODING_UNSUPPORTED",
+            "The requested source file is not valid UTF-8 text.",
+        ) from exc
+    lines = text.splitlines(keepends=True)
+    if not lines or arguments.start_line > len(lines):
+        raise ToolFailure(
+            ToolResultStatus.NOT_FOUND,
+            "SOURCE_LINE_NOT_FOUND",
+            "The requested start line is outside the source file.",
+        )
+    bounded_end = min(arguments.end_line, len(lines))
+    raw_slice = "".join(lines[arguments.start_line - 1:bounded_end])
+    raw_bytes = raw_slice.encode("utf-8")
+    truncated = bounded_end < arguments.end_line
+    if len(raw_bytes) > context.limits.max_source_slice_bytes:
+        raw_slice = raw_bytes[:context.limits.max_source_slice_bytes].decode("utf-8", errors="ignore")
+        raw_bytes = raw_slice.encode("utf-8")
+        truncated = True
+        returned_lines = max(1, raw_slice.count("\n") + (0 if raw_slice.endswith("\n") else 1))
+        bounded_end = min(bounded_end, arguments.start_line + returned_lines - 1)
+    content_digest = hashlib.sha256(raw_bytes).hexdigest()
+    visible_content = redact_secrets(raw_slice)
+    evidence_material = (
+        f"{snapshot.snapshot_id}:{path}:{arguments.start_line}:{bounded_end}:{content_digest}"
+    )
+    evidence = EvidenceRecord(
+        evidence_id=f"source:{hashlib.sha256(evidence_material.encode('utf-8')).hexdigest()}",
+        evidence_type=EvidenceType.SOURCE_SLICE,
+        source_component="repository_snapshot",
+        file_path=path,
+        start_line=arguments.start_line,
+        end_line=bounded_end,
+        source_id=content_digest,
+        metadata={"redacted": visible_content != raw_slice, "truncated": truncated},
+    )
+    return ToolExecution(
+        status=ToolResultStatus.RESOURCE_LIMIT if truncated else ToolResultStatus.SUCCESS,
+        output=ReadSourceSliceOutput(
+            repository_snapshot=snapshot.snapshot_id,
+            file_path=path,
+            start_line=arguments.start_line,
+            end_line=bounded_end,
+            content=visible_content,
+            content_sha256=content_digest,
+            file_sha256=file_digest,
+            truncated=truncated,
+        ),
+        snapshot=snapshot,
+        components=("repository_snapshot", "path_confinement", "secret_redaction"),
+        stage="bounded_source_read",
+        evidence=(evidence,),
+        warnings=(
+            (_warning("SOURCE_SLICE_TRUNCATED", "Source output was truncated to configured bounds."),)
+            if truncated else ()
+        ),
+    )
+
+
 def search_symbol(arguments: SearchSymbolInput, context: AgentToolContext) -> ToolExecution:
     snapshot = _snapshot(context, arguments.snapshot_id)
     scope = _normalize_path(snapshot, arguments.file_path) if arguments.file_path else None
@@ -462,7 +575,9 @@ def search_symbol(arguments: SearchSymbolInput, context: AgentToolContext) -> To
                 returned.append(_symbol_record(snapshot, entry_path, raw_symbol))
     truncated = found_count > effective
     status = ToolResultStatus.RESOURCE_LIMIT if truncated else (
-        ToolResultStatus.NOT_FOUND if not found_count else ToolResultStatus.SUCCESS
+        ToolResultStatus.NOT_FOUND if not found_count and snapshot.manifest_complete else (
+            ToolResultStatus.INSUFFICIENT_EVIDENCE if not found_count else ToolResultStatus.SUCCESS
+        )
     )
     evidence = tuple(
         _location_evidence(
@@ -484,6 +599,7 @@ def search_symbol(arguments: SearchSymbolInput, context: AgentToolContext) -> To
             total_matches=found_count,
             returned_matches=len(returned),
             truncated=truncated,
+            manifest_scope_complete=snapshot.manifest_complete,
         ),
         snapshot=snapshot,
         components=("repository_manifest", "tree_sitter_parser"),
@@ -491,7 +607,13 @@ def search_symbol(arguments: SearchSymbolInput, context: AgentToolContext) -> To
         evidence=evidence,
         warnings=(
             (_warning("RESULT_LIMIT_REACHED", "Symbol results were truncated.", limit=effective),)
-            if truncated else ()
+            if truncated else (
+                (_warning(
+                    "MANIFEST_SCOPE_INCOMPLETE",
+                    "Symbol absence cannot be proven because repository manifest coverage is incomplete.",
+                ),)
+                if not snapshot.manifest_complete else ()
+            )
         ),
     )
 
@@ -1672,6 +1794,7 @@ __all__ = [
     "find_callers",
     "inspect_file",
     "inspect_symbol",
+    "read_source_slice",
     "scan_security",
     "search_symbol",
     "trace_dataflow",

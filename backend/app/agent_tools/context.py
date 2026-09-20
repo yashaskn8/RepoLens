@@ -158,6 +158,7 @@ def _snapshot_artifact_payload(
     graph: RepositoryGraph | None,
     semantic_program: SemanticProgram | None,
     component_versions: Mapping[str, str],
+    source_digests: Mapping[str, str],
 ) -> dict[str, object]:
     return {
         "snapshot_id": snapshot_id,
@@ -176,6 +177,7 @@ def _snapshot_artifact_payload(
         ] if graph is not None else [],
         "semantic_program": semantic_program.model_dump(mode="json") if semantic_program is not None else None,
         "component_versions": dict(sorted(component_versions.items())),
+        "source_digests": dict(sorted(source_digests.items())),
     }
 
 
@@ -188,6 +190,8 @@ class ToolResourceLimits:
     max_dataflow_paths: int = 16
     max_flow_nodes: int = 256
     max_aliases: int = 64
+    max_source_slice_lines: int = 120
+    max_source_slice_bytes: int = 12_000
 
     def __post_init__(self) -> None:
         if min(
@@ -198,6 +202,8 @@ class ToolResourceLimits:
             self.max_dataflow_paths,
             self.max_flow_nodes,
             self.max_aliases,
+            self.max_source_slice_lines,
+            self.max_source_slice_bytes,
         ) < 1:
             raise ValueError("all agent tool resource limits must be positive")
 
@@ -221,6 +227,7 @@ class RepositorySnapshot:
     manifest_paths: frozenset[str] = field(default_factory=frozenset, repr=False)
     repository_identity: str = field(default="", repr=False)
     artifact_digest: str = field(default="", repr=False)
+    source_digests: Mapping[str, str] = field(default_factory=dict, repr=False)
     admission_limits: ToolResourceLimits = field(default_factory=ToolResourceLimits, repr=False, compare=False)
     initialization_duration_ms: float = field(default=0.0, compare=False)
 
@@ -236,6 +243,8 @@ class RepositorySnapshot:
         semantic_program: SemanticProgram | None = None,
         component_versions: Mapping[str, str] | None = None,
         limits: ToolResourceLimits | None = None,
+        capture_source_digests: bool = False,
+        source_digests: Mapping[str, str] | None = None,
     ) -> "RepositorySnapshot":
         started = time.perf_counter()
         root = Path(repository_root).resolve()
@@ -263,6 +272,29 @@ class RepositorySnapshot:
             if normalized in authorized_paths:
                 raise ValueError("repository manifest contains duplicate normalized file paths")
             authorized_paths.add(normalized)
+        if capture_source_digests and source_digests is not None:
+            raise ValueError("capture_source_digests and source_digests are mutually exclusive")
+        captured_digests: dict[str, str] = {}
+        if source_digests is not None:
+            for path, digest in sorted(source_digests.items()):
+                normalized = _confined_relative(root, path)
+                if normalized not in authorized_paths:
+                    raise ValueError("source digest path is not authorized by the repository manifest")
+                if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+                    raise ValueError("source digest must be a lowercase SHA-256 value")
+                captured_digests[normalized] = digest
+        elif capture_source_digests:
+            for entry in manifest.files:
+                if entry.is_binary or entry.skipped_reason:
+                    continue
+                normalized = _confined_relative(root, entry.path)
+                path = resolve_safe_path(root, normalized)
+                if not path.is_file():
+                    raise ValueError("manifest-authorized source file is unavailable")
+                payload = path.read_bytes()
+                if len(payload) != entry.size_bytes:
+                    raise ValueError("manifest-authorized source file changed before snapshot capture")
+                captured_digests[normalized] = hashlib.sha256(payload).hexdigest()
         scanner_results = {
             str(name): result.model_copy(deep=True)
             for name, result in sorted(evidence_store.scanner_results.items())
@@ -340,7 +372,13 @@ class RepositorySnapshot:
                 graph_entity_public_ids[node.id] = pub_id
         versions = {str(key): str(value) for key, value in sorted((component_versions or {}).items())}
         artifact_payload = _snapshot_artifact_payload(
-            snapshot_id, manifest, frozen_store, built_graph, program, versions
+            snapshot_id,
+            manifest,
+            frozen_store,
+            built_graph,
+            program,
+            versions,
+            captured_digests,
         )
         return cls(
             snapshot_id=snapshot_id,
@@ -358,6 +396,7 @@ class RepositorySnapshot:
             manifest_paths=frozenset(authorized_paths),
             repository_identity=repository_identity,
             artifact_digest=_digest_payload(artifact_payload),
+            source_digests=MappingProxyType(captured_digests),
             admission_limits=registration_limits,
             initialization_duration_ms=(time.perf_counter() - started) * 1000.0,
         )
@@ -372,6 +411,7 @@ class RepositorySnapshot:
             semantic_program=self.semantic_program,
             component_versions=self.component_versions,
             limits=self.admission_limits,
+            source_digests=self.source_digests,
         )
 
     def integrity_valid(self) -> bool:
@@ -382,6 +422,7 @@ class RepositorySnapshot:
             self.graph,
             self.semantic_program,
             self.component_versions,
+            self.source_digests,
         )) == self.artifact_digest
 
     @property

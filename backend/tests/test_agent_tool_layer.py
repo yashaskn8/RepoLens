@@ -33,7 +33,7 @@ def _write_files(root: Path, contents: dict[str, str | bytes]) -> None:
         if isinstance(content, bytes):
             target.write_bytes(content)
         else:
-            target.write_text(content, encoding="utf-8")
+            target.write_bytes(content.encode("utf-8"))
 
 
 def _manifest(root: Path, snapshot_id: str, contents: dict[str, str | bytes], *, truncated: bool = False):
@@ -119,6 +119,7 @@ def _snapshot(
         graph=graph,
         chunks=chunks,
         component_versions={"fixture": "1"},
+        capture_source_digests=True,
     )
 
 
@@ -156,7 +157,8 @@ def test_registry_catalog_is_closed_typed_and_agent_friendly(tool_fixture):
     catalog = registry.list_tools()
     assert [item.tool_name for item in catalog] == sorted([
         "analyze_change", "analyze_impact", "find_callees", "find_callers", "inspect_file",
-        "inspect_symbol", "scan_security", "search_symbol", "trace_dataflow", "verify_finding",
+        "inspect_symbol", "read_source_slice", "scan_security", "search_symbol",
+        "trace_dataflow", "verify_finding",
     ])
     assert all(item.read_only and item.deterministic for item in catalog)
     assert all(item.input_schema.get("additionalProperties") is False for item in catalog)
@@ -166,6 +168,142 @@ def test_registry_catalog_is_closed_typed_and_agent_friendly(tool_fixture):
     unknown = registry.invoke("subprocess.run", {})
     assert unknown.status == ToolResultStatus.UNSUPPORTED
     assert unknown.errors[0].code == "UNKNOWN_TOOL"
+
+
+def test_read_source_slice_is_bounded_redacted_and_snapshot_bound(tool_fixture):
+    registry, snapshot = tool_fixture
+    result = _result(registry, "read_source_slice", {
+        "snapshot_id": snapshot.snapshot_id,
+        "file_path": "app/routes.py",
+        "start_line": 1,
+        "end_line": 3,
+    })
+    assert result.status == ToolResultStatus.SUCCESS
+    assert result.result["repository_snapshot"] == snapshot.snapshot_id
+    assert result.result["file_path"] == "app/routes.py"
+    assert result.result["content"].startswith("def read_file")
+    assert len(result.result["content_sha256"]) == 64
+    assert result.provenance.repository_snapshot == snapshot.snapshot_id
+    assert result.evidence[0].evidence_type.value == "SOURCE_SLICE"
+
+
+@pytest.mark.parametrize("path", ["../secret", "../../.env", r"C:\\Windows\\win.ini", r"\\server\\share"])
+def test_read_source_slice_rejects_path_escape(tool_fixture, path):
+    registry, snapshot = tool_fixture
+    result = _result(registry, "read_source_slice", {
+        "snapshot_id": snapshot.snapshot_id,
+        "file_path": path,
+        "start_line": 1,
+        "end_line": 2,
+    })
+    assert result.status in {ToolResultStatus.INVALID_INPUT, ToolResultStatus.NOT_FOUND}
+    assert result.result is None
+    assert "Windows" not in str(result.errors)
+
+
+def test_read_source_slice_rejects_binary_skipped_and_large_ranges(tool_fixture):
+    registry, snapshot = tool_fixture
+    for file_path in ("assets/blob.bin", "app/broken.py"):
+        result = _result(registry, "read_source_slice", {
+            "snapshot_id": snapshot.snapshot_id,
+            "file_path": file_path,
+            "start_line": 1,
+            "end_line": 2,
+        })
+        assert result.status == ToolResultStatus.UNSUPPORTED
+
+    oversized = _result(registry, "read_source_slice", {
+        "snapshot_id": snapshot.snapshot_id,
+        "file_path": "app/routes.py",
+        "start_line": 1,
+        "end_line": 10_000,
+    })
+    assert oversized.status == ToolResultStatus.RESOURCE_LIMIT
+    assert oversized.errors[0].code == "SOURCE_SLICE_LINE_LIMIT"
+
+
+def test_read_source_slice_truncates_oversized_single_line(tmp_path: Path):
+    snapshot = _snapshot(tmp_path / "long-source", SNAPSHOT, {"large.py": "x" * 20_000})
+    registry = create_agent_tool_registry(AgentToolContext.from_snapshot(snapshot))
+    result = registry.invoke("read_source_slice", {
+        "snapshot_id": SNAPSHOT,
+        "file_path": "large.py",
+        "start_line": 1,
+        "end_line": 1,
+    })
+    assert result.status == ToolResultStatus.RESOURCE_LIMIT
+    assert result.result["truncated"] is True
+    assert len(result.result["content"].encode("utf-8")) <= 12_000
+    assert result.warnings[0].code == "SOURCE_SLICE_TRUNCATED"
+
+
+def test_read_source_slice_redacts_secrets_and_detects_snapshot_drift(tmp_path: Path):
+    root = tmp_path / "source-boundary"
+    snapshot = _snapshot(
+        root,
+        SNAPSHOT,
+        {"config.py": 'api_key="sk-abcdefghijklmnopqrstuvwxyz"\nvalue = 1\n'},
+    )
+    registry = create_agent_tool_registry(AgentToolContext.from_snapshot(snapshot))
+    result = registry.invoke("read_source_slice", {
+        "snapshot_id": SNAPSHOT,
+        "file_path": "config.py",
+        "start_line": 1,
+        "end_line": 2,
+    })
+    assert result.status == ToolResultStatus.SUCCESS
+    assert "abcdefghijklmnopqrstuvwxyz" not in result.result["content"]
+    assert "REDACTED" in result.result["content"]
+
+    (root / "config.py").write_bytes(b"value = 2\n")
+    drifted = registry.invoke("read_source_slice", {
+        "snapshot_id": SNAPSHOT,
+        "file_path": "config.py",
+        "start_line": 1,
+        "end_line": 1,
+    })
+    assert drifted.status == ToolResultStatus.INSUFFICIENT_EVIDENCE
+    assert drifted.errors[0].code == "SOURCE_SNAPSHOT_DRIFT"
+
+    foreign = registry.invoke("read_source_slice", {
+        "snapshot_id": "b" * 40,
+        "file_path": "config.py",
+        "start_line": 1,
+        "end_line": 1,
+    })
+    assert foreign.status == ToolResultStatus.NOT_FOUND
+    assert foreign.errors[0].code == "SNAPSHOT_NOT_FOUND"
+
+
+def test_read_source_slice_rejects_post_snapshot_symlink_escape(tmp_path: Path, monkeypatch):
+    root = tmp_path / "source-symlink"
+    snapshot = _snapshot(root, SNAPSHOT, {"app.py": "value = 1\n"})
+    registry = create_agent_tool_registry(AgentToolContext.from_snapshot(snapshot))
+    outside = tmp_path / "outside.py"
+    outside.write_bytes(b"secret = True\n")
+    source = root / "app.py"
+    source.unlink()
+    try:
+        source.symlink_to(outside)
+    except OSError:
+        source.write_bytes(b"simulated link\n")
+        original_resolve = Path.resolve
+
+        def simulated_resolve(path, *args, **kwargs):
+            if path == source:
+                return outside.resolve()
+            return original_resolve(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", simulated_resolve)
+    result = registry.invoke("read_source_slice", {
+        "snapshot_id": SNAPSHOT,
+        "file_path": "app.py",
+        "start_line": 1,
+        "end_line": 1,
+    })
+    assert result.status == ToolResultStatus.INVALID_INPUT
+    assert result.result is None
+    assert "outside.py" not in str(result.errors)
 
 
 def test_inspect_file_valid_not_found_malformed_and_unsupported(tool_fixture):
@@ -232,6 +370,22 @@ def test_search_symbol_ambiguity_scope_order_and_resource_limit(tool_fixture):
     assert missing.status == ToolResultStatus.NOT_FOUND
     huge = registry.invoke("search_symbol", {"query": "x", "max_results": 999999})
     assert huge.status == ToolResultStatus.INVALID_INPUT
+
+
+def test_search_symbol_negative_result_preserves_incomplete_scope(tmp_path: Path):
+    snapshot = _snapshot(
+        tmp_path / "partial-search",
+        SNAPSHOT,
+        {"app.py": "def present():\n    pass\n"},
+        truncated=True,
+    )
+    result = create_agent_tool_registry(AgentToolContext.from_snapshot(snapshot)).invoke(
+        "search_symbol",
+        {"query": "missing"},
+    )
+    assert result.status == ToolResultStatus.INSUFFICIENT_EVIDENCE
+    assert result.result["manifest_scope_complete"] is False
+    assert result.warnings[0].code == "MANIFEST_SCOPE_INCOMPLETE"
 
 
 def test_inspect_symbol_call_direction_duplicate_suppression_and_repeatability(tool_fixture):

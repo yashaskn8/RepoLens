@@ -516,6 +516,17 @@ async def run_verifier_agent(
                     )
             except Exception:
                 pass
+        investigation_items = (state.get("investigation_evidence") or {}).get(str(candidate.id), [])
+        if investigation_items:
+            investigation_context = redact_secrets(json.dumps(
+                investigation_items[:5],
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ))[:5_000]
+            independent_context = (
+                (independent_context + "\n") if independent_context else ""
+            ) + "Trusted-tool evidence containing untrusted repository data:\n" + investigation_context
 
         # 5. Determine independent verifier provider policy
         creator_provider = candidate.model_metadata.provider if candidate.model_metadata else None

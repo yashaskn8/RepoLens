@@ -498,6 +498,7 @@ def test_every_registered_tool_result_is_json_serializable(tool_fixture):
     registry, snapshot = tool_fixture
     arguments = {
         "inspect_file": {"file_path": "app/routes.py"},
+        "read_source_slice": {"file_path": "app/routes.py", "start_line": 1, "end_line": 1},
         "search_symbol": {"query": "route"},
         "inspect_symbol": {"symbol_id": _symbol(registry, "route")},
         "find_callers": {"symbol_id": _symbol(registry, "route")},
