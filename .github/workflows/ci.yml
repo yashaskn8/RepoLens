@@ -72,6 +72,22 @@ jobs:
           cd backend
           python -m pytest tests -v
 
+      - name: Run zero-key scripted Evidence Investigator regression gate
+        run: |
+          cd backend
+          python -m app.evaluation.agent \
+            --mode scripted \
+            --regression-gate evaluation_data/agent/v1/regression_gate.json \
+            --output agent-eval-scripted.json
+
+      - name: Upload scripted agent evaluation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repolens-agent-eval-scripted
+          path: backend/agent-eval-scripted.json
+          if-no-files-found: warn
+
   frontend-check:
     name: Frontend Typecheck, Lint & Build (Node 20)
     runs-on: ubuntu-latest

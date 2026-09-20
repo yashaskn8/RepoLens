@@ -1,0 +1,15 @@
+{
+  "case_id": "architecture-source",
+  "case_family": "progressive_disclosure",
+  "split": "REGRESSION",
+  "category": "ARCHITECTURE",
+  "difficulty": "EASY",
+  "fixture": {"repository_url": "https://github.com/example/agent-eval.git", "files": {"service.py": "class Service:\n    def run(self):\n        return 1\n"}},
+  "investigator_input": {"title": "Service boundary", "description": "The verifier needs the service source span.", "category": "ARCHITECTURE", "primary_file": "service.py", "primary_start_line": 1, "primary_end_line": 3, "verifier_uncertainty_reason": "The service boundary is ambiguous."},
+  "annotation": {"acceptable_stop_reasons": ["EVIDENCE_GATHERED"], "required_tools_all": ["inspect_file", "read_source_slice"], "required_evidence": [{"evidence_type": "SOURCE_SLICE", "file_path": "service.py", "start_line": 1}], "hidden_canary": "architecture-source-hidden-canary"},
+  "scripted_decisions": [
+    {"action": "TOOL_CALL", "tool_name": "inspect_file", "arguments": {"file_path": "service.py"}, "reason": "Start with structural facts."},
+    {"action": "TOOL_CALL", "tool_name": "read_source_slice", "arguments": {"file_path": "service.py", "start_line": 1, "end_line": 3}, "reason": "Disclose only the needed source."},
+    {"action": "FINISH", "reason": "The boundary evidence is sufficient."}
+  ]
+}

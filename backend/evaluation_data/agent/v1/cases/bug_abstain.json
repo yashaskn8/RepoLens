@@ -1,0 +1,11 @@
+{
+  "case_id": "bug-calibrated-abstain",
+  "case_family": "calibration",
+  "split": "REGRESSION",
+  "category": "BUG",
+  "difficulty": "MEDIUM",
+  "fixture": {"repository_url": "https://github.com/example/agent-eval.git", "files": {"unknown.py": "def opaque(value):\n    return external(value)\n"}},
+  "investigator_input": {"title": "Opaque behavior", "description": "The available static scope cannot establish the external behavior.", "category": "BUG", "primary_file": "unknown.py", "primary_start_line": 1, "primary_end_line": 2, "verifier_uncertainty_reason": "The external call is outside the authorized snapshot."},
+  "annotation": {"acceptable_stop_reasons": ["INSUFFICIENT_EVIDENCE"], "expected_abstention": true, "hidden_canary": "bug-abstain-hidden-canary"},
+  "scripted_decisions": [{"action": "ABSTAIN", "reason": "No safe repository evidence can resolve the external behavior."}]
+}

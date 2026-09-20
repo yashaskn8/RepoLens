@@ -1,0 +1,15 @@
+{
+  "case_id": "security-bounded-source",
+  "case_family": "security_evidence_depth",
+  "split": "REGRESSION",
+  "category": "SECURITY",
+  "difficulty": "MEDIUM",
+  "fixture": {"repository_url": "https://github.com/example/agent-eval.git", "files": {"auth.py": "def authorize(header):\n    return validate(header)\n"}},
+  "investigator_input": {"title": "Possible header trust", "description": "The verifier needs the authorization implementation before assessing trust.", "category": "SECURITY", "primary_file": "auth.py", "primary_start_line": 1, "primary_end_line": 2, "verifier_uncertainty_reason": "Validation behavior is not established."},
+  "annotation": {"acceptable_stop_reasons": ["EVIDENCE_GATHERED"], "required_tools_all": ["inspect_file", "read_source_slice"], "required_evidence": [{"evidence_type": "SOURCE_SLICE", "file_path": "auth.py"}], "hidden_canary": "security-source-hidden-canary"},
+  "scripted_decisions": [
+    {"action": "TOOL_CALL", "tool_name": "inspect_file", "arguments": {"file_path": "auth.py"}, "reason": "Inspect the deterministic auth file facts."},
+    {"action": "TOOL_CALL", "tool_name": "read_source_slice", "arguments": {"file_path": "auth.py", "start_line": 1, "end_line": 2}, "reason": "Read the validation span."},
+    {"action": "FINISH", "reason": "The verifier can now reevaluate the claim."}
+  ]
+}

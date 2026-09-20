@@ -1,0 +1,16 @@
+{
+  "case_id": "bug-source-slice",
+  "case_family": "bug_evidence_depth",
+  "split": "REGRESSION",
+  "category": "BUG",
+  "difficulty": "EASY",
+  "fixture": {"repository_url": "https://github.com/example/agent-eval.git", "files": {"app.py": "def read(value):\n    return value\n"}},
+  "investigator_input": {"title": "Possible unsafe value flow", "description": "The verifier cannot determine whether the value is normalized before use.", "category": "BUG", "primary_file": "app.py", "primary_start_line": 1, "primary_end_line": 2, "verifier_uncertainty_reason": "Caller validation is unresolved.", "atomic_claim_summaries": ["value reaches read"]},
+  "annotation": {"acceptable_stop_reasons": ["EVIDENCE_GATHERED"], "required_tools_all": ["read_source_slice"], "required_evidence": [{"evidence_type": "SOURCE_SLICE", "file_path": "app.py", "start_line": 1}], "hidden_canary": "bug-source-hidden-canary"},
+  "scripted_decisions": [
+    {"action": "TOOL_CALL", "tool_name": "search_symbol", "arguments": {"query": "read", "match_mode": "EXACT"}, "reason": "Find the stable symbol."},
+    {"action": "TOOL_CALL", "tool_name": "inspect_file", "arguments": {"file_path": "app.py"}, "reason": "Check deterministic file facts."},
+    {"action": "TOOL_CALL", "tool_name": "read_source_slice", "arguments": {"file_path": "app.py", "start_line": 1, "end_line": 2}, "reason": "Read the exact bounded span."},
+    {"action": "FINISH", "reason": "Evidence is sufficient for independent verification."}
+  ]
+}

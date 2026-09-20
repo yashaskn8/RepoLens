@@ -1,0 +1,14 @@
+{
+  "case_id": "durable-resume",
+  "case_family": "checkpoint_resume",
+  "split": "CAPABILITY",
+  "category": "BUG",
+  "difficulty": "HARD",
+  "fixture": {"repository_url": "https://github.com/example/agent-eval.git", "files": {"worker.py": "def process(item):\n    return item\n"}},
+  "investigator_input": {"title": "Worker behavior", "description": "The worker implementation must survive an interrupted investigation.", "category": "BUG", "primary_file": "worker.py", "primary_start_line": 1, "primary_end_line": 2, "verifier_uncertainty_reason": "The worker behavior needs direct source evidence."},
+  "annotation": {"acceptable_stop_reasons": ["EVIDENCE_GATHERED"], "required_tools_all": ["read_source_slice"], "required_evidence": [{"evidence_type": "SOURCE_SLICE", "file_path": "worker.py"}], "durability_case": true, "hidden_canary": "durable-resume-hidden-canary"},
+  "scripted_decisions": [
+    {"action": "TOOL_CALL", "tool_name": "read_source_slice", "arguments": {"file_path": "worker.py", "start_line": 1, "end_line": 2}, "reason": "Read the worker span."},
+    {"action": "FINISH", "reason": "The checkpointed evidence is sufficient."}
+  ]
+}

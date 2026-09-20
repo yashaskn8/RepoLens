@@ -1,0 +1,14 @@
+{
+  "case_id": "negative-search",
+  "case_family": "negative_result_retention",
+  "split": "CAPABILITY",
+  "category": "BUG",
+  "difficulty": "MEDIUM",
+  "fixture": {"repository_url": "https://github.com/example/agent-eval.git", "files": {"module.py": "def present(value):\n    return value\n"}},
+  "investigator_input": {"title": "Missing sanitizer", "description": "The exact sanitizer symbol may be absent from the complete fixture scope.", "category": "BUG", "primary_file": "module.py", "primary_start_line": 1, "primary_end_line": 2, "verifier_uncertainty_reason": "No sanitizer symbol has been established."},
+  "annotation": {"acceptable_stop_reasons": ["INSUFFICIENT_EVIDENCE"], "expected_abstention": true, "required_tools_all": ["search_symbol"], "hidden_canary": "negative-search-hidden-canary"},
+  "scripted_decisions": [
+    {"action": "TOOL_CALL", "tool_name": "search_symbol", "arguments": {"query": "sanitize_input", "match_mode": "EXACT"}, "reason": "Check whether the exact sanitizer exists."},
+    {"action": "ABSTAIN", "reason": "No safe evidence remains after the negative result."}
+  ]
+}
