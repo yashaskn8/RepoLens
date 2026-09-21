@@ -273,8 +273,10 @@ class LLMRouter:
             # Cached/coalesced responses carry historical metadata for callers,
             # but those tokens are not current provider usage.
             if not reused:
-                llm_span.set_attribute("gen_ai.usage.input_tokens", response.metadata.prompt_tokens or 0)
-                llm_span.set_attribute("gen_ai.usage.output_tokens", response.metadata.completion_tokens or 0)
+                if response.metadata.prompt_tokens is not None:
+                    llm_span.set_attribute("gen_ai.usage.input_tokens", response.metadata.prompt_tokens)
+                if response.metadata.completion_tokens is not None:
+                    llm_span.set_attribute("gen_ai.usage.output_tokens", response.metadata.completion_tokens)
             return response
 
     async def _generate_with_cache(self, request: LLMRequest) -> LLMResponse:
