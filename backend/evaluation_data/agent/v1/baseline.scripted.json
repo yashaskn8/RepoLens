@@ -1,7 +1,7 @@
 {
   "schema_version": "agent-eval-baseline/1.0",
   "dataset_hash": "376f71cf937ef25a4300a748304b996e5e2a9ff9bc9a2caddd2c6c6329c8c96d",
-  "evaluation_contract_hash": "f9f50b181a54475b509fa38490a9d513cefaba7fcb4a085c48c3778df563f4df",
+  "evaluation_contract_hash": "8331feb0efb6969841c1a24b539b33959c3ddf4c1a6889ffcfc1c3a6f0742bbc",
   "cases": [
     {"case_id": "architecture-source", "stop_reason": "EVIDENCE_GATHERED", "tool_names": ["inspect_file", "read_source_slice"]},
     {"case_id": "bug-calibrated-abstain", "stop_reason": "INSUFFICIENT_EVIDENCE", "tool_names": []},

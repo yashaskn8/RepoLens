@@ -72,6 +72,14 @@ async def test_grader_matches_trusted_evidence_and_metrics():
     assert metrics.evidence_validity_rate == 1.0
     assert metrics.evidence_validity_all_cases == 1.0
     assert metrics.required_evidence_success_rate == 1.0
+    assert metrics.unsafe_tool_requests == 0
+    assert metrics.unsafe_tool_executions == 0
+    assert metrics.duplicate_tool_executions == 0
+    assert metrics.checkpoint_resumed_cases == 0
+    assert metrics.checkpoint_duplicate_tool_executions == 0
+    assert metrics.context_budget_exceeded_cases == 0
+    assert metrics.context_measurements == trial.model_decisions_consumed
+    assert metrics.max_context_bytes == max(request.context_bytes for request in trial.model_requests)
     assert metrics.classification_metrics_measured is False
 
 

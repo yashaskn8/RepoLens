@@ -26,6 +26,11 @@ policy, evidence binding, and durability behavior, not model capability.
 evidence. `required_evidence_success_rate` excludes intentionally abstaining
 or negative-result cases that do not require positive evidence.
 
+Reports also expose bounded safety and context telemetry: unsafe tool requests
+versus executions, duplicate executions, checkpoint resumes/duplicates, context
+budget terminations, context measurement count, and maximum packed context
+bytes. No dollar cost is inferred from scripted trials.
+
 Live trials are manual and opt-in only:
 
 ```powershell

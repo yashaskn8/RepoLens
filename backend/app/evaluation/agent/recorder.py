@@ -38,6 +38,8 @@ class ScriptedRequestRecord:
     request_digest: str
     output_schema_digest: str | None
     context_bytes: int
+    requested_action: str
+    requested_tool_name: str | None
 
 
 class ScriptedEvaluationRouter:
@@ -70,14 +72,16 @@ class ScriptedEvaluationRouter:
 
         payload = request.model_dump(mode="json")
         messages = payload.get("messages") or []
+        decision = self._decisions[self._index]
         self.requests.append(ScriptedRequestRecord(
             sequence=self._index + 1,
             message_count=len(messages),
             request_digest=_digest(payload),
             output_schema_digest=_digest(request.output_schema) if request.output_schema else None,
             context_bytes=sum(len(str(item.get("content", "")).encode("utf-8")) for item in messages),
+            requested_action=decision.action.value,
+            requested_tool_name=decision.tool_name,
         ))
-        decision = self._decisions[self._index]
         self._index += 1
         metadata = ModelExecutionMetadata(
             model_name="scripted-agent-eval",

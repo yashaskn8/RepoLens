@@ -48,6 +48,14 @@ def evaluation_contract_payload() -> dict[str, Any]:
         "metric_definitions": {
             "evidence_validity_all_cases": "cases_with_trusted_evidence / all_cases",
             "required_evidence_success_rate": "cases_with_trusted_evidence / cases_with_required_evidence",
+            "unsafe_tool_requests": "model-requested tools outside the permitted category policy",
+            "unsafe_tool_executions": "registry executions outside the permitted category policy",
+            "duplicate_tool_executions": "repeated executed tool plus argument fingerprints",
+            "checkpoint_resumed_cases": "scripted trials resumed from a persisted checkpoint",
+            "checkpoint_duplicate_tool_executions": "duplicate executions observed in resumed trials",
+            "context_budget_exceeded_cases": "trials terminated by the context budget",
+            "context_measurements": "model decisions with recorded packed-context byte metrics",
+            "max_context_bytes": "maximum packed request context bytes observed",
         },
     }
 
