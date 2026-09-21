@@ -22,13 +22,16 @@ Langfuse SDK or make a hosted observability service a runtime dependency.
 ## Propagation and durability
 
 The HTTP boundary extracts a valid W3C `traceparent`/`tracestate` pair and starts
-one controlled root/request span while preserving the existing request ID,
+one controlled HTTP SERVER span while preserving the existing request ID,
 security headers, timing, and durable request metric behavior. New durable work
 items persist only bounded nullable propagation fields in
 `execution_work_items`; these fields are not part of `request_payload`, request
 digests, or idempotency identity. A reused idempotent work item retains its
 original parent. Each leased attempt starts its own span and restores the
 persisted parent, so retries and crash recovery remain distinguishable.
+Malformed or oversized propagation is rejected rather than truncated; all-zero
+W3C IDs are rejected. The SDK provider is installed at most once per process,
+and shutdown is best-effort so exporter failures cannot affect domain work.
 
 ## Privacy contract
 
@@ -38,6 +41,8 @@ queries/chunks/vectors, cookies, authorization values, API keys, secrets,
 stack traces, and absolute host paths are never attached to spans. Safe
 metadata is limited to versions, digests, provider/model IDs, operation names,
 bounded statuses, durations, token counts, evidence counts, and budget state.
+GenAI attributes use the OpenTelemetry `gen_ai.*` namespace; RepoLens-specific
+metadata uses `repolens.*`.
 Exporter headers are used only by the exporter and are never logged or
 persisted. Trace/exporter failures are non-domain failures and do not trigger a
 workflow retry.

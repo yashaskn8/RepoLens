@@ -23,6 +23,8 @@ _SAFE_ATTRIBUTE_SUFFIXES = frozenset({
     "intent", "max_tokens", "kind", "keys", "hit", "avoided", "requested", "complete",
 })
 
+_ALLOWED_ATTRIBUTE_NAMESPACES = ("gen_ai.", "http.", "error.", "repolens.")
+
 
 def digest(value: Any) -> str:
     """Return a stable digest without retaining the value."""
@@ -38,8 +40,18 @@ def safe_attributes(attributes: Mapping[str, Any] | None) -> dict[str, Any]:
     safe: dict[str, Any] = {}
     for key, value in (attributes or {}).items():
         normalized = str(key).strip().lower().replace("-", "_")
+        # OTel semantic attributes use their registered namespaces.  RepoLens
+        # metadata is deliberately namespaced so application-specific keys can
+        # never masquerade as vendor/GenAI attributes.
+        if not normalized.startswith(_ALLOWED_ATTRIBUTE_NAMESPACES):
+            continue
         token_count = normalized.endswith("_tokens") or normalized.endswith(".tokens") or normalized.endswith("_token_count")
-        prompt_version = normalized.endswith("_prompt_version") or normalized.endswith(".prompt_version")
+        prompt_version = (
+            normalized.endswith("_prompt_version")
+            or normalized.endswith(".prompt_version")
+            or normalized == "gen_ai.prompt.version"
+            or normalized.endswith(".prompt.version")
+        )
         leaf = normalized.rsplit(".", 1)[-1].rsplit("_", 1)[-1]
         allowed_key = normalized.endswith("_prompt_version") or normalized.endswith(".prompt_version") or leaf in _SAFE_ATTRIBUTE_SUFFIXES
         if not normalized or not allowed_key or normalized in CONTENT_KEYS or ("prompt" in normalized and not prompt_version) or any(part in normalized for part in ("secret", "password", "auth", "cookie")) or ("token" in normalized and not token_count):

@@ -295,7 +295,8 @@ class AgentToolRegistry:
         return [self._specs[name].metadata.model_copy(deep=True) for name in sorted(self._specs)]
 
     def get_tool(self, name: str) -> ToolMetadata | None:
-        spec = self._specs.get(name)
+        safe_name = name if isinstance(name, str) else ""
+        spec = self._specs.get(safe_name)
         return spec.metadata.model_copy(deep=True) if spec else None
 
     def validate_arguments(
@@ -338,6 +339,11 @@ class AgentToolRegistry:
         from app.observability.semantic import digest
 
         safe_name = name if isinstance(name, str) else "unknown"
+        # Invalid/unknown requests are policy/schema failures, not executions.
+        # Validate before opening an execute span so telemetry cannot imply a
+        # repository operation occurred when the registry rejected the call.
+        if self.validate_arguments(name, arguments) is not None:
+            return self._invoke(name, arguments)
         started = time.perf_counter()
         with span(
             "agent_tool.execute",
@@ -345,15 +351,15 @@ class AgentToolRegistry:
                 "gen_ai.operation.name": "execute_tool",
                 "gen_ai.tool.name": safe_name[:128],
                 "gen_ai.tool.type": "function",
-                "agent.tool.argument_digest": digest(arguments or {}),
-                "agent.tool.contract_version": AGENT_TOOL_VERSION,
+                "repolens.agent_tool.argument_digest": digest(arguments or {}),
+                "repolens.agent_tool.contract_version": AGENT_TOOL_VERSION,
             },
         ) as tool_span:
             result = self._invoke(name, arguments)
-            tool_span.set_attribute("agent.tool.status", result.status.value)
-            tool_span.set_attribute("agent.tool.duration_ms", round((time.perf_counter() - started) * 1000, 3))
-            tool_span.set_attribute("agent.tool.evidence_count", len(result.evidence))
-            tool_span.set_attribute("agent.tool.result_digest", digest(result.result or {}))
+            tool_span.set_attribute("repolens.agent_tool.status", result.status.value)
+            tool_span.set_attribute("repolens.agent_tool.duration_ms", round((time.perf_counter() - started) * 1000, 3))
+            tool_span.set_attribute("repolens.agent_tool.evidence_count", len(result.evidence))
+            tool_span.set_attribute("repolens.agent_tool.result_digest", digest(result.result or {}))
             return result
 
     def _invoke(self, name: str, arguments: Mapping[str, object] | None) -> ToolInvocationResult:

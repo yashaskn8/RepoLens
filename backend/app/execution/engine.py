@@ -6,7 +6,6 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import json
-import re
 import secrets
 from typing import Callable, Iterable, Mapping, Optional
 from uuid import uuid4
@@ -55,6 +54,7 @@ from app.models.execution import (
     WorkItemModel,
     WorkLeaseModel,
 )
+from app.observability.tracing import extract_trace_context
 
 
 _GLOBAL_SCOPE = "*"
@@ -183,6 +183,10 @@ class DurableExecutionEngine:
     def enqueue(self, request: EnqueueRequest) -> EnqueueResult:
         """Idempotently create one work item and its immutable request budget."""
         self._validate_enqueue_request(request)
+        trace_context = extract_trace_context({
+            "traceparent": request.traceparent,
+            **({"tracestate": request.tracestate} if request.tracestate is not None else {}),
+        }) if request.traceparent is not None else {}
         kind = WorkKind(_enum_value(request.work_kind))
         profile = ResourceProfile(_enum_value(request.resource_profile))
         side_effect = SideEffectClass(_enum_value(request.side_effect_class))
@@ -203,8 +207,8 @@ class DurableExecutionEngine:
             id=work_id,
             tenant_id=request.tenant_id,
             request_id=request.request_id,
-            traceparent=request.traceparent[:55] if request.traceparent else None,
-            tracestate=request.tracestate[:512] if request.tracestate else None,
+            traceparent=trace_context.get("traceparent"),
+            tracestate=trace_context.get("tracestate"),
             requested_by=request.requested_by,
             policy_snapshot_id=request.policy_snapshot_id,
             work_kind=kind.value,
@@ -1122,12 +1126,17 @@ class DurableExecutionEngine:
             raise ValueError("priority must be between 0 and 100")
         if request.max_attempts <= 0:
             raise ValueError("max_attempts must be positive")
-        if request.traceparent is not None and not re.fullmatch(
-            r"00-[0-9a-fA-F]{32}-[0-9a-fA-F]{16}-[0-9a-fA-F]{2}", request.traceparent
-        ):
-            raise ValueError("traceparent must be a valid W3C traceparent")
-        if request.tracestate is not None and len(request.tracestate) > 512:
-            raise ValueError("tracestate exceeds the bounded propagation limit")
+        if request.traceparent is not None:
+            extracted = extract_trace_context({
+                "traceparent": request.traceparent,
+                **({"tracestate": request.tracestate} if request.tracestate is not None else {}),
+            })
+            if extracted.get("traceparent") != request.traceparent.lower() or (
+                request.tracestate is not None and "tracestate" not in extracted
+            ):
+                raise ValueError("trace context must contain valid W3C traceparent/tracestate values")
+        elif request.tracestate is not None:
+            raise ValueError("tracestate requires a valid traceparent")
         if len(request.request_digest) != 64 or any(
             ch not in "0123456789abcdefABCDEF" for ch in request.request_digest
         ):

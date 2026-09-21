@@ -132,19 +132,22 @@ async def _budgeted_node(fn: Any, state: AnalysisState, runtime: Any = None) -> 
 
     node_name = getattr(fn, "__name__", "workflow_node").removeprefix("run_").removesuffix("_agent")
     operation = "invoke_agent" if node_name in {"architecture", "integration", "security", "bug", "investigator_decide"} else "workflow_node"
+    span_attributes = {
+        "repolens.workflow.operation": operation,
+        "repolens.workflow.node": node_name,
+        "repolens.workflow.step": len(state.get("completed_nodes", [])),
+    }
+    if operation != "workflow_node":
+        span_attributes["gen_ai.operation.name"] = operation
     with span(
         f"workflow.{node_name}",
-        attributes={
-            "gen_ai.operation.name": operation,
-            "workflow.node": node_name,
-            "workflow.step": len(state.get("completed_nodes", [])),
-        },
+        attributes=span_attributes,
     ) as node_span:
         if len(inspect.signature(fn).parameters) > 1:
             result = await fn(state, runtime)
         else:
             result = await fn(state)
-        node_span.set_attribute("workflow.result_keys", len(result or {}))
+        node_span.set_attribute("repolens.workflow.result_keys", len(result or {}))
     result = dict(result or {})
     budget = current_workflow_cloud_budget()
     if budget is not None:
@@ -416,9 +419,9 @@ async def run_analysis_workflow(
                 "workflow.invoke",
                 attributes={
                     "gen_ai.operation.name": "invoke_workflow",
-                    "workflow.scan_id": scan_id,
-                    "workflow.resume": payload is None,
-                    "workflow.recursion_limit": ANALYSIS_RECURSION_LIMIT,
+                    "repolens.workflow.scan_id": scan_id,
+                    "repolens.workflow.resume": payload is None,
+                    "repolens.workflow.recursion_limit": ANALYSIS_RECURSION_LIMIT,
                 },
             ):
                 result = await app.ainvoke(payload, config=config, context=runtime_context)
@@ -454,7 +457,7 @@ async def run_analysis_workflow(
                     }
                 # If all nodes already finished, return the completed state directly
                 if not current_state.next:
-                    span_event("checkpoint_resume", {"workflow.scan_id": scan_id, "checkpoint_already_complete": True})
+                    span_event("checkpoint_resume", {"repolens.workflow.scan_id": scan_id, "repolens.workflow.checkpoint_already_complete": True})
                     logger.info("Scan %s already completed in checkpointer. Returning cached result.", scan_id)
                     completed_state = dict(current_state.values)
                     completed_state.setdefault("ai_cloud_budget", cloud_budget.snapshot().as_dict())
@@ -465,9 +468,9 @@ async def run_analysis_workflow(
                 span_event(
                     "checkpoint_resume",
                     {
-                        "workflow.scan_id": scan_id,
-                        "checkpoint_already_complete": False,
-                        "checkpoint_next_node_count": len(current_state.next or ()),
+                        "repolens.workflow.scan_id": scan_id,
+                        "repolens.workflow.checkpoint_already_complete": False,
+                        "repolens.workflow.checkpoint_next_node_count": len(current_state.next or ()),
                     },
                 )
                 try:

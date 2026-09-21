@@ -246,30 +246,35 @@ class LLMRouter:
     async def generate(self, request: LLMRequest) -> LLMResponse:
         """Generate under one logical content-free router span."""
         from app.observability import span
+        from opentelemetry.trace import SpanKind
 
         with span(
-            "llm.generate",
+            "chat",
+            kind=SpanKind.CLIENT,
             attributes={
-                "gen_ai.operation.name": "generate",
-                "llm.task_policy": request.task_policy.value if request.task_policy else None,
-                "llm.capability": request.capability.value if request.capability else None,
-                "llm.request.temperature": request.temperature,
-                "llm.request.max_tokens": request.max_tokens or request.budget.max_output_tokens,
-                "llm.prompt_version": request.lineage.prompt_template_version,
-                "llm.output_schema_version": request.lineage.output_schema_version,
+                "gen_ai.operation.name": "chat",
+                "gen_ai.request.model": request.model,
+                "gen_ai.request.temperature": request.temperature,
+                "gen_ai.request.max_tokens": request.max_tokens or request.budget.max_output_tokens,
+                "repolens.prompt.version": request.lineage.prompt_template_version,
+                "gen_ai.output.type": "json" if request.output_schema else None,
+                "repolens.llm.task_policy": request.task_policy.value if request.task_policy else None,
+                "repolens.llm.capability": request.capability.value if request.capability else None,
+                "repolens.llm.output_schema_version": request.lineage.output_schema_version,
             },
         ) as llm_span:
             response = await self._generate_with_cache(request)
             extra = response.metadata.extra_metadata or {}
             reused = bool(extra.get("cache_hit", False) or extra.get("provider_call_avoided", False))
-            llm_span.set_attribute("llm.provider", response.provider.value)
-            llm_span.set_attribute("llm.model", response.model)
-            llm_span.set_attribute("llm.cache_hit", bool(extra.get("cache_hit", False)))
-            llm_span.set_attribute("llm.provider_call_avoided", bool(extra.get("provider_call_avoided", False)))
+            llm_span.set_attribute("gen_ai.provider.name", response.provider.value)
+            llm_span.set_attribute("gen_ai.response.model", response.model)
+            llm_span.set_attribute("repolens.llm.cache_hit", bool(extra.get("cache_hit", False)))
+            llm_span.set_attribute("repolens.llm.provider_call_avoided", bool(extra.get("provider_call_avoided", False)))
             # Cached/coalesced responses carry historical metadata for callers,
             # but those tokens are not current provider usage.
-            llm_span.set_attribute("llm.input_tokens", 0 if reused else (response.metadata.prompt_tokens or 0))
-            llm_span.set_attribute("llm.output_tokens", 0 if reused else (response.metadata.completion_tokens or 0))
+            if not reused:
+                llm_span.set_attribute("gen_ai.usage.input_tokens", response.metadata.prompt_tokens or 0)
+                llm_span.set_attribute("gen_ai.usage.output_tokens", response.metadata.completion_tokens or 0)
             return response
 
     async def _generate_with_cache(self, request: LLMRequest) -> LLMResponse:
@@ -371,7 +376,7 @@ class LLMRouter:
             model_target = request.model or ""
             for attempt in range(max_retries + 1):
                 try:
-                    span_event("provider_attempt", {"provider": request.provider.value, "model": model_target, "attempt": attempt})
+                    span_event("provider_attempt", {"repolens.llm.provider": request.provider.value, "repolens.llm.model": model_target, "repolens.llm.attempt": attempt})
                     reserve_cloud_attempt(request.provider, model_target)
                     response = await adapter.generate(request)
                     if model_target:
@@ -382,7 +387,7 @@ class LLMRouter:
                         response.metadata.extra_metadata["retry_count"] = attempt
                     return response
                 except LLMError as exc:
-                    span_event("provider_failure", {"provider": request.provider.value, "model": model_target, "attempt": attempt, "error_type": type(exc).__name__})
+                    span_event("provider_failure", {"repolens.llm.provider": request.provider.value, "repolens.llm.model": model_target, "repolens.llm.attempt": attempt, "error.type": type(exc).__name__})
                     if model_target:
                         code = getattr(exc, "failure_code", ProviderFailureCode.UNAVAILABLE)
                         self._health.record_failure(request.provider, model_target, code, retry_after_seconds=getattr(exc, "retry_after_seconds", None))
@@ -423,7 +428,7 @@ class LLMRouter:
 
             for attempt in range(route_max_retries + 1):
                 try:
-                    span_event("provider_attempt", {"provider": provider.value, "model": model, "attempt": attempt})
+                    span_event("provider_attempt", {"repolens.llm.provider": provider.value, "repolens.llm.model": model, "repolens.llm.attempt": attempt})
                     reserve_cloud_attempt(provider, model)
                     response = await adapter.generate(attempt_request)
                     self._health.record_success(provider, model)
@@ -443,7 +448,7 @@ class LLMRouter:
                             ]
                     return response
                 except LLMError as exc:
-                    span_event("provider_failure", {"provider": provider.value, "model": model, "attempt": attempt, "error_type": type(exc).__name__})
+                    span_event("provider_failure", {"repolens.llm.provider": provider.value, "repolens.llm.model": model, "repolens.llm.attempt": attempt, "error.type": type(exc).__name__})
                     code = getattr(exc, "failure_code", ProviderFailureCode.UNAVAILABLE)
                     self._health.record_failure(
                         provider,

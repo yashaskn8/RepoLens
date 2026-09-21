@@ -155,6 +155,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         request.state.request_id = request_id
         started = time.monotonic()
         from app.observability import extract_trace_context, span
+        from opentelemetry.trace import SpanKind
 
         trace_headers = extract_trace_context(request.headers)
         request.state.trace_headers = trace_headers
@@ -162,6 +163,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             "HTTP request",
             attributes={"http.request.method": request.method, "http.request.id": request_id},
             parent_headers=trace_headers,
+            kind=SpanKind.SERVER,
         ) as request_span:
             response: Response = await call_next(request)
             request_span.set_attribute("http.response.status_code", response.status_code)

@@ -11,14 +11,15 @@ from contextlib import contextmanager
 import logging
 import os
 import re
-import sys
 from typing import Any, Iterator, Mapping
 
 from .semantic import safe_attributes
 
 logger = logging.getLogger(__name__)
 
-_TRACEPARENT = re.compile(r"^00-[0-9a-fA-F]{32}-[0-9a-fA-F]{16}-[0-9a-fA-F]{2}$")
+_TRACEPARENT = re.compile(r"^00-([0-9a-fA-F]{32})-([0-9a-fA-F]{16})-([0-9a-fA-F]{2})$")
+_TRACESTATE_KEY = re.compile(r"^[a-z0-9][a-z0-9_*/-]{0,255}(?:@[a-z0-9][a-z0-9_*/-]{0,255})?$")
+_TRACESTATE_VALUE = re.compile(r"^[\x21-\x2b\x2d-\x3c\x3e-\x7e]{0,256}$")
 _TRACESTATE_MAX = 512
 _configured = False
 _enabled = False
@@ -44,6 +45,28 @@ class _NoopSpan:
 
     def set_status(self, *_: object, **__: object) -> None:
         return None
+
+
+class _SafeSpan:
+    """Small facade that applies the content-free policy to post-start updates."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def set_attribute(self, key: str, value: Any) -> None:
+        for safe_key, safe_value in safe_attributes({key: value}).items():
+            self._inner.set_attribute(safe_key, safe_value)
+
+    def add_event(self, name: str, attributes: Mapping[str, Any] | None = None, **kwargs: Any) -> None:
+        self._inner.add_event(name, attributes=safe_attributes(attributes), **kwargs)
+
+    def record_exception(self, exception: BaseException, **kwargs: Any) -> None:
+        # Exception messages and tracebacks may contain source or secrets.  The
+        # span exception policy is represented by a bounded type attribute.
+        self.set_attribute("error.type", type(exception).__name__)
+
+    def set_status(self, *args: Any, **kwargs: Any) -> None:
+        self._inner.set_status(*args, **kwargs)
 
 
 def configure_tracing(settings: Any | None = None) -> bool:
@@ -82,7 +105,13 @@ def configure_tracing(settings: Any | None = None) -> bool:
                 provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint, headers=headers)))
             except Exception:
                 logger.warning("OTLP exporter unavailable; tracing remains active without an exporter.")
-        trace.set_tracer_provider(provider)
+        # The OTel API permits installing the process-wide provider only once.
+        # Test clients and worker lifecycles may call this function again after
+        # shutdown, so use a fresh provider directly without attempting to
+        # overwrite an already-installed global provider.
+        current_provider = trace.get_tracer_provider()
+        if current_provider.__class__.__name__ == "ProxyTracerProvider":
+            trace.set_tracer_provider(provider)
         _provider = provider
         _tracer = trace.get_tracer("repolens", "1")
         _enabled = True
@@ -106,7 +135,40 @@ def _valid_traceparent(value: object) -> str | None:
     if not isinstance(value, str):
         return None
     value = value.strip()
-    return value if _TRACEPARENT.fullmatch(value) else None
+    match = _TRACEPARENT.fullmatch(value)
+    if match is None:
+        return None
+    trace_id, parent_id, _flags = match.groups()
+    if trace_id.lower() == "0" * 32 or parent_id.lower() == "0" * 16:
+        return None
+    return value.lower()
+
+
+def _valid_tracestate(value: object) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        if len(value.encode("ascii")) > _TRACESTATE_MAX:
+            return None
+    except UnicodeEncodeError:
+        return None
+    members = [member.strip() for member in value.split(",")]
+    if not members or len(members) > 32 or any(not member for member in members):
+        return None
+    seen: set[str] = set()
+    for member in members:
+        if member.count("=") != 1:
+            return None
+        key, member_value = member.split("=", 1)
+        if key != key.strip() or member_value != member_value.strip():
+            return None
+        if len(key) > 256 or not _TRACESTATE_KEY.fullmatch(key) or not _TRACESTATE_VALUE.fullmatch(member_value):
+            return None
+        key = key.lower()
+        if key in seen:
+            return None
+        seen.add(key)
+    return ",".join(members)
 
 
 def extract_trace_context(headers: Mapping[str, str] | None) -> dict[str, str]:
@@ -116,7 +178,7 @@ def extract_trace_context(headers: Mapping[str, str] | None) -> dict[str, str]:
     traceparent = _valid_traceparent(lowered.get("traceparent"))
     if traceparent is None:
         return {}
-    tracestate = lowered.get("tracestate", "").strip()[:_TRACESTATE_MAX]
+    tracestate = _valid_tracestate(lowered.get("tracestate"))
     return {"traceparent": traceparent, **({"tracestate": tracestate} if tracestate else {})}
 
 
@@ -139,7 +201,13 @@ def current_trace_headers() -> dict[str, str]:
 
 
 @contextmanager
-def span(name: str, *, attributes: Mapping[str, Any] | None = None, parent_headers: Mapping[str, str] | None = None) -> Iterator[Any]:
+def span(
+    name: str,
+    *,
+    attributes: Mapping[str, Any] | None = None,
+    parent_headers: Mapping[str, str] | None = None,
+    kind: Any | None = None,
+) -> Iterator[Any]:
     """Start a safe span; tracing exceptions are non-domain failures."""
     if not _enabled or _tracer is None:
         yield _NoopSpan()
@@ -152,7 +220,10 @@ def span(name: str, *, attributes: Mapping[str, Any] | None = None, parent_heade
         if parent_headers:
             ctx = propagate.extract(dict(extract_trace_context(parent_headers)))
             token = context.attach(ctx)
-        span_context_manager = _tracer.start_as_current_span(name)
+        if kind is None:
+            span_context_manager = _tracer.start_as_current_span(name)
+        else:
+            span_context_manager = _tracer.start_as_current_span(name, kind=kind)
         active = span_context_manager.__enter__()
         for key, value in safe_attributes(attributes).items():
             active.set_attribute(key, value)
@@ -160,7 +231,7 @@ def span(name: str, *, attributes: Mapping[str, Any] | None = None, parent_heade
         # Do not let an exporter/provider issue alter application behavior.
         if span_context_manager is not None:
             try:
-                span_context_manager.__exit__(*sys.exc_info())
+                span_context_manager.__exit__(None, None, None)
             except Exception:
                 pass
         yield _NoopSpan()
@@ -170,10 +241,14 @@ def span(name: str, *, attributes: Mapping[str, Any] | None = None, parent_heade
             except Exception:
                 pass
         return
+    safe_active = _SafeSpan(active)
     try:
-        yield active
-    except BaseException:
-        span_context_manager.__exit__(*sys.exc_info())
+        yield safe_active
+    except BaseException as exc:
+        # Keep exception telemetry content-free; the domain exception is still
+        # re-raised to the caller unchanged.
+        safe_active.set_attribute("error.type", type(exc).__name__)
+        span_context_manager.__exit__(None, None, None)
         raise
     else:
         span_context_manager.__exit__(None, None, None)

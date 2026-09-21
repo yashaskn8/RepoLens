@@ -281,14 +281,14 @@ async def run_investigator_decide_node(
         with span(
             "agent.investigator.plan",
             attributes={
-                "gen_ai.operation.name": "invoke_agent",
+                "gen_ai.operation.name": "plan",
                 "gen_ai.agent.name": "EvidenceInvestigator",
-                "investigator.step": target.budget.step_number,
-                "investigator.remaining_steps": target.budget.max_steps - target.budget.step_number,
-                "investigator.remaining_tool_calls": target.budget.max_tool_calls - target.budget.tool_calls,
-                "investigator.context_bytes": packed.telemetry.get("packed_context_bytes", 0),
-                "investigator.context_tokens": packed.telemetry.get("estimated_context_tokens", 0),
-                "investigator.evidence_count": len(target.evidence_ledger),
+                "repolens.investigator.step": target.budget.step_number,
+                "repolens.investigator.remaining_steps": target.budget.max_steps - target.budget.step_number,
+                "repolens.investigator.remaining_tool_calls": target.budget.max_tool_calls - target.budget.tool_calls,
+                "repolens.investigator.context_bytes": packed.telemetry.get("packed_context_bytes", 0),
+                "repolens.investigator.context_tokens": packed.telemetry.get("estimated_context_tokens", 0),
+                "repolens.investigator.evidence_count": len(target.evidence_ledger),
             },
         ):
             response = await asyncio.wait_for(

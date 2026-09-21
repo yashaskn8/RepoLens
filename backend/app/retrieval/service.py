@@ -378,16 +378,16 @@ class RetrievalService:
         with span(
             "retrieval.retrieve",
             attributes={
-                "gen_ai.operation.name": "retrieval",
-                "retrieval.top_k": query.top_k,
-                "retrieval.analysis_intent": query.analysis_intent,
-                "retrieval.reranker_requested": query.use_reranker,
+                "repolens.retrieval.operation": "retrieve",
+                "repolens.retrieval.top_k": query.top_k,
+                "repolens.retrieval.analysis_intent": query.analysis_intent,
+                "repolens.retrieval.reranker_requested": query.use_reranker,
             },
         ) as retrieval_span:
             results = await self._retrieve(query)
-            retrieval_span.set_attribute("retrieval.result_count", len(results))
-            retrieval_span.set_attribute("retrieval.source_bytes", int(self.last_query_coverage.get("source_bytes_loaded", 0)))
-            retrieval_span.set_attribute("retrieval.truncated", bool(self.last_query_coverage.get("source_byte_budget_reached", False)))
+            retrieval_span.set_attribute("repolens.retrieval.result_count", len(results))
+            retrieval_span.set_attribute("repolens.retrieval.source_bytes", int(self.last_query_coverage.get("source_bytes_loaded", 0)))
+            retrieval_span.set_attribute("repolens.retrieval.truncated", bool(self.last_query_coverage.get("source_byte_budget_reached", False)))
             return results
 
     async def _retrieve(self, query: RetrievalQuery) -> List[RetrievalResult]:

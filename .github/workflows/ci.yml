@@ -39,7 +39,7 @@ jobs:
         run: |
           cd backend
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -e ".[dev,observability]"
 
       - name: Verify Dependencies & Python Bytecode
         run: |

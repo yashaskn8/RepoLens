@@ -711,11 +711,11 @@ class DurableWorkDispatcher:
         with span(
             "durable.work_attempt",
             attributes={
-                "work.item_id": claim.work_item_id,
-                "work.kind": claim.work_kind.value,
-                "work.attempt_number": claim.attempt_number,
-                "work.resource_type": claim.resource_type,
-                "work.resume": claim.attempt_number > 1,
+                "repolens.work.item_id": claim.work_item_id,
+                "repolens.work.kind": claim.work_kind.value,
+                "repolens.work.attempt_number": claim.attempt_number,
+                "repolens.work.resource_type": claim.resource_type,
+                "repolens.work.resume": claim.attempt_number > 1,
             },
             parent_headers=parent,
         ):
