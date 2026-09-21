@@ -51,6 +51,9 @@ async def lifespan(app: FastAPI):
     from app.execution.dispatcher import DurableWorkDispatcher
     from app.governance.outbox import RelationalOutboxRelay
     from app.llm.router import configure_persistent_llm_router
+    from app.observability import configure_tracing, shutdown_tracing
+
+    configure_tracing(settings)
 
     available_tables = set(inspect(engine).get_table_names())
     from app.core.redis import get_redis_manager
@@ -83,6 +86,7 @@ async def lifespan(app: FastAPI):
     RelationalOutboxRelay.stop()
     await DurableWorkDispatcher.stop()
     await redis_mgr.close()
+    shutdown_tracing()
 
 
 def _record_request_duration(
@@ -150,7 +154,17 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         request_id = candidate if re.fullmatch(r"[A-Za-z0-9._:-]{8,128}", candidate) else str(uuid.uuid4())
         request.state.request_id = request_id
         started = time.monotonic()
-        response: Response = await call_next(request)
+        from app.observability import extract_trace_context, span
+
+        trace_headers = extract_trace_context(request.headers)
+        request.state.trace_headers = trace_headers
+        with span(
+            "HTTP request",
+            attributes={"http.request.method": request.method, "http.request.id": request_id},
+            parent_headers=trace_headers,
+        ) as request_span:
+            response: Response = await call_next(request)
+            request_span.set_attribute("http.response.status_code", response.status_code)
         duration_ms = max(0.0, (time.monotonic() - started) * 1000.0)
         response.headers["X-Request-ID"] = request_id
         response.headers["X-API-Version"] = settings.API_CURRENT_VERSION

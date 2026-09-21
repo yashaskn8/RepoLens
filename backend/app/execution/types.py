@@ -228,6 +228,8 @@ class EnqueueRequest:
     coverage_artifact_id: Optional[str] = None
     priority: int = 50
     max_attempts: int = 3
+    traceparent: Optional[str] = None
+    tracestate: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -250,6 +252,8 @@ class ClaimedWork:
     resource_id: str
     policy_snapshot_id: str
     input_artifact_id: Optional[str]
+    traceparent: Optional[str] = None
+    tracestate: Optional[str] = None
 
 
 @dataclass(frozen=True)

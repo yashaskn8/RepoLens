@@ -86,6 +86,14 @@ class Settings(BaseSettings):
     LLM_DEFAULT_TIMEOUT: float = 30.0
     LLM_MAX_RETRIES: int = 2
 
+    # Optional vendor-neutral distributed tracing. Disabled by default and
+    # content-free even when enabled. OTLP headers are exporter-only secrets.
+    OTEL_ENABLED: bool = False
+    OTEL_SERVICE_NAME: str = Field(default="repolens", min_length=1, max_length=128)
+    OTEL_SAMPLE_RATIO: float = Field(default=1.0, ge=0.0, le=1.0)
+    OTEL_EXPORTER_OTLP_ENDPOINT: str = ""
+    OTEL_EXPORTER_OTLP_HEADERS: str = ""
+
     # Shared workflow cloud-use governor.  Local Ollama, cache hits, and
     # deterministic work never consume these limits.
     AI_ECONOMY_MODE: Literal["auto", "strict", "quality"] = "auto"

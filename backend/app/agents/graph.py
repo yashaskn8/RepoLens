@@ -128,10 +128,23 @@ def _checkpoint_requires_investigator(checkpoint_state: Any) -> bool:
 
 async def _budgeted_node(fn: Any, state: AnalysisState, runtime: Any = None) -> Dict[str, Any]:
     """Attach the current economy snapshot to every durable checkpoint write."""
-    if len(inspect.signature(fn).parameters) > 1:
-        result = await fn(state, runtime)
-    else:
-        result = await fn(state)
+    from app.observability import span
+
+    node_name = getattr(fn, "__name__", "workflow_node").removeprefix("run_").removesuffix("_agent")
+    operation = "invoke_agent" if node_name in {"architecture", "integration", "security", "bug", "investigator_decide"} else "workflow_node"
+    with span(
+        f"workflow.{node_name}",
+        attributes={
+            "gen_ai.operation.name": operation,
+            "workflow.node": node_name,
+            "workflow.step": len(state.get("completed_nodes", [])),
+        },
+    ) as node_span:
+        if len(inspect.signature(fn).parameters) > 1:
+            result = await fn(state, runtime)
+        else:
+            result = await fn(state)
+        node_span.set_attribute("workflow.result_keys", len(result or {}))
     result = dict(result or {})
     budget = current_workflow_cloud_budget()
     if budget is not None:
@@ -286,6 +299,8 @@ async def run_analysis_workflow(
     - An interrupted scan resumes from the last completed node without re-executing finished agents.
     - Failed nodes or terminal failures capture sanitized errors without corrupting the checkpointer.
     """
+    from app.observability import span_event
+
     config = {
         "configurable": {"thread_id": scan_id},
         # Worst case is four sequential targets, each with prepare/complete,
@@ -393,9 +408,20 @@ async def run_analysis_workflow(
     }
 
     async def invoke_with_cloud_budget(payload: Any) -> AnalysisState:
+        from app.observability import span
+
         token = bind_workflow_cloud_budget(cloud_budget)
         try:
-            result = await app.ainvoke(payload, config=config, context=runtime_context)
+            with span(
+                "workflow.invoke",
+                attributes={
+                    "gen_ai.operation.name": "invoke_workflow",
+                    "workflow.scan_id": scan_id,
+                    "workflow.resume": payload is None,
+                    "workflow.recursion_limit": ANALYSIS_RECURSION_LIMIT,
+                },
+            ):
+                result = await app.ainvoke(payload, config=config, context=runtime_context)
         finally:
             reset_workflow_cloud_budget(token)
         result = dict(result)
@@ -428,6 +454,7 @@ async def run_analysis_workflow(
                     }
                 # If all nodes already finished, return the completed state directly
                 if not current_state.next:
+                    span_event("checkpoint_resume", {"workflow.scan_id": scan_id, "checkpoint_already_complete": True})
                     logger.info("Scan %s already completed in checkpointer. Returning cached result.", scan_id)
                     completed_state = dict(current_state.values)
                     completed_state.setdefault("ai_cloud_budget", cloud_budget.snapshot().as_dict())
@@ -435,6 +462,14 @@ async def run_analysis_workflow(
 
                 # Interrupted scan: resume execution from last completed super-step
                 logger.info("Resuming scan %s from checkpoint (next nodes: %s)...", scan_id, current_state.next)
+                span_event(
+                    "checkpoint_resume",
+                    {
+                        "workflow.scan_id": scan_id,
+                        "checkpoint_already_complete": False,
+                        "checkpoint_next_node_count": len(current_state.next or ()),
+                    },
+                )
                 try:
                     resumed_result = await invoke_with_cloud_budget(None)
                     return resumed_result

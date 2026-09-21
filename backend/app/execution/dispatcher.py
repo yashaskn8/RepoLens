@@ -699,6 +699,30 @@ class DurableWorkDispatcher:
 
     @classmethod
     async def _run_claim(cls, claim: ClaimedWork) -> None:
+        """Run one leased attempt under its durable W3C parent context."""
+        from app.observability import span
+
+        parent = {
+            key: value for key, value in {
+                "traceparent": claim.traceparent,
+                "tracestate": claim.tracestate,
+            }.items() if value
+        }
+        with span(
+            "durable.work_attempt",
+            attributes={
+                "work.item_id": claim.work_item_id,
+                "work.kind": claim.work_kind.value,
+                "work.attempt_number": claim.attempt_number,
+                "work.resource_type": claim.resource_type,
+                "work.resume": claim.attempt_number > 1,
+            },
+            parent_headers=parent,
+        ):
+            await cls._run_claim_inner(claim)
+
+    @classmethod
+    async def _run_claim_inner(cls, claim: ClaimedWork) -> None:
         from app.execution.context import bind_claim, reset_claim
 
         control = _AttemptControl()

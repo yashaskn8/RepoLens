@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import json
+import re
 import secrets
 from typing import Callable, Iterable, Mapping, Optional
 from uuid import uuid4
@@ -202,6 +203,8 @@ class DurableExecutionEngine:
             id=work_id,
             tenant_id=request.tenant_id,
             request_id=request.request_id,
+            traceparent=request.traceparent[:55] if request.traceparent else None,
+            tracestate=request.tracestate[:512] if request.tracestate else None,
             requested_by=request.requested_by,
             policy_snapshot_id=request.policy_snapshot_id,
             work_kind=kind.value,
@@ -1119,6 +1122,12 @@ class DurableExecutionEngine:
             raise ValueError("priority must be between 0 and 100")
         if request.max_attempts <= 0:
             raise ValueError("max_attempts must be positive")
+        if request.traceparent is not None and not re.fullmatch(
+            r"00-[0-9a-fA-F]{32}-[0-9a-fA-F]{16}-[0-9a-fA-F]{2}", request.traceparent
+        ):
+            raise ValueError("traceparent must be a valid W3C traceparent")
+        if request.tracestate is not None and len(request.tracestate) > 512:
+            raise ValueError("tracestate exceeds the bounded propagation limit")
         if len(request.request_digest) != 64 or any(
             ch not in "0123456789abcdefABCDEF" for ch in request.request_digest
         ):
@@ -1342,6 +1351,8 @@ class DurableExecutionEngine:
                 resource_id=candidate.resource_id,
                 policy_snapshot_id=candidate.policy_snapshot_id,
                 input_artifact_id=candidate.input_artifact_id,
+                traceparent=candidate.traceparent,
+                tracestate=candidate.tracestate,
             )
         except ResourceCapacityUnavailable:
             self.db.expire_all()

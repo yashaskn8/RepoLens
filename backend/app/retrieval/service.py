@@ -372,6 +372,25 @@ class RetrievalService:
     # Hybrid Retrieval Execution
     # =========================================================================
     async def retrieve(self, query: RetrievalQuery) -> List[RetrievalResult]:
+        """Retrieve under a content-free span; source/query content never becomes an attribute."""
+        from app.observability import span
+
+        with span(
+            "retrieval.retrieve",
+            attributes={
+                "gen_ai.operation.name": "retrieval",
+                "retrieval.top_k": query.top_k,
+                "retrieval.analysis_intent": query.analysis_intent,
+                "retrieval.reranker_requested": query.use_reranker,
+            },
+        ) as retrieval_span:
+            results = await self._retrieve(query)
+            retrieval_span.set_attribute("retrieval.result_count", len(results))
+            retrieval_span.set_attribute("retrieval.source_bytes", int(self.last_query_coverage.get("source_bytes_loaded", 0)))
+            retrieval_span.set_attribute("retrieval.truncated", bool(self.last_query_coverage.get("source_byte_budget_reached", False)))
+            return results
+
+    async def _retrieve(self, query: RetrievalQuery) -> List[RetrievalResult]:
         """Execute multi-channel retrieval, RRF fusion, and optional neural reranking."""
         channel_rankings: Dict[RetrievalChannel, List[Tuple[str, float]]] = {}
 

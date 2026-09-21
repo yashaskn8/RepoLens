@@ -203,7 +203,15 @@ def lineage_for_resource(
                 output_schema_version=output_schema_version,
                 evidence_digest=evidence_digest(evidence),
             )
-        work = db.query(WorkItemModel).filter(
+        # Select only lineage columns so older local databases remain readable
+        # until the additive trace-context migration is applied.
+        work = db.query(
+            WorkItemModel.id,
+            WorkItemModel.tenant_id,
+            WorkItemModel.request_id,
+            WorkItemModel.policy_snapshot_id,
+            WorkItemModel.created_at,
+        ).filter(
             WorkItemModel.resource_type == resource_type,
             WorkItemModel.resource_id == str(resource_id),
         ).order_by(WorkItemModel.created_at.desc()).first()

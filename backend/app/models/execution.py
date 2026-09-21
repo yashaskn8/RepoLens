@@ -96,6 +96,10 @@ class WorkItemModel(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
     tenant_id = Column(String(36), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True)
     request_id = Column(String(128), nullable=False, index=True)
+    # W3C context is transport metadata only; it is intentionally excluded
+    # from request_payload/request_digest and never affects idempotency.
+    traceparent = Column(String(55), nullable=True)
+    tracestate = Column(String(512), nullable=True)
     requested_by = Column(String(128), nullable=False)
     policy_snapshot_id = Column(String(128), nullable=False, index=True)
 

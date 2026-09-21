@@ -333,6 +333,30 @@ class AgentToolRegistry:
         return None
 
     def invoke(self, name: str, arguments: Mapping[str, object] | None) -> ToolInvocationResult:
+        """Invoke one canonical deterministic capability under a safe span."""
+        from app.observability import span
+        from app.observability.semantic import digest
+
+        safe_name = name if isinstance(name, str) else "unknown"
+        started = time.perf_counter()
+        with span(
+            "agent_tool.execute",
+            attributes={
+                "gen_ai.operation.name": "execute_tool",
+                "gen_ai.tool.name": safe_name[:128],
+                "gen_ai.tool.type": "function",
+                "agent.tool.argument_digest": digest(arguments or {}),
+                "agent.tool.contract_version": AGENT_TOOL_VERSION,
+            },
+        ) as tool_span:
+            result = self._invoke(name, arguments)
+            tool_span.set_attribute("agent.tool.status", result.status.value)
+            tool_span.set_attribute("agent.tool.duration_ms", round((time.perf_counter() - started) * 1000, 3))
+            tool_span.set_attribute("agent.tool.evidence_count", len(result.evidence))
+            tool_span.set_attribute("agent.tool.result_digest", digest(result.result or {}))
+            return result
+
+    def _invoke(self, name: str, arguments: Mapping[str, object] | None) -> ToolInvocationResult:
         invocation_id = str(uuid4())
         started_at = datetime.now(timezone.utc).isoformat()
         started = time.perf_counter()

@@ -25,6 +25,7 @@ from app.governance.events import AuditLedger, DomainOutbox
 from app.governance.policies import OperationalPolicy, OperationalPolicyService
 from app.governance.telemetry import TelemetryRecorder
 from app.models.execution import WorkItemModel
+from app.observability import current_trace_headers
 
 
 class NewWorkPaused(RuntimeError):
@@ -78,6 +79,8 @@ class WorkSubmissionService:
         priority: int = 50,
         max_attempts: int | None = None,
         allow_when_paused: bool = False,
+        traceparent: str | None = None,
+        tracestate: str | None = None,
     ) -> WorkSubmission:
         policy_model = OperationalPolicyService.active(db, tenant_id)
         if policy_model is None:
@@ -112,6 +115,7 @@ class WorkSubmissionService:
             ResourceDimension.GITHUB_WRITE: 1,
         }
         request_digest = canonical_request_digest(request_payload)
+        trace_headers = current_trace_headers()
         engine = DurableExecutionEngine(
             db,
             lease_seconds=self.settings.EXECUTION_LEASE_SECONDS,
@@ -135,6 +139,8 @@ class WorkSubmissionService:
             EnqueueRequest(
                 tenant_id=tenant_id,
                 request_id=request_id,
+                traceparent=traceparent or trace_headers.get("traceparent"),
+                tracestate=tracestate or trace_headers.get("tracestate"),
                 requested_by=actor_id,
                 policy_snapshot_id=policy_model.id,
                 work_kind=work_kind,
