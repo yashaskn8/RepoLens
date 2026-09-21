@@ -294,6 +294,11 @@ class AgentToolRegistry:
     def list_tools(self) -> list[ToolMetadata]:
         return [self._specs[name].metadata.model_copy(deep=True) for name in sorted(self._specs)]
 
+    @property
+    def default_snapshot_id(self) -> str:
+        """Return the immutable snapshot identity bound to this registry."""
+        return self._context.default_snapshot_id
+
     def get_tool(self, name: str) -> ToolMetadata | None:
         safe_name = name if isinstance(name, str) else ""
         spec = self._specs.get(safe_name)
@@ -306,7 +311,8 @@ class AgentToolRegistry:
     ) -> ToolError | None:
         """Validate one request without executing it or consuming repository resources."""
 
-        spec = self._specs.get(name)
+        safe_name = name if isinstance(name, str) else ""
+        spec = self._specs.get(safe_name)
         if spec is None:
             return ToolError(code="UNKNOWN_TOOL", message="The requested tool is not registered.")
         if not isinstance(arguments, Mapping):
@@ -335,7 +341,7 @@ class AgentToolRegistry:
 
     def invoke(self, name: str, arguments: Mapping[str, object] | None) -> ToolInvocationResult:
         """Invoke one canonical deterministic capability under a safe span."""
-        from app.observability import span
+        from app.observability import is_mcp_server_tool_span_active, span
         from app.observability.semantic import digest
 
         safe_name = name if isinstance(name, str) else "unknown"
@@ -344,6 +350,12 @@ class AgentToolRegistry:
         # repository operation occurred when the registry rejected the call.
         if self.validate_arguments(name, arguments) is not None:
             return self._invoke(name, arguments)
+        if is_mcp_server_tool_span_active():
+            # The MCP SDK owns the protocol-level execute_tool span.  Keep
+            # this delegation free of a second semantic execute span while
+            # preserving the canonical registry validation and invocation.
+            return self._invoke(name, arguments)
+
         started = time.perf_counter()
         with span(
             "agent_tool.execute",

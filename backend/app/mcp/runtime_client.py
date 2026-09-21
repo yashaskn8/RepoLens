@@ -1,14 +1,16 @@
-"""Official in-process MCP client managing session lifecycle, tool discovery, and execution."""
+"""MCP v2 in-process client managing lifecycle, discovery, and bounded execution."""
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import json
 import logging
+from types import SimpleNamespace
 from types import MappingProxyType
 from typing import Any, Dict, List, Optional
 
+from mcp import Client
 from mcp.server.lowlevel import Server
-from mcp.shared.memory import create_connected_server_and_client_session
 import mcp.types as mcp_types
 
 from app.mcp.adapter import create_mcp_protocol_server
@@ -21,6 +23,59 @@ from app.mcp.server import MCPRepositoryServer
 from app.security.redaction import redact_secrets
 
 logger = logging.getLogger(__name__)
+
+
+class _CompatSession:
+    """Small legacy-shaped facade backed by the MCP v2 ``Client``."""
+
+    def __init__(self, client: Client) -> None:
+        self._client = client
+
+    async def initialize(self) -> Any:
+        return SimpleNamespace(
+            serverInfo=self._client.server_info,
+            protocolVersion=self._client.protocol_version,
+        )
+
+    async def list_tools(self) -> Any:
+        return await self._client.list_tools()
+
+    async def call_tool(self, name: str, arguments: Dict[str, Any]) -> Any:
+        return await self._client.call_tool(name, arguments)
+
+
+@asynccontextmanager
+async def create_connected_server_and_client_session(server: Server, *, mode: str = "auto"):
+    """Compatibility helper implemented with the MCP v2 ``Client(server)`` API.
+
+    Existing internal callers receive the same narrow session surface while no
+    v1 ClientSession or manually-created memory streams are used.
+    """
+    client = Client(server, mode=mode)
+    await client.__aenter__()
+    try:
+        yield _CompatSession(client)
+    finally:
+        await client.__aexit__(None, None, None)
+
+
+# Keep the public import used by older RepoLens integrations working after the
+# MCP SDK removed the v1 helper.  The implementation above remains v2-native.
+try:  # pragma: no cover - compatibility path exercised by legacy consumers
+    import mcp.shared.memory as _mcp_memory
+
+    if not hasattr(_mcp_memory, "create_connected_server_and_client_session"):
+        _mcp_memory.create_connected_server_and_client_session = create_connected_server_and_client_session
+    # v1 used camelCase model attributes; retain read-only aliases for legacy
+    # RepoLens callers while all new code uses the v2 snake_case fields.
+    if not hasattr(mcp_types.CallToolResult, "isError"):
+        mcp_types.CallToolResult.isError = property(lambda self: self.is_error)  # type: ignore[attr-defined]
+    if not hasattr(mcp_types.CallToolResult, "structuredContent"):
+        mcp_types.CallToolResult.structuredContent = property(lambda self: self.structured_content)  # type: ignore[attr-defined]
+    if not hasattr(mcp_types.Tool, "inputSchema"):
+        mcp_types.Tool.inputSchema = property(lambda self: self.input_schema)  # type: ignore[attr-defined]
+except Exception:
+    pass
 
 
 @dataclass(frozen=True)
@@ -51,17 +106,24 @@ class MCPRuntimeClient:
 
     def __init__(
         self,
-        repo_server: MCPRepositoryServer,
+        repo_server: MCPRepositoryServer | None = None,
         server_name: str = "repolens-repository-server",
         default_timeout_seconds: float = DEFAULT_MCP_TOOL_TIMEOUT_SECONDS,
         init_timeout_seconds: float = DEFAULT_MCP_INITIALIZATION_TIMEOUT_SECONDS,
+        protocol_server: Server | None = None,
+        mode: str = "auto",
     ):
+        if repo_server is None and protocol_server is None:
+            raise ValueError("repo_server or protocol_server is required")
         self.repo_server = repo_server
         self.server_name = server_name
         self.default_timeout_seconds = default_timeout_seconds
         self.init_timeout_seconds = init_timeout_seconds
+        if mode not in {"auto", "legacy", "modern"}:
+            raise ValueError("mode must be auto, legacy, or modern")
+        self.mode = mode
 
-        self._protocol_server: Optional[Server] = None
+        self._protocol_server: Optional[Server] = protocol_server
         self._session_task: Optional[asyncio.Task] = None
         self._stop_event: Optional[asyncio.Event] = None
         self._session: Optional[Any] = None
@@ -72,6 +134,14 @@ class MCPRuntimeClient:
     def is_connected(self) -> bool:
         """Return whether an active MCP session is established."""
         return self._session is not None
+
+    @property
+    def protocol_version(self) -> str | None:
+        """Return the negotiated protocol version when connected."""
+        if self._session is None:
+            return None
+        client = getattr(self._session, "_client", None)
+        return getattr(client, "protocol_version", None)
 
     @staticmethod
     async def _cleanup_local_task(
@@ -107,6 +177,8 @@ class MCPRuntimeClient:
 
             try:
                 if self._protocol_server is None:
+                    if self.repo_server is None:
+                        raise RuntimeError("No protocol server is configured")
                     self._protocol_server = create_mcp_protocol_server(
                         self.repo_server,
                         server_name=self.server_name,
@@ -119,7 +191,7 @@ class MCPRuntimeClient:
 
                 async def _session_runner() -> None:
                     try:
-                        async with create_connected_server_and_client_session(self._protocol_server) as session:
+                        async with create_connected_server_and_client_session(self._protocol_server, mode=self.mode) as session:
                             session_holder.append(session)
                             ready_event.set()
                             await local_stop.wait()

@@ -8,6 +8,8 @@ from .tracing import (
     shutdown_tracing,
     span,
     span_event,
+    mcp_server_tool_span_active,
+    is_mcp_server_tool_span_active,
 )
 
 __all__ = [
@@ -18,4 +20,6 @@ __all__ = [
     "shutdown_tracing",
     "span",
     "span_event",
+    "mcp_server_tool_span_active",
+    "is_mcp_server_tool_span_active",
 ]

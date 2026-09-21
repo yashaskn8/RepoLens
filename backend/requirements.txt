@@ -39,7 +39,7 @@ reportlab>=4.4.0,<5.0.0
 pypdf>=6.0.0,<7.0.0
 
 # Model Context Protocol (MCP) SDK
-mcp>=1.28.0,<2.0.0
+mcp>=2.0.0,<3.0.0
 
 # Local Embeddings
 sentence-transformers>=6.0.0,<7.0.0

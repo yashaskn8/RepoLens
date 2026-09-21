@@ -30,3 +30,18 @@ RUNTIME_MCP_ALLOWLIST: frozenset[str] = frozenset({
     "repo_retrieve_context",
     "repo_get_static_findings",
 })
+
+# Protocol-facing agent gateway allowlist.  This is deliberately separate
+# from the legacy repo_* enrichment allowlist above; both remain authoritative
+# for their respective consumers.
+MCP_AGENT_TOOL_ALLOWLIST: frozenset[str] = frozenset({
+    "inspect_file",
+    "search_symbol",
+    "read_source_slice",
+    "inspect_symbol",
+    "find_callers",
+    "find_callees",
+    "trace_dataflow",
+    "scan_security",
+    "verify_finding",
+})

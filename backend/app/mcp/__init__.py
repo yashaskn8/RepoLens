@@ -1,10 +1,14 @@
 """Read-only Model Context Protocol (MCP) server package for RepoLens."""
 
 from app.mcp.adapter import (
+    MCPAgentProtocolAdapter,
     MCPProtocolAdapter,
+    create_agent_mcp_protocol_server,
+    create_agent_mcp_streamable_http_app,
     create_mcp_protocol_server,
     serve_stdio,
 )
+from app.mcp.agent_bridge import MCPAgentToolBridge
 from app.mcp.constants import (
     DEFAULT_MCP_INITIALIZATION_TIMEOUT_SECONDS,
     DEFAULT_MCP_TOOL_TIMEOUT_SECONDS,
@@ -19,6 +23,7 @@ from app.mcp.constants import (
     MAX_MCP_TARGETS_PER_REVISION,
     MAX_MCP_TEXT_CHARS,
     RUNTIME_MCP_ALLOWLIST,
+    MCP_AGENT_TOOL_ALLOWLIST,
 )
 from app.mcp.executor import (
     MCPToolEvidence,
@@ -27,6 +32,7 @@ from app.mcp.executor import (
 )
 from app.mcp.runtime_client import MCPNormalizedResult, MCPRuntimeClient
 from app.mcp.server import MCPRepositoryServer
+from app.mcp.runtime_factory import MCPScanRuntime, MCPScanRuntimeFactory
 from app.mcp.types import (
     MCPToolCallRequest,
     MCPToolCallResponse,
@@ -36,7 +42,13 @@ from app.mcp.types import (
 __all__ = [
     "MCPRepositoryServer",
     "MCPProtocolAdapter",
+    "MCPAgentProtocolAdapter",
+    "MCPAgentToolBridge",
+    "MCPScanRuntime",
+    "MCPScanRuntimeFactory",
     "create_mcp_protocol_server",
+    "create_agent_mcp_protocol_server",
+    "create_agent_mcp_streamable_http_app",
     "serve_stdio",
     "MCPToolDefinition",
     "MCPToolCallRequest",
@@ -47,6 +59,7 @@ __all__ = [
     "MCPToolEvidence",
     "MCPToolExecutionRecord",
     "RUNTIME_MCP_ALLOWLIST",
+    "MCP_AGENT_TOOL_ALLOWLIST",
     "MAX_MCP_CALLS_PER_WORKFLOW",
     "MAX_MCP_CALLS_PER_TARGET",
     "MAX_MCP_TARGETS_PER_REVISION",

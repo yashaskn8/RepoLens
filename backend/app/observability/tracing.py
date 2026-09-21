@@ -8,6 +8,7 @@ this boundary and never become domain failures.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from contextvars import ContextVar
 import logging
 import os
 import re
@@ -25,6 +26,14 @@ _configured = False
 _enabled = False
 _tracer = None
 _provider = None
+
+# The MCP SDK creates the authoritative server-side execute-tool span.  An
+# in-process protocol bridge sets this flag while it delegates to the
+# canonical AgentToolRegistry so the registry does not emit a duplicate
+# semantic execute_tool span for the same operation.
+_mcp_server_tool_span_active: ContextVar[bool] = ContextVar(
+    "repolens_mcp_server_tool_span_active", default=False
+)
 
 
 class _NoopSpan:
@@ -201,6 +210,20 @@ def current_trace_headers() -> dict[str, str]:
 
 
 @contextmanager
+def mcp_server_tool_span_active() -> Iterator[None]:
+    """Suppress duplicate AgentToolRegistry execute spans for MCP calls."""
+    token = _mcp_server_tool_span_active.set(True)
+    try:
+        yield
+    finally:
+        _mcp_server_tool_span_active.reset(token)
+
+
+def is_mcp_server_tool_span_active() -> bool:
+    return _mcp_server_tool_span_active.get()
+
+
+@contextmanager
 def span(
     name: str,
     *,
@@ -291,4 +314,5 @@ def shutdown_tracing() -> None:
 __all__ = [
     "configure_tracing", "current_trace_headers", "extract_trace_context",
     "inject_trace_context", "shutdown_tracing", "span", "span_event",
+    "mcp_server_tool_span_active", "is_mcp_server_tool_span_active",
 ]
