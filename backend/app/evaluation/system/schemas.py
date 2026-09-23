@@ -7,6 +7,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.evaluation.counterfactual.contracts import CounterfactualReplayReport
 from app.agents.specialist_provenance import SpecialistOpportunityRecord
 from app.llm.types import LLMProvider
 
@@ -240,6 +241,10 @@ class FullAnalysisReportDetails(SystemEvalModel):
         default=None,
         exclude_if=lambda value: value is None,
     )
+    counterfactual_replay: CounterfactualReplayReport | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
 
 class SystemEvalMode(str, Enum):
@@ -417,6 +422,7 @@ class SystemEvaluationReport(SystemEvalModel):
         "agent-system-eval-report/1.0",
         "agent-system-eval-report/1.1",
         "agent-system-eval-report/1.2",
+        "agent-system-eval-report/1.3",
     ] = "agent-system-eval-report/1.0"
     mode: SystemEvalMode
     scope: Literal["PRODUCTION_EVIDENCE_INVESTIGATOR_GRAPH", "FULL_ANALYSIS_GRAPH"] = "PRODUCTION_EVIDENCE_INVESTIGATOR_GRAPH"
@@ -444,7 +450,11 @@ class SystemEvaluationReport(SystemEvalModel):
             if self.scope != "PRODUCTION_EVIDENCE_INVESTIGATOR_GRAPH" or self.full_analysis is not None:
                 raise ValueError("legacy report schema is reserved for investigator-graph scope")
         elif self.scope != "FULL_ANALYSIS_GRAPH" or self.full_analysis is None:
-            raise ValueError("report schemas 1.1 and 1.2 require full-analysis scope details")
+            raise ValueError("report schemas 1.1+ require full-analysis scope details")
+        elif self.schema_version == "agent-system-eval-report/1.3" and self.full_analysis.counterfactual_replay is None:
+            raise ValueError("report schema 1.3 requires the counterfactual replay artifact")
+        elif self.schema_version != "agent-system-eval-report/1.3" and self.full_analysis.counterfactual_replay is not None:
+            raise ValueError("counterfactual replay artifacts require report schema 1.3")
         ids = [item.case_id for item in self.case_results]
         if len(ids) != len(set(ids)) or ids != self.evaluated_case_ids:
             raise ValueError("case result IDs must uniquely match evaluated_case_ids in order")
@@ -646,6 +656,18 @@ class SystemEvaluationReport(SystemEvalModel):
             elif expected_suite_rate is not None:
                 raise ValueError("completed suite trial grades require a measured success rate")
         digest_payload = self.model_dump(mode="json", exclude={"report_digest"})
+        if self.full_analysis is not None and self.full_analysis.counterfactual_replay is not None:
+            factual_payload = self.model_dump(mode="json", exclude={"report_digest"})
+            counterfactual_payload = factual_payload.get("full_analysis", {}).pop(
+                "counterfactual_replay", None,
+            )
+            if counterfactual_payload is None:
+                raise ValueError("counterfactual report is missing from its factual binding projection")
+            # The stored factual digest is over the identical report before
+            # the opt-in replay artifact is attached (schema 1.2).
+            factual_payload["schema_version"] = "agent-system-eval-report/1.2"
+            if self.full_analysis.counterfactual_replay.factual_report_digest != system_evaluation_report_digest(factual_payload):
+                raise ValueError("counterfactual artifact is not bound to the factual-only report digest")
         if self.schema_version == "agent-system-eval-report/1.0" and "full_analysis" not in self.model_fields_set:
             digest_payload.pop("full_analysis", None)
         expected_digest = system_evaluation_report_digest(digest_payload)

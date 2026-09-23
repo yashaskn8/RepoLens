@@ -298,6 +298,55 @@ async def test_mcp_executor_workflow_budget_exhaustion(mcp_client_fixture):
         await executor.aclose()
 
 
+def test_mcp_executor_fork_isolates_sibling_branch_budgets(mcp_executor_fixture):
+    factual = mcp_executor_fixture
+    factual.workflow_call_count = 1
+    factual.target_call_counts["target-1"] = 1
+    first_branch = factual.fork()
+    second_branch = factual.fork()
+
+    assert first_branch.client is factual.client
+    assert second_branch.client is factual.client
+    assert first_branch._check_and_consume_budget("target-1") is None
+    assert first_branch.workflow_call_count == 2
+    assert second_branch.workflow_call_count == 1
+    assert second_branch.target_call_counts["target-1"] == 1
+    assert factual.workflow_call_count == 1
+
+    first_branch.target_call_counts["target-2"] = 1
+    assert "target-2" not in second_branch.target_call_counts
+
+
+def test_mcp_executor_fork_restores_checkpoint_budget_not_final_runtime_budget(mcp_executor_fixture):
+    factual = mcp_executor_fixture
+    factual.workflow_call_count = 2
+    factual.target_call_counts.update({"target-1": 1, "target-2": 1})
+    factual.execution_records = [
+        MCPToolExecutionRecord(
+            tool_name="repo_read_file", target_finding_id="target-1", success=True, duration_ms=1,
+        ),
+        MCPToolExecutionRecord(
+            tool_name="repo_get_related_symbols", target_finding_id="target-2", success=True, duration_ms=1,
+        ),
+    ]
+    checkpoint_state = {
+        "mcp_call_count": 1,
+        "mcp_tool_events": [factual.execution_records[0].model_dump()],
+    }
+
+    branch_a = factual.fork(checkpoint_state)
+    branch_b = factual.fork(checkpoint_state)
+    assert branch_a.workflow_call_count == branch_b.workflow_call_count == 1
+    assert branch_a.target_call_counts == branch_b.target_call_counts == {"target-1": 1}
+    assert branch_a._check_and_consume_budget("target-2") is None
+    assert branch_b.workflow_call_count == 1
+    assert "target-2" not in branch_b.target_call_counts
+    assert factual.workflow_call_count == 2
+
+    with pytest.raises(ValueError, match="inconsistent"):
+        factual.fork({"mcp_call_count": 2, "mcp_tool_events": [checkpoint_state["mcp_tool_events"][0]]})
+
+
 # =============================================================================
 # 5. Output Bounds and Truncation
 # =============================================================================
@@ -1540,5 +1589,3 @@ async def test_server_repo_get_related_symbols_truthful_truncation(temp_repo, ev
     assert res_10.is_error is False
     assert len(res_10.content["related_symbols"]) == 10
     assert res_10.content["truncated"] is False
-
-

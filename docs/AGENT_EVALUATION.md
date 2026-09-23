@@ -178,6 +178,31 @@ hard safety or harness/provider failure. `PROMOTION_ELIGIBLE` is only a signal
 for human review; nothing is automatically promoted. Report SHA-256 digests
 detect content changes but are not signatures or proof of trusted origin.
 
+### Evaluator-only counterfactual trajectory replay
+
+Full-analysis replay is disabled unless `--counterfactual-replay` is supplied
+with `--scope full-analysis`. It is a bounded diagnostic branch from an exact
+factual LangGraph checkpoint, not a production behavior, prompt change, or
+causal proof. Replay reuses the same graph, runtime, provider route, snapshot,
+tool policy, and evaluator. It currently supports only three evaluator-owned
+output substitutions: accept one independently matched verifier rejection,
+reject one structurally unsupported confirmation, or restore one valid
+pre-revision candidate after a proven revision failure. Specialist misses are
+reported as not replayable because there is no faithful specialist-action
+intervention. Ambiguous checkpoint/output attribution fails closed.
+
+The report retains the factual score and state separately, then records the
+intervention digest, exact checkpoint/snapshot/system identity, bounded
+downstream trace digests, and independent structural re-grade. It does not
+copy ground-truth answers into graph state or report raw source. Scripted mode
+is labeled `SCRIPTED_HARNESS_VALIDATION_ONLY` and is not model-capability
+evidence. Live replay remains inside the explicitly enabled full-analysis run;
+Ollama replay is declined because RepoLens's canonical workflow budget does
+not enforce a hard local-model invocation ceiling. Replay is limited to two
+factual trials, six branches total, two cloud model calls and 8,000 reserved
+tokens per branch, twelve replay model calls total, and 120 seconds. Replay
+resource exhaustion or a failed branch never alters factual grades.
+
 The existing manual `production-validation.yml` workflow exposes this scope as
 an explicit input. It remains excluded from ordinary pull-request CI; only the
 provider-specific execution steps receive credentials, while comparison and
@@ -220,9 +245,9 @@ snapshot-bound opportunity are collapsed by node, claim, candidate, and record
 digest. No event/list order establishes causal blame. Verifier rejection and
 unsupported-publication precedence remain verifier-owned. Checkpoint/resume
 preserves the same content-free specialist opportunity digest without rerunning
-completed specialists. The full-analysis evaluation contract is version 1.5
-because the deterministic attribution semantics changed; the specialist
-opportunity schema and graph topology did not change.
+completed specialists. The full-analysis evaluation contract is version 1.7,
+reflecting the evaluator-only replay and attribution contract changes; the
+specialist opportunity schema and production graph topology did not change.
 
 ```powershell
 .\.venv\Scripts\python.exe -m app.evaluation.improvement analyze baseline.json --output corpus.json

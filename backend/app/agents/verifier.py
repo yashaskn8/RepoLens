@@ -399,6 +399,39 @@ def _merge_findings_for_pass(
     return final_verified, final_rejected
 
 
+def resolve_verification_routing(
+    rejected_findings: List[Dict[str, Any]],
+    attested_candidate_ids: Set[str],
+    *,
+    has_infrastructure_failure: bool = False,
+    has_missing_eval: bool = False,
+) -> Tuple[str, List[str]]:
+    """Canonical pure routing projection shared by verifier and evaluator replay.
+
+    Only attested POSSIBLE findings with semantic feedback may request the
+    existing single revision pass. Infrastructure/invalid-output uncertainty
+    remains fail-closed and is never converted into autonomous exploration.
+    """
+    revision_target_ids: List[str] = []
+    if not has_infrastructure_failure and not has_missing_eval:
+        for rejected in rejected_findings:
+            finding_id = rejected.get("finding_id")
+            verdict = rejected.get("verdict")
+            reason = str(rejected.get("reason", ""))
+            if verdict == VerificationVerdict.POSSIBLE.value and finding_id in attested_candidate_ids:
+                if (
+                    not reason.startswith("Independent verifier returned no valid evaluation")
+                    and not reason.startswith("Independent verifier returned invalid verdict")
+                    and "failed closed" not in reason.lower()
+                ):
+                    revision_target_ids.append(str(finding_id))
+    if has_infrastructure_failure or has_missing_eval:
+        return "uncertain", []
+    if revision_target_ids:
+        return "needs_revision", revision_target_ids
+    return "verified", []
+
+
 async def run_verifier_agent(
     state: AnalysisState,
     runtime: Optional[Runtime[AnalysisRuntimeContext]] = None,
@@ -789,31 +822,12 @@ async def run_verifier_agent(
         for rf in rejected_findings
     )
 
-    revision_target_ids: List[str] = []
-    if not has_infrastructure_failure and not has_missing_eval:
-        for rf in rejected_findings:
-            f_id = rf.get("finding_id")
-            verdict = rf.get("verdict")
-            reason = str(rf.get("reason", ""))
-            # Must be VerificationVerdict.POSSIBLE.value string comparison
-            if verdict == VerificationVerdict.POSSIBLE.value:
-                # Must be attested from checked repository bytes
-                if f_id in attested_candidate_ids:
-                    # Must be a genuine semantic claim uncertainty, not format or provider errors
-                    if (
-                        not reason.startswith("Independent verifier returned no valid evaluation")
-                        and not reason.startswith("Independent verifier returned invalid verdict")
-                        and "failed closed" not in reason.lower()
-                    ):
-                        revision_target_ids.append(str(f_id))
-
-    if has_infrastructure_failure or has_missing_eval:
-        verification_decision = "uncertain"
-        revision_target_ids = []
-    elif revision_target_ids:
-        verification_decision = "needs_revision"
-    else:
-        verification_decision = "verified"
+    verification_decision, revision_target_ids = resolve_verification_routing(
+        rejected_findings,
+        attested_candidate_ids,
+        has_infrastructure_failure=has_infrastructure_failure,
+        has_missing_eval=has_missing_eval,
+    )
 
     final_verified, final_rejected = _merge_findings_for_pass(
         is_revision_pass=is_revision_pass,

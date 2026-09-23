@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import time
+from collections.abc import Mapping
 from typing import Any, Dict, List, Optional, Set, Tuple
 from pydantic import BaseModel, Field
 
@@ -76,6 +77,55 @@ class MCPToolExecutor:
         self.workflow_call_count: int = 0
         self.target_call_counts: Dict[str, int] = {}
         self.execution_records: List[MCPToolExecutionRecord] = []
+
+    def fork(self, checkpoint_state: Optional[Mapping[str, Any]] = None) -> "MCPToolExecutor":
+        """Create an isolated budget view over the same canonical read-only client.
+
+        Without a checkpoint, this preserves the current runtime snapshot. An
+        evaluator replay may provide a serialized factual checkpoint; in that
+        case its bounded tool-event ledger is the authority for restoring the
+        exact pre-intervention attempted-call counters. Authorization,
+        argument validation, execution, and result handling remain in this
+        canonical executor implementation.
+        """
+        branch = MCPToolExecutor(
+            self.client,
+            max_workflow_calls=self.max_workflow_calls,
+            max_calls_per_target=self.max_calls_per_target,
+        )
+        if checkpoint_state is None:
+            branch.workflow_call_count = self.workflow_call_count
+            branch.target_call_counts = dict(self.target_call_counts)
+            branch.execution_records = list(self.execution_records)
+            return branch
+
+        raw_count = checkpoint_state.get("mcp_call_count", 0)
+        raw_events = checkpoint_state.get("mcp_tool_events", [])
+        if (
+            isinstance(raw_count, bool)
+            or not isinstance(raw_count, int)
+            or raw_count < 0
+            or raw_count > self.max_workflow_calls
+            or not isinstance(raw_events, list)
+            or len(raw_events) != raw_count
+        ):
+            raise ValueError("checkpoint MCP budget snapshot is inconsistent")
+
+        records: list[MCPToolExecutionRecord] = []
+        target_counts: Dict[str, int] = {}
+        for event in raw_events:
+            record = MCPToolExecutionRecord.model_validate(event)
+            if not record.target_finding_id:
+                raise ValueError("checkpoint MCP event has no target identity")
+            records.append(record)
+            target_counts[record.target_finding_id] = target_counts.get(record.target_finding_id, 0) + 1
+        if any(count > self.max_calls_per_target for count in target_counts.values()):
+            raise ValueError("checkpoint MCP target budget snapshot is inconsistent")
+
+        branch.workflow_call_count = raw_count
+        branch.target_call_counts = target_counts
+        branch.execution_records = records
+        return branch
 
     def _check_and_consume_budget(self, target_finding_id: str) -> Optional[str]:
         """Check budget constraints and consume budget BEFORE dispatch.

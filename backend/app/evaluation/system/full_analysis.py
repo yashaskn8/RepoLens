@@ -877,6 +877,7 @@ async def _execute_trial(
     model: str,
     interrupt_after: list[str] | None = None,
     prompt_overlay: PromptCandidateOverlay | None = None,
+    evaluation_after_run: Any = None,
 ) -> tuple[dict[str, Any], float, bool, ScriptedFullAnalysisRouter | None]:
     started = time.perf_counter()
     fixture = FullAnalysisFixture(analysis_input)
@@ -887,8 +888,21 @@ async def _execute_trial(
         kwargs: dict[str, Any] = {}
         if scripted_router is not None:
             kwargs["llm_router"] = scripted_router
+
+        async def evaluation_hook(**session: Any) -> None:
+            if evaluation_after_run is None:
+                return
+            await evaluation_after_run(
+                **session,
+                fixture=fixture,
+                scripted_router=scripted_router,
+            )
+
         async def invoke() -> dict[str, Any]:
             with evaluation_prompt_overlay(prompt_overlay):
+                workflow_kwargs: dict[str, Any] = {}
+                if evaluation_after_run is not None:
+                    workflow_kwargs["_evaluation_after_run"] = evaluation_hook
                 return dict(await run_analysis_workflow(
                     evidence_store=fixture.evidence_store,
                     scan_id=fixture.scan_id,
@@ -898,6 +912,7 @@ async def _execute_trial(
                     scan_runtime=fixture.scan_runtime,
                     interrupt_after=interrupt_after,
                     **kwargs,
+                    **workflow_kwargs,
                 ))
 
         if mode == SystemEvalMode.LIVE:
@@ -936,6 +951,76 @@ def _trial_failure_codes(state: dict[str, Any], trace: Sequence[WorkflowNodeEven
     if bool((state.get("ai_cloud_budget") or {}).get("exhausted")):
         codes.add("BUDGET_EXHAUSTION")
     return sorted(codes)[:32]
+
+
+def _actual_model_pairs(state: dict[str, Any]) -> set[tuple[str, str]]:
+    pairs: set[tuple[str, str]] = set()
+    model_executions = state.get("model_executions", [])
+    for execution in model_executions if isinstance(model_executions, list) else []:
+        if isinstance(execution, dict):
+            actual_provider = execution.get("provider")
+            actual_model = execution.get("model_name") or execution.get("model")
+        else:
+            actual_provider = getattr(execution, "provider", None)
+            actual_model = getattr(execution, "model_name", None) or getattr(execution, "model", None)
+        if actual_provider and actual_model:
+            pairs.add((str(getattr(actual_provider, "value", actual_provider)).lower(), str(actual_model)))
+    return pairs
+
+
+def _attribute_trial_failure(
+    *,
+    case: BenchmarkCase,
+    judged: CaseEvaluationResult,
+    published_judged: CaseEvaluationResult,
+    state: dict[str, Any],
+    trace: Sequence[WorkflowNodeEvent],
+    judge: IndependentBenchmarkJudge,
+    mode: SystemEvalMode,
+    selected_provider: LLMProvider | None,
+    selected_model: str,
+    failure_codes: Sequence[str],
+) -> tuple[FailureAttribution | None, list[str], set[tuple[str, str]], bool]:
+    """Share the factual trial attribution authority with replay selection."""
+    security_codes = [code for code in failure_codes if code in _HARD_SAFETY_VIOLATIONS]
+    actual_pairs = _actual_model_pairs(state)
+    expected_pair = (selected_provider.value.lower(), selected_model) if selected_provider else None
+    identity_mismatch = bool(mode == SystemEvalMode.LIVE and actual_pairs and actual_pairs != {expected_pair})
+    identity_unverified = bool(mode == SystemEvalMode.LIVE and actual_pairs != {expected_pair})
+    if identity_mismatch:
+        security_codes.append("CANDIDATE_IDENTITY_MISMATCH")
+        failure = FailureAttribution(
+            case_id=case.case_id,
+            failure_stage="MODEL_IDENTITY",
+            failure_class=FailureClass.SECURITY_POLICY_VIOLATION,
+            primary_node=None,
+            upstream_condition="The exact-candidate evaluation observed provider/model metadata outside its pinned identity.",
+            observed_behavior="At least one production graph model execution did not match the selected candidate.",
+            expected_behavior="Every model execution uses only the explicitly selected provider and model.",
+            evidence_refs=[],
+            downstream_effect="This trial is invalid and cannot support promotion.",
+            hard_safety_violation=True,
+            confidence_basis="Recorded model execution metadata differs from the expected provider/model pair.",
+        )
+    else:
+        failure = attribute_full_analysis_failure(
+            case, judged, state, trace, judge,
+            published_evaluation=published_judged,
+        )
+        if identity_unverified and failure is None:
+            failure = FailureAttribution(
+                case_id=case.case_id,
+                failure_stage="MODEL_IDENTITY",
+                failure_class=FailureClass.UNKNOWN_ATTRIBUTION,
+                primary_node=None,
+                upstream_condition="No production model execution metadata proved the selected candidate ran.",
+                observed_behavior="The task output cannot be attributed to the requested live candidate.",
+                expected_behavior="At least one model execution uses the explicitly selected provider and model.",
+                evidence_refs=[],
+                downstream_effect="The trial is not counted as candidate success.",
+                confidence_basis="The durable model execution inventory contains no exact provider/model pair.",
+            )
+    return failure, security_codes, actual_pairs, identity_unverified
 
 
 def _duplicate_tool_call_count(trace: Sequence[WorkflowNodeEvent]) -> int:
@@ -1057,6 +1142,7 @@ async def run_full_analysis_evaluation(
     case_ids: Sequence[str] | None = None,
     allow_live: bool = False,
     prompt_overlay: PromptCandidateOverlay | None = None,
+    counterfactual_replay: bool = False,
 ) -> SystemEvaluationReport:
     """Run bounded real production-graph trials over DEV repository-scan cases only."""
     mode = SystemEvalMode(mode)
@@ -1130,6 +1216,23 @@ async def run_full_analysis_evaluation(
     finally:
         identity_fixture.close()
 
+    replay_coordinator = None
+    if counterfactual_replay:
+        from app.evaluation.counterfactual.contracts import canonical_digest
+        from app.evaluation.counterfactual.replay import CounterfactualReplayCoordinator
+
+        replay_coordinator = CounterfactualReplayCoordinator(
+            mode=mode,
+            expected_provider=selected_provider,
+            expected_model=selected_model,
+            # This exact inventory comes only from the fixed public DEV loader
+            # above. The coordinator refuses arbitrary/holdout case objects.
+            allowed_case_digests={
+                case.case_id: canonical_digest(case.model_dump(mode="json"))
+                for case in selected
+            },
+        )
+
     judge = IndependentBenchmarkJudge()
     case_results: list[SystemCaseResults] = []
     trial_details: list[FullAnalysisTrialDetail] = []
@@ -1140,12 +1243,90 @@ async def run_full_analysis_evaluation(
             # The annotation remains in evaluator scope. Only this label-free
             # AnalysisInput is handed to fixture construction and the graph.
             analysis_input = LeakageDetector.bifurcate_input(case)
+
+            async def replay_after_factual_run(
+                *, factual_state: dict[str, Any], graph: Any, config: dict[str, Any],
+                runtime_context: Any, fixture: FullAnalysisFixture, **_: Any,
+            ) -> None:
+                if replay_coordinator is None:
+                    return
+                before_count = len(replay_coordinator.results)
+                try:
+                    state = dict(factual_state)
+                    factual_trace = _workflow_trace(state)
+                    replay_stage = EvaluationStage(case.evaluation_stage)
+                    factual_predictions = _evaluated_findings(state, replay_stage)
+                    published_predictions = _evaluated_findings(
+                        state, EvaluationStage.PUBLISHED_FINDING,
+                    )
+                    manifest_files = set(case.fixture.files)
+                    file_line_counts = {
+                        path: len(content.splitlines())
+                        for path, content in case.fixture.files.items()
+                    }
+                    factual_judged = judge.evaluate_case(
+                        case=case,
+                        emitted_findings=factual_predictions,
+                        manifest_files=manifest_files,
+                        file_line_counts=file_line_counts,
+                        explicit_abstention=(
+                            str((state.get("investigator") or {}).get("active", {}).get("stop_reason", ""))
+                            == "INSUFFICIENT_EVIDENCE"
+                        ),
+                    )
+                    factual_published_judged = judge.evaluate_case(
+                        case=case,
+                        emitted_findings=published_predictions,
+                        manifest_files=manifest_files,
+                        file_line_counts=file_line_counts,
+                    )
+                    failure_codes = _trial_failure_codes(state, factual_trace)
+                    if factual_published_judged.fp > 0:
+                        failure_codes.append("UNSUPPORTED_CONFIRMED_FINDING")
+                    failure_attribution, _, _, _ = _attribute_trial_failure(
+                        case=case,
+                        judged=factual_judged,
+                        published_judged=factual_published_judged,
+                        state=state,
+                        trace=factual_trace,
+                        judge=judge,
+                        mode=mode,
+                        selected_provider=selected_provider,
+                        selected_model=selected_model,
+                        failure_codes=failure_codes,
+                    )
+                    await replay_coordinator.replay_trial(
+                        case=case,
+                        trial_number=trial_number,
+                        factual_state=state,
+                        attribution=failure_attribution,
+                        judged=factual_judged,
+                        published_judged=factual_published_judged,
+                        judge=judge,
+                        graph=graph,
+                        factual_config=config,
+                        runtime_context=runtime_context,
+                        fixture=fixture,
+                        system_identity=identity,
+                    )
+                except Exception:
+                    # Replay is diagnostic only: retain a content-free outcome
+                    # and never change the factual state or evaluation grade.
+                    if len(replay_coordinator.results) == before_count:
+                        replay_coordinator.record_unexpected_failure(
+                            case=case,
+                            trial_number=trial_number,
+                            factual_state=factual_state,
+                            judge=judge,
+                        )
+
             trial_state, duration_ms, resumed, _ = await _execute_trial(
                 analysis_input,
                 mode=mode,
                 provider=selected_provider,
                 model=selected_model,
                 prompt_overlay=prompt_overlay,
+                evaluation_after_run=(replay_after_factual_run if replay_coordinator is not None else None),
             )
             all_durations.append(duration_ms)
             trace = _workflow_trace(trial_state)
@@ -1182,57 +1363,19 @@ async def run_full_analysis_evaluation(
             failure_codes = _trial_failure_codes(trial_state, trace)
             if published_judged.fp > 0:
                 failure_codes.append("UNSUPPORTED_CONFIRMED_FINDING")
-            security_codes = [
-                code for code in failure_codes
-                if code in _HARD_SAFETY_VIOLATIONS
-            ]
-            model_executions = trial_state.get("model_executions", [])
-            actual_pairs: set[tuple[str, str]] = set()
-            for execution in model_executions if isinstance(model_executions, list) else []:
-                if isinstance(execution, dict):
-                    actual_provider = execution.get("provider")
-                    actual_model = execution.get("model_name") or execution.get("model")
-                else:
-                    actual_provider = getattr(execution, "provider", None)
-                    actual_model = getattr(execution, "model_name", None) or getattr(execution, "model", None)
-                if actual_provider and actual_model:
-                    actual_pairs.add((str(getattr(actual_provider, "value", actual_provider)).lower(), str(actual_model)))
             expected_pair = (selected_provider.value.lower(), selected_model) if selected_provider else None
-            identity_mismatch = bool(mode == SystemEvalMode.LIVE and actual_pairs and actual_pairs != {expected_pair})
-            identity_unverified = bool(mode == SystemEvalMode.LIVE and actual_pairs != {expected_pair})
-            if identity_mismatch:
-                security_codes.append("CANDIDATE_IDENTITY_MISMATCH")
-                failure = FailureAttribution(
-                    case_id=case.case_id,
-                    failure_stage="MODEL_IDENTITY",
-                    failure_class=FailureClass.SECURITY_POLICY_VIOLATION,
-                    primary_node=None,
-                    upstream_condition="The exact-candidate evaluation observed provider/model metadata outside its pinned identity.",
-                    observed_behavior="At least one production graph model execution did not match the selected candidate.",
-                    expected_behavior="Every model execution uses only the explicitly selected provider and model.",
-                    evidence_refs=[],
-                    downstream_effect="This trial is invalid and cannot support promotion.",
-                    hard_safety_violation=True,
-                    confidence_basis="Recorded model execution metadata differs from the expected provider/model pair.",
-                )
-            else:
-                failure = attribute_full_analysis_failure(
-                    case, judged, trial_state, trace, judge,
-                    published_evaluation=published_judged,
-                )
-                if identity_unverified and failure is None:
-                    failure = FailureAttribution(
-                        case_id=case.case_id,
-                        failure_stage="MODEL_IDENTITY",
-                        failure_class=FailureClass.UNKNOWN_ATTRIBUTION,
-                        primary_node=None,
-                        upstream_condition="No production model execution metadata proved the selected candidate ran.",
-                        observed_behavior="The task output cannot be attributed to the requested live candidate.",
-                        expected_behavior="At least one model execution uses the explicitly selected provider and model.",
-                        evidence_refs=[],
-                        downstream_effect="The trial is not counted as candidate success.",
-                        confidence_basis="The durable model execution inventory contains no exact provider/model pair.",
-                    )
+            failure, security_codes, actual_pairs, identity_unverified = _attribute_trial_failure(
+                case=case,
+                judged=judged,
+                published_judged=published_judged,
+                state=trial_state,
+                trace=trace,
+                judge=judge,
+                mode=mode,
+                selected_provider=selected_provider,
+                selected_model=selected_model,
+                failure_codes=failure_codes,
+            )
             budget_exhausted = "BUDGET_EXHAUSTION" in failure_codes
             provider_failed = any(code in {"MODEL_PROVIDER_FAILURE", "MODEL_PROVIDER_TIMEOUT"} for code in failure_codes)
             harness_failed = trial_state.get("status") == "FAILED"
@@ -1256,6 +1399,7 @@ async def run_full_analysis_evaluation(
                 if event.model_execution_count is not None else len(event.model_identities)
                 for event in trace
             )
+            model_executions = trial_state.get("model_executions", [])
             (
                 input_token_metric,
                 output_token_metric,
@@ -1437,6 +1581,16 @@ async def run_full_analysis_evaluation(
     if prompt_overlay is None:
         payload["full_analysis"].pop("candidate_overlay", None)
     payload["report_digest"] = system_evaluation_report_digest(payload)
+    if replay_coordinator is not None:
+        replay_report = replay_coordinator.build_report(
+            factual_report_digest=payload["report_digest"],
+            system_identity=identity,
+        )
+        payload["schema_version"] = "agent-system-eval-report/1.3"
+        payload["full_analysis"]["counterfactual_replay"] = replay_report.model_dump(mode="json")
+        payload["report_digest"] = system_evaluation_report_digest({
+            key: value for key, value in payload.items() if key != "report_digest"
+        })
     return SystemEvaluationReport.model_validate(payload)
 
 

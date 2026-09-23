@@ -179,7 +179,7 @@ def _workflow_source_digest(module_names: Iterable[str]) -> str:
 
 
 FULL_ANALYSIS_GRAPH_CONTRACT_VERSION = "full-analysis-graph/1.1"
-FULL_ANALYSIS_EVALUATION_CONTRACT_VERSION = "full-analysis-evaluation/1.5"
+FULL_ANALYSIS_EVALUATION_CONTRACT_VERSION = "full-analysis-evaluation/1.7"
 FULL_ANALYSIS_GRAPH_CONTRACT = {
     "version": FULL_ANALYSIS_GRAPH_CONTRACT_VERSION,
     "nodes": [
@@ -222,6 +222,12 @@ def full_analysis_evaluation_contract_hash(graph_digest: str | None = None) -> s
             "app.evaluation.system.specialist_attribution",
             "app.agents.specialist_provenance",
             "app.specialist_candidates",
+            "app.mcp.executor",
+            "app.evaluation.counterfactual.contracts",
+            "app.evaluation.counterfactual.policy",
+            "app.evaluation.counterfactual.checkpoints",
+            "app.evaluation.counterfactual.eligibility",
+            "app.evaluation.counterfactual.replay",
         ]),
     })
 
@@ -260,6 +266,12 @@ def _evaluation_harness_digest() -> str:
         "app.evaluation.system.runner",
         "app.evaluation.system.schemas",
         "app.evaluation.system.full_analysis",
+        "app.mcp.executor",
+        "app.evaluation.counterfactual.contracts",
+        "app.evaluation.counterfactual.policy",
+        "app.evaluation.counterfactual.checkpoints",
+        "app.evaluation.counterfactual.eligibility",
+        "app.evaluation.counterfactual.replay",
     ])
     gate_path = Path(__file__).resolve().parents[3] / "evaluation_data" / "agent" / "v1" / "regression_gate.json"
     gate_digest = hashlib.sha256(gate_path.read_bytes()).hexdigest()

@@ -58,6 +58,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--trials", type=int, default=DEVELOPMENT_TRIALS_PER_CASE)
     run.add_argument("--max-cases", type=int, default=3)
     run.add_argument("--case-id", action="append", dest="case_ids")
+    run.add_argument(
+        "--counterfactual-replay",
+        action="store_true",
+        help="Opt in to bounded evaluator-only corrective replay (DEV full-analysis scope only).",
+    )
     run.add_argument("--output", type=Path)
 
     compare = commands.add_parser("compare", help="Compare two completed, compatible live reports.")
@@ -84,6 +89,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise ValueError("live runs require an exact --provider and --model")
             if mode == SystemEvalMode.SCRIPTED and (args.provider or args.model or args.allow_live):
                 raise ValueError("scripted runs do not accept provider, model, or --allow-live options")
+            if args.counterfactual_replay and args.scope != "full-analysis":
+                raise ValueError("--counterfactual-replay requires --scope full-analysis")
             if args.scope == "full-analysis":
                 if args.dataset_root != DEFAULT_DATASET_ROOT:
                     raise ValueError("--dataset-root applies only to investigator scope")
@@ -103,6 +110,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     max_cases=args.max_cases,
                     case_ids=args.case_ids,
                     allow_live=args.allow_live,
+                    counterfactual_replay=args.counterfactual_replay,
                 ))
             else:
                 dataset = load_agent_dataset(args.dataset_root)

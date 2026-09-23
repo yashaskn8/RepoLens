@@ -1,6 +1,7 @@
 """Durable LangGraph multi-agent workflow construction, SQLite checkpointer integration, and execution."""
 
 import asyncio
+import copy
 import hashlib
 import inspect
 import json
@@ -550,6 +551,7 @@ async def run_analysis_workflow(
     llm_router: Any = None,
     interrupt_after: Optional[List[str]] = None,
     scan_runtime: Optional[ScanIntelligenceRuntime] = None,
+    _evaluation_after_run: Any = None,
 ) -> AnalysisState:
     """Execute or resume the durable LangGraph multi-agent analysis workflow using scan_id as thread identifier.
     
@@ -888,6 +890,26 @@ async def run_analysis_workflow(
                     final_state = await invoke_with_cloud_budget(None)
             if resumed_for_evaluation:
                 final_state["_evaluation_resumed"] = True
+            if _evaluation_after_run is not None:
+                # Evaluator-only hook: it runs while the exact in-memory
+                # checkpointer and transient runtime are still alive. Give it
+                # a detached factual state so a replay branch cannot mutate
+                # the value returned as the baseline.
+                try:
+                    callback_result = _evaluation_after_run(
+                        factual_state=copy.deepcopy(final_state),
+                        graph=app,
+                        config=copy.deepcopy(config),
+                        runtime_context=runtime_context,
+                    )
+                    if inspect.isawaitable(callback_result):
+                        await callback_result
+                except Exception as exc:
+                    logger.warning(
+                        "Evaluation-only post-run hook failed for scan %s (%s)",
+                        scan_id,
+                        type(exc).__name__,
+                    )
             return final_state
         except Exception as exc:
             safe_msg = redact_secrets(str(exc))[:2048]
