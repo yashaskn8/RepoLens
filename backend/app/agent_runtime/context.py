@@ -20,6 +20,7 @@ from app.agent_runtime.schemas import (
     MemoryKind,
 )
 from app.agent_runtime.prompts import INVESTIGATOR_SYSTEM_PROMPT
+from app.agent_runtime.prompt_overlay import resolve_agent_prompt
 from app.agent_tools.schemas import ToolInvocationResult, ToolResultStatus
 from app.llm.types import AIContextMetrics, LLMMessage
 from app.security.redaction import redact_secrets, sanitize_metadata
@@ -327,7 +328,8 @@ def pack_decision_context(
             "reason": "short operational explanation",
         },
     }
-    system = f"<SYSTEM_CONTRACT>\n{INVESTIGATOR_SYSTEM_PROMPT}\n</SYSTEM_CONTRACT>"
+    system_prompt = resolve_agent_prompt("evidence-investigator", INVESTIGATOR_SYSTEM_PROMPT)
+    system = f"<SYSTEM_CONTRACT>\n{system_prompt}\n</SYSTEM_CONTRACT>"
     max_bytes = max_context_tokens * 3
 
     def render() -> str:

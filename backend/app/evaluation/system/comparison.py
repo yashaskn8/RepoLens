@@ -164,8 +164,8 @@ def _full_analysis_promotion_authority_reasons(
     candidate: SystemEvaluationReport,
 ) -> list[str]:
     """Require the current full-analysis DEV corpus and graph contract."""
-    from app.evaluation.ground_truth.loader import compute_canonical_benchmark_hash, load_benchmark_dataset
-    from app.evaluation.ground_truth.schemas import BenchmarkSplit, TargetPipeline
+    from app.evaluation.ground_truth.loader import compute_canonical_benchmark_hash
+    from app.evaluation.ground_truth.public_dev import load_public_dev_repository_cases
     from app.evaluation.system.identity import (
         FULL_ANALYSIS_EVALUATION_CONTRACT_VERSION,
         full_analysis_evaluation_contract_hash,
@@ -173,11 +173,7 @@ def _full_analysis_promotion_authority_reasons(
     )
 
     try:
-        cases = [
-            case for case in load_benchmark_dataset()
-            if case.split == BenchmarkSplit.DEV and case.target_pipeline == TargetPipeline.REPOSITORY_SCAN
-        ]
-        cases.sort(key=lambda item: item.case_id)
+        cases = load_public_dev_repository_cases()
         expected_ids = [item.case_id for item in cases]
         expected_hash = compute_canonical_benchmark_hash(cases)
         graph_digest = full_analysis_graph_identity_digest()

@@ -134,6 +134,18 @@ class FullAnalysisMetrics(SystemEvalModel):
     branch_counts: dict[str, int] = Field(default_factory=dict)
 
 
+class PromptCandidateRunIdentity(SystemEvalModel):
+    """Explicit prompt-only candidate identity bound to one full-graph report."""
+
+    optimization_run_id: str = Field(min_length=1, max_length=128)
+    candidate_id: str = Field(min_length=1, max_length=128)
+    component: str = Field(min_length=1, max_length=128)
+    baseline_prompt_version: str = Field(min_length=1, max_length=128)
+    baseline_prompt_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    candidate_prompt_version: str = Field(min_length=1, max_length=128)
+    candidate_prompt_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class FullAnalysisReportDetails(SystemEvalModel):
     """Scope-specific facts for the real production AnalysisState graph."""
 
@@ -144,6 +156,10 @@ class FullAnalysisReportDetails(SystemEvalModel):
     dataset_case_count: int = Field(ge=1, le=64)
     trial_details: list[FullAnalysisTrialDetail] = Field(max_length=320)
     metrics: FullAnalysisMetrics
+    candidate_overlay: PromptCandidateRunIdentity | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
 
 class SystemEvalMode(str, Enum):
@@ -369,6 +385,19 @@ class SystemEvaluationReport(SystemEvalModel):
                 or self.evaluation_contract_hash != self.system_identity.evaluation_contract_hash
             ):
                 raise ValueError("full-analysis report, identity, graph, and evaluator contracts disagree")
+            overlay = details.candidate_overlay
+            if overlay is not None:
+                component = next(
+                    (item for item in self.system_identity.prompt_components if item.name == overlay.component),
+                    None,
+                )
+                if (
+                    self.mode != SystemEvalMode.LIVE
+                    or component is None
+                    or component.version != overlay.candidate_prompt_version
+                    or component.content_digest != overlay.candidate_prompt_digest
+                ):
+                    raise ValueError("candidate prompt report metadata disagrees with the evaluated system identity")
             if details.dataset_case_count != len(self.expected_case_ids):
                 raise ValueError("full-analysis dataset size must match the declared case inventory")
             expected_pairs = {

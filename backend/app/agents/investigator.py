@@ -16,6 +16,7 @@ from app.agent_runtime.context import (
     normalize_tool_result,
     pack_decision_context,
 )
+from app.agent_runtime.prompt_overlay import resolve_agent_prompt_version
 from app.agent_runtime.policy import (
     InvestigatorPolicyViolation,
     authorize_decision,
@@ -262,7 +263,7 @@ async def run_investigator_decide_node(
         ),
         lineage=lineage_for_scan(
             str(state.get("scan_id", "")),
-            prompt_template_version=INVESTIGATOR_PROMPT_VERSION,
+            prompt_template_version=resolve_agent_prompt_version("evidence-investigator", INVESTIGATOR_PROMPT_VERSION),
             output_schema_version=INVESTIGATOR_DECISION_SCHEMA_VERSION,
             evidence={
                 "finding_id": target.finding.finding_id,

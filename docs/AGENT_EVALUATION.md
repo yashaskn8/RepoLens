@@ -183,6 +183,65 @@ an explicit input. It remains excluded from ordinary pull-request CI; only the
 provider-specific execution steps receive credentials, while comparison and
 promotion steps do not.
 
-The future Agent Improvement Lab (automatic prompt optimization, skill/tool
-rewriting, or production configuration changes) is intentionally NOT
-implemented in this phase.
+## Offline Prompt Improvement Lab
+
+RepoLens includes a bounded, evaluation-only prompt Improvement Lab. It consumes
+only integrity-validated, complete public DEV `FULL_ANALYSIS_GRAPH` reports,
+uses deterministic failure attribution to select a registered prompt, and
+reuses the canonical full-analysis evaluator, paired comparison, and promotion
+gate. It can propose prompt candidates and produce a human-review signal; it
+never changes production prompt files, runtime settings, routing, tools,
+evaluation logic, datasets, labels, or promotion policy.
+
+Only these current LLM prompt surfaces are registered: architecture, security,
+bug, verifier, revision, and evidence-investigator. Integration has no current
+LLM system prompt and mapper is deterministic. The currently implemented
+failure-attribution mapping can select verifier, revision, or
+evidence-investigator; unsupported, provider, budget, harness, and unknown
+attributions are not optimized. A failure family with insufficient distinct
+DEV examples stops without generating candidates.
+
+```powershell
+.\.venv\Scripts\python.exe -m app.evaluation.improvement analyze baseline.json --output corpus.json
+.\.venv\Scripts\python.exe -m app.evaluation.improvement optimize baseline.json `
+  --allow-live-optimization --generator-provider gemini `
+  --generator-model <exact-generator-model> --output improvement-run.json
+```
+
+The `optimize` command makes no provider calls without
+`--allow-live-optimization`. A semantic optimization run requires a current,
+complete, five-trial LIVE baseline from the exact production graph and current
+public DEV corpus. Candidate evaluation uses the baseline's exact provider and
+model; generator identity is recorded separately. Each run is capped at two
+generations, four candidates per generation, a deterministic screen set, three
+full-DEV candidate evaluations, bounded model requests, 640 total
+case-trials, and a one-hour wall-clock budget. These limits are policy-versioned.
+
+Candidate text is installed through an async-context-local evaluation overlay;
+production prompt constants are never mutated. Candidates must preserve
+registered mandatory clauses and pass deterministic safety, size, URL, secret,
+case-ID, and fixture-path checks. The sanitizer is one defense, not a semantic
+security proof. Application tool authority, snapshots, verification,
+resources, and the existing human boundary remain independent of prompt text.
+An overlay report records both baseline and candidate prompt digests and
+versions. Candidate comparison uses the existing full-report compatibility,
+paired comparison, and non-mutating human promotion gate; precision and recall
+must not regress. Scripted reports are accepted only for offline harness/corpus
+tests and can never establish real prompt improvement.
+
+The lab reads only the canonical public DEV repository-scan dataset. It accepts
+no dataset-root or holdout-path override and does not call holdout loaders. The
+full-analysis evaluator and lab share a code-owned fixed inventory of the 35
+public DEV repository-scan case files; they do not recursively discover JSON
+files. Report case IDs are checked against this inventory before trial details
+are serialized. All inventory paths are checked for symlink/junction escapes
+before any case is opened, and files outside that inventory are never loaded.
+Corpus and per-example truncation are recorded. The CLI rejects known
+private/holdout baseline paths, refuses to overwrite output, and
+restricts in-repository artifacts to `backend/evaluation_artifacts/improvement_lab`.
+Validation-family IDs are withheld from reflection and candidate generation;
+they are selected deterministically and recorded, but their labels are only
+observed by the evaluator. There is no automatic source patch, commit, push,
+PR, deployment, or private-final holdout execution. A generated candidate is
+not evidence of improvement; absent an actual compatible comparison,
+`REAL PROMPT IMPROVEMENT NOT MEASURED`.

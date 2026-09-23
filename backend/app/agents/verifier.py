@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from app.agents.helpers import extract_json_block
+from app.agent_runtime.prompt_overlay import resolve_agent_prompt, resolve_agent_prompt_version
 from app.agents.state import AnalysisState
 from app.context.runtime import AnalysisRuntimeContext, get_scan_context_engine, get_scan_runtime, resolve_analysis_llm_router
 from app.llm.budgets import REPOSITORY_VERIFICATION_BUDGET
@@ -602,6 +603,7 @@ async def run_verifier_agent(
         "}\n"
         "Rule: Output only CONFIRMED, POSSIBLE, or REJECTED. Reject any unsupported, hallucinated, or contradictory claims."
     )
+    system_prompt = resolve_agent_prompt("verifier-agent", system_prompt)
 
     verification_inputs: List[Tuple[int, Dict[str, Any], TaskPolicy, List[LLMProvider]]] = []
     for idx, (target_cand, code_slice, _, investigation_ctx, ind_ctx) in enumerate(candidates_for_llm):
@@ -661,7 +663,7 @@ async def run_verifier_agent(
                 output_schema=VERIFICATION_OUTPUT_SCHEMA,
                 lineage=lineage_for_scan(
                     str(scan_id),
-                    prompt_template_version="finding-verifier/2.0",
+                    prompt_template_version=resolve_agent_prompt_version("verifier-agent", "finding-verifier/2.0"),
                     output_schema_version="finding-verification/2.0",
                     evidence=batch_items,
                 ),

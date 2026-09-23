@@ -16,16 +16,19 @@ from app.agent_tools import AgentToolContext, RepositorySnapshot, create_agent_t
 from app.agents.graph import run_analysis_workflow
 from app.analysis.core import analyze_core_repository
 from app.analysis.store import EvidenceStore
+from app.agent_runtime.prompt_overlay import PromptCandidateOverlay, evaluation_prompt_overlay
 from app.context.runtime import ScanIntelligenceRuntime
 from app.evaluation.ground_truth.leakage import LeakageDetector
-from app.evaluation.ground_truth.loader import compute_canonical_benchmark_hash, load_benchmark_dataset
+from app.evaluation.ground_truth.loader import compute_canonical_benchmark_hash
+from app.evaluation.ground_truth.public_dev import (
+    PUBLIC_DEV_REPOSITORY_SCAN_CASE_IDS,
+    load_public_dev_repository_cases,
+)
 from app.evaluation.ground_truth.matcher import CaseEvaluationResult, EvaluatedFinding, IndependentBenchmarkJudge
 from app.evaluation.ground_truth.schemas import (
     AnalysisInput,
     BenchmarkCase,
-    BenchmarkSplit,
     ExpectedVerdict,
-    TargetPipeline,
     EvaluationStage,
 )
 from app.evaluation.system.identity import (
@@ -41,6 +44,7 @@ from app.evaluation.system.schemas import (
     FailureClass,
     FullAnalysisMetrics,
     FullAnalysisReportDetails,
+    PromptCandidateRunIdentity,
     FullAnalysisTrialDetail,
     MeasuredMetric,
     MetricStatus,
@@ -623,6 +627,7 @@ async def _execute_trial(
     provider: LLMProvider | None,
     model: str,
     interrupt_after: list[str] | None = None,
+    prompt_overlay: PromptCandidateOverlay | None = None,
 ) -> tuple[dict[str, Any], float, bool, ScriptedFullAnalysisRouter | None]:
     started = time.perf_counter()
     fixture = FullAnalysisFixture(analysis_input)
@@ -634,16 +639,17 @@ async def _execute_trial(
         if scripted_router is not None:
             kwargs["llm_router"] = scripted_router
         async def invoke() -> dict[str, Any]:
-            return dict(await run_analysis_workflow(
-                evidence_store=fixture.evidence_store,
-                scan_id=fixture.scan_id,
-                repo_dir=str(fixture.repository_root),
-                checkpointer=checkpointer,
-                resume_if_exists=True,
-                scan_runtime=fixture.scan_runtime,
-                interrupt_after=interrupt_after,
-                **kwargs,
-            ))
+            with evaluation_prompt_overlay(prompt_overlay):
+                return dict(await run_analysis_workflow(
+                    evidence_store=fixture.evidence_store,
+                    scan_id=fixture.scan_id,
+                    repo_dir=str(fixture.repository_root),
+                    checkpointer=checkpointer,
+                    resume_if_exists=True,
+                    scan_runtime=fixture.scan_runtime,
+                    interrupt_after=interrupt_after,
+                    **kwargs,
+                ))
 
         if mode == SystemEvalMode.LIVE:
             if provider is None:
@@ -792,6 +798,7 @@ async def run_full_analysis_evaluation(
     max_cases: int = 3,
     case_ids: Sequence[str] | None = None,
     allow_live: bool = False,
+    prompt_overlay: PromptCandidateOverlay | None = None,
 ) -> SystemEvaluationReport:
     """Run bounded real production-graph trials over DEV repository-scan cases only."""
     mode = SystemEvalMode(mode)
@@ -802,21 +809,33 @@ async def run_full_analysis_evaluation(
         raise ValueError("max_cases must be between 1 and 64")
     if mode == SystemEvalMode.LIVE and (not allow_live or not provider or not model):
         raise ValueError("LIVE full-analysis evaluation requires --allow-live and an exact provider/model")
+    if prompt_overlay is not None:
+        if mode != SystemEvalMode.LIVE or not allow_live:
+            raise ValueError("prompt candidates can be evaluated only in explicitly enabled LIVE full-analysis runs")
+        from app.evaluation.improvement.registry import OptimizablePromptRegistry
+
+        prompt_registry = OptimizablePromptRegistry()
+        spec = prompt_registry.get_spec(prompt_overlay.component)
+        if (
+            spec.version != prompt_overlay.baseline_version
+            or prompt_registry.current_digest(prompt_overlay.component) != prompt_overlay.baseline_digest
+        ):
+            raise ValueError("prompt candidate baseline is stale or incompatible with current production source")
+        sanitizer_result = prompt_registry.sanitize_candidate(
+            prompt_overlay.component,
+            prompt_overlay.prompt_text,
+            case_ids=PUBLIC_DEV_REPOSITORY_SCAN_CASE_IDS,
+        )
+        if not sanitizer_result.accepted or sanitizer_result.prompt_digest != prompt_overlay.candidate_digest:
+            raise ValueError("prompt candidate failed deterministic safety or content-integrity validation")
     if mode == SystemEvalMode.SCRIPTED and (provider is not None or model is not None or allow_live):
         raise ValueError("SCRIPTED full-analysis evaluation does not accept provider/model or live permission")
     if suite not in {SystemEvalSuite.ALL, SystemEvalSuite.SECURITY}:
         raise ValueError("full-analysis supports only ALL or SECURITY suites")
 
-    # Deliberately use only the canonical public benchmark root. An arbitrary
-    # caller-supplied directory could point at sealed holdout labels before the
-    # split filter is applied.
-    loaded = load_benchmark_dataset()
-    # Filter the split before any test input reaches the production graph. Sealed
-    # holdout metadata is not loaded or accepted by this evaluator.
-    eligible = [
-        case for case in loaded
-        if case.split == BenchmarkSplit.DEV and case.target_pipeline == TargetPipeline.REPOSITORY_SCAN
-    ]
+    # Use an explicit fixed public DEV inventory. The general-purpose loader
+    # recursively materializes every JSON file before split filtering.
+    eligible = load_public_dev_repository_cases()
     if suite == SystemEvalSuite.SECURITY:
         eligible = [case for case in eligible if case.category.value.lower() == "security"]
     eligible.sort(key=lambda item: item.case_id)
@@ -848,6 +867,7 @@ async def run_full_analysis_evaluation(
             model=selected_model,
             registry=identity_fixture.registry,
             scope="FULL_ANALYSIS_GRAPH",
+            prompt_overlay=prompt_overlay,
         )
     finally:
         identity_fixture.close()
@@ -867,6 +887,7 @@ async def run_full_analysis_evaluation(
                 mode=mode,
                 provider=selected_provider,
                 model=selected_model,
+                prompt_overlay=prompt_overlay,
             )
             all_durations.append(duration_ms)
             trace = _workflow_trace(trial_state)
@@ -1123,8 +1144,22 @@ async def run_full_analysis_evaluation(
             "dataset_case_count": len(eligible),
             "trial_details": [item.model_dump(mode="json") for item in trial_details],
             "metrics": full_metrics.model_dump(mode="json"),
+            "candidate_overlay": (
+                PromptCandidateRunIdentity(
+                    optimization_run_id=prompt_overlay.optimization_run_id,
+                    candidate_id=prompt_overlay.candidate_id,
+                    component=prompt_overlay.component,
+                    baseline_prompt_version=prompt_overlay.baseline_version,
+                    baseline_prompt_digest=prompt_overlay.baseline_digest,
+                    candidate_prompt_version=prompt_overlay.candidate_version,
+                    candidate_prompt_digest=prompt_overlay.candidate_digest,
+                ).model_dump(mode="json")
+                if prompt_overlay is not None else None
+            ),
         },
     }
+    if prompt_overlay is None:
+        payload["full_analysis"].pop("candidate_overlay", None)
     payload["report_digest"] = system_evaluation_report_digest(payload)
     return SystemEvaluationReport.model_validate(payload)
 

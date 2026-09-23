@@ -11,6 +11,7 @@ from typing import Any, Iterable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.agent_runtime.prompt_overlay import PromptCandidateOverlay
 from app.agent_runtime.prompts import INVESTIGATOR_PROMPT_VERSION, INVESTIGATOR_SYSTEM_PROMPT
 from app.agent_runtime.schemas import (
     INVESTIGATOR_DECISION_SCHEMA_VERSION,
@@ -178,7 +179,7 @@ def _workflow_source_digest(module_names: Iterable[str]) -> str:
 
 
 FULL_ANALYSIS_GRAPH_CONTRACT_VERSION = "full-analysis-graph/1.0"
-FULL_ANALYSIS_EVALUATION_CONTRACT_VERSION = "full-analysis-evaluation/1.1"
+FULL_ANALYSIS_EVALUATION_CONTRACT_VERSION = "full-analysis-evaluation/1.2"
 FULL_ANALYSIS_GRAPH_CONTRACT = {
     "version": FULL_ANALYSIS_GRAPH_CONTRACT_VERSION,
     "nodes": [
@@ -270,6 +271,7 @@ def build_agent_system_identity(
     router: LLMRouter | None = None,
     source_revision: str | None = None,
     scope: str = "PRODUCTION_EVIDENCE_INVESTIGATOR_GRAPH",
+    prompt_overlay: PromptCandidateOverlay | None = None,
 ) -> AgentSystemIdentity:
     """Derive a stable identity from canonical runtime contracts and sources."""
     if not model or len(model) > 256:
@@ -380,6 +382,31 @@ def build_agent_system_identity(
             PromptComponentIdentity(name="verifier-agent", version="finding-verifier/2.0", content_digest=_module_prompt_digest("app.agents.verifier")),
             PromptComponentIdentity(name="revision-agent", version="revision-agent/1.0", content_digest=_module_prompt_digest("app.agents.revision")),
             prompt_components[0], prompt_components[1],
+        )
+    if prompt_overlay is not None:
+        if scope != "FULL_ANALYSIS_GRAPH":
+            raise ValueError("prompt candidates are supported only by full-analysis evaluation")
+        baseline_component = next(
+            (item for item in prompt_components if item.name == prompt_overlay.component),
+            None,
+        )
+        if baseline_component is None:
+            raise ValueError("prompt overlay component is not present in the full-analysis identity")
+        from app.evaluation.improvement.registry import OptimizablePromptRegistry
+
+        prompt_registry = OptimizablePromptRegistry()
+        if (
+            baseline_component.version != prompt_overlay.baseline_version
+            or prompt_registry.current_digest(prompt_overlay.component) != prompt_overlay.baseline_digest
+        ):
+            raise ValueError("prompt overlay semantic or content baseline is stale")
+        prompt_components = tuple(
+            PromptComponentIdentity(
+                name=item.name,
+                version=prompt_overlay.candidate_version,
+                content_digest=prompt_overlay.candidate_digest,
+            ) if item.name == prompt_overlay.component else item
+            for item in prompt_components
         )
     raw = {
         "schema_version": "agent-system-identity/1.2" if scope == "FULL_ANALYSIS_GRAPH" else "agent-system-identity/1.1",

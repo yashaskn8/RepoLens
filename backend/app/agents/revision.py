@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from app.agents.helpers import extract_json_block, safe_to_uuid
+from app.agent_runtime.prompt_overlay import resolve_agent_prompt, resolve_agent_prompt_version
 from app.agents.state import AnalysisState
 from app.context.runtime import AnalysisRuntimeContext, resolve_analysis_llm_router
 from app.llm.budgets import REPOSITORY_ANALYSIS_BUDGET
@@ -208,7 +209,7 @@ async def run_revision_agent(
         try:
             request = LLMRequest(
                 messages=[
-                    LLMMessage(role="system", content=_REVISION_SYSTEM_PROMPT),
+                    LLMMessage(role="system", content=resolve_agent_prompt("revision-agent", _REVISION_SYSTEM_PROMPT)),
                     LLMMessage(role="user", content=user_prompt),
                 ],
                 task_policy=TaskPolicy.BUG_REASONING,
@@ -220,7 +221,7 @@ async def run_revision_agent(
                 budget=REPOSITORY_ANALYSIS_BUDGET,
                 lineage=lineage_for_scan(
                     str(scan_id),
-                    prompt_template_version="revision-agent/1.0",
+                    prompt_template_version=resolve_agent_prompt_version("revision-agent", "revision-agent/1.0"),
                     output_schema_version="finding-revision/2.0",
                     evidence=[{"finding_id": target_id, "verifier_feedback": verifier_reason}],
                 ),

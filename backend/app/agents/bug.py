@@ -3,6 +3,7 @@
 from typing import Any, Dict, Optional
 from langgraph.runtime import Runtime
 from app.agents.helpers import parse_llm_findings, safe_to_uuid
+from app.agent_runtime.prompt_overlay import resolve_agent_prompt, resolve_agent_prompt_version
 from app.agents.state import AnalysisState
 from app.context.runtime import AnalysisRuntimeContext, get_scan_context_engine, resolve_analysis_llm_router
 from app.context.slices import build_specialist_context, candidate_evidence_authority
@@ -109,6 +110,7 @@ async def run_bug_agent(
         "Never output file paths, line numbers, snippets, or detector IDs: RepoLens binds those deterministically. "
         "Graph edges cannot be the sole evidence. If the triggering mechanism is not proven, return findings=[]."
     )
+    system_prompt = resolve_agent_prompt("bug-agent", system_prompt)
 
     user_prompt = (
         "Analysis task: candidate correctness verification.\n"
@@ -142,7 +144,7 @@ async def run_bug_agent(
             output_schema=CANDIDATE_FINDINGS_OUTPUT_SCHEMA,
             lineage=lineage_for_scan(
                 str(scan_id),
-                prompt_template_version="bug-agent/3.0",
+                prompt_template_version=resolve_agent_prompt_version("bug-agent", "bug-agent/3.0"),
                 output_schema_version="candidate-findings/3.0",
                 evidence={"manifest": manifest, "route_count": len(routes), **context_evidence},
             ),
