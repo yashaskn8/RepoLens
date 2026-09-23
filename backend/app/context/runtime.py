@@ -392,6 +392,10 @@ class AnalysisRuntimeContext:
     scan_runtime: ScanIntelligenceRuntime
     agent_tools: Optional[AgentToolRegistry] = None
     mcp_executor: Optional[MCPToolExecutor] = None
+    # Optional dependency injection for isolated evaluator runs. Production
+    # execution leaves this unset and uses the canonical LLMRouter singleton.
+    # This object is transient runtime context and is never written to state.
+    llm_router: Any = None
 
     @property
     def context_engine(self) -> ContextEngine:

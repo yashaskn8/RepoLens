@@ -247,6 +247,12 @@ class LLMRouter:
         """Generate under one logical content-free router span."""
         from app.observability import span
         from opentelemetry.trace import SpanKind
+        from app.llm.evaluation_route import apply_evaluation_model_route
+
+        # The context-local evaluator may pin this request to an exact
+        # provider/model. Routing still proceeds through the same governed
+        # capability gateway and provider adapter path.
+        request = apply_evaluation_model_route(request)
 
         with span(
             "chat",

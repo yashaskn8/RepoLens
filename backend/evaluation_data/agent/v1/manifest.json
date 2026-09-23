@@ -1,7 +1,7 @@
 {
   "schema_version": "agent-eval-manifest/1.0",
   "dataset_version": "agent-eval-v1",
-  "evaluation_contract_version": "agent-eval-contract/1.1",
+  "evaluation_contract_version": "agent-eval-contract/1.2",
   "dataset_hash": "376f71cf937ef25a4300a748304b996e5e2a9ff9bc9a2caddd2c6c6329c8c96d",
   "case_files": [
     "bug_source.json",

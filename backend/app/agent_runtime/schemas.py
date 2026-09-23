@@ -7,8 +7,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.agent_runtime.prompts import INVESTIGATOR_PROMPT_VERSION
 
-INVESTIGATOR_PROMPT_VERSION = "evidence-investigator/1.0"
 INVESTIGATOR_DECISION_SCHEMA_VERSION = "investigator-decision/1.0"
 INVESTIGATOR_STATE_VERSION = "investigator-state/1.0"
 MAX_INVESTIGATOR_TARGETS = 4

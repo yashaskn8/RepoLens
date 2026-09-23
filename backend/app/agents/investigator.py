@@ -291,8 +291,9 @@ async def run_investigator_decide_node(
                 "repolens.investigator.evidence_count": len(target.evidence_ledger),
             },
         ):
+            router = context.llm_router if context is not None and context.llm_router is not None else get_llm_router()
             response = await asyncio.wait_for(
-                get_llm_router().generate(request),
+                router.generate(request),
                 timeout=settings.AGENT_INVESTIGATOR_MODEL_TIMEOUT_SECONDS + 1.0,
             )
         decision = InvestigatorDecision.model_validate(

@@ -29,6 +29,49 @@ on:
         required: true
         default: false
         type: boolean
+      run_agent_system_comparison:
+        description: Run paired, isolated live investigator system evaluations and non-mutating comparison/promotion checks
+        required: true
+        default: false
+        type: boolean
+      system_eval_suite:
+        description: System-evaluation case suite
+        required: true
+        default: ALL
+        type: choice
+        options: [ALL, REGRESSION, CAPABILITY, SECURITY]
+      system_eval_trials:
+        description: Fresh trials per case (promotion requires 5)
+        required: true
+        default: "3"
+        type: choice
+        options: ["1", "3", "5"]
+      system_eval_max_cases:
+        description: Maximum cases per model (promotion requires the full suite)
+        required: true
+        default: "3"
+        type: choice
+        options: ["1", "3", "8", "16", "32"]
+      system_eval_baseline_provider:
+        description: Exact baseline provider; ignored unless system comparison is enabled
+        required: false
+        default: gemini
+        type: choice
+        options: [gemini, groq, nvidia, huggingface, mistral, openrouter, cloudflare]
+      system_eval_baseline_model:
+        description: Exact registered baseline model ID
+        required: false
+        type: string
+      system_eval_candidate_provider:
+        description: Exact candidate provider; ignored unless system comparison is enabled
+        required: false
+        default: groq
+        type: choice
+        options: [gemini, groq, nvidia, huggingface, mistral, openrouter, cloudflare]
+      system_eval_candidate_model:
+        description: Exact registered candidate model ID
+        required: false
+        type: string
       smoke_mode:
         description: Deployment smoke mode
         required: true
@@ -159,6 +202,122 @@ jobs:
           name: repolens-agent-eval-live
           path: backend/agent-eval-live.json
           if-no-files-found: warn
+
+  agent-system-comparison:
+    if: ${{ inputs.run_agent_system_comparison }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+      - name: Install backend
+        working-directory: backend
+        run: pip install -e ".[dev]"
+      - name: Require exact baseline and candidate model IDs
+        env:
+          BASELINE_MODEL: ${{ inputs.system_eval_baseline_model }}
+          CANDIDATE_MODEL: ${{ inputs.system_eval_candidate_model }}
+        run: |
+          test -n "$BASELINE_MODEL" || { echo "::error::system_eval_baseline_model is required"; exit 1; }
+          test -n "$CANDIDATE_MODEL" || { echo "::error::system_eval_candidate_model is required"; exit 1; }
+      - name: Run exact baseline candidate
+        id: baseline
+        continue-on-error: true
+        working-directory: backend
+        env:
+          SYSTEM_EVAL_SUITE: ${{ inputs.system_eval_suite }}
+          SYSTEM_EVAL_PROVIDER: ${{ inputs.system_eval_baseline_provider }}
+          SYSTEM_EVAL_MODEL: ${{ inputs.system_eval_baseline_model }}
+          SYSTEM_EVAL_TRIALS: ${{ inputs.system_eval_trials }}
+          SYSTEM_EVAL_MAX_CASES: ${{ inputs.system_eval_max_cases }}
+          GEMINI_API_KEY: ${{ inputs.system_eval_baseline_provider == 'gemini' && secrets.GEMINI_API_KEY || '' }}
+          GROQ_API_KEY: ${{ inputs.system_eval_baseline_provider == 'groq' && secrets.GROQ_API_KEY || '' }}
+          NVIDIA_API_KEY: ${{ inputs.system_eval_baseline_provider == 'nvidia' && secrets.NVIDIA_API_KEY || '' }}
+          HUGGINGFACE_API_KEY: ${{ inputs.system_eval_baseline_provider == 'huggingface' && secrets.HUGGINGFACE_API_KEY || '' }}
+          MISTRAL_API_KEY: ${{ inputs.system_eval_baseline_provider == 'mistral' && secrets.MISTRAL_API_KEY || '' }}
+          OPENROUTER_API_KEY: ${{ inputs.system_eval_baseline_provider == 'openrouter' && secrets.OPENROUTER_API_KEY || '' }}
+          CLOUDFLARE_API_TOKEN: ${{ inputs.system_eval_baseline_provider == 'cloudflare' && secrets.CLOUDFLARE_API_TOKEN || '' }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ inputs.system_eval_baseline_provider == 'cloudflare' && secrets.CLOUDFLARE_ACCOUNT_ID || '' }}
+        run: >-
+          python -m app.evaluation.system run --mode live --allow-live
+          --suite "$SYSTEM_EVAL_SUITE"
+          --provider "$SYSTEM_EVAL_PROVIDER"
+          --model "$SYSTEM_EVAL_MODEL"
+          --trials "$SYSTEM_EVAL_TRIALS"
+          --max-cases "$SYSTEM_EVAL_MAX_CASES"
+          --output baseline-system-eval.json
+      - name: Run exact candidate model
+        id: candidate
+        continue-on-error: true
+        working-directory: backend
+        env:
+          SYSTEM_EVAL_SUITE: ${{ inputs.system_eval_suite }}
+          SYSTEM_EVAL_PROVIDER: ${{ inputs.system_eval_candidate_provider }}
+          SYSTEM_EVAL_MODEL: ${{ inputs.system_eval_candidate_model }}
+          SYSTEM_EVAL_TRIALS: ${{ inputs.system_eval_trials }}
+          SYSTEM_EVAL_MAX_CASES: ${{ inputs.system_eval_max_cases }}
+          GEMINI_API_KEY: ${{ inputs.system_eval_candidate_provider == 'gemini' && secrets.GEMINI_API_KEY || '' }}
+          GROQ_API_KEY: ${{ inputs.system_eval_candidate_provider == 'groq' && secrets.GROQ_API_KEY || '' }}
+          NVIDIA_API_KEY: ${{ inputs.system_eval_candidate_provider == 'nvidia' && secrets.NVIDIA_API_KEY || '' }}
+          HUGGINGFACE_API_KEY: ${{ inputs.system_eval_candidate_provider == 'huggingface' && secrets.HUGGINGFACE_API_KEY || '' }}
+          MISTRAL_API_KEY: ${{ inputs.system_eval_candidate_provider == 'mistral' && secrets.MISTRAL_API_KEY || '' }}
+          OPENROUTER_API_KEY: ${{ inputs.system_eval_candidate_provider == 'openrouter' && secrets.OPENROUTER_API_KEY || '' }}
+          CLOUDFLARE_API_TOKEN: ${{ inputs.system_eval_candidate_provider == 'cloudflare' && secrets.CLOUDFLARE_API_TOKEN || '' }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ inputs.system_eval_candidate_provider == 'cloudflare' && secrets.CLOUDFLARE_ACCOUNT_ID || '' }}
+        run: >-
+          python -m app.evaluation.system run --mode live --allow-live
+          --suite "$SYSTEM_EVAL_SUITE"
+          --provider "$SYSTEM_EVAL_PROVIDER"
+          --model "$SYSTEM_EVAL_MODEL"
+          --trials "$SYSTEM_EVAL_TRIALS"
+          --max-cases "$SYSTEM_EVAL_MAX_CASES"
+          --output candidate-system-eval.json
+      - name: Compare compatible reports
+        id: comparison
+        if: ${{ always() }}
+        continue-on-error: true
+        working-directory: backend
+        run: |
+          if test -f baseline-system-eval.json && test -f candidate-system-eval.json; then
+            python -m app.evaluation.system compare baseline-system-eval.json candidate-system-eval.json --output system-comparison.json
+          else
+            echo "Baseline or candidate report is missing; comparison was not executed."
+            exit 1
+          fi
+      - name: Run the non-mutating promotion gate
+        id: promotion
+        if: ${{ always() && steps.comparison.outcome == 'success' }}
+        continue-on-error: true
+        working-directory: backend
+        run: >-
+          python -m app.evaluation.system promote-check baseline-system-eval.json
+          candidate-system-eval.json --minimum-trials 5 --output system-promotion-check.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: repolens-agent-system-evaluation
+          path: |
+            backend/baseline-system-eval.json
+            backend/candidate-system-eval.json
+            backend/system-comparison.json
+            backend/system-promotion-check.json
+          if-no-files-found: warn
+      - name: Surface evaluation or promotion-gate failures
+        if: ${{ always() }}
+        env:
+          BASELINE_OUTCOME: ${{ steps.baseline.outcome }}
+          CANDIDATE_OUTCOME: ${{ steps.candidate.outcome }}
+          COMPARISON_OUTCOME: ${{ steps.comparison.outcome }}
+          PROMOTION_OUTCOME: ${{ steps.promotion.outcome }}
+        run: |
+          if [ "$BASELINE_OUTCOME" != "success" ] || [ "$CANDIDATE_OUTCOME" != "success" ] || [ "$COMPARISON_OUTCOME" != "success" ] || [ "$PROMOTION_OUTCOME" != "success" ]; then
+            echo "::error::System evaluation was incomplete, failed, or did not pass the human promotion gate. Review the uploaded reports."
+            exit 1
+          fi
 
   redis:
     if: ${{ inputs.run_redis }}

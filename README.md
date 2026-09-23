@@ -242,6 +242,7 @@ RepoLens enforces strict controls around external GitHub writes:
 
 - [Architecture Specification](docs/architecture.md): System components, data flow, LangGraph workflows, and 3 Mermaid diagrams.
 - [Evidence Investigator](docs/EVIDENCE_INVESTIGATOR.md): Feature flag, durable model-directed tool loop, context compaction, limits, and security boundary.
+- [Agent Evaluation](docs/AGENT_EVALUATION.md): Zero-key scripted regression gate, isolated live system evaluation, compatible baseline/candidate comparison, and non-mutating human promotion check.
 - [Security & Threat Model](docs/threat-model.md): Trust boundaries, threat actors, 20 evaluated vectors, and deployment checklist.
 - [Demonstration Playbook](docs/demo.md): Step-by-step evaluator walkthrough, curated public repositories, and 5-minute demo script.
 - [Product Capability Matrix](docs/phase9/product-capability-matrix.md): Complete module-by-module capability inventory.
