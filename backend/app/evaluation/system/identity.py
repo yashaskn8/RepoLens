@@ -178,8 +178,8 @@ def _workflow_source_digest(module_names: Iterable[str]) -> str:
     return _digest(sources)
 
 
-FULL_ANALYSIS_GRAPH_CONTRACT_VERSION = "full-analysis-graph/1.0"
-FULL_ANALYSIS_EVALUATION_CONTRACT_VERSION = "full-analysis-evaluation/1.3"
+FULL_ANALYSIS_GRAPH_CONTRACT_VERSION = "full-analysis-graph/1.1"
+FULL_ANALYSIS_EVALUATION_CONTRACT_VERSION = "full-analysis-evaluation/1.4"
 FULL_ANALYSIS_GRAPH_CONTRACT = {
     "version": FULL_ANALYSIS_GRAPH_CONTRACT_VERSION,
     "nodes": [
@@ -199,6 +199,7 @@ FULL_ANALYSIS_GRAPH_CONTRACT = {
         ["revise", "verifier"], ["finalize|finalize_uncertain", "END"],
     ],
     "revision_limit": 1,
+    "specialist_opportunity_trace_contract": "specialist-opportunity/1.0",
 }
 
 
@@ -218,6 +219,9 @@ def full_analysis_evaluation_contract_hash(graph_digest: str | None = None) -> s
             "app.evaluation.ground_truth.matcher",
             "app.evaluation.ground_truth.schemas",
             "app.evaluation.system.full_analysis",
+            "app.evaluation.system.specialist_attribution",
+            "app.agents.specialist_provenance",
+            "app.specialist_candidates",
         ]),
     })
 
@@ -333,6 +337,7 @@ def build_agent_system_identity(
             "app.agents.security", "app.agents.bug", "app.agents.verifier",
             "app.agents.investigator", "app.agents.revision", "app.agents.mcp_enrichment",
             "app.agent_runtime.stuck_detector", "app.agents.graph", "app.agents.state",
+            "app.agents.specialist_provenance", "app.context.slices", "app.specialist_candidates",
         ])
     elif scope == "PRODUCTION_EVIDENCE_INVESTIGATOR_GRAPH":
         workflow_implementation_digest = _source_digest([

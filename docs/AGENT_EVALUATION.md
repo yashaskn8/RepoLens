@@ -195,11 +195,24 @@ evaluation logic, datasets, labels, or promotion policy.
 
 Only these current LLM prompt surfaces are registered: architecture, security,
 bug, verifier, revision, and evidence-investigator. Integration has no current
-LLM system prompt and mapper is deterministic. The currently implemented
-failure-attribution mapping can select verifier, revision, or
-evidence-investigator; unsupported, provider, budget, harness, and unknown
-attributions are not optimized. A failure family with insufficient distinct
-DEV examples stops without generating candidates.
+LLM system prompt and mapper is deterministic. Failure attribution can select
+verifier, revision, evidence-investigator, or a specialist only when
+deterministic provenance proves one unique candidate opportunity. Specialist
+targeting requires an exact registered candidate-kind/ground-truth-rule
+mapping, an exact fixture snapshot match, source evidence locators actually
+packed into the specialist context, a normal provider-backed model execution
+with validated structured output, and no matching candidate output from that
+model. Scripted harness identities, malformed or evidence-rejected output,
+provider failures, admission/context omissions, ambiguous opportunities,
+unsupported candidate kinds, and unknown causes are never specialist prompt
+targets. The currently registered ground-truth mappings cover selected
+security-flow and bug/correctness candidates; architecture currently has no
+targetable mapping because the public evaluator has no corresponding
+architecture candidate rule contract. Attribution alone is not enough to
+generate candidates: the lab also requires repeated failures across distinct
+public DEV cases and families. Unsupported, provider, budget, harness, and
+unknown attributions are not optimized. A failure family with insufficient
+distinct DEV examples stops without generating candidates.
 
 ```powershell
 .\.venv\Scripts\python.exe -m app.evaluation.improvement analyze baseline.json --output corpus.json

@@ -11,11 +11,14 @@ from app.evaluation.improvement.digest import canonical_digest
 
 
 class ImprovementPolicy(ImprovementModel):
-    version: Literal["prompt-improvement-policy/1.1"] = "prompt-improvement-policy/1.1"
+    version: Literal["prompt-improvement-policy/1.2"] = "prompt-improvement-policy/1.2"
     max_generations: int = Field(default=2, ge=1, le=2)
     max_candidates_per_generation: int = Field(default=4, ge=1, le=4)
     max_reflection_examples: int = Field(default=8, ge=1, le=12)
     max_preserve_examples: int = Field(default=3, ge=0, le=4)
+    min_failed_trials_per_target_case: int = Field(default=2, ge=2, le=5)
+    min_target_failure_cases: int = Field(default=2, ge=2, le=64)
+    min_target_failure_families: int = Field(default=2, ge=2, le=64)
     max_trace_events_per_example: int = Field(default=12, ge=1, le=32)
     max_evidence_refs_per_example: int = Field(default=8, ge=1, le=32)
     validation_partition_percent: int = Field(default=25, ge=20, le=40)
@@ -35,6 +38,7 @@ class ImprovementPolicy(ImprovementModel):
     max_wall_clock_seconds: int = Field(default=3_600, ge=1, le=3_600)
     candidate_sanitizer_version: str = "prompt-candidate-sanitizer/1.2"
     corpus_selection_policy: str = "failure-group-hash-split/1.0"
+    target_selection_policy: str = "validated-specialist-provenance-two-trials-two-cases-two-families/1.0"
     screen_selection_policy: str = "target-validation-security-preserve-regression/1.0"
     ranking_policy: str = "hard-safety-target-preserve-precision-recall/1.1"
     allowed_components: tuple[str, ...] = (

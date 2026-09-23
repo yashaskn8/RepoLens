@@ -1,6 +1,7 @@
 """Helper utilities for parsing LLM structured output into canonical Finding domain models."""
 
 import json
+import math
 import re
 from typing import Any, List, Mapping, Set
 import uuid
@@ -32,6 +33,84 @@ def extract_json_block(text: str) -> str:
     if match:
         return match.group(1).strip()
     return cleaned
+
+
+def validated_candidate_findings_payload(raw_content: str) -> dict[str, Any] | None:
+    """Return a schema-shaped candidate response or None without guessing.
+
+    `parse_llm_findings` intentionally drops malformed/un-grounded items for
+    production safety. Failure attribution must distinguish that case from a
+    valid, explicit empty answer, so it uses this stricter preflight as well.
+    Limits mirror CANDIDATE_FINDINGS_OUTPUT_SCHEMA.
+    """
+    try:
+        payload = json.loads(extract_json_block(raw_content))
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    confidence = payload.get("confidence")
+    findings = payload.get("findings")
+    if (
+        isinstance(confidence, bool)
+        or not isinstance(confidence, (int, float))
+        or not isinstance(findings, list)
+        or len(findings) > 12
+    ):
+        return None
+    try:
+        normalized_confidence = float(confidence)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    if not math.isfinite(normalized_confidence) or not 0.0 <= normalized_confidence <= 1.0:
+        return None
+    required_strings = {
+        "candidate_id": 256,
+        "title": 300,
+        "description": 8_000,
+        "category": 128,
+        "source_behavior": 4_000,
+        "trigger_condition": 4_000,
+        "failure_mechanism": 4_000,
+        "impact_claim": 4_000,
+    }
+    for item in findings:
+        if not isinstance(item, dict):
+            return None
+        if any(
+            not isinstance(item.get(name), str)
+            or not item[name]
+            or len(item[name]) > maximum
+            for name, maximum in required_strings.items()
+        ):
+            return None
+        severity = item.get("severity")
+        if not isinstance(severity, str) or severity not in {"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"}:
+            return None
+        evidence_refs = item.get("evidence_refs")
+        if (
+            not isinstance(evidence_refs, list)
+            or not 1 <= len(evidence_refs) <= 16
+            or any(not isinstance(value, str) or not value or len(value) > 1_024 for value in evidence_refs)
+        ):
+            return None
+        counter_evidence = item.get("counter_evidence_considered")
+        if (
+            not isinstance(counter_evidence, list)
+            or len(counter_evidence) > 16
+            or any(not isinstance(value, str) or len(value) > 1_000 for value in counter_evidence)
+        ):
+            return None
+        if item.get("rule_id") is not None and (
+            not isinstance(item.get("rule_id"), str) or len(item["rule_id"]) > 256
+        ):
+            return None
+        if item.get("mitigation_guidance") is not None and (
+            not isinstance(item.get("mitigation_guidance"), str)
+            or len(item["mitigation_guidance"]) > 8_000
+        ):
+            return None
+    return payload
 
 
 def parse_llm_findings(

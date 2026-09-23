@@ -2,10 +2,11 @@
 
 from typing import Any, Dict, Optional
 from langgraph.runtime import Runtime
-from app.agents.helpers import parse_llm_findings, safe_to_uuid
+from app.agents.helpers import parse_llm_findings, safe_to_uuid, validated_candidate_findings_payload
 from app.agent_runtime.prompt_overlay import resolve_agent_prompt, resolve_agent_prompt_version
 from app.agents.deterministic import scanner_candidates
 from app.agents.state import AnalysisState
+from app.agents.specialist_provenance import build_specialist_opportunity
 from app.context.runtime import AnalysisRuntimeContext, get_scan_context_engine, resolve_analysis_llm_router
 from app.context.slices import build_specialist_context, candidate_evidence_authority
 from app.agents.grounding import build_evidence_index
@@ -33,16 +34,6 @@ async def run_security_agent(
     static_findings = state.get("static_findings", [])
 
     deterministic_candidates = scanner_candidates(static_findings, scan_id=scan_id)
-    if admission.decision != AdmissionDecision.CLOUD_REQUIRED:
-        return {
-            "candidate_findings": deterministic_candidates if admission.decision == AdmissionDecision.DETERMINISTIC_ONLY else [],
-            "completed_nodes": ["security"],
-            "model_executions": [],
-            "errors": [],
-        }
-
-    languages = state.get("languages", {})
-    frameworks = state.get("frameworks", [])
     raw_flows = state.get("deterministic_security_flow_candidates") or []
     flow_hypotheses = []
     for raw in raw_flows:
@@ -50,6 +41,38 @@ async def run_security_agent(
             flow_hypotheses.append(AnalysisCandidate.model_validate(raw))
         except (TypeError, ValueError):
             continue
+    candidate_source = "MAPPER" if flow_hypotheses else "NONE"
+    specialist_context = None
+    model_attempted = False
+    model_succeeded = False
+    model_invalid_output = False
+    model_output_findings = []
+
+    def with_opportunity(result: Dict[str, Any], reason: str) -> Dict[str, Any]:
+        result["specialist_opportunity"] = build_specialist_opportunity(
+            node="security",
+            state=state,
+            candidates=flow_hypotheses,
+            candidate_source=candidate_source,
+            context=specialist_context,
+            model_attempted=model_attempted,
+            model_succeeded=model_succeeded,
+            model_execution_count=len(result.get("model_executions", [])),
+            model_output_findings=model_output_findings,
+            completion_reason=reason,
+        )
+        return result
+
+    if admission.decision != AdmissionDecision.CLOUD_REQUIRED:
+        return with_opportunity({
+            "candidate_findings": deterministic_candidates if admission.decision == AdmissionDecision.DETERMINISTIC_ONLY else [],
+            "completed_nodes": ["security"],
+            "model_executions": [],
+            "errors": [],
+        }, "ADMISSION_BLOCKED")
+
+    languages = state.get("languages", {})
+    frameworks = state.get("frameworks", [])
     if (
         not flow_hypotheses
         and context_engine
@@ -59,13 +82,19 @@ async def run_security_agent(
             context_engine.evidence_store.manifest,
             context_engine.retrieval_service.chunks_by_id.values(),
         )
+        candidate_source = "LOCAL_BUILDER" if flow_hypotheses else "NONE"
     if not flow_hypotheses or not context_engine:
-        return {
+        reason = (
+            "NO_CONTEXT_OR_CANDIDATES"
+            if not context_engine
+            else "NO_DETERMINISTIC_CANDIDATES"
+        )
+        return with_opportunity({
             "candidate_findings": deterministic_candidates,
             "completed_nodes": ["security"],
             "model_executions": [],
             "errors": [],
-        }
+        }, reason)
 
     packed_budget = min(4_800, max(1_024, admission.max_output_tokens * 2))
     specialist_context = await build_specialist_context(
@@ -142,15 +171,16 @@ async def run_security_agent(
     candidate_findings = deterministic_candidates
 
     if not any(anchor.is_locatable for anchor in evidence_index.values()):
-        return {
+        return with_opportunity({
             "candidate_findings": candidate_findings,
             "completed_nodes": ["security"],
             "model_executions": [],
             "errors": [],
-        }
+        }, "NO_LOCATABLE_PACKED_EVIDENCE")
 
     try:
         router = resolve_analysis_llm_router(runtime, get_llm_router)
+        model_attempted = True
         request = LLMRequest(
             messages=[
                 LLMMessage(role="system", content=system_prompt),
@@ -173,6 +203,7 @@ async def run_security_agent(
         )
         response = await router.generate(request)
         model_executions.append(response.metadata)
+        response_payload = validated_candidate_findings_payload(response.content)
         model_candidates = parse_llm_findings(
             raw_content=response.content,
             scan_id=scan_id,
@@ -201,13 +232,21 @@ async def run_security_agent(
             )
             not in deterministic_keys
         )
+        if response_payload is None:
+            model_invalid_output = True
+        else:
+            if len(model_candidates) != len(response_payload["findings"]):
+                model_invalid_output = True
+            else:
+                model_output_findings = list(model_candidates)
+                model_succeeded = True
     except Exception as exc:
         safe_msg = redact_secrets(str(exc))[:2048]
         errors.append(f"Security Agent error: {safe_msg}")
 
-    return {
+    return with_opportunity({
         "candidate_findings": candidate_findings,
         "completed_nodes": ["security"],
         "model_executions": model_executions,
         "errors": errors,
-    }
+    }, "MODEL_COMPLETED" if model_succeeded else "MODEL_INVALID_OUTPUT" if model_invalid_output else "MODEL_FAILURE")

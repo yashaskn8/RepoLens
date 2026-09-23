@@ -166,7 +166,7 @@ def one_case_full_report():
 def test_full_analysis_scope_runs_real_graph_and_grades_structurally(one_case_full_report):
     report = one_case_full_report
     assert report.scope == "FULL_ANALYSIS_GRAPH"
-    assert report.schema_version == "agent-system-eval-report/1.1"
+    assert report.schema_version == "agent-system-eval-report/1.2"
     assert report.execution_status.value == "PARTIAL"
     assert report.full_analysis is not None
     assert report.full_analysis.dataset_split == "DEV"

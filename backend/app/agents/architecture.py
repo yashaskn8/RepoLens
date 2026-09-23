@@ -2,8 +2,9 @@
 
 from typing import Any, Dict, Optional
 from langgraph.runtime import Runtime
-from app.agents.helpers import parse_llm_findings, safe_to_uuid
+from app.agents.helpers import parse_llm_findings, safe_to_uuid, validated_candidate_findings_payload
 from app.agents.state import AnalysisState
+from app.agents.specialist_provenance import build_specialist_opportunity
 from app.agent_runtime.prompt_overlay import resolve_agent_prompt, resolve_agent_prompt_version
 from app.context.runtime import AnalysisRuntimeContext, get_scan_context_engine, resolve_analysis_llm_router
 from app.context.slices import build_specialist_context, candidate_evidence_authority
@@ -33,12 +34,15 @@ async def run_architecture_agent(
     if context_engine is None:
         context_engine = get_scan_context_engine(str(scan_id))
     raw_candidates = state.get("deterministic_architecture_candidates") or []
+    candidate_source = "NONE"
     architecture_hypotheses = []
     for raw in raw_candidates:
         try:
             architecture_hypotheses.append(AnalysisCandidate.model_validate(raw))
         except (TypeError, ValueError):
             continue
+    if architecture_hypotheses:
+        candidate_source = "MAPPER"
     if (
         not architecture_hypotheses
         and context_engine
@@ -49,22 +53,44 @@ async def run_architecture_agent(
             context_engine.repository_graph,
             context_engine.retrieval_service.chunks_by_id.values(),
         )
+        candidate_source = "LOCAL_BUILDER" if architecture_hypotheses else "NONE"
+    specialist_context = None
+    model_attempted = False
+    model_succeeded = False
+    model_invalid_output = False
+    model_output_findings = []
+
+    def with_opportunity(result: Dict[str, Any], reason: str) -> Dict[str, Any]:
+        result["specialist_opportunity"] = build_specialist_opportunity(
+            node="architecture",
+            state=state,
+            candidates=architecture_hypotheses,
+            candidate_source=candidate_source,
+            context=specialist_context,
+            model_attempted=model_attempted,
+            model_succeeded=model_succeeded,
+            model_execution_count=len(result.get("model_executions", [])),
+            model_output_findings=model_output_findings,
+            completion_reason=reason,
+        )
+        return result
+
     if not architecture_hypotheses:
-        return {
+        return with_opportunity({
             "candidate_findings": [],
             "completed_nodes": ["architecture"],
             "model_executions": [],
             "errors": [],
-        }
+        }, "NO_CONTEXT_OR_CANDIDATES" if context_engine is None else "NO_DETERMINISTIC_CANDIDATES")
 
     admission = admission_for_state(state, "architecture")
     if admission.decision != AdmissionDecision.CLOUD_REQUIRED or not context_engine:
-        return {
+        return with_opportunity({
             "candidate_findings": [],
             "completed_nodes": ["architecture"],
             "model_executions": [],
             "errors": [],
-        }
+        }, "ADMISSION_BLOCKED")
 
     packed_budget = min(4_800, max(1_024, admission.max_output_tokens * 2))
     specialist_context = await build_specialist_context(
@@ -136,15 +162,16 @@ async def run_architecture_agent(
     candidate_findings = []
 
     if not any(anchor.is_locatable for anchor in evidence_index.values()):
-        return {
+        return with_opportunity({
             "candidate_findings": [],
             "completed_nodes": ["architecture"],
             "model_executions": [],
             "errors": [],
-        }
+        }, "NO_LOCATABLE_PACKED_EVIDENCE")
 
     try:
         router = resolve_analysis_llm_router(runtime, get_llm_router)
+        model_attempted = True
         request = LLMRequest(
             messages=[
                 LLMMessage(role="system", content=system_prompt),
@@ -167,6 +194,7 @@ async def run_architecture_agent(
         )
         response = await router.generate(request)
         model_executions.append(response.metadata)
+        response_payload = validated_candidate_findings_payload(response.content)
         candidate_findings = parse_llm_findings(
             raw_content=response.content,
             scan_id=scan_id,
@@ -175,13 +203,21 @@ async def run_architecture_agent(
             evidence_index=evidence_index,
             candidate_evidence=candidate_evidence_authority(specialist_context.slices),
         )
+        if response_payload is None:
+            model_invalid_output = True
+        else:
+            if len(candidate_findings) != len(response_payload["findings"]):
+                model_invalid_output = True
+            else:
+                model_output_findings = list(candidate_findings)
+                model_succeeded = True
     except Exception as exc:
         safe_msg = redact_secrets(str(exc))[:2048]
         errors.append(f"Architecture Agent error: {safe_msg}")
 
-    return {
+    return with_opportunity({
         "candidate_findings": candidate_findings,
         "completed_nodes": ["architecture"],
         "model_executions": model_executions,
         "errors": errors,
-    }
+    }, "MODEL_COMPLETED" if model_succeeded else "MODEL_INVALID_OUTPUT" if model_invalid_output else "MODEL_FAILURE")

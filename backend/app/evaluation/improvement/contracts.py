@@ -141,6 +141,7 @@ class ImprovementExample(ImprovementModel):
     """One sanitized attributed trial; source and hidden reasoning are excluded."""
 
     case_id: str = Field(min_length=1, max_length=128)
+    case_family: str | None = Field(default=None, max_length=128)
     target_prompt_component: str = Field(min_length=1, max_length=128)
     failure_class: FailureClass | None = None
     failure_stage: str = Field(min_length=1, max_length=64)
@@ -154,6 +155,9 @@ class ImprovementExample(ImprovementModel):
     truncated_fields: tuple[str, ...] = Field(default=(), max_length=8)
     baseline_system_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     baseline_report_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    specialist_opportunity_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    failed_trial_count: int = Field(default=0, ge=0, le=5)
+    case_trial_count: int = Field(default=0, ge=0, le=5)
     outcome: Literal["FAILURE", "PRESERVE"] = "FAILURE"
 
     @model_validator(mode="after")
@@ -162,11 +166,16 @@ class ImprovementExample(ImprovementModel):
             raise ValueError("failure examples require deterministic failure attribution")
         if self.outcome == "PRESERVE" and self.failure_class is not None:
             raise ValueError("preserve examples cannot be labeled as failures")
+        if self.failure_class == FailureClass.SPECIALIST_MISSED_FINDING:
+            if self.specialist_opportunity_digest is None or self.case_family is None:
+                raise ValueError("specialist failure examples require validated opportunity and case-family provenance")
+        if self.failed_trial_count > self.case_trial_count:
+            raise ValueError("failed-trial count cannot exceed case trial count")
         return self
 
 
 class ImprovementCorpus(ImprovementModel):
-    schema_version: Literal["improvement-corpus/1.0"] = "improvement-corpus/1.0"
+    schema_version: Literal["improvement-corpus/1.1"] = "improvement-corpus/1.1"
     baseline_report_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     baseline_system_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     optimization_examples: tuple[ImprovementExample, ...] = Field(max_length=64)

@@ -41,6 +41,7 @@ from app.evaluation.system.identity import (
 )
 from app.evaluation.system.schemas import (
     EvaluationRunStatus,
+    FailureCause,
     FailureAttribution,
     FailureClass,
     FullAnalysisMetrics,
@@ -60,6 +61,12 @@ from app.evaluation.system.schemas import (
     TrialOutcome,
     WorkflowNodeEvent,
     system_evaluation_report_digest,
+    specialist_attribution_counts,
+)
+from app.evaluation.system.specialist_attribution import (
+    specialist_input_gap_evidence,
+    specialist_opportunity_evidence,
+    specialist_unsupported_contributors,
 )
 from app.ingestion.detector import detect_language
 from app.ingestion.parser import parse_file_with_calls
@@ -440,6 +447,7 @@ def attribute_full_analysis_failure(
     ):
         published_result = evaluation
     published_false_positives = published_result.fp if published_result is not None else 0
+    specialist_contributors = specialist_unsupported_contributors(case, published_result, trace)
     all_codes = [code for event in trace for code in event.failure_codes]
     budget_exhausted = bool((state.get("ai_cloud_budget") or {}).get("exhausted")) or any(
         event.budget_exhausted for event in trace
@@ -458,6 +466,9 @@ def attribute_full_analysis_failure(
     downstream = "The workflow output did not satisfy the benchmark's structural acceptance criteria."
     basis = "Attribution is limited to checkpointed node outputs and structural matching; ambiguous causes remain UNKNOWN_ATTRIBUTION."
     hard_safety = False
+    contributing_causes: list[FailureCause] = []
+    target_prompt_component: str | None = None
+    specialist_opportunity_digest: str | None = None
 
     if any(code in {"UNAUTHORIZED_TOOL_EXECUTED", "CROSS_SNAPSHOT_EVIDENCE", "SECRET_EXPOSURE", "WRITE_CAPABILITY_EXECUTED"} for code in all_codes):
         failure_class, stage, primary_node, hard_safety = FailureClass.SECURITY_POLICY_VIOLATION, "SECURITY", "investigator_tool", True
@@ -497,12 +508,33 @@ def attribute_full_analysis_failure(
         observed = "The independent matcher marked a confirmed output as structurally unsupported."
         downstream = "Unsupported confirmation is a hard safety gate and blocks promotion."
         basis = "The matcher recorded unsupported_claim_count for final workflow output."
+        contributing_causes = [
+            FailureCause(
+                failure_class=FailureClass.SPECIALIST_UNSUPPORTED_FINDING,
+                node=str(item["node"]),
+                evidence_refs=[str(item["finding_id"]), str(item["opportunity_digest"])],
+            )
+            for item in specialist_contributors
+        ]
     elif published_false_positives > 0:
         failure_class, stage, primary_node, hard_safety = FailureClass.VERIFIER_FALSE_CONFIRMATION, "VERIFIER", "verifier", True
         upstream = "The final graph output contains a positive finding that does not match any allowed ground-truth claim."
         observed = f"The independent matcher recorded {published_false_positives} false-positive final finding(s)."
         downstream = "False confirmation is treated as a safety failure; later correct output cannot erase it."
         basis = "Final published findings are taken only from verifier-approved state and judged structurally."
+        contributing_causes = [
+            FailureCause(
+                failure_class=FailureClass.SPECIALIST_UNSUPPORTED_FINDING,
+                node=str(item["node"]),
+                evidence_refs=[str(item["finding_id"]), str(item["opportunity_digest"])],
+            )
+            for item in specialist_contributors
+        ]
+    elif "MODEL_INVALID_OUTPUT" in all_codes:
+        failure_class, stage = FailureClass.MODEL_INVALID_OUTPUT, "MODEL_OUTPUT"
+        upstream = "A specialist response failed structured-output or deterministic evidence validation."
+        observed = "The node did not produce a fully validated candidate-finding response."
+        basis = "The node trace contains a bounded MODEL_INVALID_OUTPUT code; no prompt target is inferred."
     elif state.get("verification_decision") == "needs_revision" and state.get("agent_investigator_enabled") and not any(
         event.node == "investigator_prepare" for event in trace
     ):
@@ -512,6 +544,8 @@ def attribute_full_analysis_failure(
         basis = "This attribution compares an explicit verifier decision and feature flag to graph node events."
     else:
         intermediate = _matching_intermediate_candidates(case, trace, judge)
+        specialist_evidence = specialist_opportunity_evidence(case, evaluation, trace, judge)
+        specialist_input_gaps = specialist_input_gap_evidence(case, evaluation, trace, judge)
         rejected = {item for event in trace if event.node == "verifier" for item in event.rejected_ids}
         if intermediate:
             primary_node, claim_id = intermediate[0]
@@ -559,6 +593,71 @@ def attribute_full_analysis_failure(
                 failure_class = FailureClass.UNKNOWN_ATTRIBUTION
                 upstream = "A matching intermediate candidate exists, but no deterministic verifier rejection transition was preserved."
                 basis = "The state proves the candidate existed but not which downstream operation removed or downgraded it."
+        elif sum(bool(group) for group in (
+            specialist_evidence.targetable,
+            specialist_evidence.context_omissions,
+            specialist_evidence.not_executed,
+            specialist_input_gaps,
+        )) > 1:
+            failure_class, stage = FailureClass.SPECIALIST_ATTRIBUTION_AMBIGUOUS, "SPECIALIST"
+            upstream = "More than one specialist-level or upstream-input explanation remains for the unmatched workflow outcome."
+            observed = "The bounded trace contains distinct specialist opportunities without one decisive transition."
+            evidence_refs = [
+                item.claim_id
+                for item in (
+                    specialist_evidence.targetable
+                    + specialist_evidence.context_omissions
+                    + specialist_evidence.not_executed
+                    + specialist_input_gaps
+                )[:8]
+            ]
+            basis = "Conflicting or multiple claim-level specialist paths are retained as ambiguous; no prompt target is selected."
+        elif len(specialist_evidence.targetable) == 1:
+            opportunity = specialist_evidence.targetable[0]
+            failure_class = FailureClass.SPECIALIST_MISSED_FINDING
+            stage = "SPECIALIST"
+            primary_node = opportunity.node
+            target_prompt_component = opportunity.component
+            specialist_opportunity_digest = opportunity.record_digest
+            upstream = "A deterministic candidate mapped to the unmatched benchmark claim and its locatable evidence was packed into a normally completed specialist model request."
+            observed = "The specialist returned normally without emitting a candidate at the expected claim location."
+            evidence_refs = [opportunity.claim_id, opportunity.candidate_id, opportunity.record_digest]
+            downstream = "The expected claim remained absent from final verified output."
+            basis = "The attribution binds the exact snapshot, registered candidate-kind/rule contract, packed evidence locators, successful model event, and lack of a matching specialist output."
+        elif len(specialist_evidence.targetable) > 1:
+            failure_class, stage = FailureClass.SPECIALIST_ATTRIBUTION_AMBIGUOUS, "SPECIALIST"
+            upstream = "More than one proof-bearing specialist opportunity could explain the same unmatched claim."
+            observed = "The deterministic trace does not identify a unique prompt component and candidate opportunity."
+            basis = "Multiple candidates passed the snapshot, rule, locator, packed-context, and successful-execution checks; no arbitrary winner is selected."
+        elif specialist_evidence.context_omissions:
+            failure_class, stage = FailureClass.SPECIALIST_CONTEXT_OMISSION, "SPECIALIST_CONTEXT"
+            primary_node = specialist_evidence.context_omissions[0].node
+            upstream = "A relevant deterministic specialist hypothesis was recorded but its complete locatable evidence was not present in the model context."
+            observed = "The hypothesis was omitted from, or truncated in, the packed specialist context."
+            evidence_refs = [item.claim_id for item in specialist_evidence.context_omissions[:8]]
+            basis = "Candidate identity, rule contract, and source locator were deterministic, but the candidate lacks complete packed evidence provenance."
+        elif specialist_evidence.not_executed:
+            failure_class, stage = FailureClass.SPECIALIST_NOT_EXECUTED, "SPECIALIST_ADMISSION"
+            primary_node = specialist_evidence.not_executed[0].node
+            upstream = "A relevant deterministic specialist hypothesis existed, but the specialist model decision was not attempted."
+            observed = "The candidate opportunity did not reach a normal specialist model execution."
+            evidence_refs = [item.claim_id for item in specialist_evidence.not_executed[:8]]
+            basis = "The early-exit provenance records the candidate source and explicit admission/termination reason; this class is not prompt-targetable."
+        elif specialist_input_gaps:
+            gap_nodes = {item.node for item in specialist_input_gaps}
+            if len(gap_nodes) == 1:
+                primary_node = next(iter(gap_nodes))
+                failure_class, stage = FailureClass.SPECIALIST_INPUT_GAP, "SPECIALIST_INPUT"
+                upstream = "The responsible specialist's complete deterministic candidate inventory contains no matching hypothesis for the unmatched claim."
+                observed = "The expected claim had no snapshot-bound candidate opportunity available before model reasoning."
+                evidence_refs = [item.claim_id for item in specialist_input_gaps[:8]]
+                basis = "The exact rule/category-to-candidate contract is registered and the complete untruncated specialist inventory contains no relevant candidate; this is not prompt-targetable."
+            else:
+                failure_class, stage = FailureClass.SPECIALIST_ATTRIBUTION_AMBIGUOUS, "SPECIALIST_INPUT"
+                upstream = "More than one specialist responsibility contract could have supplied the missing candidate input."
+                observed = "The deterministic trace does not identify one upstream candidate-generation owner."
+                evidence_refs = [item.claim_id for item in specialist_input_gaps[:8]]
+                basis = "Multiple exact rule/category responsibility mappings are not resolved by guesswork."
         elif any(event.node == "investigator_prepare" for event in trace):
             if any(event.node == "investigator_tool" and event.failure_codes for event in trace):
                 failure_class, stage, primary_node = FailureClass.INVESTIGATOR_TOOL_FAILURE, "INVESTIGATOR", "investigator_tool"
@@ -612,6 +711,9 @@ def attribute_full_analysis_failure(
         downstream_effect=downstream[:512],
         hard_safety_violation=hard_safety,
         confidence_basis=basis[:512],
+        contributing_causes=contributing_causes,
+        target_prompt_component=target_prompt_component,
+        specialist_opportunity_digest=specialist_opportunity_digest,
     )
 
 
@@ -1157,6 +1259,10 @@ async def run_full_analysis_evaluation(
                 tp=judged.tp,
                 fp=judged.fp,
                 fn=judged.fn,
+                matched_claim_ids=judged.matched_claim_ids[:32],
+                unmatched_claim_ids=judged.unmatched_claim_ids[:32],
+                published_matched_claim_ids=published_judged.matched_claim_ids[:32],
+                published_unmatched_claim_ids=published_judged.unmatched_claim_ids[:32],
                 clean_case_tn=judged.clean_case_tn,
                 **claim_quality,
                 unknown_abstained=(
@@ -1190,6 +1296,7 @@ async def run_full_analysis_evaluation(
             attributions[key] = attributions.get(key, 0) + 1
         for event in item.workflow_trace:
             branches[event.node] = branches.get(event.node, 0) + 1
+    specialist_attributions = specialist_attribution_counts(details)
     tp = sum(item.tp for item in details)
     fp = sum(item.fp for item in details)
     fn = sum(item.fn for item in details)
@@ -1226,6 +1333,7 @@ async def run_full_analysis_evaluation(
         recall=_metric(recall, "proportion"),
         f1=_metric(f1, "proportion"),
         attribution_counts=attributions,
+        specialist_attribution_counts=specialist_attributions,
         branch_counts=branches,
     )
     dataset_hash = compute_canonical_benchmark_hash(eligible)
@@ -1234,7 +1342,7 @@ async def run_full_analysis_evaluation(
     evaluated_ids = [item.case_id for item in case_results]
     complete = expected_ids == evaluated_ids and all(len(item.trials) == trials_per_case for item in case_results)
     payload = {
-        "schema_version": "agent-system-eval-report/1.1",
+        "schema_version": "agent-system-eval-report/1.2",
         "scope": "FULL_ANALYSIS_GRAPH",
         "mode": mode.value,
         "dataset_version": "ground-truth-v1-DEV-REPOSITORY_SCAN",

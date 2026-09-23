@@ -7,6 +7,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.agents.specialist_provenance import SpecialistOpportunityRecord
 from app.llm.types import LLMProvider
 
 
@@ -30,7 +31,14 @@ class FailureClass(str, Enum):
     INVESTIGATOR_INSUFFICIENT_EVIDENCE = "INVESTIGATOR_INSUFFICIENT_EVIDENCE"
     INVESTIGATOR_TOOL_FAILURE = "INVESTIGATOR_TOOL_FAILURE"
     REVISION_FAILED_TO_REPAIR = "REVISION_FAILED_TO_REPAIR"
+    SPECIALIST_MISSED_FINDING = "SPECIALIST_MISSED_FINDING"
+    SPECIALIST_UNSUPPORTED_FINDING = "SPECIALIST_UNSUPPORTED_FINDING"
+    SPECIALIST_CONTEXT_OMISSION = "SPECIALIST_CONTEXT_OMISSION"
+    SPECIALIST_NOT_EXECUTED = "SPECIALIST_NOT_EXECUTED"
+    SPECIALIST_INPUT_GAP = "SPECIALIST_INPUT_GAP"
+    SPECIALIST_ATTRIBUTION_AMBIGUOUS = "SPECIALIST_ATTRIBUTION_AMBIGUOUS"
     MODEL_PROVIDER_FAILURE = "MODEL_PROVIDER_FAILURE"
+    MODEL_INVALID_OUTPUT = "MODEL_INVALID_OUTPUT"
     BUDGET_EXHAUSTION = "BUDGET_EXHAUSTION"
     STAGNATION = "STAGNATION"
     HARNESS_FAILURE = "HARNESS_FAILURE"
@@ -60,6 +68,17 @@ class WorkflowNodeEvent(SystemEvalModel):
     evidence_count: int = Field(default=0, ge=0)
     budget_exhausted: bool = False
     failure_codes: list[str] = Field(default_factory=list, max_length=16)
+    specialist_opportunity: SpecialistOpportunityRecord | None = None
+
+
+class FailureCause(SystemEvalModel):
+    """Non-primary contributor retained without granting prompt-target authority."""
+
+    failure_class: FailureClass
+    node: str = Field(min_length=1, max_length=64)
+    role: Literal["CONTRIBUTING"] = "CONTRIBUTING"
+    evidence_refs: list[str] = Field(default_factory=list, max_length=16)
+    targetable: Literal[False] = False
 
 
 class FailureAttribution(SystemEvalModel):
@@ -76,6 +95,29 @@ class FailureAttribution(SystemEvalModel):
     downstream_effect: str = Field(min_length=1, max_length=512)
     hard_safety_violation: bool = False
     confidence_basis: str = Field(min_length=1, max_length=512)
+    contributing_causes: list[FailureCause] = Field(default_factory=list, max_length=8)
+    target_prompt_component: str | None = Field(default=None, max_length=128)
+    specialist_opportunity_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def validate_specialist_target_authority(self) -> "FailureAttribution":
+        if self.failure_class == FailureClass.SPECIALIST_MISSED_FINDING:
+            expected = {
+                "architecture": "architecture-agent",
+                "security": "security-agent",
+                "bug": "bug-agent",
+            }.get(self.primary_node or "")
+            if (
+                expected is None
+                or self.target_prompt_component != expected
+                or self.specialist_opportunity_digest is None
+            ):
+                raise ValueError("specialist miss attribution requires one proof-bound registered prompt target")
+        elif self.target_prompt_component is not None or self.specialist_opportunity_digest is not None:
+            raise ValueError("only validated specialist misses may carry a prompt target")
+        if any(item.targetable for item in self.contributing_causes):
+            raise ValueError("contributing causes cannot authorize prompt optimization")
+        return self
 
 
 class FullAnalysisTrialDetail(SystemEvalModel):
@@ -88,6 +130,10 @@ class FullAnalysisTrialDetail(SystemEvalModel):
     tp: int = Field(ge=0)
     fp: int = Field(ge=0)
     fn: int = Field(ge=0)
+    matched_claim_ids: list[str] = Field(default_factory=list, max_length=32)
+    unmatched_claim_ids: list[str] = Field(default_factory=list, max_length=32)
+    published_matched_claim_ids: list[str] = Field(default_factory=list, max_length=32)
+    published_unmatched_claim_ids: list[str] = Field(default_factory=list, max_length=32)
     clean_case_tn: bool = False
     unknown_abstained: bool | None = None
     category_evaluated_claims: int = Field(default=0, ge=0)
@@ -102,6 +148,39 @@ class FullAnalysisTrialDetail(SystemEvalModel):
     failure_attribution: FailureAttribution | None = None
     resumed: bool = False
     duration_ms: float = Field(ge=0.0)
+
+
+_SPECIALIST_FAILURE_CLASSES = {
+    FailureClass.SPECIALIST_MISSED_FINDING,
+    FailureClass.SPECIALIST_UNSUPPORTED_FINDING,
+    FailureClass.SPECIALIST_CONTEXT_OMISSION,
+    FailureClass.SPECIALIST_NOT_EXECUTED,
+    FailureClass.SPECIALIST_INPUT_GAP,
+    FailureClass.SPECIALIST_ATTRIBUTION_AMBIGUOUS,
+}
+
+
+def specialist_attribution_counts(details: list[FullAnalysisTrialDetail]) -> dict[str, int]:
+    """Derive class/node, targetable, ambiguity, and contributor counts from trials."""
+    counts: dict[str, int] = {}
+
+    def increment(key: str) -> None:
+        counts[key] = counts.get(key, 0) + 1
+
+    for detail in details:
+        attribution = detail.failure_attribution
+        if attribution is None:
+            continue
+        if attribution.failure_class in _SPECIALIST_FAILURE_CLASSES:
+            increment(f"PRIMARY:{attribution.failure_class.value}:{attribution.primary_node or 'UNKNOWN'}")
+        if attribution.target_prompt_component:
+            increment(f"TARGETABLE:{attribution.target_prompt_component}")
+        if attribution.failure_class == FailureClass.SPECIALIST_ATTRIBUTION_AMBIGUOUS:
+            increment("AMBIGUOUS")
+        for cause in attribution.contributing_causes:
+            if cause.failure_class in _SPECIALIST_FAILURE_CLASSES:
+                increment(f"CONTRIBUTING:{cause.failure_class.value}:{cause.node}")
+    return counts
 
 
 class FullAnalysisMetrics(SystemEvalModel):
@@ -131,6 +210,7 @@ class FullAnalysisMetrics(SystemEvalModel):
     recall: MeasuredMetric
     f1: MeasuredMetric
     attribution_counts: dict[str, int] = Field(default_factory=dict)
+    specialist_attribution_counts: dict[str, int] = Field(default_factory=dict)
     branch_counts: dict[str, int] = Field(default_factory=dict)
 
 
@@ -333,7 +413,11 @@ class SystemTrialPolicy(SystemEvalModel):
 
 
 class SystemEvaluationReport(SystemEvalModel):
-    schema_version: Literal["agent-system-eval-report/1.0", "agent-system-eval-report/1.1"] = "agent-system-eval-report/1.0"
+    schema_version: Literal[
+        "agent-system-eval-report/1.0",
+        "agent-system-eval-report/1.1",
+        "agent-system-eval-report/1.2",
+    ] = "agent-system-eval-report/1.0"
     mode: SystemEvalMode
     scope: Literal["PRODUCTION_EVIDENCE_INVESTIGATOR_GRAPH", "FULL_ANALYSIS_GRAPH"] = "PRODUCTION_EVIDENCE_INVESTIGATOR_GRAPH"
     dataset_version: str = Field(min_length=1, max_length=64)
@@ -360,7 +444,7 @@ class SystemEvaluationReport(SystemEvalModel):
             if self.scope != "PRODUCTION_EVIDENCE_INVESTIGATOR_GRAPH" or self.full_analysis is not None:
                 raise ValueError("legacy report schema is reserved for investigator-graph scope")
         elif self.scope != "FULL_ANALYSIS_GRAPH" or self.full_analysis is None:
-            raise ValueError("report schema 1.1 requires full-analysis scope details")
+            raise ValueError("report schemas 1.1 and 1.2 require full-analysis scope details")
         ids = [item.case_id for item in self.case_results]
         if len(ids) != len(set(ids)) or ids != self.evaluated_case_ids:
             raise ValueError("case result IDs must uniquely match evaluated_case_ids in order")
@@ -480,6 +564,9 @@ class SystemEvaluationReport(SystemEvalModel):
                     expected_branches[event.node] = expected_branches.get(event.node, 0) + 1
             if details.metrics.attribution_counts != expected_attributions or details.metrics.branch_counts != expected_branches:
                 raise ValueError("full-analysis attribution/branch metrics disagree with child records")
+            expected_specialist_attributions = specialist_attribution_counts(details.trial_details)
+            if details.metrics.specialist_attribution_counts != expected_specialist_attributions:
+                raise ValueError("full-analysis specialist attribution metrics disagree with child records")
         trials = [trial for item in self.case_results for trial in item.trials]
         if self.mode == SystemEvalMode.LIVE:
             expected_identity = (

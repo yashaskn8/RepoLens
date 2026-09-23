@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from app.evaluation.ground_truth.loader import compute_canonical_benchmark_hash
+from app.evaluation.ground_truth.matcher import IndependentBenchmarkJudge
 from app.evaluation.ground_truth.public_dev import (
     PUBLIC_DEV_REPOSITORY_SCAN_CASE_IDS,
     load_public_dev_repository_cases,
@@ -15,14 +16,22 @@ from app.evaluation.improvement.contracts import (
 from app.evaluation.improvement.digest import canonical_digest
 from app.evaluation.improvement.policy import ImprovementPolicy
 from app.evaluation.system.schemas import EvaluationRunStatus, FailureClass, SystemEvaluationReport
+from app.evaluation.system.specialist_attribution import (
+    SPECIALIST_PROMPT_COMPONENTS,
+    specialist_preserve_proof,
+    validated_specialist_target,
+)
 from app.security.redaction import redact_secrets
 
 
-FAILURE_TARGETS: dict[FailureClass, str] = {
-    FailureClass.VERIFIER_FALSE_REJECTION: "verifier-agent",
-    FailureClass.VERIFIER_FALSE_CONFIRMATION: "verifier-agent",
-    FailureClass.INVESTIGATOR_INSUFFICIENT_EVIDENCE: "evidence-investigator",
-    FailureClass.REVISION_FAILED_TO_REPAIR: "revision-agent",
+FAILURE_TARGETS: dict[tuple[FailureClass, str], str] = {
+    (FailureClass.VERIFIER_FALSE_REJECTION, "verifier"): "verifier-agent",
+    (FailureClass.VERIFIER_FALSE_CONFIRMATION, "verifier"): "verifier-agent",
+    (FailureClass.INVESTIGATOR_INSUFFICIENT_EVIDENCE, "investigator_complete"): "evidence-investigator",
+    (FailureClass.REVISION_FAILED_TO_REPAIR, "revise"): "revision-agent",
+    (FailureClass.SPECIALIST_MISSED_FINDING, "architecture"): "architecture-agent",
+    (FailureClass.SPECIALIST_MISSED_FINDING, "security"): "security-agent",
+    (FailureClass.SPECIALIST_MISSED_FINDING, "bug"): "bug-agent",
 }
 
 
@@ -152,6 +161,31 @@ def build_improvement_corpus(
         (case.case_id, grade.trial_number): grade
         for case in report.case_results for grade in case.trials
     }
+    case_by_id = {item.case_id: item for item in public_cases}
+    judge = IndependentBenchmarkJudge()
+    target_by_trial: dict[tuple[str, int], tuple[str, str | None]] = {}
+    failed_trial_counts: dict[tuple[str, str, str, str], int] = {}
+    case_trial_counts: dict[str, int] = {}
+    for key, grade in grade_by_trial.items():
+        case_trial_counts[key[0]] = case_trial_counts.get(key[0], 0) + 1
+        detail = detail_by_trial.get(key)
+        attribution = detail.failure_attribution if detail is not None else None
+        if grade.task_success is not False or attribution is None:
+            continue
+        target = FAILURE_TARGETS.get((attribution.failure_class, attribution.primary_node or ""))
+        proof_digest = None
+        if attribution.failure_class == FailureClass.SPECIALIST_MISSED_FINDING:
+            target = validated_specialist_target(
+                case_by_id[key[0]], detail.workflow_trace, attribution, judge,
+            )
+            proof_digest = attribution.specialist_opportunity_digest if target else None
+        if target is None:
+            continue
+        target_by_trial[key] = (target, proof_digest)
+        signature = (
+            key[0], target, attribution.failure_class.value, attribution.primary_node or "",
+        )
+        failed_trial_counts[signature] = failed_trial_counts.get(signature, 0) + 1
     examples: list[ImprovementExample] = []
     example_keys: set[tuple[str, str, str]] = set()
     preserve_by_component: dict[str, dict[str, ImprovementExample]] = {}
@@ -166,7 +200,8 @@ def build_improvement_corpus(
             continue
         if grade.task_success is False and detail.failure_attribution is not None:
             attribution = detail.failure_attribution
-            target = FAILURE_TARGETS.get(attribution.failure_class)
+            target_info = target_by_trial.get(key)
+            target = target_info[0] if target_info is not None else None
             if target is None:
                 continue
             example_key = (key[0], target, attribution.failure_class.value)
@@ -201,6 +236,7 @@ def build_improvement_corpus(
                 truncated_fields.append("safety_codes")
             examples.append(ImprovementExample(
                 case_id=key[0],
+                case_family=case_by_id[key[0]].case_family,
                 target_prompt_component=target,
                 failure_class=attribution.failure_class,
                 failure_stage=attribution.failure_stage,
@@ -214,6 +250,11 @@ def build_improvement_corpus(
                 truncated_fields=tuple(truncated_fields),
                 baseline_system_digest=report.system_identity.system_digest,
                 baseline_report_digest=report.report_digest,
+                specialist_opportunity_digest=target_info[1],
+                failed_trial_count=failed_trial_counts.get((
+                    key[0], target, attribution.failure_class.value, attribution.primary_node or "",
+                ), 0),
+                case_trial_count=case_trial_counts.get(key[0], 0),
                 outcome="FAILURE",
             ))
         elif grade.task_success is True and grade.trial_number == 1:
@@ -228,22 +269,32 @@ def build_improvement_corpus(
             ):
                 if node not in successful_nodes:
                     continue
+                preserve_digest = None
+                preserve_refs: tuple[str, ...] = ()
+                if node in SPECIALIST_PROMPT_COMPONENTS:
+                    proof = specialist_preserve_proof(case_by_id[key[0]], detail, node=node, judge=judge)
+                    if proof is None:
+                        continue
+                    preserve_digest, preserve_refs = proof
                 events, events_truncated = _safe_events(detail.workflow_trace, selected_policy)
                 preserve_by_component.setdefault(target, {}).setdefault(key[0], ImprovementExample(
                     case_id=key[0],
+                    case_family=case_by_id[key[0]].case_family,
                     target_prompt_component=target,
                     failure_class=None,
                     failure_stage="PRESERVED_SUCCESS",
                     primary_node=node,
                     observed_behavior="The complete public DEV trial met RepoLens deterministic task-success criteria.",
                     expected_behavior="Preserve the behavior that produced a successful task outcome.",
-                    supporting_evidence_refs=(),
+                    supporting_evidence_refs=preserve_refs,
                     downstream_effect="No downstream failure was attributed in this successful trial.",
                     workflow_events=events,
                     safety_codes=(),
                     truncated_fields=("workflow_events",) if events_truncated else (),
                     baseline_system_digest=report.system_identity.system_digest,
                     baseline_report_digest=report.report_digest,
+                    specialist_opportunity_digest=preserve_digest,
+                    case_trial_count=case_trial_counts.get(key[0], 0),
                     outcome="PRESERVE",
                 ))
 
@@ -255,12 +306,16 @@ def build_improvement_corpus(
         preserve.extend(eligible[:selected_policy.max_preserve_examples])
     selection_payload = {
         "policy": selected_policy.corpus_selection_policy,
+        "target_selection_policy": selected_policy.target_selection_policy,
         "optimization_case_digest": canonical_digest(list(optimization_ids)),
         "validation_case_digest": canonical_digest(list(validation_ids)),
-        "failure_targets": {key.value: value for key, value in FAILURE_TARGETS.items()},
+        "failure_targets": {
+            f"{failure.value}:{node}": value
+            for (failure, node), value in FAILURE_TARGETS.items()
+        },
     }
     payload = {
-        "schema_version": "improvement-corpus/1.0",
+        "schema_version": "improvement-corpus/1.1",
         "baseline_report_digest": report.report_digest,
         "baseline_system_digest": report.system_identity.system_digest,
         "optimization_examples": [item.model_dump(mode="json") for item in examples],

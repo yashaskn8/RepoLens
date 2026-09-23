@@ -258,25 +258,44 @@ def select_target(
     registry: OptimizablePromptRegistry | None = None,
     *,
     allowed_components: Sequence[str] | None = None,
+    policy: ImprovementPolicy | None = None,
 ) -> str | None:
-    """Choose a prompt surface only from deterministic attribution counts."""
+    """Choose a target only after repeated, proof-bound failures span cases/families."""
+    selected_policy = policy or ImprovementPolicy()
     allowed = set((registry or OptimizablePromptRegistry()).names)
     if allowed_components is not None:
         allowed &= set(allowed_components)
-    failed_cases: dict[str, set[str]] = {}
+    failures: dict[str, dict[str, tuple[str | None, int]]] = {}
     for item in corpus.optimization_examples:
         if item.outcome != "FAILURE" or item.failure_class is None:
             continue
-        target = FAILURE_TARGETS.get(item.failure_class)
-        if target in allowed:
-            failed_cases.setdefault(target, set()).add(item.case_id)
-    if not failed_cases:
+        target = FAILURE_TARGETS.get((item.failure_class, item.primary_node or ""))
+        if item.failure_class == FailureClass.SPECIALIST_MISSED_FINDING and (
+            item.specialist_opportunity_digest is None or item.failed_trial_count < selected_policy.min_failed_trials_per_target_case
+        ):
+            continue
+        if target == item.target_prompt_component and target in allowed and item.case_family:
+            failures.setdefault(target, {})[item.case_id] = (item.case_family, item.failed_trial_count)
+    eligible = {
+        component: cases
+        for component, cases in failures.items()
+        if len(cases) >= selected_policy.min_target_failure_cases
+        and len({family for family, _ in cases.values() if family}) >= selected_policy.min_target_failure_families
+        and all(
+            count >= selected_policy.min_failed_trials_per_target_case
+            for _, count in cases.values()
+        )
+    }
+    if not eligible:
         return None
-    return sorted(failed_cases, key=lambda name: (-len(failed_cases[name]), name))[0]
+    return sorted(eligible, key=lambda name: (-len(eligible[name]), name))[0]
 
 
 def _target_failure_classes(component: str) -> tuple[FailureClass, ...]:
-    return tuple(sorted((key for key, value in FAILURE_TARGETS.items() if value == component), key=lambda item: item.value))
+    return tuple(sorted(
+        {failure for (failure, _node), value in FAILURE_TARGETS.items() if value == component},
+        key=lambda item: item.value,
+    ))
 
 
 def _reflection_payload(component: str, failures, preserve) -> tuple[dict[str, Any], dict[str, str]]:

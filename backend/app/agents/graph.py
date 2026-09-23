@@ -8,6 +8,7 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 from langgraph.graph import END, START, StateGraph
+from pydantic import ValidationError
 
 from app.agents.architecture import run_architecture_agent
 from app.agents.bug import run_bug_agent
@@ -28,6 +29,7 @@ from app.agents.mcp_enrichment import run_mcp_enrichment_node
 from app.agents.revision import run_revision_agent
 from app.agents.security import run_security_agent
 from app.agents.state import AnalysisState
+from app.agents.specialist_provenance import SpecialistOpportunityRecord
 from app.agents.verifier import run_verifier_agent
 from app.agents.helpers import safe_to_uuid
 from app.analysis.store import EvidenceStore
@@ -192,10 +194,17 @@ async def _budgeted_node(fn: Any, state: AnalysisState, runtime: Any = None) -> 
             raise _WorkflowNodeExecutionError(node_name, trace_event) from None
         node_span.set_attribute("repolens.workflow.result_keys", len(result or {}))
     result = dict(result or {})
+    # Opportunity provenance is report/checkpoint telemetry, not workflow state.
+    # Keeping it out of the LangGraph merge prevents concurrent specialist nodes
+    # from overwriting one another and avoids a second state reducer.
+    specialist_opportunity = result.pop("specialist_opportunity", None)
     budget = current_workflow_cloud_budget()
     if budget is not None:
         result["ai_cloud_budget"] = budget.snapshot().as_dict()
-    trace_event = _workflow_node_event(node_name, state, result, time.perf_counter() - started)
+    trace_output = dict(result)
+    if specialist_opportunity is not None:
+        trace_output["specialist_opportunity"] = specialist_opportunity
+    trace_event = _workflow_node_event(node_name, state, trace_output, time.perf_counter() - started)
     if len(state.get("workflow_trace", [])) < MAX_WORKFLOW_TRACE_EVENTS:
         result["workflow_trace"] = [trace_event]
     return result
@@ -280,6 +289,17 @@ def _workflow_node_event(node: str, before: AnalysisState, output: Dict[str, Any
         "model_execution_count": model_execution_count,
         "finding_refs": refs[:64],
     }
+    raw_specialist_opportunity = output.get("specialist_opportunity")
+    specialist_opportunity = None
+    specialist_provenance_invalid = False
+    if node in {"architecture", "security", "bug"} and raw_specialist_opportunity is not None:
+        try:
+            specialist_opportunity = SpecialistOpportunityRecord.model_validate(raw_specialist_opportunity)
+            output_projection["specialist_opportunity_digest"] = specialist_opportunity.record_digest
+            if specialist_opportunity.completion_reason == "MODEL_INVALID_OUTPUT":
+                output_projection["specialist_model_output_invalid"] = True
+        except ValidationError:
+            specialist_provenance_invalid = True
     models = []
     for item in model_executions[:16] if isinstance(model_executions, list) else []:
         provider = getattr(item, "provider", None)
@@ -317,6 +337,13 @@ def _workflow_node_event(node: str, before: AnalysisState, output: Dict[str, Any
             pass
     errors = output.get("errors", [])
     failure_codes = []
+    if specialist_provenance_invalid:
+        failure_codes.append("SPECIALIST_PROVENANCE_INVALID")
+    if (
+        specialist_opportunity is not None
+        and specialist_opportunity.completion_reason == "MODEL_INVALID_OUTPUT"
+    ):
+        failure_codes.append("MODEL_INVALID_OUTPUT")
     for value in errors[:16] if isinstance(errors, list) else []:
         text = str(value).lower()
         failure_codes.append(
@@ -364,6 +391,10 @@ def _workflow_node_event(node: str, before: AnalysisState, output: Dict[str, Any
         "evidence_count": evidence_count,
         "budget_exhausted": bool((cloud_budget or {}).get("exhausted", False)),
         "failure_codes": list(dict.fromkeys(failure_codes))[:16],
+        "specialist_opportunity": (
+            specialist_opportunity.model_dump(mode="json")
+            if specialist_opportunity is not None else None
+        ),
     }
 
 

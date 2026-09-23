@@ -56,20 +56,26 @@ from app.llm.types import LLMProvider
 
 
 def _example(case_id: str, failure: FailureClass) -> ImprovementExample:
+    node = "verifier" if failure in {
+        FailureClass.VERIFIER_FALSE_CONFIRMATION, FailureClass.VERIFIER_FALSE_REJECTION,
+    } else "investigator_complete" if failure == FailureClass.INVESTIGATOR_INSUFFICIENT_EVIDENCE else "other"
     return ImprovementExample(
         case_id=case_id,
+        case_family=f"FAMILY-{case_id}",
         target_prompt_component="verifier-agent" if failure in {
             FailureClass.VERIFIER_FALSE_CONFIRMATION, FailureClass.VERIFIER_FALSE_REJECTION,
         } else "evidence-investigator",
         failure_class=failure,
         failure_stage="VERIFICATION",
-        primary_node="verifier",
+        primary_node=node,
         observed_behavior="A deterministic evaluation failure was recorded.",
         expected_behavior="The verifier should apply the independent evidence contract.",
         supporting_evidence_refs=("evidence:sha256:abc",),
         downstream_effect="The candidate reached an incorrect final state.",
         baseline_system_digest="a" * 64,
         baseline_report_digest="b" * 64,
+        failed_trial_count=2,
+        case_trial_count=5,
     )
 
 
@@ -87,7 +93,7 @@ def _corpus(
         "selection_policy": "failure-group-hash-split/1.0",
         "selection_digest": "c" * 64,
         "truncated": False,
-        "schema_version": "improvement-corpus/1.0",
+        "schema_version": "improvement-corpus/1.1",
     }
     payload["corpus_digest"] = canonical_digest(payload)
     return ImprovementCorpus.model_validate(payload)

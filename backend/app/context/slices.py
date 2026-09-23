@@ -25,6 +25,7 @@ class SpecialistContextPack:
     slices: tuple[EvidenceSlice, ...]
     estimated_tokens: int
     packed_bytes: int
+    truncated_candidate_ids: tuple[str, ...] = ()
 
 
 def candidate_evidence_authority(
@@ -199,6 +200,7 @@ async def build_specialist_context(
     contexts: list[dict] = []
     evidence_index: dict[str, dict] = {}
     conflicted_evidence_ids: set[str] = set()
+    truncated_candidate_ids: set[str] = set()
 
     for candidate in selected:
         role_refs: dict[str, list[str]] = {"primary": list(candidate.evidence_refs)}
@@ -239,6 +241,8 @@ async def build_specialist_context(
             file_path_filter=target_file if targeted_roles else None,
         )
         packed = pack_repository_context(bundle, token_budget=per_candidate_budget)
+        if packed.truncated:
+            truncated_candidate_ids.add(candidate.candidate_id)
         candidate_for_slice = candidate.model_copy(deep=True)
         retrieved_refs = [evidence_id for evidence_id in packed.evidence_index
             if evidence_id not in declared_refs and evidence_id.startswith("chunk:")][:2]
@@ -315,6 +319,7 @@ async def build_specialist_context(
         slices=tuple(slices),
         estimated_tokens=max(1, (packed_bytes + 3) // 4),
         packed_bytes=packed_bytes,
+        truncated_candidate_ids=tuple(sorted(truncated_candidate_ids)),
     )
 
 
