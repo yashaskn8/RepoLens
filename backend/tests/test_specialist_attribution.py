@@ -9,14 +9,18 @@ from types import SimpleNamespace
 import pytest
 
 from app.agents.specialist_provenance import SpecialistOpportunityRecord, build_specialist_opportunity
+import app.agents.specialist_provenance as provenance_module
 from app.agents.helpers import validated_candidate_findings_payload
 from app.context.slices import SpecialistContextPack
 from app.evaluation.ground_truth.matcher import EvaluatedFinding, IndependentBenchmarkJudge
 from app.evaluation.ground_truth.schemas import EvaluationStage
 from app.evaluation.system.full_analysis import attribute_full_analysis_failure
+from app.evaluation.system import full_analysis as full_analysis_module
 from app.evaluation.system.schemas import FailureAttribution, FailureClass, WorkflowNodeEvent
 from app.evaluation.system.specialist_attribution import (
     SPECIALIST_CANDIDATE_RULE_CONTRACTS,
+    SpecialistOpportunityMatch,
+    specialist_input_gap_evidence,
     specialist_opportunity_evidence,
     specialist_preserve_proof,
     specialist_unsupported_contributors,
@@ -54,14 +58,20 @@ def _record(
     evidence_truncated: bool = False,
     no_candidates: bool = False,
     node: str = "bug",
+    candidate_kind: str = "BROAD_EXCEPTION_SWALLOW",
+    candidate_path: str = "app/services/payment.py",
+    candidate_line: int = 4,
+    candidate_symbol: str = "process_transaction",
+    model_attempted: bool | None = None,
+    completion_reason: str | None = None,
 ):
     candidate = AnalysisCandidate(
         candidate_id=candidate_id,
-        candidate_kind="BROAD_EXCEPTION_SWALLOW",
+        candidate_kind=candidate_kind,
         deterministic_reason="Raw source must never enter persisted provenance.",
         evidence_refs=["chunk:anchor-a"],
-        related_symbol="process_transaction",
-        metadata={"file_path": "app/services/payment.py", "source_line": 4},
+        related_symbol=candidate_symbol,
+        metadata={"file_path": candidate_path, "source_line": candidate_line},
     )
     slices = ()
     evidence_index = {}
@@ -84,10 +94,10 @@ def _record(
         ),)
         evidence_index = {
             "chunk:anchor-a": {
-                "file_path": "app/services/payment.py",
-                "start_line": 4,
+                "file_path": candidate_path,
+                "start_line": candidate_line,
                 "end_line": 5,
-                "symbol": "process_transaction",
+                "symbol": candidate_symbol,
             }
         }
         truncated_ids = (candidate_id,) if evidence_truncated else ()
@@ -111,12 +121,12 @@ def _record(
         candidates=candidates,
         candidate_source="NONE" if no_candidates else "MAPPER",
         context=None if no_candidates else context,
-        completion_reason=(
+        completion_reason=completion_reason or (
             "NO_DETERMINISTIC_CANDIDATES"
             if no_candidates
             else "MODEL_COMPLETED" if model_succeeded else "MODEL_FAILURE"
         ),
-        model_attempted=not no_candidates,
+        model_attempted=(not no_candidates if model_attempted is None else model_attempted),
         model_succeeded=model_succeeded and not no_candidates,
         model_execution_count=1 if model_succeeded and not no_candidates else 0,
         model_output_findings=output,
@@ -202,7 +212,161 @@ def test_unpacked_or_truncated_evidence_is_non_targetable_context_omission():
         )
         assert attribution is not None
         assert attribution.failure_class == FailureClass.SPECIALIST_CONTEXT_OMISSION
+        assert attribution.primary_node == "bug"
         assert attribution.target_prompt_component is None
+
+
+def _map_security_to_bug_contract(monkeypatch):
+    monkeypatch.setitem(
+        SPECIALIST_CANDIDATE_RULE_CONTRACTS,
+        ("security", "BROAD_EXCEPTION_SWALLOW"),
+        ("BROAD_EXCEPTION_SWALLOW", "CORRECTNESS"),
+    )
+
+
+def test_multiple_distinct_context_omissions_are_ambiguous_not_first_node(monkeypatch):
+    case = _case()
+    _map_security_to_bug_contract(monkeypatch)
+    judge, missing = _missing(case)
+    records = (
+        _record(case, node="security", packed=False),
+        _record(case, node="bug", candidate_id="candidate:bug", packed=False),
+    )
+    trace = [
+        _event(records[0], node="security"),
+        _event(records[1], node="bug"),
+    ]
+
+    attribution = attribute_full_analysis_failure(
+        case, missing, {"status": "COMPLETED"}, trace, judge,
+    )
+
+    assert attribution is not None
+    assert attribution.failure_class == FailureClass.SPECIALIST_ATTRIBUTION_AMBIGUOUS
+    assert attribution.primary_node is None
+    assert attribution.target_prompt_component is None
+    assert set(attribution.evidence_refs) >= {
+        "BROAD_EXCEPTION_SWALLOW@app/services/payment.py",
+        "candidate:opportunity-a",
+        "candidate:bug",
+        records[0]["record_digest"],
+        records[1]["record_digest"],
+    }
+
+
+def test_duplicate_identical_context_omission_is_deduplicated_not_ambiguous():
+    case = _case()
+    judge, missing = _missing(case)
+    event = _event(_record(case, packed=False))
+
+    evidence = specialist_opportunity_evidence(case, missing, [event, event], judge)
+    attribution = attribute_full_analysis_failure(
+        case, missing, {"status": "COMPLETED"}, [event, event], judge,
+    )
+
+    assert len(evidence.context_omissions) == 1
+    assert attribution is not None
+    assert attribution.failure_class == FailureClass.SPECIALIST_CONTEXT_OMISSION
+    assert attribution.primary_node == "bug"
+    assert attribution.target_prompt_component is None
+
+
+def test_multiple_not_executed_specialists_are_ambiguous_not_first_node(monkeypatch):
+    case = _case()
+    _map_security_to_bug_contract(monkeypatch)
+    judge, missing = _missing(case)
+    security = _record(
+        case, node="security", model_succeeded=False, model_attempted=False,
+        completion_reason="ADMISSION_BLOCKED",
+    )
+    bug = _record(
+        case, candidate_id="candidate:bug", node="bug", model_succeeded=False,
+        model_attempted=False, completion_reason="ADMISSION_BLOCKED",
+    )
+
+    attribution = attribute_full_analysis_failure(
+        case, missing, {"status": "COMPLETED"},
+        [_event(security, node="security"), _event(bug, node="bug")], judge,
+    )
+
+    assert attribution is not None
+    assert attribution.failure_class == FailureClass.SPECIALIST_ATTRIBUTION_AMBIGUOUS
+    assert attribution.primary_node is None
+    assert attribution.target_prompt_component is None
+
+
+def test_single_non_executed_opportunity_keeps_specific_non_targetable_node():
+    case = _case()
+    judge, missing = _missing(case)
+    record = _record(
+        case, model_succeeded=False, model_attempted=False,
+        completion_reason="ADMISSION_BLOCKED",
+    )
+
+    attribution = attribute_full_analysis_failure(
+        case, missing, {"status": "COMPLETED"}, [_event(record)], judge,
+    )
+
+    assert attribution is not None
+    assert attribution.failure_class == FailureClass.SPECIALIST_NOT_EXECUTED
+    assert attribution.primary_node == "bug"
+    assert attribution.target_prompt_component is None
+
+
+def test_single_security_context_omission_keeps_security_as_non_targetable_node(monkeypatch):
+    case = _case()
+    _map_security_to_bug_contract(monkeypatch)
+    judge, missing = _missing(case)
+    event = _event(_record(case, node="security", packed=False), node="security")
+
+    attribution = attribute_full_analysis_failure(
+        case, missing, {"status": "COMPLETED"}, [event], judge,
+    )
+
+    assert attribution is not None
+    assert attribution.failure_class == FailureClass.SPECIALIST_CONTEXT_OMISSION
+    assert attribution.primary_node == "security"
+    assert attribution.target_prompt_component is None
+
+
+def test_targetable_plus_context_omission_is_ambiguous(monkeypatch):
+    case = _case()
+    _map_security_to_bug_contract(monkeypatch)
+    judge, missing = _missing(case)
+    targetable = _event(_record(case, node="bug", candidate_id="candidate:targetable"), node="bug")
+    omitted = _event(
+        _record(case, node="security", candidate_id="candidate:omitted", packed=False),
+        node="security",
+    )
+
+    attribution = attribute_full_analysis_failure(
+        case, missing, {"status": "COMPLETED"}, [targetable, omitted], judge,
+    )
+
+    assert attribution is not None
+    assert attribution.failure_class == FailureClass.SPECIALIST_ATTRIBUTION_AMBIGUOUS
+    assert attribution.primary_node is None
+    assert attribution.target_prompt_component is None
+
+
+def test_targetable_plus_input_gap_is_ambiguous(monkeypatch):
+    case = _case()
+    judge, missing = _missing(case)
+    targetable = _event(_record(case, candidate_id="candidate:targetable"))
+    gap = SpecialistOpportunityMatch(
+        node="security", component="security-agent", candidate_id=None,
+        record_digest="a" * 64, claim_id="BROAD_EXCEPTION_SWALLOW@app/services/payment.py",
+    )
+    monkeypatch.setattr(full_analysis_module, "specialist_input_gap_evidence", lambda *args: (gap,))
+
+    attribution = attribute_full_analysis_failure(
+        case, missing, {"status": "COMPLETED"}, [targetable], judge,
+    )
+
+    assert attribution is not None
+    assert attribution.failure_class == FailureClass.SPECIALIST_ATTRIBUTION_AMBIGUOUS
+    assert attribution.primary_node is None
+    assert attribution.target_prompt_component is None
 
 
 def test_snapshot_mismatch_model_failure_and_matching_emission_never_blame_specialist():
@@ -294,6 +458,62 @@ def test_missing_security_hypothesis_is_an_upstream_input_gap_not_a_prompt_miss(
     assert failed_attribution is not None
     assert failed_attribution.failure_class != FailureClass.SPECIALIST_INPUT_GAP
     assert failed_attribution.target_prompt_component is None
+
+
+def test_input_gap_requires_a_complete_consistent_zero_candidate_inventory():
+    case = _case(
+        Path(__file__).resolve().parents[1]
+        / "evaluation_data"
+        / "ground_truth"
+        / "v1"
+        / "cases"
+        / "security"
+        / "SEC-SQLI-01A.json"
+    )
+    judge, missing = _missing(case)
+    complete = _record(case, node="security", no_candidates=True)
+    assert len(specialist_input_gap_evidence(case, missing, [_event(complete, node="security")], judge)) == 1
+
+    truncated_payload = dict(complete)
+    truncated_payload.pop("record_digest")
+    truncated_payload["candidate_count"] = 1
+    truncated_payload["candidate_inventory_truncated"] = True
+    truncated_payload["candidate_inventory_digest"] = provenance_module._digest({
+        "count": 1,
+        "candidates": [],
+        "truncated": True,
+    })
+    truncated_payload["record_digest"] = provenance_module._digest(truncated_payload)
+    truncated = SpecialistOpportunityRecord.model_validate(truncated_payload).model_dump(mode="json")
+
+    inconsistent_payload = dict(complete)
+    inconsistent_payload.pop("record_digest")
+    inconsistent_payload["candidate_source"] = "MAPPER"
+    inconsistent_payload["record_digest"] = provenance_module._digest(inconsistent_payload)
+    inconsistent = SpecialistOpportunityRecord.model_validate(inconsistent_payload).model_dump(mode="json")
+
+    for record in (truncated, inconsistent):
+        assert specialist_input_gap_evidence(case, missing, [_event(record, node="security")], judge) == ()
+
+    wrong_snapshot = _record(
+        case, node="security", no_candidates=True, snapshot_id="f" * 40,
+    )
+    assert specialist_input_gap_evidence(
+        case, missing, [_event(wrong_snapshot, node="security")], judge,
+    ) == ()
+
+
+def test_non_targetable_attribution_classes_are_absent_from_improvement_targets():
+    from app.evaluation.improvement.corpus import FAILURE_TARGETS
+
+    non_targetable = (
+        FailureClass.SPECIALIST_CONTEXT_OMISSION,
+        FailureClass.SPECIALIST_NOT_EXECUTED,
+        FailureClass.SPECIALIST_INPUT_GAP,
+        FailureClass.SPECIALIST_ATTRIBUTION_AMBIGUOUS,
+        FailureClass.MODEL_INVALID_OUTPUT,
+    )
+    assert not any(failure in non_targetable for failure, _ in FAILURE_TARGETS)
 
 
 def test_multiple_candidate_opportunities_are_explicitly_ambiguous():

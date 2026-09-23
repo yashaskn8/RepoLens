@@ -57,6 +57,17 @@ class SpecialistAttributionEvidence:
     input_gaps: tuple[SpecialistOpportunityMatch, ...] = ()
 
 
+def _unique_opportunities(
+    opportunities: Sequence[SpecialistOpportunityMatch],
+) -> tuple[SpecialistOpportunityMatch, ...]:
+    """Collapse repeated trace projections without collapsing distinct claims."""
+    unique: dict[tuple[str, str, str | None, str], SpecialistOpportunityMatch] = {}
+    for item in opportunities:
+        key = (item.node, item.claim_id, item.candidate_id, item.record_digest)
+        unique.setdefault(key, item)
+    return tuple(unique.values())
+
+
 def snapshot_id_for_case(case: BenchmarkCase) -> str:
     payload = json.dumps(case.fixture.files, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
@@ -269,9 +280,9 @@ def specialist_opportunity_evidence(
                 else:
                     omissions.append(match)
     return SpecialistAttributionEvidence(
-        targetable=tuple(targetable),
-        context_omissions=tuple(omissions),
-        not_executed=tuple(not_executed),
+        targetable=_unique_opportunities(targetable),
+        context_omissions=_unique_opportunities(omissions),
+        not_executed=_unique_opportunities(not_executed),
     )
 
 
@@ -317,22 +328,6 @@ def specialist_input_gap_evidence(
             or record.model_execution_count != 0
         ):
             continue
-        candidate_kinds = {kind for _, kind in contracts}
-        matching_hypotheses = [
-            candidate
-            for candidate in record.candidates
-            if candidate.candidate_kind in candidate_kinds
-            and _candidate_matches_claim(
-                candidate,
-                node=node,
-                case=case,
-                claim=claim,
-                judge=judge,
-                require_packed=False,
-            )
-        ]
-        if matching_hypotheses:
-            continue
         gaps.append(SpecialistOpportunityMatch(
             node=node,
             component=SPECIALIST_PROMPT_COMPONENTS[node],
@@ -340,7 +335,7 @@ def specialist_input_gap_evidence(
             record_digest=record.record_digest,
             claim_id=claim_id,
         ))
-    return tuple(gaps)
+    return _unique_opportunities(gaps)
 
 
 def validated_specialist_target(

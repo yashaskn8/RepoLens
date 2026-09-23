@@ -179,7 +179,7 @@ def _workflow_source_digest(module_names: Iterable[str]) -> str:
 
 
 FULL_ANALYSIS_GRAPH_CONTRACT_VERSION = "full-analysis-graph/1.1"
-FULL_ANALYSIS_EVALUATION_CONTRACT_VERSION = "full-analysis-evaluation/1.4"
+FULL_ANALYSIS_EVALUATION_CONTRACT_VERSION = "full-analysis-evaluation/1.5"
 FULL_ANALYSIS_GRAPH_CONTRACT = {
     "version": FULL_ANALYSIS_GRAPH_CONTRACT_VERSION,
     "nodes": [

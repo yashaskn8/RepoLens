@@ -25,7 +25,12 @@ from app.evaluation.ground_truth.public_dev import (
     PUBLIC_DEV_REPOSITORY_SCAN_CASE_IDS,
     load_public_dev_repository_cases,
 )
-from app.evaluation.ground_truth.matcher import CaseEvaluationResult, EvaluatedFinding, IndependentBenchmarkJudge
+from app.evaluation.ground_truth.matcher import (
+    CaseEvaluationResult,
+    EvaluatedFinding,
+    IndependentBenchmarkJudge,
+    normalize_repo_path,
+)
 from app.evaluation.ground_truth.schemas import (
     AnalysisInput,
     BenchmarkCase,
@@ -64,6 +69,7 @@ from app.evaluation.system.schemas import (
     specialist_attribution_counts,
 )
 from app.evaluation.system.specialist_attribution import (
+    SpecialistOpportunityMatch,
     specialist_input_gap_evidence,
     specialist_opportunity_evidence,
     specialist_unsupported_contributors,
@@ -397,31 +403,56 @@ def _matching_intermediate_candidates(
     case: BenchmarkCase,
     trace: Sequence[WorkflowNodeEvent],
     judge: IndependentBenchmarkJudge,
-) -> list[tuple[str, str]]:
-    matches: list[tuple[str, str]] = []
+) -> list[tuple[str, str, str]]:
+    """Bind every structurally matched intermediate claim to its finding ID."""
+    matches: list[tuple[str, str, str]] = []
+    manifest_files = {normalize_repo_path(path) for path in case.fixture.files}
+    line_counts = {
+        normalize_repo_path(path): len(text.splitlines())
+        for path, text in case.fixture.files.items()
+    }
     for event in trace:
         if event.node not in {"architecture", "integration", "security", "bug", "revise"}:
             continue
-        findings = []
+        findings: list[tuple[EvaluatedFinding, str]] = []
         for item in event.finding_refs:
             rule_id = str(item.get("rule_id") or "")
-            for evidence in item.get("evidences", [])[:8]:
-                findings.append(EvaluatedFinding(
+            finding_id = str(item.get("finding_id") or "")
+            evidences = item.get("evidences", [])
+            if not finding_id or not isinstance(evidences, list):
+                continue
+            for evidence in evidences[:8]:
+                if not isinstance(evidence, dict):
+                    continue
+                finding = EvaluatedFinding(
                     rule_id=rule_id,
                     file_path=str(evidence.get("file_path") or ""),
                     start_line=evidence.get("start_line"),
                     end_line=evidence.get("end_line"),
                     stage=EvaluationStage.ANALYSIS_CANDIDATE,
-                ))
-        result = judge.evaluate_case(
-            case=case,
-            emitted_findings=findings,
-            manifest_files={path for path in case.fixture.files},
-            file_line_counts={path: len(text.splitlines()) for path, text in case.fixture.files.items()},
-        )
-        for claim_id in result.matched_claim_ids:
-            matches.append((event.node, claim_id))
-    return matches
+                )
+                findings.append((finding, finding_id))
+        remaining = list(enumerate(case.annotation.claims))
+        for finding, finding_id in findings:
+            if not judge._check_reference_validity(finding, manifest_files, line_counts):
+                continue
+            for index, claim in remaining:
+                if judge._matches_claim(finding, claim)[0]:
+                    claim_id = f"{claim.rule_id}@{claim.permitted_files[0]}"
+                    matches.append((event.node, claim_id, finding_id))
+                    remaining = [(other_index, other) for other_index, other in remaining if other_index != index]
+                    break
+    return list(dict.fromkeys(matches))
+
+
+def _specialist_opportunity_refs(
+    opportunities: Sequence[SpecialistOpportunityMatch],
+) -> list[str]:
+    """Retain bounded identities for ambiguous-cause diagnostics, not targeting."""
+    refs: list[str] = []
+    for item in opportunities:
+        refs.extend((item.claim_id, item.candidate_id or "", item.record_digest))
+    return list(dict.fromkeys(value for value in refs if value))[:32]
 
 
 def attribute_full_analysis_failure(
@@ -548,50 +579,54 @@ def attribute_full_analysis_failure(
         specialist_input_gaps = specialist_input_gap_evidence(case, evaluation, trace, judge)
         rejected = {item for event in trace if event.node == "verifier" for item in event.rejected_ids}
         if intermediate:
-            primary_node, claim_id = intermediate[0]
-            finding_ref = next((
-                ref for event in trace if event.node == primary_node
-                for ref in event.finding_refs
-                if any(
-                    f"{ref.get('rule_id')}@{ev.get('file_path')}" == claim_id
-                    for ev in ref.get("evidences", [])
-                )
-            ), None)
-            candidate_id = str((finding_ref or {}).get("finding_id") or "")
-            if candidate_id and candidate_id in rejected:
+            intermediate_refs = intermediate
+            rejected_intermediates = [item for item in intermediate_refs if item[2] in rejected]
+            if rejected_intermediates:
                 failure_class, stage = FailureClass.VERIFIER_FALSE_REJECTION, "VERIFIER"
                 primary_node = "verifier"
-                upstream = "A specialist emitted structurally matching source evidence and the verifier recorded that candidate as rejected."
-                observed = f"The correct intermediate candidate for {claim_id} did not reach the final verified output."
-                evidence_refs = [claim_id, candidate_id]
-                basis = "The 1-to-1 ground-truth matcher accepted the specialist evidence; the verifier trace contains the same stable finding ID in rejected_ids."
+                upstream = "A workflow agent emitted structurally matching source evidence and the verifier recorded that candidate as rejected."
+                observed = "One or more structurally matching intermediate candidates did not reach final verified output."
+                evidence_refs = [
+                    value for _, claim_id, candidate_id in rejected_intermediates
+                    for value in (claim_id, candidate_id)
+                ][:32]
+                basis = "The 1-to-1 ground-truth matcher accepted the intermediate evidence; the verifier trace contains the same stable finding ID in rejected_ids."
             elif any(event.node == "revise" for event in trace):
                 revision_events = [event for event in trace if event.node == "revise"]
                 revision_candidate_ids = {
                     str(ref.get("finding_id") or "")
                     for event in revision_events for ref in event.finding_refs
                 }
-                revision_matches_claim = any(
-                    node == "revise" and matched_claim == claim_id
-                    for node, matched_claim in intermediate
-                )
-                revision_failed = (
-                    any(event.status == "COMPLETED_WITH_ERRORS" for event in revision_events)
-                    or (candidate_id in revision_candidate_ids and not revision_matches_claim)
-                )
+                revision_matched_claims = {
+                    matched_claim for node, matched_claim, _ in intermediate if node == "revise"
+                }
+                failed_revision_refs = [
+                    (node, claim_id, candidate_id)
+                    for node, claim_id, candidate_id in intermediate_refs
+                    if node != "revise"
+                    and candidate_id in revision_candidate_ids
+                    and claim_id not in revision_matched_claims
+                ]
+                revision_failed = any(
+                    event.status == "COMPLETED_WITH_ERRORS" for event in revision_events
+                ) or bool(failed_revision_refs)
                 if revision_failed:
                     failure_class, stage, primary_node = FailureClass.REVISION_FAILED_TO_REPAIR, "REVISION", "revise"
                     upstream = "A structurally matching candidate reached revision, whose output failed or no longer matched the same expected claim."
-                    observed = f"Revision did not preserve a structurally valid result for {claim_id}."
-                    evidence_refs = [claim_id, candidate_id] if candidate_id else [claim_id]
+                    affected = failed_revision_refs or intermediate_refs
+                    observed = "Revision did not preserve a structurally valid intermediate candidate."
+                    evidence_refs = [
+                        value for _, claim_id, candidate_id in affected
+                        for value in (claim_id, candidate_id)
+                    ][:32]
                     basis = "The candidate ID and structural matcher were compared with the revision node's bounded output or explicit error status."
                 else:
                     failure_class = FailureClass.UNKNOWN_ATTRIBUTION
-                    upstream = "A matching intermediate candidate exists, but neither an explicit verifier rejection nor a defective revision output is proven."
+                    upstream = "Matching intermediate candidates exist, but neither an explicit verifier rejection nor a defective revision output is proven."
                     basis = "The trace has insufficient node-level evidence to distinguish downstream causes without guessing."
             else:
                 failure_class = FailureClass.UNKNOWN_ATTRIBUTION
-                upstream = "A matching intermediate candidate exists, but no deterministic verifier rejection transition was preserved."
+                upstream = "Matching intermediate candidates exist, but no deterministic verifier rejection transition was preserved."
                 basis = "The state proves the candidate existed but not which downstream operation removed or downgraded it."
         elif sum(bool(group) for group in (
             specialist_evidence.targetable,
@@ -602,15 +637,12 @@ def attribute_full_analysis_failure(
             failure_class, stage = FailureClass.SPECIALIST_ATTRIBUTION_AMBIGUOUS, "SPECIALIST"
             upstream = "More than one specialist-level or upstream-input explanation remains for the unmatched workflow outcome."
             observed = "The bounded trace contains distinct specialist opportunities without one decisive transition."
-            evidence_refs = [
-                item.claim_id
-                for item in (
-                    specialist_evidence.targetable
-                    + specialist_evidence.context_omissions
-                    + specialist_evidence.not_executed
-                    + specialist_input_gaps
-                )[:8]
-            ]
+            evidence_refs = _specialist_opportunity_refs(
+                specialist_evidence.targetable
+                + specialist_evidence.context_omissions
+                + specialist_evidence.not_executed
+                + specialist_input_gaps
+            )
             basis = "Conflicting or multiple claim-level specialist paths are retained as ambiguous; no prompt target is selected."
         elif len(specialist_evidence.targetable) == 1:
             opportunity = specialist_evidence.targetable[0]
@@ -628,21 +660,38 @@ def attribute_full_analysis_failure(
             failure_class, stage = FailureClass.SPECIALIST_ATTRIBUTION_AMBIGUOUS, "SPECIALIST"
             upstream = "More than one proof-bearing specialist opportunity could explain the same unmatched claim."
             observed = "The deterministic trace does not identify a unique prompt component and candidate opportunity."
+            evidence_refs = _specialist_opportunity_refs(specialist_evidence.targetable)
             basis = "Multiple candidates passed the snapshot, rule, locator, packed-context, and successful-execution checks; no arbitrary winner is selected."
         elif specialist_evidence.context_omissions:
-            failure_class, stage = FailureClass.SPECIALIST_CONTEXT_OMISSION, "SPECIALIST_CONTEXT"
-            primary_node = specialist_evidence.context_omissions[0].node
-            upstream = "A relevant deterministic specialist hypothesis was recorded but its complete locatable evidence was not present in the model context."
-            observed = "The hypothesis was omitted from, or truncated in, the packed specialist context."
-            evidence_refs = [item.claim_id for item in specialist_evidence.context_omissions[:8]]
-            basis = "Candidate identity, rule contract, and source locator were deterministic, but the candidate lacks complete packed evidence provenance."
+            if len(specialist_evidence.context_omissions) == 1:
+                opportunity = specialist_evidence.context_omissions[0]
+                failure_class, stage = FailureClass.SPECIALIST_CONTEXT_OMISSION, "SPECIALIST_CONTEXT"
+                primary_node = opportunity.node
+                upstream = "A relevant deterministic specialist hypothesis was recorded but its complete locatable evidence was not present in the model context."
+                observed = "The hypothesis was omitted from, or truncated in, the packed specialist context."
+                evidence_refs = [opportunity.claim_id]
+                basis = "Candidate identity, rule contract, and source locator were deterministic, but the candidate lacks complete packed evidence provenance."
+            else:
+                failure_class, stage = FailureClass.SPECIALIST_ATTRIBUTION_AMBIGUOUS, "SPECIALIST_CONTEXT"
+                upstream = "More than one distinct specialist context omission could explain the unmatched workflow outcome."
+                observed = "The trace contains multiple claim-aware omitted opportunities; list order does not establish causality."
+                evidence_refs = _specialist_opportunity_refs(specialist_evidence.context_omissions)
+                basis = "Distinct node, claim, candidate, or provenance identities remain plausible; no first-entry specialist is selected."
         elif specialist_evidence.not_executed:
-            failure_class, stage = FailureClass.SPECIALIST_NOT_EXECUTED, "SPECIALIST_ADMISSION"
-            primary_node = specialist_evidence.not_executed[0].node
-            upstream = "A relevant deterministic specialist hypothesis existed, but the specialist model decision was not attempted."
-            observed = "The candidate opportunity did not reach a normal specialist model execution."
-            evidence_refs = [item.claim_id for item in specialist_evidence.not_executed[:8]]
-            basis = "The early-exit provenance records the candidate source and explicit admission/termination reason; this class is not prompt-targetable."
+            if len(specialist_evidence.not_executed) == 1:
+                opportunity = specialist_evidence.not_executed[0]
+                failure_class, stage = FailureClass.SPECIALIST_NOT_EXECUTED, "SPECIALIST_ADMISSION"
+                primary_node = opportunity.node
+                upstream = "A relevant deterministic specialist hypothesis existed, but the specialist model decision was not attempted."
+                observed = "The candidate opportunity did not reach a normal specialist model execution."
+                evidence_refs = [opportunity.claim_id]
+                basis = "The early-exit provenance records the candidate source and explicit admission/termination reason; this class is not prompt-targetable."
+            else:
+                failure_class, stage = FailureClass.SPECIALIST_ATTRIBUTION_AMBIGUOUS, "SPECIALIST_ADMISSION"
+                upstream = "More than one specialist model opportunity was not executed for the unmatched workflow outcome."
+                observed = "The trace contains multiple claim-aware non-executed opportunities; list order does not establish causality."
+                evidence_refs = _specialist_opportunity_refs(specialist_evidence.not_executed)
+                basis = "Distinct node, claim, candidate, or provenance identities remain plausible; no first-entry specialist is selected."
         elif specialist_input_gaps:
             gap_nodes = {item.node for item in specialist_input_gaps}
             if len(gap_nodes) == 1:
@@ -650,13 +699,13 @@ def attribute_full_analysis_failure(
                 failure_class, stage = FailureClass.SPECIALIST_INPUT_GAP, "SPECIALIST_INPUT"
                 upstream = "The responsible specialist's complete deterministic candidate inventory contains no matching hypothesis for the unmatched claim."
                 observed = "The expected claim had no snapshot-bound candidate opportunity available before model reasoning."
-                evidence_refs = [item.claim_id for item in specialist_input_gaps[:8]]
+                evidence_refs = _specialist_opportunity_refs(specialist_input_gaps)
                 basis = "The exact rule/category-to-candidate contract is registered and the complete untruncated specialist inventory contains no relevant candidate; this is not prompt-targetable."
             else:
                 failure_class, stage = FailureClass.SPECIALIST_ATTRIBUTION_AMBIGUOUS, "SPECIALIST_INPUT"
                 upstream = "More than one specialist responsibility contract could have supplied the missing candidate input."
                 observed = "The deterministic trace does not identify one upstream candidate-generation owner."
-                evidence_refs = [item.claim_id for item in specialist_input_gaps[:8]]
+                evidence_refs = _specialist_opportunity_refs(specialist_input_gaps)
                 basis = "Multiple exact rule/category responsibility mappings are not resolved by guesswork."
         elif any(event.node == "investigator_prepare" for event in trace):
             if any(event.node == "investigator_tool" and event.failure_codes for event in trace):

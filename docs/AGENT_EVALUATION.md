@@ -214,6 +214,16 @@ public DEV cases and families. Unsupported, provider, budget, harness, and
 unknown attributions are not optimized. A failure family with insufficient
 distinct DEV examples stops without generating candidates.
 
+Multiple distinct context omissions or non-executed specialist opportunities
+remain `SPECIALIST_ATTRIBUTION_AMBIGUOUS`; duplicate projections of the same
+snapshot-bound opportunity are collapsed by node, claim, candidate, and record
+digest. No event/list order establishes causal blame. Verifier rejection and
+unsupported-publication precedence remain verifier-owned. Checkpoint/resume
+preserves the same content-free specialist opportunity digest without rerunning
+completed specialists. The full-analysis evaluation contract is version 1.5
+because the deterministic attribution semantics changed; the specialist
+opportunity schema and graph topology did not change.
+
 ```powershell
 .\.venv\Scripts\python.exe -m app.evaluation.improvement analyze baseline.json --output corpus.json
 .\.venv\Scripts\python.exe -m app.evaluation.improvement optimize baseline.json `

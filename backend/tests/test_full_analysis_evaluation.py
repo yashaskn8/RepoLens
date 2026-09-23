@@ -5,10 +5,13 @@ from __future__ import annotations
 import json
 import asyncio
 import hashlib
+from functools import wraps
 from pathlib import Path
+from uuid import UUID
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 
 from app.evaluation.ground_truth.matcher import EvaluatedFinding, IndependentBenchmarkJudge
 from app.evaluation.ground_truth.schemas import (
@@ -705,3 +708,126 @@ def test_final_false_positive_is_a_hard_failure_and_success_cannot_erase_securit
     assert safety_failure is not None
     assert safety_failure.failure_class == FailureClass.SECURITY_POLICY_VIOLATION
     assert safety_failure.hard_safety_violation is True
+
+
+def test_checkpoint_resume_preserves_specialist_provenance_without_reexecution(monkeypatch):
+    from app.agents import graph as graph_module
+    from app.evaluation.ground_truth.leakage import LeakageDetector
+
+    case = _positive_case()
+    analysis_input = LeakageDetector.bifurcate_input(case)
+    checkpoints = []
+    specialist_calls = 0
+    original_build = graph_module.build_analysis_graph
+    original_bug = graph_module.run_bug_agent
+
+    class CapturingGraph:
+        def __init__(self, app):
+            self.app = app
+
+        async def aget_state(self, config):
+            snapshot = await self.app.aget_state(config)
+            values = getattr(snapshot, "values", None)
+            if isinstance(values, dict) and values.get("workflow_trace"):
+                checkpoints.append(snapshot)
+            return snapshot
+
+        def __getattr__(self, name):
+            return getattr(self.app, name)
+
+    def capture_graph(*args, **kwargs):
+        return CapturingGraph(original_build(*args, **kwargs))
+
+    @wraps(original_bug)
+    async def counted_bug(*args, **kwargs):
+        nonlocal specialist_calls
+        specialist_calls += 1
+        return await original_bug(*args, **kwargs)
+
+    monkeypatch.setattr(graph_module, "build_analysis_graph", capture_graph)
+    monkeypatch.setattr(graph_module, "run_bug_agent", counted_bug)
+    # Identical scan identity makes provenance digest comparisons meaningful
+    # across resumed and uninterrupted executions with separate checkpointers.
+    monkeypatch.setattr(full_analysis_module, "uuid4", lambda: UUID(int=0x123456789ABCDEF))
+
+    resumed_state, _, resumed, _ = asyncio.run(_execute_trial(
+        analysis_input,
+        mode=SystemEvalMode.SCRIPTED,
+        provider=None,
+        model="scripted-full-analysis-harness",
+        interrupt_after=["bug"],
+    ))
+    assert resumed is True
+    assert specialist_calls == 1
+
+    checkpoint = next((
+        item for item in checkpoints
+        if any(event.get("node") == "bug" for event in item.values["workflow_trace"])
+    ), None)
+    assert checkpoint is not None, [
+        (item.next, [event.get("node") for event in item.values.get("workflow_trace", [])])
+        for item in checkpoints
+    ]
+    checkpoint_bug_events = [
+        event for event in checkpoint.values["workflow_trace"] if event.get("node") == "bug"
+    ]
+    assert len(checkpoint_bug_events) == 1
+    checkpoint_record = checkpoint_bug_events[0]["specialist_opportunity"]
+    assert checkpoint_record is not None
+    serialized_provenance = json.dumps(checkpoint_record, sort_keys=True)
+    assert all(source not in serialized_provenance for source in case.fixture.files.values())
+    assert "PRIVATE_SOURCE_SNIPPET" not in serialized_provenance
+
+    bug_events = [event for event in resumed_state["workflow_trace"] if event.get("node") == "bug"]
+    assert len(bug_events) == 1
+    resumed_record = bug_events[0]["specialist_opportunity"]
+    assert resumed_record["record_digest"] == checkpoint_record["record_digest"]
+
+    uninterrupted_state, _, uninterrupted, _ = asyncio.run(_execute_trial(
+        analysis_input,
+        mode=SystemEvalMode.SCRIPTED,
+        provider=None,
+        model="scripted-full-analysis-harness",
+    ))
+    assert uninterrupted is False
+    assert specialist_calls == 2
+    uninterrupted_bug_events = [
+        event for event in uninterrupted_state["workflow_trace"] if event.get("node") == "bug"
+    ]
+    assert len(uninterrupted_bug_events) == 1
+    uninterrupted_record = uninterrupted_bug_events[0]["specialist_opportunity"]
+    assert uninterrupted_record["record_digest"] == checkpoint_record["record_digest"]
+
+    resumed_trace = full_analysis_module._workflow_trace(resumed_state)
+    uninterrupted_trace = full_analysis_module._workflow_trace(uninterrupted_state)
+    assert [event.node for event in resumed_trace] == [event.node for event in uninterrupted_trace]
+    judge = IndependentBenchmarkJudge()
+    manifest_files = set(case.fixture.files)
+    file_line_counts = {path: len(content.splitlines()) for path, content in case.fixture.files.items()}
+
+    def attribution(state, trace):
+        predictions = _evaluated_findings(state, EvaluationStage(case.evaluation_stage))
+        published = _evaluated_findings(state, EvaluationStage.PUBLISHED_FINDING)
+        evaluated = judge.evaluate_case(case, predictions, manifest_files, file_line_counts)
+        published_evaluated = judge.evaluate_case(case, published, manifest_files, file_line_counts)
+        return attribute_full_analysis_failure(
+            case, evaluated, state, trace, judge, published_evaluation=published_evaluated,
+        )
+
+    resumed_attribution = attribution(resumed_state, resumed_trace)
+    uninterrupted_attribution = attribution(uninterrupted_state, uninterrupted_trace)
+    assert (
+        resumed_attribution.model_dump(mode="json") if resumed_attribution else None
+    ) == (
+        uninterrupted_attribution.model_dump(mode="json") if uninterrupted_attribution else None
+    )
+    if resumed_attribution is not None:
+        assert resumed_attribution.failure_class != FailureClass.SPECIALIST_MISSED_FINDING
+        assert resumed_attribution.target_prompt_component is None
+
+    tampered = dict(checkpoint_bug_events[0])
+    tampered_record = dict(checkpoint_record)
+    tampered_record["snapshot_id"] = "0" * 40
+    tampered["specialist_opportunity"] = tampered_record
+    with pytest.raises(ValidationError, match="digest does not match"):
+        full_analysis_module._workflow_trace({"workflow_trace": [tampered]})
