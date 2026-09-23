@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -25,6 +26,9 @@ from app.evaluation.improvement.contracts import (
     ImprovementRunReport,
     ImprovementTerminationReason,
     PromptReflection,
+    ScreenCaseGroup,
+    ScreenCaseGroupMembership,
+    ScreenCaseSelection,
 )
 from app.evaluation.improvement.corpus import (
     FAILURE_TARGETS,
@@ -45,6 +49,8 @@ from app.evaluation.system.identity import build_agent_system_identity
 from app.evaluation.system.schemas import (
     EvaluationRunStatus,
     FailureClass,
+    MeasuredMetric,
+    MetricStatus,
     SystemEvalMode,
     SystemEvalSuite,
     SystemEvaluationReport,
@@ -80,30 +86,131 @@ class _CandidateSuggestions(_StrictModel):
     candidates: tuple[_PromptCandidateSuggestion, ...] = Field(min_length=1, max_length=4)
 
 
+@dataclass(frozen=True, slots=True)
+class _OptimizerCallUsage:
+    input_tokens: int | None
+    output_tokens: int | None
+    retries: int | None
+    fallbacks: int | None
+    model_executions: int | None
+    cost_usd: float | None
+
+
 @dataclass(slots=True)
 class _Usage:
     reflection_calls: int = 0
     generation_calls: int = 0
     candidate_screen_runs: int = 0
     candidate_full_runs: int = 0
-    evaluation_trials: int = 0
-    reserved_model_tokens: int = 0
-    reported_input_tokens: int = 0
-    reported_output_tokens: int = 0
+    case_trial_work_units_reserved: int = 0
+    reserved_optimizer_tokens: int = 0
+    optimizer_input_token_values: list[int | None] = field(default_factory=list)
+    optimizer_output_token_values: list[int | None] = field(default_factory=list)
+    optimizer_retry_values: list[int | None] = field(default_factory=list)
+    optimizer_fallback_values: list[int | None] = field(default_factory=list)
+    optimizer_execution_values: list[int | None] = field(default_factory=list)
+    optimizer_cost_values: list[float | None] = field(default_factory=list)
     elapsed_seconds: float = 0.0
 
-    def snapshot(self) -> ImprovementResourceUsage:
+    def snapshot(self, evaluation_artifacts: Sequence["EvaluationArtifact"] = ()) -> ImprovementResourceUsage:
+        optimizer_call_count = self.reflection_calls + self.generation_calls
+        optimizer_input = _sum_usage(self.optimizer_input_token_values, optimizer_call_count, "tokens")
+        optimizer_output = _sum_usage(self.optimizer_output_token_values, optimizer_call_count, "tokens")
+        optimizer_retries = _sum_usage(self.optimizer_retry_values, optimizer_call_count, "calls")
+        optimizer_fallbacks = _sum_usage(self.optimizer_fallback_values, optimizer_call_count, "calls")
+        optimizer_executions = _sum_usage(self.optimizer_execution_values, optimizer_call_count, "calls")
+        optimizer_cost = _sum_usage(self.optimizer_cost_values, optimizer_call_count, "USD")
+        evaluation_attempts = self.candidate_screen_runs + self.candidate_full_runs
+        evaluation_reports = [item.report for item in evaluation_artifacts]
+        evaluation_coverage_complete = len(evaluation_reports) == evaluation_attempts
+
+        def evaluation_metric(attribute: str, unit: str) -> MeasuredMetric:
+            if not evaluation_attempts:
+                return _usage_metric(0, unit)
+            if not evaluation_coverage_complete:
+                return _usage_metric(None, unit)
+            values: list[float] = []
+            for report in evaluation_reports:
+                if attribute == "model_calls":
+                    calls = getattr(report.metrics, "model_calls", None)
+                    if isinstance(calls, int) and calls >= 0:
+                        values.append(float(calls))
+                        continue
+                    return _usage_metric(None, unit)
+                metric = getattr(report.metrics, attribute, None)
+                if not isinstance(metric, MeasuredMetric) or metric.status != MetricStatus.MEASURED or metric.value is None:
+                    return _usage_metric(None, unit)
+                values.append(metric.value)
+            return _usage_metric(sum(values), unit)
+
+        evaluation_inputs = evaluation_metric("input_tokens", "tokens")
+        evaluation_outputs = evaluation_metric("output_tokens", "tokens")
+        evaluation_retries = evaluation_metric("retry_count", "calls")
+        evaluation_fallbacks = evaluation_metric("fallback_count", "calls")
+        evaluation_cost = evaluation_metric("cost_usd", "USD")
+        evaluation_model_calls = evaluation_metric("model_calls", "calls")
+        evaluation_executions = _combine_usage(
+            evaluation_model_calls,
+            _combine_usage(evaluation_retries, evaluation_fallbacks, "calls"),
+            "calls",
+        )
+        total_executions = _combine_usage(optimizer_executions, evaluation_executions, "calls")
+        total_inputs = _combine_usage(optimizer_input, evaluation_inputs, "tokens")
+        total_outputs = _combine_usage(optimizer_output, evaluation_outputs, "tokens")
+        total_retries = _combine_usage(optimizer_retries, evaluation_retries, "calls")
+        total_fallbacks = _combine_usage(optimizer_fallbacks, evaluation_fallbacks, "calls")
+        total_cost = _combine_usage(optimizer_cost, evaluation_cost, "USD")
+        completed_work_units = sum(
+            sum(len(case.trials) for case in item.report.case_results)
+            for item in evaluation_artifacts
+        )
         return ImprovementResourceUsage(
             reflection_calls=self.reflection_calls,
             generation_calls=self.generation_calls,
             candidate_screen_runs=self.candidate_screen_runs,
             candidate_full_runs=self.candidate_full_runs,
-            evaluation_trials=self.evaluation_trials,
-            reserved_model_tokens=self.reserved_model_tokens,
-            reported_input_tokens=self.reported_input_tokens,
-            reported_output_tokens=self.reported_output_tokens,
+            case_trial_work_units_reserved=self.case_trial_work_units_reserved,
+            case_trial_work_units_completed=completed_work_units,
+            reserved_optimizer_tokens=self.reserved_optimizer_tokens,
+            optimizer_input_tokens=optimizer_input,
+            optimizer_output_tokens=optimizer_output,
+            optimizer_retries=optimizer_retries,
+            optimizer_fallbacks=optimizer_fallbacks,
+            candidate_evaluation_model_executions=evaluation_executions,
+            candidate_evaluation_input_tokens=evaluation_inputs,
+            candidate_evaluation_output_tokens=evaluation_outputs,
+            candidate_evaluation_retries=evaluation_retries,
+            candidate_evaluation_fallbacks=evaluation_fallbacks,
+            candidate_evaluation_cost_usd=evaluation_cost,
+            total_model_executions=total_executions,
+            total_input_tokens=total_inputs,
+            total_output_tokens=total_outputs,
+            total_retries=total_retries,
+            total_fallbacks=total_fallbacks,
+            total_cost_usd=total_cost,
             elapsed_seconds=round(self.elapsed_seconds, 3),
         )
+
+
+def _usage_metric(value: float | int | None, unit: str) -> MeasuredMetric:
+    if value is None:
+        return MeasuredMetric(status=MetricStatus.NOT_MEASURED, value=None, unit=unit)
+    return MeasuredMetric(status=MetricStatus.MEASURED, value=float(value), unit=unit)
+
+
+def _sum_usage(values: Sequence[int | float | None], expected_count: int, unit: str) -> MeasuredMetric:
+    if expected_count == 0:
+        return _usage_metric(0, unit)
+    if len(values) != expected_count or any(value is None for value in values):
+        return _usage_metric(None, unit)
+    return _usage_metric(sum(value for value in values if value is not None), unit)
+
+
+def _combine_usage(left: MeasuredMetric, right: MeasuredMetric, unit: str) -> MeasuredMetric:
+    if left.status != MetricStatus.MEASURED or right.status != MetricStatus.MEASURED:
+        return _usage_metric(None, unit)
+    assert left.value is not None and right.value is not None
+    return _usage_metric(left.value + right.value, unit)
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,13 +367,48 @@ async def _generate_structured(
     router: LLMRouter,
     request: LLMRequest,
     model_type: type[BaseModel],
-) -> tuple[BaseModel, int | None, int | None]:
+) -> tuple[BaseModel, _OptimizerCallUsage]:
     response = await router.generate(request)
     try:
         value = model_type.model_validate_json(response.content)
     except (ValidationError, ValueError) as exc:
         raise ValueError("improvement model returned invalid structured output") from exc
-    return value, response.metadata.prompt_tokens, response.metadata.completion_tokens
+    metadata = response.metadata
+    extra = metadata.extra_metadata if isinstance(metadata.extra_metadata, dict) else {}
+    raw_retries = extra.get("retry_count", 0)
+    retries = raw_retries if isinstance(raw_retries, int) and not isinstance(raw_retries, bool) and raw_retries >= 0 else None
+    if "fallbacks_attempted" in extra or "fallback_used" in extra:
+        raw_fallbacks = extra.get("fallbacks_attempted")
+        if isinstance(raw_fallbacks, list):
+            fallbacks = len(raw_fallbacks)
+        elif isinstance(extra.get("fallback_used"), bool):
+            fallbacks = int(extra["fallback_used"])
+        else:
+            fallbacks = None
+    else:
+        # The canonical request pins one explicit provider and disables
+        # escalation, so absent fallback metadata means no fallback occurred.
+        fallbacks = 0
+    # This is one successful canonical RepoLens generation. Retries and
+    # fallbacks remain separate counters rather than being double-counted as
+    # additional model executions.
+    executions = 1
+    raw_cost = extra.get("cost_usd")
+    cost = (
+        float(raw_cost)
+        if isinstance(raw_cost, (int, float)) and not isinstance(raw_cost, bool)
+        and math.isfinite(float(raw_cost)) and raw_cost >= 0
+        else None
+    )
+    retry_or_fallback_usage_unreported = bool(retries or fallbacks)
+    return value, _OptimizerCallUsage(
+        input_tokens=None if retry_or_fallback_usage_unreported else metadata.prompt_tokens,
+        output_tokens=None if retry_or_fallback_usage_unreported else metadata.completion_tokens,
+        retries=retries,
+        fallbacks=fallbacks,
+        model_executions=executions,
+        cost_usd=None if retry_or_fallback_usage_unreported else cost,
+    )
 
 
 def _run_id() -> str:
@@ -276,12 +418,22 @@ def _run_id() -> str:
 def _reserve_model_call(usage: _Usage, policy: ImprovementPolicy) -> bool:
     """Reserve the full request ceiling before a call, not after an estimate."""
     calls = usage.reflection_calls + usage.generation_calls
-    if calls >= policy.max_total_model_calls:
+    if calls >= policy.max_total_optimizer_calls:
         return False
     reservation = policy.max_input_tokens_per_model_call + policy.max_output_tokens_per_model_call
-    if usage.reserved_model_tokens + reservation > policy.max_total_model_tokens:
+    if usage.reserved_optimizer_tokens + reservation > policy.max_optimizer_reserved_tokens:
         return False
-    usage.reserved_model_tokens += reservation
+    usage.reserved_optimizer_tokens += reservation
+    return True
+
+
+def _reserve_case_trial_work_units(usage: _Usage, policy: ImprovementPolicy, units: int) -> bool:
+    """Atomically reserve bounded case×trial work before a candidate workflow."""
+    if units <= 0:
+        return False
+    if usage.case_trial_work_units_reserved + units > policy.max_total_case_trial_work_units:
+        return False
+    usage.case_trial_work_units_reserved += units
     return True
 
 
@@ -300,10 +452,11 @@ def _report(
     generator_provider: str | None = None,
     generator_model: str | None = None,
     usage: _Usage | None = None,
+    evaluation_artifacts: Sequence[EvaluationArtifact] = (),
     reasons: Sequence[str] = (),
 ) -> ImprovementRunReport:
     payload = {
-        "schema_version": "improvement-run-report/1.0",
+        "schema_version": "improvement-run-report/1.1",
         "optimization_run_id": run_id,
         "policy_version": policy.version,
         "policy_digest": policy.digest,
@@ -319,7 +472,7 @@ def _report(
         "winner_candidate_id": winner,
         "termination_reason": termination.value,
         "reasons": [redact_secrets(str(item))[:512] for item in reasons[:16]],
-        "resources": (usage or _Usage()).snapshot().model_dump(mode="json"),
+        "resources": (usage or _Usage()).snapshot(evaluation_artifacts).model_dump(mode="json"),
     }
     payload["report_digest"] = canonical_digest(payload)
     return ImprovementRunReport.model_validate(payload)
@@ -379,37 +532,112 @@ async def validate_live_baseline(report: SystemEvaluationReport) -> tuple[bool, 
     return not reasons, tuple(dict.fromkeys(reasons))
 
 
-def _screen_case_ids(
+def _screen_case_selection(
     corpus: ImprovementCorpus,
     component: str,
     policy: ImprovementPolicy,
-) -> tuple[str, ...]:
+) -> ScreenCaseSelection:
     public_cases = load_public_dev_repository_cases()
-    validation = set(corpus.validation_case_ids)
-    failures = {
+    case_by_id = {item.case_id: item for item in public_cases}
+    family_by_id = {item.case_id: item.case_family for item in public_cases}
+    groups: dict[ScreenCaseGroup, list[str]] = {
+        ScreenCaseGroup.TARGET_FAILURES: sorted({
         item.case_id for item in corpus.optimization_examples
         if item.target_prompt_component == component and item.outcome == "FAILURE"
+        }),
+        ScreenCaseGroup.VALIDATION: sorted(set(corpus.validation_case_ids)),
+        ScreenCaseGroup.SECURITY: sorted({
+            item.case_id for item in public_cases if item.category.value.lower() == "security"
+        }),
+        ScreenCaseGroup.PRESERVE_REGRESSION: sorted({
+            item.case_id for item in corpus.preserve_examples
+            if item.target_prompt_component == component and item.outcome == "PRESERVE"
+        }),
+        ScreenCaseGroup.DETERMINISTIC_FALLBACK: [],
     }
-    security = {item.case_id for item in public_cases if item.category.value.lower() == "security"}
-    candidates = sorted(public_cases, key=lambda item: canonical_digest({"case_id": item.case_id, "policy": policy.screen_selection_policy}))
+
+    def ordered(case_ids: Sequence[str]) -> list[str]:
+        return sorted(
+            (case_id for case_id in case_ids if case_id in case_by_id),
+            key=lambda case_id: canonical_digest({
+                "policy_version": policy.version,
+                "selection_policy": policy.screen_selection_policy,
+                "target_component": component,
+                "corpus_digest": corpus.corpus_digest,
+                "case_id": case_id,
+                "case_family": family_by_id[case_id],
+            }),
+        )
+
     selected: list[str] = []
-    groups = (
-        (sorted(failures), min(3, policy.screen_case_limit)),
-        (sorted(validation), 2),
-        (sorted(security), 2),
-        ([item.case_id for item in candidates], policy.screen_case_limit),
+    selected_by_group: dict[ScreenCaseGroup, list[str]] = {
+        group: [] for group in groups
+    }
+    required_groups = (
+        ScreenCaseGroup.TARGET_FAILURES,
+        ScreenCaseGroup.VALIDATION,
+        ScreenCaseGroup.SECURITY,
+        ScreenCaseGroup.PRESERVE_REGRESSION,
     )
-    for group, group_limit in groups:
-        added = 0
-        for case_id in group:
-            if case_id not in selected:
-                selected.append(case_id)
-                added += 1
-            if len(selected) >= policy.screen_case_limit:
-                return tuple(selected)
-            if added >= group_limit:
+    ordered_by_group = {group: ordered(groups[group]) for group in required_groups}
+    # First reserve one case from every available conceptual group, then use
+    # remaining capacity for a second case per group. Overlaps cost one slot.
+    for group in required_groups:
+        match = next((case_id for case_id in ordered_by_group[group] if case_id in selected), None)
+        if match is None and len(selected) < policy.screen_case_limit:
+            match = next((case_id for case_id in ordered_by_group[group] if case_id not in selected), None)
+        if match is not None:
+            selected_by_group[group].append(match)
+            if match not in selected:
+                selected.append(match)
+    for group in required_groups:
+        for case_id in ordered_by_group[group]:
+            if len(selected_by_group[group]) >= 2:
                 break
-    return tuple(selected)
+            if case_id in selected_by_group[group]:
+                continue
+            if case_id in selected or len(selected) < policy.screen_case_limit:
+                selected_by_group[group].append(case_id)
+                if case_id not in selected:
+                    selected.append(case_id)
+    if len(selected) < policy.screen_case_limit:
+        fallback_ids = [item.case_id for item in public_cases if item.case_id not in selected]
+        for case_id in ordered(fallback_ids):
+            if len(selected) >= policy.screen_case_limit:
+                break
+            selected.append(case_id)
+            selected_by_group[ScreenCaseGroup.DETERMINISTIC_FALLBACK].append(case_id)
+
+    memberships = tuple(
+        ScreenCaseGroupMembership(group=group, case_ids=tuple(selected_by_group[group]))
+        for group in (
+            ScreenCaseGroup.TARGET_FAILURES,
+            ScreenCaseGroup.VALIDATION,
+            ScreenCaseGroup.SECURITY,
+            ScreenCaseGroup.PRESERVE_REGRESSION,
+            ScreenCaseGroup.DETERMINISTIC_FALLBACK,
+        )
+        if group != ScreenCaseGroup.DETERMINISTIC_FALLBACK or selected_by_group[group]
+    )
+    preserve_selected = bool(selected_by_group[ScreenCaseGroup.PRESERVE_REGRESSION])
+    preserve_available = bool(groups[ScreenCaseGroup.PRESERVE_REGRESSION])
+    if preserve_available and not preserve_selected:
+        raise ValueError("available preserve cases were omitted from the bounded screen selection")
+    limitation = None if preserve_available else "NO_KNOWN_GOOD_PRESERVE_CASES_FOR_TARGET"
+    payload = {
+        "schema_version": "improvement-screen-selection/1.0",
+        "policy_version": policy.version,
+        "selection_policy": policy.screen_selection_policy,
+        "target_component": component,
+        "corpus_digest": corpus.corpus_digest,
+        "case_ids": tuple(selected),
+        "groups": [item.model_dump(mode="json") for item in memberships],
+        "preserve_cases_available": preserve_selected,
+        "preserve_limitation": limitation,
+        "evidence_level": "LOW_CONFIDENCE_ELIMINATION_ONLY",
+    }
+    payload["selection_digest"] = canonical_digest(payload)
+    return ScreenCaseSelection.model_validate(payload)
 
 
 def _metrics_for_cases(report: SystemEvaluationReport, case_ids: set[str], classes: set[FailureClass]):
@@ -442,10 +670,10 @@ def _assess_screen(
     candidate_id: str,
     baseline: SystemEvaluationReport,
     candidate: SystemEvaluationReport,
-    case_ids: tuple[str, ...],
+    selection: ScreenCaseSelection,
     target_classes: tuple[FailureClass, ...],
 ) -> _ScreenAssessment:
-    selected = set(case_ids)
+    selected = set(selection.case_ids)
     before = _metrics_for_cases(baseline, selected, set(target_classes))
     after = _metrics_for_cases(candidate, selected, set(target_classes))
     reasons: list[str] = []
@@ -462,6 +690,24 @@ def _assess_screen(
         reasons.append("candidate reduced F1 on the fixed screen set")
     if after[6] < before[6]:
         reasons.append("candidate reduced task success on the fixed screen set")
+    baseline_grades = {
+        case.case_id: next((grade for grade in case.trials if grade.trial_number == 1), None)
+        for case in baseline.case_results
+    }
+    candidate_grades = {
+        case.case_id: next((grade for grade in case.trials if grade.trial_number == 1), None)
+        for case in candidate.case_results
+    }
+    preserve_group = next(
+        group for group in selection.groups if group.group == ScreenCaseGroup.PRESERVE_REGRESSION
+    )
+    for case_id in preserve_group.case_ids:
+        baseline_grade = baseline_grades.get(case_id)
+        candidate_grade = candidate_grades.get(case_id)
+        if baseline_grade is None or baseline_grade.task_success is not True:
+            reasons.append(f"preserve case {case_id} was not a known-good baseline trial")
+        elif candidate_grade is None or candidate_grade.task_success is not True:
+            reasons.append(f"candidate regressed on preserve case {case_id}")
     if not candidate.system_identity.model_provider == baseline.system_identity.model_provider or not candidate.system_identity.model_identifier == baseline.system_identity.model_identifier:
         reasons.append("screen changed model or provider")
     if candidate.system_identity.compatibility_digest != baseline.system_identity.compatibility_digest:
@@ -493,11 +739,18 @@ def _rank_screen(assessment: _ScreenAssessment):
 
 
 def _candidate_overlay_matches(
+    baseline: SystemEvaluationReport,
     report: SystemEvaluationReport,
     overlay: PromptCandidateOverlay,
 ) -> bool:
-    """Bind candidate metrics to the exact prompt overlay under evaluation."""
-    if report.mode != SystemEvalMode.LIVE or report.full_analysis is None:
+    """Require exact overlay identity and exactly one prompt delta in the Lab."""
+    if (
+        baseline.scope != "FULL_ANALYSIS_GRAPH"
+        or report.scope != "FULL_ANALYSIS_GRAPH"
+        or report.mode != SystemEvalMode.LIVE
+        or report.execution_status != EvaluationRunStatus.COMPLETED
+        or report.full_analysis is None
+    ):
         return False
     recorded = report.full_analysis.candidate_overlay
     if recorded is None:
@@ -513,14 +766,47 @@ def _candidate_overlay_matches(
     }
     if recorded.model_dump(mode="json") != expected:
         return False
-    component = next(
-        (item for item in report.system_identity.prompt_components if item.name == overlay.component),
-        None,
-    )
-    return bool(
-        component is not None
-        and component.version == overlay.candidate_version
-        and component.content_digest == overlay.candidate_digest
+    baseline_items = baseline.system_identity.prompt_components
+    candidate_items = report.system_identity.prompt_components
+    baseline_prompts = {item.name: item for item in baseline_items}
+    candidate_prompts = {item.name: item for item in candidate_items}
+    if len(baseline_prompts) != len(baseline_items) or len(candidate_prompts) != len(candidate_items):
+        return False
+    if set(baseline_prompts) != set(candidate_prompts):
+        return False
+    previous = baseline_prompts.get(overlay.component)
+    current = candidate_prompts.get(overlay.component)
+    if previous is None or current is None:
+        return False
+    if (
+        previous.version != overlay.baseline_version
+        or previous.content_digest != overlay.baseline_digest
+        or current.version != overlay.candidate_version
+        or current.content_digest != overlay.candidate_digest
+        or current.content_digest == previous.content_digest
+        or overlay.candidate_version != f"{overlay.baseline_version}/candidate/{overlay.candidate_digest[:12]}"
+    ):
+        return False
+    changed_prompt_components = {
+        name for name in baseline_prompts
+        if baseline_prompts[name].model_dump(mode="json") != candidate_prompts[name].model_dump(mode="json")
+    }
+    return changed_prompt_components == {overlay.component}
+
+
+def _screen_report_covers_selection(report: SystemEvaluationReport, selection: ScreenCaseSelection) -> bool:
+    """A cheap screen is usable only when every selected case has one fresh trial."""
+    case_ids = [item.case_id for item in report.case_results]
+    if (
+        report.execution_status != EvaluationRunStatus.COMPLETED
+        or len(case_ids) != len(selection.case_ids)
+        or set(case_ids) != set(selection.case_ids)
+        or report.evaluated_case_ids and set(report.evaluated_case_ids) != set(selection.case_ids)
+    ):
+        return False
+    return all(
+        len(case.trials) == 1 and case.trials[0].trial_number == 1
+        for case in report.case_results
     )
 
 
@@ -548,12 +834,28 @@ async def run_improvement_optimization(
             termination=ImprovementTerminationReason.LIVE_PERMISSION_REQUIRED,
             reasons=("explicit --allow-live-optimization permission is required",),
         ))
-    baseline_ok, baseline_reasons = await validate_live_baseline(baseline)
+    try:
+        baseline_ok, baseline_reasons = await asyncio.wait_for(
+            validate_live_baseline(baseline),
+            timeout=selected_policy.max_wall_clock_seconds,
+        )
+    except asyncio.TimeoutError:
+        usage.elapsed_seconds = time.monotonic() - started
+        return OptimizationOutput(_report(
+            run_id=run_id,
+            policy=selected_policy,
+            termination=ImprovementTerminationReason.OPTIMIZATION_BUDGET_EXHAUSTED,
+            baseline=baseline,
+            usage=usage,
+            reasons=("wall-clock budget expired while validating the baseline",),
+        ))
     if not baseline_ok:
+        usage.elapsed_seconds = time.monotonic() - started
         return OptimizationOutput(_report(
             run_id=run_id, policy=selected_policy,
             termination=ImprovementTerminationReason.INVALID_BASELINE,
             baseline=baseline,
+            usage=usage,
             reasons=baseline_reasons,
         ))
     corpus = build_improvement_corpus(baseline, policy=selected_policy, require_live=True)
@@ -562,25 +864,29 @@ async def run_improvement_optimization(
     fixture_paths = tuple(sorted({path for case in public_cases for path in case.fixture.files}))
     registry = OptimizablePromptRegistry()
     if set(selected_policy.allowed_components) - set(registry.names):
+        usage.elapsed_seconds = time.monotonic() - started
         return OptimizationOutput(_report(
             run_id=run_id,
             policy=selected_policy,
             termination=ImprovementTerminationReason.INVALID_BASELINE,
             baseline=baseline,
             corpus=corpus,
+            usage=usage,
             reasons=("optimization policy includes an unregistered prompt component",),
         ), corpus=corpus)
     target = select_target(corpus, registry, allowed_components=selected_policy.allowed_components)
     if target is None:
+        usage.elapsed_seconds = time.monotonic() - started
         return OptimizationOutput(_report(
             run_id=run_id, policy=selected_policy, termination=ImprovementTerminationReason.NO_ACTIONABLE_FAILURES,
-            baseline=baseline, corpus=corpus,
+            baseline=baseline, corpus=corpus, usage=usage,
         ), corpus=corpus)
     failures, preserve = examples_for_target(corpus, target, selected_policy)
     if len({item.case_id for item in failures}) < 2:
+        usage.elapsed_seconds = time.monotonic() - started
         return OptimizationOutput(_report(
             run_id=run_id, policy=selected_policy, termination=ImprovementTerminationReason.INSUFFICIENT_EVIDENCE,
-            baseline=baseline, corpus=corpus, target=target,
+            baseline=baseline, corpus=corpus, target=target, usage=usage,
         ), corpus=corpus)
 
     selected_router = router or get_llm_router()
@@ -614,7 +920,48 @@ async def run_improvement_optimization(
         schema_version="prompt-reflection/1.0",
         policy=selected_policy,
     )
+    if time.monotonic() - started >= selected_policy.max_wall_clock_seconds:
+        usage.elapsed_seconds = time.monotonic() - started
+        return OptimizationOutput(_report(
+            run_id=run_id,
+            policy=selected_policy,
+            termination=ImprovementTerminationReason.OPTIMIZATION_BUDGET_EXHAUSTED,
+            baseline=baseline,
+            corpus=corpus,
+            target=target,
+            usage=usage,
+            reasons=("wall-clock budget expired before reflection",),
+        ), corpus=corpus)
+    reflection_timeout = min(
+        selected_policy.model_timeout_seconds,
+        selected_policy.max_wall_clock_seconds - (time.monotonic() - started),
+    )
+    if reflection_timeout <= 0:
+        usage.elapsed_seconds = time.monotonic() - started
+        return OptimizationOutput(_report(
+            run_id=run_id,
+            policy=selected_policy,
+            termination=ImprovementTerminationReason.OPTIMIZATION_BUDGET_EXHAUSTED,
+            baseline=baseline,
+            corpus=corpus,
+            target=target,
+            usage=usage,
+            reasons=("wall-clock budget expired before reflection",),
+        ), corpus=corpus)
+    if usage.reflection_calls >= selected_policy.max_reflection_calls:
+        usage.elapsed_seconds = time.monotonic() - started
+        return OptimizationOutput(_report(
+            run_id=run_id,
+            policy=selected_policy,
+            termination=ImprovementTerminationReason.OPTIMIZATION_BUDGET_EXHAUSTED,
+            baseline=baseline,
+            corpus=corpus,
+            target=target,
+            usage=usage,
+            reasons=("reflection-call ceiling is exhausted",),
+        ), corpus=corpus)
     if not _reserve_model_call(usage, selected_policy):
+        usage.elapsed_seconds = time.monotonic() - started
         return OptimizationOutput(_report(
             run_id=run_id,
             policy=selected_policy,
@@ -634,18 +981,21 @@ async def run_improvement_optimization(
     comparison_digests: list[str] = []
     reflections: PromptReflection | None = None
     full_evaluation_count = 0
-    evaluation_trials = 0
     usage.reflection_calls += 1
     try:
         with evaluation_model_route(provider, generator_model):
-            reflection, input_tokens, output_tokens = await asyncio.wait_for(
+            reflection, call_usage = await asyncio.wait_for(
                 _generate_structured(
                     router=selected_router, request=reflection_request, model_type=PromptReflection,
                 ),
-                timeout=selected_policy.model_timeout_seconds,
+                timeout=reflection_timeout,
             )
-        usage.reported_input_tokens += input_tokens or 0
-        usage.reported_output_tokens += output_tokens or 0
+        usage.optimizer_input_token_values.append(call_usage.input_tokens)
+        usage.optimizer_output_token_values.append(call_usage.output_tokens)
+        usage.optimizer_retry_values.append(call_usage.retries)
+        usage.optimizer_fallback_values.append(call_usage.fallbacks)
+        usage.optimizer_execution_values.append(call_usage.model_executions)
+        usage.optimizer_cost_values.append(call_usage.cost_usd)
         reflections = reflection  # type: ignore[assignment]
         if reflections.target_component != target:
             raise ValueError("reflection attempted to redirect deterministic prompt target")
@@ -692,7 +1042,8 @@ async def run_improvement_optimization(
             generator_provider=provider.value, generator_model=generator_model,
         ), corpus=corpus, reflection=reflections)
 
-    selected_cases = _screen_case_ids(corpus, target, selected_policy)
+    screen_selection = _screen_case_selection(corpus, target, selected_policy)
+    selected_cases = screen_selection.case_ids
     case_ids = all_case_ids
     target_classes = _target_failure_classes(target)
     parent_text = baseline_prompt
@@ -703,6 +1054,9 @@ async def run_improvement_optimization(
 
     for generation in range(1, selected_policy.max_generations + 1):
         if time.monotonic() - started >= selected_policy.max_wall_clock_seconds:
+            termination = ImprovementTerminationReason.OPTIMIZATION_BUDGET_EXHAUSTED
+            break
+        if usage.generation_calls >= selected_policy.max_generation_calls:
             termination = ImprovementTerminationReason.OPTIMIZATION_BUDGET_EXHAUSTED
             break
         generator_system = (
@@ -736,18 +1090,29 @@ async def run_improvement_optimization(
         if not _reserve_model_call(usage, selected_policy):
             termination = ImprovementTerminationReason.OPTIMIZATION_BUDGET_EXHAUSTED
             break
+        generation_timeout = min(
+            selected_policy.model_timeout_seconds,
+            selected_policy.max_wall_clock_seconds - (time.monotonic() - started),
+        )
+        if generation_timeout <= 0:
+            termination = ImprovementTerminationReason.OPTIMIZATION_BUDGET_EXHAUSTED
+            break
         generation_token = bind_workflow_cloud_budget(budget)
         usage.generation_calls += 1
         try:
             with evaluation_model_route(provider, generator_model):
-                generated, input_tokens, output_tokens = await asyncio.wait_for(
+                generated, call_usage = await asyncio.wait_for(
                     _generate_structured(
                         router=selected_router, request=generation_request, model_type=_CandidateSuggestions,
                     ),
-                    timeout=selected_policy.model_timeout_seconds,
+                    timeout=generation_timeout,
                 )
-            usage.reported_input_tokens += input_tokens or 0
-            usage.reported_output_tokens += output_tokens or 0
+            usage.optimizer_input_token_values.append(call_usage.input_tokens)
+            usage.optimizer_output_token_values.append(call_usage.output_tokens)
+            usage.optimizer_retry_values.append(call_usage.retries)
+            usage.optimizer_fallback_values.append(call_usage.fallbacks)
+            usage.optimizer_execution_values.append(call_usage.model_executions)
+            usage.optimizer_cost_values.append(call_usage.cost_usd)
         except LLMQuotaExhaustedError:
             termination = ImprovementTerminationReason.OPTIMIZATION_BUDGET_EXHAUSTED
             break
@@ -827,6 +1192,9 @@ async def run_improvement_optimization(
             if time.monotonic() - started >= selected_policy.max_wall_clock_seconds:
                 termination = ImprovementTerminationReason.OPTIMIZATION_BUDGET_EXHAUSTED
                 break
+            if usage.candidate_screen_runs >= selected_policy.max_candidate_screen_workflows:
+                termination = ImprovementTerminationReason.OPTIMIZATION_BUDGET_EXHAUSTED
+                break
             overlay = PromptCandidateOverlay(
                 optimization_run_id=run_id,
                 candidate_id=candidate.candidate_id,
@@ -838,11 +1206,13 @@ async def run_improvement_optimization(
                 prompt_text=candidate.candidate_prompt,
             )
             trial_units = len(selected_cases) * selected_policy.screen_trials_per_case
-            if evaluation_trials + trial_units > selected_policy.max_total_evaluation_trials:
+            if not _reserve_case_trial_work_units(usage, selected_policy, trial_units):
                 termination = ImprovementTerminationReason.OPTIMIZATION_BUDGET_EXHAUSTED
                 break
-            evaluation_trials += trial_units
-            usage.evaluation_trials = evaluation_trials
+            remaining_seconds = selected_policy.max_wall_clock_seconds - (time.monotonic() - started)
+            if remaining_seconds <= 0:
+                termination = ImprovementTerminationReason.OPTIMIZATION_BUDGET_EXHAUSTED
+                break
             usage.candidate_screen_runs += 1
             try:
                 screen_report = await asyncio.wait_for(
@@ -857,36 +1227,62 @@ async def run_improvement_optimization(
                         allow_live=True,
                         prompt_overlay=overlay,
                     ),
-                    timeout=max(1.0, selected_policy.max_wall_clock_seconds - (time.monotonic() - started)),
+                    timeout=remaining_seconds,
                 )
-            except (asyncio.TimeoutError, ValueError, LLMError):
+            except asyncio.TimeoutError:
                 candidates[candidates.index(candidate)] = transition_candidate(
                     candidate,
                     CandidateStatus.INCONCLUSIVE,
-                    screen_case_ids=selected_cases,
-                    screen_case_selection_digest=canonical_digest({"policy": selected_policy.screen_selection_policy, "case_ids": selected_cases}),
-                    screen_selection_policy=selected_policy.screen_selection_policy,
+                    screen_selection=screen_selection,
                     rationale="Development screen could not complete within the declared budget."
                 )
                 termination = ImprovementTerminationReason.OPTIMIZATION_BUDGET_EXHAUSTED
-                continue
+                break
+            except LLMQuotaExhaustedError:
+                candidates[candidates.index(candidate)] = transition_candidate(
+                    candidate,
+                    CandidateStatus.INCONCLUSIVE,
+                    screen_selection=screen_selection,
+                    rationale="Canonical workflow AI budget rejected the development screen."
+                )
+                termination = ImprovementTerminationReason.OPTIMIZATION_BUDGET_EXHAUSTED
+                break
+            except LLMError:
+                candidates[candidates.index(candidate)] = transition_candidate(
+                    candidate,
+                    CandidateStatus.INCONCLUSIVE,
+                    screen_selection=screen_selection,
+                    rationale="Development screen failed at the model-provider boundary."
+                )
+                termination = ImprovementTerminationReason.PROVIDER_FAILURE
+                break
+            except ValueError:
+                candidates[candidates.index(candidate)] = transition_candidate(
+                    candidate,
+                    CandidateStatus.INCONCLUSIVE,
+                    screen_selection=screen_selection,
+                    rationale="Development screen was rejected by a harness or contract boundary."
+                )
+                termination = ImprovementTerminationReason.HARNESS_FAILURE
+                break
             artifacts.append(EvaluationArtifact(candidate.candidate_id, "SCREEN", screen_report))
-            if not _candidate_overlay_matches(screen_report, overlay):
+            if (
+                not _candidate_overlay_matches(baseline, screen_report, overlay)
+                or not _screen_report_covers_selection(screen_report, screen_selection)
+            ):
                 index = candidates.index(candidate)
                 candidates[index] = transition_candidate(
                     candidate,
                     CandidateStatus.INCONCLUSIVE,
                     screen_report_digest=screen_report.report_digest,
-                    screen_case_ids=selected_cases,
-                    screen_case_selection_digest=canonical_digest({"policy": selected_policy.screen_selection_policy, "case_ids": selected_cases}),
-                    screen_selection_policy=selected_policy.screen_selection_policy,
+                    screen_selection=screen_selection,
                     rationale="Screen report did not attest the exact requested prompt overlay.",
                 )
                 termination = ImprovementTerminationReason.HARNESS_FAILURE
                 break
             current_screen_results[candidate.candidate_id] = screen_report
             assessment = _assess_screen(
-                candidate.candidate_id, baseline, screen_report, selected_cases, target_classes,
+                candidate.candidate_id, baseline, screen_report, screen_selection, target_classes,
             )
             assessments.append(assessment)
             index = candidates.index(candidate)
@@ -894,31 +1290,28 @@ async def run_improvement_optimization(
                 candidates[index] = transition_candidate(
                     candidate, CandidateStatus.SAFETY_BLOCKED,
                     screen_report_digest=screen_report.report_digest,
-                    screen_case_ids=selected_cases,
-                    screen_case_selection_digest=canonical_digest({"policy": selected_policy.screen_selection_policy, "case_ids": selected_cases}),
-                    screen_selection_policy=selected_policy.screen_selection_policy,
+                    screen_selection=screen_selection,
                     rationale="; ".join(assessment.reasons)[:600],
                 )
             elif assessment.passed:
                 candidates[index] = transition_candidate(
                     candidate, CandidateStatus.SCREEN_PASSED,
                     screen_report_digest=screen_report.report_digest,
-                    screen_case_ids=selected_cases,
-                    screen_case_selection_digest=canonical_digest({"policy": selected_policy.screen_selection_policy, "case_ids": selected_cases}),
-                    screen_selection_policy=selected_policy.screen_selection_policy,
+                    screen_selection=screen_selection,
                     rationale=f"Screen passed: target failures {assessment.target_failures_before}->{assessment.target_failures_after}; recall and precision did not regress.",
                 )
             else:
                 candidates[index] = transition_candidate(
                     candidate, CandidateStatus.SCREEN_FAILED,
                     screen_report_digest=screen_report.report_digest,
-                    screen_case_ids=selected_cases,
-                    screen_case_selection_digest=canonical_digest({"policy": selected_policy.screen_selection_policy, "case_ids": selected_cases}),
-                    screen_selection_policy=selected_policy.screen_selection_policy,
+                    screen_selection=screen_selection,
                     rationale="; ".join(assessment.reasons)[:600],
                 )
 
-        if termination == ImprovementTerminationReason.HARNESS_FAILURE:
+        if termination in {
+            ImprovementTerminationReason.HARNESS_FAILURE,
+            ImprovementTerminationReason.OPTIMIZATION_BUDGET_EXHAUSTED,
+        }:
             break
         survivors = [item for item in candidates if item.optimization_run_id == run_id and item.status == CandidateStatus.SCREEN_PASSED and item.candidate_id in current_screen_results]
         if not survivors:
@@ -927,7 +1320,10 @@ async def run_improvement_optimization(
             break
         assessment_map = {item.candidate_id: item for item in assessments}
         survivors.sort(key=lambda item: _rank_screen(assessment_map[item.candidate_id]))
-        remaining_full = selected_policy.max_total_evaluation_trials - evaluation_trials
+        remaining_full = (
+            selected_policy.max_total_case_trial_work_units
+            - usage.case_trial_work_units_reserved
+        )
         full_candidates: list[ImprovementCandidate] = []
         for candidate in survivors:
             if full_evaluation_count >= selected_policy.max_full_evaluation_candidates:
@@ -941,6 +1337,12 @@ async def run_improvement_optimization(
             break
 
         for candidate in full_candidates:
+            if time.monotonic() - started >= selected_policy.max_wall_clock_seconds:
+                termination = ImprovementTerminationReason.OPTIMIZATION_BUDGET_EXHAUSTED
+                break
+            if full_evaluation_count >= selected_policy.max_full_evaluation_candidates:
+                termination = ImprovementTerminationReason.OPTIMIZATION_BUDGET_EXHAUSTED
+                break
             candidate_overlay = PromptCandidateOverlay(
                 optimization_run_id=run_id,
                 candidate_id=candidate.candidate_id,
@@ -952,11 +1354,13 @@ async def run_improvement_optimization(
                 prompt_text=candidate.candidate_prompt,
             )
             units = len(case_ids) * selected_policy.full_trials_per_case
-            if evaluation_trials + units > selected_policy.max_total_evaluation_trials:
+            if not _reserve_case_trial_work_units(usage, selected_policy, units):
                 termination = ImprovementTerminationReason.OPTIMIZATION_BUDGET_EXHAUSTED
                 break
-            evaluation_trials += units
-            usage.evaluation_trials = evaluation_trials
+            remaining_seconds = selected_policy.max_wall_clock_seconds - (time.monotonic() - started)
+            if remaining_seconds <= 0:
+                termination = ImprovementTerminationReason.OPTIMIZATION_BUDGET_EXHAUSTED
+                break
             usage.candidate_full_runs += 1
             full_evaluation_count += 1
             try:
@@ -972,17 +1376,42 @@ async def run_improvement_optimization(
                         allow_live=True,
                         prompt_overlay=candidate_overlay,
                     ),
-                    timeout=max(1.0, selected_policy.max_wall_clock_seconds - (time.monotonic() - started)),
+                    timeout=remaining_seconds,
                 )
-            except (asyncio.TimeoutError, ValueError, LLMError):
+            except asyncio.TimeoutError:
                 idx = candidates.index(candidate)
                 candidates[idx] = transition_candidate(
                     candidate, CandidateStatus.FULL_EVAL_FAILED,
                     rationale="Full DEV evaluation failed or timed out; no promotion evidence was produced.",
                 )
-                continue
+                termination = ImprovementTerminationReason.OPTIMIZATION_BUDGET_EXHAUSTED
+                break
+            except LLMQuotaExhaustedError:
+                idx = candidates.index(candidate)
+                candidates[idx] = transition_candidate(
+                    candidate, CandidateStatus.FULL_EVAL_FAILED,
+                    rationale="Canonical workflow AI budget rejected the full DEV evaluation.",
+                )
+                termination = ImprovementTerminationReason.OPTIMIZATION_BUDGET_EXHAUSTED
+                break
+            except LLMError:
+                idx = candidates.index(candidate)
+                candidates[idx] = transition_candidate(
+                    candidate, CandidateStatus.FULL_EVAL_FAILED,
+                    rationale="Full DEV evaluation failed at the model-provider boundary.",
+                )
+                termination = ImprovementTerminationReason.PROVIDER_FAILURE
+                break
+            except ValueError:
+                idx = candidates.index(candidate)
+                candidates[idx] = transition_candidate(
+                    candidate, CandidateStatus.FULL_EVAL_FAILED,
+                    rationale="Full DEV evaluation was rejected by a harness or contract boundary.",
+                )
+                termination = ImprovementTerminationReason.HARNESS_FAILURE
+                break
             artifacts.append(EvaluationArtifact(candidate.candidate_id, "FULL", full_report))
-            if not _candidate_overlay_matches(full_report, candidate_overlay):
+            if not _candidate_overlay_matches(baseline, full_report, candidate_overlay):
                 idx = candidates.index(candidate)
                 candidates[idx] = transition_candidate(
                     candidate,
@@ -1028,6 +1457,17 @@ async def run_improvement_optimization(
                     rationale=("Candidate regressed precision or recall." if pareto_regression else "; ".join(decision.reasons))[:600],
                 )
             elif decision.eligible_for_human_review:
+                # Recheck the Lab-specific one-prompt invariant immediately at
+                # the authority boundary that creates promotion eligibility.
+                if not _candidate_overlay_matches(baseline, full_report, candidate_overlay):
+                    candidates[idx] = transition_candidate(
+                        candidate, CandidateStatus.INCONCLUSIVE,
+                        full_eval_report_digest=full_report.report_digest,
+                        comparison_digest=comparison.comparison_digest,
+                        rationale="Promotion blocked because the exact one-prompt overlay no longer matches.",
+                    )
+                    termination = ImprovementTerminationReason.HARNESS_FAILURE
+                    break
                 candidates[idx] = transition_candidate(
                     candidate, CandidateStatus.PROMOTION_ELIGIBLE,
                     full_eval_report_digest=full_report.report_digest,
@@ -1096,6 +1536,7 @@ async def run_improvement_optimization(
         generator_provider=provider.value,
         generator_model=generator_model,
         usage=usage,
+        evaluation_artifacts=artifacts,
     )
     return OptimizationOutput(
         report=final_report,
@@ -1108,5 +1549,6 @@ async def run_improvement_optimization(
 __all__ = [
     "EvaluationArtifact", "OptimizationOutput", "run_improvement_optimization",
     "select_target", "transition_candidate", "validate_live_baseline",
-    "_candidate_overlay_matches",
+    "_candidate_overlay_matches", "_reserve_case_trial_work_units",
+    "_screen_report_covers_selection",
 ]

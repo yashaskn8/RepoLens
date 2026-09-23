@@ -23,7 +23,9 @@ class PromptComponentSpec:
     assignment_name: str
     mandatory_clauses: tuple[str, ...]
     max_chars: int = 16_000
-    max_growth_ratio: float = 1.25
+    # A rational ratio keeps candidate-length boundaries exact and auditable.
+    max_growth_ratio_numerator: int = 5
+    max_growth_ratio_denominator: int = 4
     max_growth_chars: int = 1_200
     optimization_enabled: bool = True
 
@@ -113,6 +115,17 @@ def _read_prompt(spec: PromptComponentSpec) -> str:
     return value
 
 
+def _maximum_candidate_chars(baseline_length: int, spec: PromptComponentSpec) -> int:
+    if baseline_length < 0:
+        raise ValueError("baseline prompt length must be non-negative")
+    if spec.max_growth_ratio_denominator <= 0:
+        raise ValueError("candidate growth ratio denominator must be positive")
+    if spec.max_growth_ratio_numerator < spec.max_growth_ratio_denominator:
+        raise ValueError("candidate growth ratio must be at least 1")
+    ratio_cap = (baseline_length * spec.max_growth_ratio_numerator) // spec.max_growth_ratio_denominator
+    return min(spec.max_chars, ratio_cap, baseline_length + spec.max_growth_chars)
+
+
 class OptimizablePromptRegistry:
     """Runtime access to an explicit, fail-closed set of prompt components."""
 
@@ -133,7 +146,8 @@ class OptimizablePromptRegistry:
                 "assignment_name": spec.assignment_name,
                 "mandatory_clauses": list(spec.mandatory_clauses),
                 "max_chars": spec.max_chars,
-                "max_growth_ratio": spec.max_growth_ratio,
+                "max_growth_ratio_numerator": spec.max_growth_ratio_numerator,
+                "max_growth_ratio_denominator": spec.max_growth_ratio_denominator,
                 "max_growth_chars": spec.max_growth_chars,
                 "optimization_enabled": spec.optimization_enabled,
             }
@@ -159,6 +173,16 @@ class OptimizablePromptRegistry:
 
     def current_digest(self, name: str) -> str:
         return prompt_digest(self.current_text(name))
+
+    def maximum_candidate_chars(self, name: str) -> int:
+        """Return the strictest of the ratio, absolute-growth, and global caps.
+
+        The multiplicative cap uses integer arithmetic and floors toward the
+        lower whole character, avoiding floating-point boundary surprises.
+        """
+        spec = self.get_spec(name)
+        baseline_length = len(self.current_text(name))
+        return _maximum_candidate_chars(baseline_length, spec)
 
     def current_version(self, name: str) -> str:
         return self.get_spec(name).version
@@ -186,7 +210,7 @@ class OptimizablePromptRegistry:
             rejection.append("NO_MEANINGFUL_CHANGE")
         if len(candidate_text) > spec.max_chars:
             rejection.append("MAXIMUM_SIZE")
-        if len(candidate_text) > max(len(baseline) * spec.max_growth_ratio, len(baseline) + spec.max_growth_chars):
+        if len(candidate_text) > _maximum_candidate_chars(len(baseline), spec):
             rejection.append("GROWTH_LIMIT")
         for clause in spec.mandatory_clauses:
             if clause not in candidate_text:

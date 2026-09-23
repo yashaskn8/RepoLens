@@ -213,21 +213,49 @@ The `optimize` command makes no provider calls without
 complete, five-trial LIVE baseline from the exact production graph and current
 public DEV corpus. Candidate evaluation uses the baseline's exact provider and
 model; generator identity is recorded separately. Each run is capped at two
-generations, four candidates per generation, a deterministic screen set, three
-full-DEV candidate evaluations, bounded model requests, 640 total
-case-trials, and a one-hour wall-clock budget. These limits are policy-versioned.
+generations, four candidates per generation, at most eight candidate screen
+workflows, three full-DEV candidate evaluations, bounded model requests, 640
+case-trial work units, and a one-hour wall-clock budget. These limits are
+policy-versioned. The optimizer reserves at most 160,000 tokens across its own
+reflection/generation requests (12,000 input + 8,000 output per reservation,
+ten calls maximum). That reservation is not a global ceiling for candidate
+evaluation. Candidate screen/full-evaluation model calls, reported input/output
+tokens, retries, fallbacks, and cost are aggregated from the existing
+full-analysis reports without double-counting. Missing provider usage is
+`NOT_MEASURED`, never zero; work-unit, per-workflow AI-budget, candidate, and
+wall-clock ceilings remain the pre-execution controls. When retries or
+fallbacks occurred but their failed-attempt token/cost usage is unavailable,
+the corresponding total token/cost metric is also `NOT_MEASURED`; retry and
+fallback counts remain separately reported.
 
 Candidate text is installed through an async-context-local evaluation overlay;
 production prompt constants are never mutated. Candidates must preserve
 registered mandatory clauses and pass deterministic safety, size, URL, secret,
 case-ID, and fixture-path checks. The sanitizer is one defense, not a semantic
-security proof. Application tool authority, snapshots, verification,
-resources, and the existing human boundary remain independent of prompt text.
-An overlay report records both baseline and candidate prompt digests and
-versions. Candidate comparison uses the existing full-report compatibility,
-paired comparison, and non-mutating human promotion gate; precision and recall
-must not regress. Scripted reports are accepted only for offline harness/corpus
-tests and can never establish real prompt improvement.
+security proof. Each experiment changes exactly one registered prompt
+component. The Improvement Lab verifies the baseline/candidate prompt-component
+maps and exact overlay identity, requiring the changed-component set to equal
+the selected target; every other component's version and digest must match.
+The generic compatibility digest intentionally allows candidate-capable prompt
+surfaces to vary, so compatibility-digest equality alone does not establish
+prompt-only causal isolation. Application tool authority, snapshots,
+verification, resources, and the existing human boundary remain independent of
+prompt text. Candidate comparison still uses the existing full-report
+compatibility, paired comparison, and non-mutating human promotion gate.
+
+The deterministic development screen records four explicit groups:
+target-attributed failures, withheld validation cases, security cases, and
+known-good preserve/regression cases when available. Selection is fixed by the
+versioned policy, target component, public corpus digest, case ID, and case
+family; any remaining capacity is separately labeled deterministic fallback.
+If the target has no known-good preserve examples, the report records that
+limitation rather than describing fallback cases as regression evidence. The
+screen uses one trial per case and is only a low-confidence elimination stage:
+it cannot establish promotion eligibility. A survivor must still pass the
+existing full public DEV evaluation with five fresh trials per case and the
+existing comparison/promotion gates. Precision and recall may not regress.
+Scripted reports are accepted only for offline harness/corpus tests and can
+never establish real prompt improvement.
 
 The lab reads only the canonical public DEV repository-scan dataset. It accepts
 no dataset-root or holdout-path override and does not call holdout loaders. The

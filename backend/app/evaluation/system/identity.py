@@ -179,7 +179,7 @@ def _workflow_source_digest(module_names: Iterable[str]) -> str:
 
 
 FULL_ANALYSIS_GRAPH_CONTRACT_VERSION = "full-analysis-graph/1.0"
-FULL_ANALYSIS_EVALUATION_CONTRACT_VERSION = "full-analysis-evaluation/1.2"
+FULL_ANALYSIS_EVALUATION_CONTRACT_VERSION = "full-analysis-evaluation/1.3"
 FULL_ANALYSIS_GRAPH_CONTRACT = {
     "version": FULL_ANALYSIS_GRAPH_CONTRACT_VERSION,
     "nodes": [
@@ -383,6 +383,20 @@ def build_agent_system_identity(
             PromptComponentIdentity(name="revision-agent", version="revision-agent/1.0", content_digest=_module_prompt_digest("app.agents.revision")),
             prompt_components[0], prompt_components[1],
         )
+        # Registered prompt identities bind the exact prompt text, not the
+        # containing module's AST. This gives the Improvement Lab a baseline
+        # digest that can be compared byte-for-byte with its overlay contract.
+        from app.evaluation.improvement.registry import OptimizablePromptRegistry
+
+        optimizable_prompts = OptimizablePromptRegistry()
+        prompt_components = tuple(
+            PromptComponentIdentity(
+                name=item.name,
+                version=optimizable_prompts.current_version(item.name),
+                content_digest=optimizable_prompts.current_digest(item.name),
+            ) if item.name in optimizable_prompts.names else item
+            for item in prompt_components
+        )
     if prompt_overlay is not None:
         if scope != "FULL_ANALYSIS_GRAPH":
             raise ValueError("prompt candidates are supported only by full-analysis evaluation")
@@ -397,6 +411,7 @@ def build_agent_system_identity(
         prompt_registry = OptimizablePromptRegistry()
         if (
             baseline_component.version != prompt_overlay.baseline_version
+            or baseline_component.content_digest != prompt_overlay.baseline_digest
             or prompt_registry.current_digest(prompt_overlay.component) != prompt_overlay.baseline_digest
         ):
             raise ValueError("prompt overlay semantic or content baseline is stale")

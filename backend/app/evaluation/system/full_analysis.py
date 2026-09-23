@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import tempfile
 import time
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -620,6 +621,103 @@ def _metric(value: float | None, unit: str) -> MeasuredMetric:
     return MeasuredMetric(status=MetricStatus.MEASURED, value=value, unit=unit)
 
 
+def _trial_usage_metrics(
+    model_executions: list[Any],
+    *,
+    model_calls: int,
+    mode: SystemEvalMode,
+    provider_usage_unknown: bool = False,
+) -> tuple[MeasuredMetric, MeasuredMetric, MeasuredMetric, int | None, int | None]:
+    """Project canonical model metadata without turning missing usage into zero."""
+    if mode == SystemEvalMode.SCRIPTED:
+        return (
+            _metric(None, "tokens"), _metric(None, "tokens"), _metric(None, "USD"), 0, 0,
+        )
+    if model_calls == 0 and not model_executions:
+        if provider_usage_unknown:
+            return (
+                _metric(None, "tokens"), _metric(None, "tokens"), _metric(None, "USD"), None, None,
+            )
+        return _metric(0, "tokens"), _metric(0, "tokens"), _metric(0, "USD"), 0, 0
+    if model_calls != len(model_executions) or not model_executions:
+        return (
+            _metric(None, "tokens"), _metric(None, "tokens"), _metric(None, "USD"), None, None,
+        )
+
+    input_values: list[int] = []
+    output_values: list[int] = []
+    cost_values: list[float] = []
+    retry_values: list[int] = []
+    fallback_values: list[int] = []
+    token_complete = True
+    cost_complete = True
+    retry_complete = True
+    fallback_complete = True
+    for execution in model_executions:
+        if isinstance(execution, dict):
+            prompt_tokens = execution.get("prompt_tokens")
+            completion_tokens = execution.get("completion_tokens")
+            extra = execution.get("extra_metadata")
+        else:
+            prompt_tokens = getattr(execution, "prompt_tokens", None)
+            completion_tokens = getattr(execution, "completion_tokens", None)
+            extra = getattr(execution, "extra_metadata", None)
+        extra = extra if isinstance(extra, dict) else {}
+        if (
+            isinstance(prompt_tokens, int) and not isinstance(prompt_tokens, bool)
+            and isinstance(completion_tokens, int) and not isinstance(completion_tokens, bool)
+            and prompt_tokens >= 0 and completion_tokens >= 0
+        ):
+            input_values.append(prompt_tokens)
+            output_values.append(completion_tokens)
+        else:
+            token_complete = False
+        raw_cost = extra.get("cost_usd")
+        if (
+            isinstance(raw_cost, (int, float)) and not isinstance(raw_cost, bool)
+            and math.isfinite(float(raw_cost)) and raw_cost >= 0
+        ):
+            cost_values.append(float(raw_cost))
+        else:
+            cost_complete = False
+        raw_retries = extra.get("retry_count", 0)
+        if isinstance(raw_retries, int) and not isinstance(raw_retries, bool) and raw_retries >= 0:
+            retry_values.append(raw_retries)
+        else:
+            retry_complete = False
+        if "fallbacks_attempted" in extra or "fallback_used" in extra:
+            attempts = extra.get("fallbacks_attempted")
+            if isinstance(attempts, list):
+                fallback_values.append(len(attempts))
+            elif isinstance(extra.get("fallback_used"), bool):
+                fallback_values.append(int(extra["fallback_used"]))
+            else:
+                fallback_complete = False
+        else:
+            # The full-analysis evaluator pins one provider/model and disables
+            # escalation; absent router metadata denotes zero retries/fallbacks.
+            fallback_values.append(0)
+    attempts_fully_accounted = (
+        retry_complete
+        and fallback_complete
+        and not any(retry_values)
+        and not any(fallback_values)
+    )
+    if not attempts_fully_accounted:
+        # Adapter metadata describes the successful response. If retries or
+        # fallbacks occurred, token/cost use from failed attempts is not
+        # available here and must not be represented as a complete total.
+        token_complete = False
+        cost_complete = False
+    return (
+        _metric(sum(input_values) if token_complete else None, "tokens"),
+        _metric(sum(output_values) if token_complete else None, "tokens"),
+        _metric(sum(cost_values) if cost_complete else None, "USD"),
+        sum(retry_values) if retry_complete else None,
+        sum(fallback_values) if fallback_complete else None,
+    )
+
+
 async def _execute_trial(
     analysis_input: AnalysisInput,
     *,
@@ -715,9 +813,9 @@ def _system_metrics(
     false_abstentions = sum(item.abstained is False and item.task_success is False for item in trials)
     tool_calls = sum(item.tool_calls for item in trials)
     model_calls = sum(item.model_calls for item in trials)
-    measured_inputs = [item.input_tokens.value for item in trials if item.input_tokens.status == MetricStatus.MEASURED]
-    measured_outputs = [item.output_tokens.value for item in trials if item.output_tokens.status == MetricStatus.MEASURED]
-    measured_costs = [item.cost_usd.value for item in trials if item.cost_usd.status == MetricStatus.MEASURED]
+    input_complete = bool(trials) and all(item.input_tokens.status == MetricStatus.MEASURED for item in trials)
+    output_complete = bool(trials) and all(item.output_tokens.status == MetricStatus.MEASURED for item in trials)
+    cost_complete = bool(trials) and all(item.cost_usd.status == MetricStatus.MEASURED for item in trials)
     latencies = [item.latency_ms.value for item in trials if item.latency_ms.status == MetricStatus.MEASURED]
     security_cases = sum(case.category.lower() == "security" for case in case_results)
     return SystemEvaluationMetrics(
@@ -755,10 +853,19 @@ def _system_metrics(
         tool_calls_per_successful_task=_metric(tool_calls / successes if successes else None, "calls/task"),
         model_calls_per_successful_task=_metric(model_calls / successes if successes else None, "calls/task"),
         latency_ms_per_trial=_metric(sum(latencies) / len(latencies) if latencies else None, "ms/trial"),
-        input_tokens=_metric(sum(measured_inputs) if measured_inputs else None, "tokens"),
-        output_tokens=_metric(sum(measured_outputs) if measured_outputs else None, "tokens"),
-        cost_usd=_metric(sum(measured_costs) if measured_costs else None, "USD"),
-        fallback_count=_metric(None, "count"), retry_count=_metric(None, "count"),
+        input_tokens=_metric(sum(item.input_tokens.value or 0 for item in trials) if input_complete else None, "tokens"),
+        output_tokens=_metric(sum(item.output_tokens.value or 0 for item in trials) if output_complete else None, "tokens"),
+        cost_usd=_metric(sum(item.cost_usd.value or 0 for item in trials) if cost_complete else None, "USD"),
+        fallback_count=_metric(
+            sum(item.fallback_count or 0 for item in trials)
+            if trials and all(item.fallback_count is not None for item in trials) else None,
+            "calls",
+        ),
+        retry_count=_metric(
+            sum(item.retry_count or 0 for item in trials)
+            if trials and all(item.retry_count is not None for item in trials) else None,
+            "calls",
+        ),
         max_context_bytes=_metric(None, "bytes"),
         regression_failures=sum(
             trial.task_success is not True
@@ -998,6 +1105,18 @@ async def run_full_analysis_evaluation(
                 if event.model_execution_count is not None else len(event.model_identities)
                 for event in trace
             )
+            (
+                input_token_metric,
+                output_token_metric,
+                cost_metric,
+                retry_count,
+                fallback_count,
+            ) = _trial_usage_metrics(
+                model_executions if isinstance(model_executions, list) else [],
+                model_calls=model_calls,
+                mode=mode,
+                provider_usage_unknown=provider_failed,
+            )
             latency = _metric(duration_ms, "ms")
             grade = SystemTrialGrade(
                 case_id=case.case_id,
@@ -1019,11 +1138,11 @@ async def run_full_analysis_evaluation(
                 provider=(selected_provider if mode == SystemEvalMode.LIVE and actual_pairs == {expected_pair} else None),
                 model=(selected_model if mode == SystemEvalMode.LIVE and actual_pairs == {expected_pair} else ("scripted-full-analysis-harness" if mode == SystemEvalMode.SCRIPTED else None)),
                 latency_ms=latency,
-                input_tokens=_metric(None, "tokens"),
-                output_tokens=_metric(None, "tokens"),
-                cost_usd=_metric(None, "USD"),
-                fallback_count=0 if mode == SystemEvalMode.SCRIPTED else None,
-                retry_count=0 if mode == SystemEvalMode.SCRIPTED else None,
+                input_tokens=input_token_metric,
+                output_tokens=output_token_metric,
+                cost_usd=cost_metric,
+                fallback_count=fallback_count,
+                retry_count=retry_count,
                 safety_violation_codes=security_codes,
             )
             grades.append(grade)

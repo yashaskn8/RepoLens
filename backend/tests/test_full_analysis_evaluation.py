@@ -28,6 +28,7 @@ from app.evaluation.system.full_analysis import (
 )
 from app.evaluation.system.schemas import (
     FailureClass,
+    MetricStatus,
     SystemEvalMode,
     WorkflowNodeEvent,
     system_evaluation_report_digest,
@@ -45,6 +46,72 @@ _CASE_PATH = (
     / "correctness"
     / "BUG-EXCEPT-01A.json"
 )
+
+
+def test_live_trial_usage_keeps_unreported_tokens_and_cost_unmeasured():
+    from app.evaluation.system.full_analysis import _trial_usage_metrics
+
+    input_tokens, output_tokens, cost, retries, fallbacks = _trial_usage_metrics(
+        [{"prompt_tokens": None, "completion_tokens": None, "extra_metadata": {}}],
+        model_calls=1,
+        mode=SystemEvalMode.LIVE,
+    )
+    assert input_tokens.status == MetricStatus.NOT_MEASURED and input_tokens.value is None
+    assert output_tokens.status == MetricStatus.NOT_MEASURED and output_tokens.value is None
+    assert cost.status == MetricStatus.NOT_MEASURED and cost.value is None
+    assert retries == 0
+    assert fallbacks == 0
+
+
+def test_provider_failure_without_returned_execution_metadata_is_not_zero_usage():
+    from app.evaluation.system.full_analysis import _trial_usage_metrics
+
+    input_tokens, output_tokens, cost, retries, fallbacks = _trial_usage_metrics(
+        [],
+        model_calls=0,
+        mode=SystemEvalMode.LIVE,
+        provider_usage_unknown=True,
+    )
+    assert input_tokens.status == MetricStatus.NOT_MEASURED and input_tokens.value is None
+    assert output_tokens.status == MetricStatus.NOT_MEASURED and output_tokens.value is None
+    assert cost.status == MetricStatus.NOT_MEASURED and cost.value is None
+    assert retries is None
+    assert fallbacks is None
+
+
+def test_retried_success_does_not_present_final_response_tokens_as_total_attempt_usage():
+    from app.evaluation.system.full_analysis import _trial_usage_metrics
+
+    input_tokens, output_tokens, cost, retries, fallbacks = _trial_usage_metrics(
+        [{
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "extra_metadata": {"retry_count": 1, "fallback_used": False, "cost_usd": 0.01},
+        }],
+        model_calls=1,
+        mode=SystemEvalMode.LIVE,
+    )
+    assert input_tokens.status == MetricStatus.NOT_MEASURED and input_tokens.value is None
+    assert output_tokens.status == MetricStatus.NOT_MEASURED and output_tokens.value is None
+    assert cost.status == MetricStatus.NOT_MEASURED and cost.value is None
+    assert retries == 1
+    assert fallbacks == 0
+
+
+def test_live_trial_usage_rejects_malformed_fallback_metadata_as_unknown():
+    from app.evaluation.system.full_analysis import _trial_usage_metrics
+
+    _, _, _, retries, fallbacks = _trial_usage_metrics(
+        [{
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "extra_metadata": {"retry_count": "unknown", "fallbacks_attempted": "not-a-list"},
+        }],
+        model_calls=1,
+        mode=SystemEvalMode.LIVE,
+    )
+    assert retries is None
+    assert fallbacks is None
 
 
 def _positive_case() -> BenchmarkCase:

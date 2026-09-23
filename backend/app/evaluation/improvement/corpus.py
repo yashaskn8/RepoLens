@@ -74,7 +74,11 @@ def _safe_events(events, policy: ImprovementPolicy) -> tuple[tuple[SafeImproveme
             status=item.status,
             duration_ms=min(item.duration_ms, 1_000_000_000.0),
             model_identities=tuple(_short(value, 128) for value in item.model_identities[:8]),
-            model_execution_count=item.model_execution_count or 0,
+            model_execution_count=(
+                item.model_execution_count
+                if item.model_execution_count is not None
+                else len(item.model_identities)
+            ),
             tool_names=tuple(_short(value, 64) for value in item.tool_names[:8]),
             tool_execution_count=item.tool_execution_count,
             evidence_count=min(item.evidence_count, 1_000_000),
@@ -212,7 +216,7 @@ def build_improvement_corpus(
                 baseline_report_digest=report.report_digest,
                 outcome="FAILURE",
             ))
-        elif grade.task_success is True:
+        elif grade.task_success is True and grade.trial_number == 1:
             successful_nodes = {event.node for event in detail.workflow_trace}
             for target, node in (
                 ("architecture-agent", "architecture"),

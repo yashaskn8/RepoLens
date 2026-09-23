@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.evaluation.system.schemas import FailureClass
+from app.evaluation.system.schemas import FailureClass, MeasuredMetric, MetricStatus
 
 
 class ImprovementModel(BaseModel):
@@ -63,6 +63,64 @@ class ImprovementTerminationReason(str, Enum):
     PROVIDER_FAILURE = "PROVIDER_FAILURE"
     INVALID_BASELINE = "INVALID_BASELINE"
     HARNESS_FAILURE = "HARNESS_FAILURE"
+
+
+class ScreenCaseGroup(str, Enum):
+    TARGET_FAILURES = "TARGET_FAILURES"
+    VALIDATION = "VALIDATION"
+    SECURITY = "SECURITY"
+    PRESERVE_REGRESSION = "PRESERVE_REGRESSION"
+    DETERMINISTIC_FALLBACK = "DETERMINISTIC_FALLBACK"
+
+
+class ScreenCaseGroupMembership(ImprovementModel):
+    group: ScreenCaseGroup
+    case_ids: tuple[str, ...] = Field(default=(), max_length=16)
+
+
+class ScreenCaseSelection(ImprovementModel):
+    schema_version: Literal["improvement-screen-selection/1.0"] = "improvement-screen-selection/1.0"
+    policy_version: str = Field(min_length=1, max_length=64)
+    selection_policy: str = Field(min_length=1, max_length=128)
+    target_component: str = Field(min_length=1, max_length=128)
+    corpus_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    case_ids: tuple[str, ...] = Field(min_length=1, max_length=16)
+    groups: tuple[ScreenCaseGroupMembership, ...] = Field(min_length=4, max_length=5)
+    preserve_cases_available: bool
+    preserve_limitation: str | None = Field(default=None, max_length=256)
+    evidence_level: Literal["LOW_CONFIDENCE_ELIMINATION_ONLY"] = "LOW_CONFIDENCE_ELIMINATION_ONLY"
+    selection_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> "ScreenCaseSelection":
+        from app.evaluation.improvement.digest import canonical_digest
+
+        group_names = [item.group for item in self.groups]
+        required = {
+            ScreenCaseGroup.TARGET_FAILURES,
+            ScreenCaseGroup.VALIDATION,
+            ScreenCaseGroup.SECURITY,
+            ScreenCaseGroup.PRESERVE_REGRESSION,
+        }
+        if len(group_names) != len(set(group_names)) or not required.issubset(set(group_names)):
+            raise ValueError("screen selection must record each required group exactly once")
+        selected = set(self.case_ids)
+        if len(selected) != len(self.case_ids):
+            raise ValueError("screen selection case IDs must be unique")
+        grouped = {case_id for item in self.groups for case_id in item.case_ids}
+        if grouped != selected:
+            raise ValueError("screen group membership must cover exactly the selected cases")
+        preserve_ids = next(
+            item.case_ids for item in self.groups if item.group == ScreenCaseGroup.PRESERVE_REGRESSION
+        )
+        if self.preserve_cases_available != bool(preserve_ids):
+            raise ValueError("preserve availability must agree with selected preserve cases")
+        if self.preserve_cases_available == (self.preserve_limitation is not None):
+            raise ValueError("preserve limitation must be present exactly when no preserve cases are available")
+        expected = canonical_digest(self.model_dump(mode="json", exclude={"selection_digest"}))
+        if self.selection_digest != expected:
+            raise ValueError("screen selection digest does not match its content")
+        return self
 
 
 class SafeImprovementEvent(ImprovementModel):
@@ -160,7 +218,7 @@ class CandidateGenerationBudget(ImprovementModel):
 
 
 class ImprovementCandidate(ImprovementModel):
-    schema_version: Literal["improvement-candidate/1.0"] = "improvement-candidate/1.0"
+    schema_version: Literal["improvement-candidate/1.1"] = "improvement-candidate/1.1"
     optimization_run_id: str = Field(min_length=1, max_length=128)
     candidate_id: str = Field(min_length=1, max_length=128)
     target_component: str = Field(min_length=1, max_length=128)
@@ -181,9 +239,7 @@ class ImprovementCandidate(ImprovementModel):
     artifact_digest: str = "NOT_COMPUTED"
     sanitizer_result: SanitizerResult
     screen_report_digest: str = "NOT_EXECUTED"
-    screen_case_ids: tuple[str, ...] = Field(default=(), max_length=16)
-    screen_case_selection_digest: str = "NOT_EXECUTED"
-    screen_selection_policy: str = "NOT_EXECUTED"
+    screen_selection: ScreenCaseSelection | None = None
     full_eval_report_digest: str = "NOT_EXECUTED"
     comparison_digest: str = "NOT_EXECUTED"
     status: CandidateStatus = CandidateStatus.PROPOSED
@@ -217,14 +273,15 @@ class ImprovementCandidate(ImprovementModel):
             CandidateStatus.SANITIZER_REJECTED, CandidateStatus.SAFETY_BLOCKED,
         }:
             raise ValueError("a sanitizer-rejected candidate cannot advance")
-        if self.status in {CandidateStatus.SCREEN_FAILED, CandidateStatus.SCREEN_PASSED}:
-            if (
-                not re.fullmatch(r"[0-9a-f]{64}", self.screen_report_digest)
-                or not re.fullmatch(r"[0-9a-f]{64}", self.screen_case_selection_digest)
-                or self.screen_selection_policy == "NOT_EXECUTED"
-                or not self.screen_case_ids
-            ):
+        screen_was_run = any(
+            status in {CandidateStatus.SCREEN_FAILED, CandidateStatus.SCREEN_PASSED}
+            for status in self.status_history
+        )
+        if screen_was_run:
+            if not re.fullmatch(r"[0-9a-f]{64}", self.screen_report_digest) or self.screen_selection is None:
                 raise ValueError("screened candidates require a recorded screen report and selection")
+            if self.screen_selection.target_component != self.target_component:
+                raise ValueError("screen selection must target the candidate's prompt component")
         if self.status in {CandidateStatus.REGRESSION_DETECTED, CandidateStatus.PROMOTION_ELIGIBLE}:
             if (
                 not re.fullmatch(r"[0-9a-f]{64}", self.full_eval_report_digest)
@@ -253,15 +310,30 @@ class ImprovementResourceUsage(ImprovementModel):
     generation_calls: int = Field(default=0, ge=0, le=8)
     candidate_screen_runs: int = Field(default=0, ge=0, le=8)
     candidate_full_runs: int = Field(default=0, ge=0, le=3)
-    evaluation_trials: int = Field(default=0, ge=0, le=640)
-    reserved_model_tokens: int = Field(default=0, ge=0, le=160_000)
-    reported_input_tokens: int = Field(default=0, ge=0)
-    reported_output_tokens: int = Field(default=0, ge=0)
+    case_trial_work_units_reserved: int = Field(default=0, ge=0, le=640)
+    case_trial_work_units_completed: int = Field(default=0, ge=0, le=640)
+    reserved_optimizer_tokens: int = Field(default=0, ge=0, le=160_000)
+    optimizer_input_tokens: MeasuredMetric
+    optimizer_output_tokens: MeasuredMetric
+    optimizer_retries: MeasuredMetric
+    optimizer_fallbacks: MeasuredMetric
+    candidate_evaluation_model_executions: MeasuredMetric
+    candidate_evaluation_input_tokens: MeasuredMetric
+    candidate_evaluation_output_tokens: MeasuredMetric
+    candidate_evaluation_retries: MeasuredMetric
+    candidate_evaluation_fallbacks: MeasuredMetric
+    candidate_evaluation_cost_usd: MeasuredMetric
+    total_model_executions: MeasuredMetric
+    total_input_tokens: MeasuredMetric
+    total_output_tokens: MeasuredMetric
+    total_retries: MeasuredMetric
+    total_fallbacks: MeasuredMetric
+    total_cost_usd: MeasuredMetric
     elapsed_seconds: float = Field(default=0.0, ge=0.0)
 
 
 class ImprovementRunReport(ImprovementModel):
-    schema_version: Literal["improvement-run-report/1.0"] = "improvement-run-report/1.0"
+    schema_version: Literal["improvement-run-report/1.1"] = "improvement-run-report/1.1"
     optimization_run_id: str = Field(min_length=1, max_length=128)
     policy_version: str = Field(min_length=1, max_length=64)
     policy_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
