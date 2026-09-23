@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from app.agents.helpers import extract_json_block
 from app.agents.state import AnalysisState
-from app.context.runtime import AnalysisRuntimeContext, get_scan_context_engine, get_scan_runtime
+from app.context.runtime import AnalysisRuntimeContext, get_scan_context_engine, get_scan_runtime, resolve_analysis_llm_router
 from app.llm.budgets import REPOSITORY_VERIFICATION_BUDGET
 from app.llm.router import get_llm_router
 from app.llm.types import LLMMessage, LLMProvider, LLMRequest, ModelCapability, TaskPolicy
@@ -639,7 +639,7 @@ async def run_verifier_agent(
         ))
 
     eval_map: Dict[int, Dict[str, Any]] = {}
-    router = get_llm_router()
+    router = resolve_analysis_llm_router(runtime, get_llm_router)
     for batch_number, batch in enumerate(_verification_batches(verification_inputs), start=1):
         batch_items = [entry[1] for entry in batch]
         primary_policy = batch[0][2]

@@ -5,7 +5,7 @@ from langgraph.runtime import Runtime
 from app.agents.helpers import parse_llm_findings, safe_to_uuid
 from app.agents.deterministic import scanner_candidates
 from app.agents.state import AnalysisState
-from app.context.runtime import AnalysisRuntimeContext, get_scan_context_engine
+from app.context.runtime import AnalysisRuntimeContext, get_scan_context_engine, resolve_analysis_llm_router
 from app.context.slices import build_specialist_context, candidate_evidence_authority
 from app.agents.grounding import build_evidence_index
 from app.llm.admission import AdmissionDecision, admission_for_state
@@ -148,7 +148,7 @@ async def run_security_agent(
         }
 
     try:
-        router = get_llm_router()
+        router = resolve_analysis_llm_router(runtime, get_llm_router)
         request = LLMRequest(
             messages=[
                 LLMMessage(role="system", content=system_prompt),

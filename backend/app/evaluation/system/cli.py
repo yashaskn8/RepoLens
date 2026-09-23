@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sys
 from pathlib import Path
 from typing import Sequence
 
@@ -12,6 +13,7 @@ from pydantic import ValidationError
 
 from app.evaluation.agent.loader import DEFAULT_DATASET_ROOT, load_agent_dataset
 from app.evaluation.system.comparison import compare_system_reports, promote_check
+from app.evaluation.system.full_analysis import run_full_analysis_evaluation
 from app.evaluation.system.runner import DEVELOPMENT_TRIALS_PER_CASE, run_system_evaluation
 from app.evaluation.system.schemas import (
     SystemEvalMode,
@@ -41,6 +43,12 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     run = commands.add_parser("run", help="Run repeated isolated investigator trials.")
+    run.add_argument(
+        "--scope",
+        choices=("investigator", "full-analysis"),
+        default="investigator",
+        help="Evaluate the Phase-1 investigator graph or the production full analysis graph.",
+    )
     run.add_argument("--mode", choices=[item.value.lower() for item in SystemEvalMode], default="scripted")
     run.add_argument("--dataset-root", type=Path, default=DEFAULT_DATASET_ROOT)
     run.add_argument("--suite", choices=[item.value for item in SystemEvalSuite], default="ALL")
@@ -76,18 +84,39 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise ValueError("live runs require an exact --provider and --model")
             if mode == SystemEvalMode.SCRIPTED and (args.provider or args.model or args.allow_live):
                 raise ValueError("scripted runs do not accept provider, model, or --allow-live options")
-            dataset = load_agent_dataset(args.dataset_root)
-            report = asyncio.run(run_system_evaluation(
-                dataset=dataset,
-                suite=SystemEvalSuite(args.suite),
-                mode=mode,
-                provider=args.provider,
-                model=args.model,
-                trials_per_case=args.trials,
-                max_cases=args.max_cases,
-                case_ids=args.case_ids,
-                allow_live=args.allow_live,
-            ))
+            if args.scope == "full-analysis":
+                if args.dataset_root != DEFAULT_DATASET_ROOT:
+                    raise ValueError("--dataset-root applies only to investigator scope")
+                if mode == SystemEvalMode.LIVE:
+                    planned_cases = min(args.max_cases, 64)
+                    print(
+                        f"Full-analysis live plan: at most {planned_cases} case(s) × {args.trials} fresh trial(s); "
+                        "one-at-a-time, per-workflow cloud budgets enabled.",
+                        file=sys.stderr,
+                    )
+                report = asyncio.run(run_full_analysis_evaluation(
+                    suite=SystemEvalSuite(args.suite),
+                    mode=mode,
+                    provider=args.provider,
+                    model=args.model,
+                    trials_per_case=args.trials,
+                    max_cases=args.max_cases,
+                    case_ids=args.case_ids,
+                    allow_live=args.allow_live,
+                ))
+            else:
+                dataset = load_agent_dataset(args.dataset_root)
+                report = asyncio.run(run_system_evaluation(
+                    dataset=dataset,
+                    suite=SystemEvalSuite(args.suite),
+                    mode=mode,
+                    provider=args.provider,
+                    model=args.model,
+                    trials_per_case=args.trials,
+                    max_cases=args.max_cases,
+                    case_ids=args.case_ids,
+                    allow_live=args.allow_live,
+                ))
             serialized = _write_payload(report.model_dump(mode="json"), args.output)
             print(serialized, end="")
             return 0 if report.execution_status.value == "COMPLETED" and report.metrics.failed_trials == 0 else 1

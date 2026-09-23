@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -19,6 +19,131 @@ class SystemEvalSuite(str, Enum):
     REGRESSION = "REGRESSION"
     CAPABILITY = "CAPABILITY"
     SECURITY = "SECURITY"
+
+
+class FailureClass(str, Enum):
+    """Deterministic, evidence-backed causes for full-graph evaluation failures."""
+
+    VERIFIER_FALSE_REJECTION = "VERIFIER_FALSE_REJECTION"
+    VERIFIER_FALSE_CONFIRMATION = "VERIFIER_FALSE_CONFIRMATION"
+    INVESTIGATOR_NOT_TRIGGERED = "INVESTIGATOR_NOT_TRIGGERED"
+    INVESTIGATOR_INSUFFICIENT_EVIDENCE = "INVESTIGATOR_INSUFFICIENT_EVIDENCE"
+    INVESTIGATOR_TOOL_FAILURE = "INVESTIGATOR_TOOL_FAILURE"
+    REVISION_FAILED_TO_REPAIR = "REVISION_FAILED_TO_REPAIR"
+    MODEL_PROVIDER_FAILURE = "MODEL_PROVIDER_FAILURE"
+    BUDGET_EXHAUSTION = "BUDGET_EXHAUSTION"
+    STAGNATION = "STAGNATION"
+    HARNESS_FAILURE = "HARNESS_FAILURE"
+    SECURITY_POLICY_VIOLATION = "SECURITY_POLICY_VIOLATION"
+    UNKNOWN_ATTRIBUTION = "UNKNOWN_ATTRIBUTION"
+
+
+class WorkflowNodeEvent(SystemEvalModel):
+    """Content-free event captured at a production graph node boundary."""
+
+    sequence: int = Field(ge=1, le=256)
+    node: str = Field(min_length=1, max_length=64)
+    superstep: int = Field(ge=0, le=256)
+    status: Literal["COMPLETED", "COMPLETED_WITH_ERRORS"]
+    duration_ms: float = Field(ge=0.0)
+    input_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    output_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    candidate_ids: list[str] = Field(default_factory=list, max_length=64)
+    verified_ids: list[str] = Field(default_factory=list, max_length=64)
+    rejected_ids: list[str] = Field(default_factory=list, max_length=64)
+    finding_refs: list[dict[str, Any]] = Field(default_factory=list, max_length=64)
+    model_identities: list[str] = Field(default_factory=list, max_length=16)
+    model_execution_count: int | None = Field(default=None, ge=0, le=10_000)
+    tool_names: list[str] = Field(default_factory=list, max_length=16)
+    tool_call_digests: list[Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]] = Field(default_factory=list, max_length=16)
+    tool_execution_count: int = Field(default=0, ge=0, le=16)
+    evidence_count: int = Field(default=0, ge=0)
+    budget_exhausted: bool = False
+    failure_codes: list[str] = Field(default_factory=list, max_length=16)
+
+
+class FailureAttribution(SystemEvalModel):
+    """Deterministic causal diagnosis; unknown is preferred over speculation."""
+
+    case_id: str = Field(min_length=1, max_length=128)
+    failure_stage: str = Field(min_length=1, max_length=64)
+    failure_class: FailureClass
+    primary_node: str | None = Field(default=None, max_length=64)
+    upstream_condition: str = Field(min_length=1, max_length=256)
+    observed_behavior: str = Field(min_length=1, max_length=512)
+    expected_behavior: str = Field(min_length=1, max_length=512)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=32)
+    downstream_effect: str = Field(min_length=1, max_length=512)
+    hard_safety_violation: bool = False
+    confidence_basis: str = Field(min_length=1, max_length=512)
+
+
+class FullAnalysisTrialDetail(SystemEvalModel):
+    """Bounded workflow trace and structural ground-truth result for one trial."""
+
+    case_id: str = Field(min_length=1, max_length=128)
+    trial_number: int = Field(ge=1, le=5)
+    workflow_status: str = Field(min_length=1, max_length=32)
+    evaluation_stage: Literal["STATIC_FINDING", "ANALYSIS_CANDIDATE", "PUBLISHED_FINDING"]
+    tp: int = Field(ge=0)
+    fp: int = Field(ge=0)
+    fn: int = Field(ge=0)
+    clean_case_tn: bool = False
+    unknown_abstained: bool | None = None
+    category_evaluated_claims: int = Field(default=0, ge=0)
+    category_mismatches: int = Field(default=0, ge=0)
+    severity_evaluated_claims: int = Field(default=0, ge=0)
+    severity_mismatches: int = Field(default=0, ge=0)
+    invalid_references: int = Field(default=0, ge=0)
+    unsupported_claims: int = Field(default=0, ge=0)
+    published_unsupported_confirmations: int = Field(default=0, ge=0)
+    security_violation_codes: list[str] = Field(default_factory=list, max_length=32)
+    workflow_trace: list[WorkflowNodeEvent] = Field(default_factory=list, max_length=128)
+    failure_attribution: FailureAttribution | None = None
+    resumed: bool = False
+    duration_ms: float = Field(ge=0.0)
+
+
+class FullAnalysisMetrics(SystemEvalModel):
+    case_count: int = Field(ge=0)
+    trial_count: int = Field(ge=0)
+    tp: int = Field(ge=0)
+    fp: int = Field(ge=0)
+    fn: int = Field(ge=0)
+    true_negatives: int = Field(ge=0)
+    category_evaluated_claims: int = Field(default=0, ge=0)
+    category_mismatches: int = Field(default=0, ge=0)
+    severity_evaluated_claims: int = Field(default=0, ge=0)
+    severity_mismatches: int = Field(default=0, ge=0)
+    unsupported_confirmations: int = Field(ge=0)
+    hard_safety_violations: int = Field(ge=0)
+    provider_failures: int = Field(ge=0)
+    budget_exhaustions: int = Field(ge=0)
+    harness_failures: int = Field(ge=0)
+    failed_node_events: int = Field(ge=0)
+    investigator_triggered_trials: int = Field(ge=0)
+    revision_trials: int = Field(ge=0)
+    node_event_count: int = Field(ge=0)
+    tool_calls: int = Field(ge=0)
+    model_calls: int = Field(ge=0)
+    mean_latency_ms: MeasuredMetric
+    precision: MeasuredMetric
+    recall: MeasuredMetric
+    f1: MeasuredMetric
+    attribution_counts: dict[str, int] = Field(default_factory=dict)
+    branch_counts: dict[str, int] = Field(default_factory=dict)
+
+
+class FullAnalysisReportDetails(SystemEvalModel):
+    """Scope-specific facts for the real production AnalysisState graph."""
+
+    graph_contract_version: str = Field(min_length=1, max_length=64)
+    graph_identity_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    dataset_split: Literal["DEV"] = "DEV"
+    target_pipeline: Literal["REPOSITORY_SCAN"] = "REPOSITORY_SCAN"
+    dataset_case_count: int = Field(ge=1, le=64)
+    trial_details: list[FullAnalysisTrialDetail] = Field(max_length=320)
+    metrics: FullAnalysisMetrics
 
 
 class SystemEvalMode(str, Enum):
@@ -120,7 +245,7 @@ class SystemTrialGrade(SystemEvalModel):
 class SystemCaseResults(SystemEvalModel):
     case_id: str = Field(min_length=1, max_length=128)
     category: str = Field(min_length=1, max_length=128)
-    split: Literal["REGRESSION", "CAPABILITY"]
+    split: Literal["REGRESSION", "CAPABILITY", "DEV", "FROZEN_PUBLIC_EVAL"]
     trials: list[SystemTrialGrade] = Field(min_length=1, max_length=5)
 
     @model_validator(mode="after")
@@ -185,32 +310,41 @@ class SystemSuiteMetrics(SystemEvalModel):
 
 class SystemTrialPolicy(SystemEvalModel):
     trials_per_case: int = Field(ge=1, le=5)
-    max_cases: int = Field(ge=1, le=32)
+    max_cases: int = Field(ge=1, le=64)
     concurrency: Literal[1] = 1
     fresh_checkpoint_per_trial: Literal[True] = True
     cache_policy: Literal["DISABLED"] = "DISABLED"
 
 
 class SystemEvaluationReport(SystemEvalModel):
-    schema_version: Literal["agent-system-eval-report/1.0"] = "agent-system-eval-report/1.0"
+    schema_version: Literal["agent-system-eval-report/1.0", "agent-system-eval-report/1.1"] = "agent-system-eval-report/1.0"
     mode: SystemEvalMode
-    scope: Literal["PRODUCTION_EVIDENCE_INVESTIGATOR_GRAPH"] = "PRODUCTION_EVIDENCE_INVESTIGATOR_GRAPH"
+    scope: Literal["PRODUCTION_EVIDENCE_INVESTIGATOR_GRAPH", "FULL_ANALYSIS_GRAPH"] = "PRODUCTION_EVIDENCE_INVESTIGATOR_GRAPH"
     dataset_version: str = Field(min_length=1, max_length=64)
     dataset_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     evaluation_contract_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     suite: SystemEvalSuite
-    expected_case_ids: list[str] = Field(min_length=1, max_length=32)
-    evaluated_case_ids: list[str] = Field(max_length=32)
+    expected_case_ids: list[str] = Field(min_length=1, max_length=64)
+    evaluated_case_ids: list[str] = Field(max_length=64)
     trial_policy: SystemTrialPolicy
     execution_status: EvaluationRunStatus
     system_identity: "AgentSystemIdentity"
-    case_results: list[SystemCaseResults] = Field(default_factory=list, max_length=32)
+    case_results: list[SystemCaseResults] = Field(default_factory=list, max_length=64)
     suite_metrics: list[SystemSuiteMetrics] = Field(min_length=1, max_length=4)
     metrics: SystemEvaluationMetrics
+    full_analysis: FullAnalysisReportDetails | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     report_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def validate_report_shape(self) -> "SystemEvaluationReport":
+        if self.schema_version == "agent-system-eval-report/1.0":
+            if self.scope != "PRODUCTION_EVIDENCE_INVESTIGATOR_GRAPH" or self.full_analysis is not None:
+                raise ValueError("legacy report schema is reserved for investigator-graph scope")
+        elif self.scope != "FULL_ANALYSIS_GRAPH" or self.full_analysis is None:
+            raise ValueError("report schema 1.1 requires full-analysis scope details")
         ids = [item.case_id for item in self.case_results]
         if len(ids) != len(set(ids)) or ids != self.evaluated_case_ids:
             raise ValueError("case result IDs must uniquely match evaluated_case_ids in order")
@@ -226,6 +360,97 @@ class SystemEvaluationReport(SystemEvalModel):
             raise ValueError("execution status does not match planned and completed case/trial counts")
         if self.execution_status == EvaluationRunStatus.NOT_EXECUTED and self.case_results:
             raise ValueError("NOT_EXECUTED reports cannot contain case results")
+        if self.full_analysis is not None:
+            details = self.full_analysis
+            if (
+                self.system_identity.scope != "FULL_ANALYSIS_GRAPH"
+                or self.system_identity.graph_identity_digest != details.graph_identity_digest
+                or self.system_identity.graph_contract_version != details.graph_contract_version
+                or self.evaluation_contract_hash != self.system_identity.evaluation_contract_hash
+            ):
+                raise ValueError("full-analysis report, identity, graph, and evaluator contracts disagree")
+            if details.dataset_case_count != len(self.expected_case_ids):
+                raise ValueError("full-analysis dataset size must match the declared case inventory")
+            expected_pairs = {
+                (case.case_id, trial.trial_number)
+                for case in self.case_results for trial in case.trials
+            }
+            actual_pairs = {(item.case_id, item.trial_number) for item in details.trial_details}
+            if expected_pairs != actual_pairs or len(actual_pairs) != len(details.trial_details):
+                raise ValueError("full-analysis trial detail inventory must match graded trial inventory")
+            if details.metrics.case_count != len(self.case_results):
+                raise ValueError("full-analysis case count disagrees with child case results")
+            if details.metrics.trial_count != len(details.trial_details):
+                raise ValueError("full-analysis aggregate trial count disagrees with child records")
+            if details.metrics.hard_safety_violations != sum(
+                bool(item.security_violation_codes) for item in details.trial_details
+            ):
+                raise ValueError("full-analysis safety aggregate disagrees with child records")
+            derived_full = {
+                "case_count": len(self.case_results),
+                "tp": sum(item.tp for item in details.trial_details),
+                "fp": sum(item.fp for item in details.trial_details),
+                "fn": sum(item.fn for item in details.trial_details),
+                "true_negatives": sum(item.clean_case_tn for item in details.trial_details),
+                "category_evaluated_claims": sum(item.category_evaluated_claims for item in details.trial_details),
+                "category_mismatches": sum(item.category_mismatches for item in details.trial_details),
+                "severity_evaluated_claims": sum(item.severity_evaluated_claims for item in details.trial_details),
+                "severity_mismatches": sum(item.severity_mismatches for item in details.trial_details),
+                "unsupported_confirmations": sum(
+                    item.published_unsupported_confirmations for item in details.trial_details
+                ),
+                "provider_failures": sum(item.outcome == TrialOutcome.PROVIDER_FAILED for case in self.case_results for item in case.trials),
+                "budget_exhaustions": sum(item.outcome == TrialOutcome.BUDGET_EXHAUSTED for case in self.case_results for item in case.trials),
+                "harness_failures": sum(item.outcome == TrialOutcome.HARNESS_FAILED for case in self.case_results for item in case.trials),
+                "failed_node_events": sum(
+                    event.status == "COMPLETED_WITH_ERRORS"
+                    for item in details.trial_details for event in item.workflow_trace
+                ),
+                "investigator_triggered_trials": sum(any(event.node == "investigator_prepare" for event in item.workflow_trace) for item in details.trial_details),
+                "revision_trials": sum(any(event.node == "revise" for event in item.workflow_trace) for item in details.trial_details),
+                "node_event_count": sum(len(item.workflow_trace) for item in details.trial_details),
+                "tool_calls": sum(sum(event.tool_execution_count for event in item.workflow_trace) for item in details.trial_details),
+                "model_calls": sum(sum(
+                    event.model_execution_count if event.model_execution_count is not None else len(event.model_identities)
+                    for event in item.workflow_trace
+                ) for item in details.trial_details),
+            }
+            if any(getattr(details.metrics, name) != value for name, value in derived_full.items()):
+                raise ValueError("full-analysis aggregate metrics disagree with child trial details")
+            expected_precision = (
+                derived_full["tp"] / (derived_full["tp"] + derived_full["fp"])
+                if derived_full["tp"] + derived_full["fp"]
+                else (1.0 if derived_full["fn"] == 0 else 0.0)
+            )
+            expected_recall = (
+                derived_full["tp"] / (derived_full["tp"] + derived_full["fn"])
+                if derived_full["tp"] + derived_full["fn"] else None
+            )
+            expected_f1 = (
+                2 * expected_precision * expected_recall / (expected_precision + expected_recall)
+                if expected_recall is not None and expected_precision + expected_recall else None
+            )
+            for name, expected in (
+                ("precision", expected_precision),
+                ("recall", expected_recall),
+                ("f1", expected_f1),
+            ):
+                metric = getattr(details.metrics, name)
+                if metric.status == MetricStatus.MEASURED:
+                    if metric.value != expected:
+                        raise ValueError(f"full-analysis {name} disagrees with child trial records")
+                elif expected is not None:
+                    raise ValueError(f"full-analysis {name} must be measured when derivable")
+            expected_attributions: dict[str, int] = {}
+            expected_branches: dict[str, int] = {}
+            for item in details.trial_details:
+                if item.failure_attribution is not None:
+                    key = item.failure_attribution.failure_class.value
+                    expected_attributions[key] = expected_attributions.get(key, 0) + 1
+                for event in item.workflow_trace:
+                    expected_branches[event.node] = expected_branches.get(event.node, 0) + 1
+            if details.metrics.attribution_counts != expected_attributions or details.metrics.branch_counts != expected_branches:
+                raise ValueError("full-analysis attribution/branch metrics disagree with child records")
         trials = [trial for item in self.case_results for trial in item.trials]
         if self.mode == SystemEvalMode.LIVE:
             expected_identity = (
@@ -304,7 +529,10 @@ class SystemEvaluationReport(SystemEvalModel):
                     raise ValueError("suite success rate disagrees with the recorded trial grades")
             elif expected_suite_rate is not None:
                 raise ValueError("completed suite trial grades require a measured success rate")
-        expected_digest = system_evaluation_report_digest(self.model_dump(mode="json", exclude={"report_digest"}))
+        digest_payload = self.model_dump(mode="json", exclude={"report_digest"})
+        if self.schema_version == "agent-system-eval-report/1.0" and "full_analysis" not in self.model_fields_set:
+            digest_payload.pop("full_analysis", None)
+        expected_digest = system_evaluation_report_digest(digest_payload)
         if self.report_digest != expected_digest:
             raise ValueError("system evaluation report digest does not match its content")
         return self
@@ -390,13 +618,16 @@ from app.evaluation.system.identity import AgentSystemIdentity  # noqa: E402
 
 SystemEvaluationReport.model_rebuild()
 SystemTrialGrade.model_rebuild()
+FullAnalysisMetrics.model_rebuild()
 
 
 __all__ = [
-    "ComparisonOutcome", "EvaluationRunStatus", "MeasuredMetric", "MetricStatus",
+    "ComparisonOutcome", "EvaluationRunStatus", "FailureAttribution", "FailureClass",
+    "FullAnalysisMetrics", "FullAnalysisReportDetails", "FullAnalysisTrialDetail",
+    "MeasuredMetric", "MetricStatus",
     "PromotionDecision", "PromotionOutcome", "SystemCaseResults", "SystemEvalMode",
     "SystemEvalSuite", "SystemEvaluationComparison", "SystemEvaluationMetrics",
     "SystemEvaluationReport", "SystemTrialGrade", "SystemTrialPolicy", "TrialOutcome",
-    "SystemSuiteMetrics", "SystemTrajectoryEvent", "system_evaluation_report_digest",
+    "SystemSuiteMetrics", "SystemTrajectoryEvent", "WorkflowNodeEvent", "system_evaluation_report_digest",
     "system_evaluation_comparison_digest",
 ]

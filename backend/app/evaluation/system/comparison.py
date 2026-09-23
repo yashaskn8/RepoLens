@@ -77,11 +77,16 @@ def _prompt_candidate_reasons(
     if set(baseline_prompts) != set(candidate_prompts):
         return ["prompt component inventories differ"]
     reasons: list[str] = []
+    candidate_names = (
+        {"evidence-investigator"}
+        if baseline.scope == "PRODUCTION_EVIDENCE_INVESTIGATOR_GRAPH"
+        else {"evidence-investigator", "architecture-agent", "security-agent", "bug-agent", "verifier-agent", "revision-agent"}
+    )
     for name, previous in baseline_prompts.items():
         current = candidate_prompts[name]
-        if name == "evidence-investigator":
+        if name in candidate_names:
             if previous.content_digest != current.content_digest and previous.version == current.version:
-                reasons.append("investigator prompt content changed without a version increment")
+                reasons.append(f"prompt content changed without a version increment for candidate {name}")
         elif previous != current:
             reasons.append(f"non-candidate prompt component changed: {name}")
     return reasons
@@ -106,6 +111,8 @@ def _promotion_authority_reasons(
     """Require the pinned corpus and current harness before issuing promotion evidence."""
     if candidate.suite.value != "ALL":
         return []
+    if candidate.scope == "FULL_ANALYSIS_GRAPH":
+        return _full_analysis_promotion_authority_reasons(baseline, candidate)
 
     from app.evaluation.agent.contract import (
         REGRESSION_GATE_EXPECTED_CASE_COUNT,
@@ -152,6 +159,55 @@ def _promotion_authority_reasons(
     return []
 
 
+def _full_analysis_promotion_authority_reasons(
+    baseline: SystemEvaluationReport,
+    candidate: SystemEvaluationReport,
+) -> list[str]:
+    """Require the current full-analysis DEV corpus and graph contract."""
+    from app.evaluation.ground_truth.loader import compute_canonical_benchmark_hash, load_benchmark_dataset
+    from app.evaluation.ground_truth.schemas import BenchmarkSplit, TargetPipeline
+    from app.evaluation.system.identity import (
+        FULL_ANALYSIS_EVALUATION_CONTRACT_VERSION,
+        full_analysis_evaluation_contract_hash,
+        full_analysis_graph_identity_digest,
+    )
+
+    try:
+        cases = [
+            case for case in load_benchmark_dataset()
+            if case.split == BenchmarkSplit.DEV and case.target_pipeline == TargetPipeline.REPOSITORY_SCAN
+        ]
+        cases.sort(key=lambda item: item.case_id)
+        expected_ids = [item.case_id for item in cases]
+        expected_hash = compute_canonical_benchmark_hash(cases)
+        graph_digest = full_analysis_graph_identity_digest()
+        contract_hash = full_analysis_evaluation_contract_hash(graph_digest)
+        for label, report in (("baseline", baseline), ("candidate", candidate)):
+            details = report.full_analysis
+            if report.dataset_hash != expected_hash or report.expected_case_ids != expected_ids:
+                return [f"{label} does not cover the complete current DEV repository-scan dataset"]
+            if report.dataset_version != "ground-truth-v1-DEV-REPOSITORY_SCAN":
+                return [f"{label} uses an unsupported full-analysis dataset version"]
+            if report.evaluation_contract_hash != contract_hash:
+                return [f"{label} evaluator contract differs from the current full-analysis contract"]
+            if (
+                details is None
+                or details.dataset_case_count != len(cases)
+                or details.metrics.case_count != len(cases)
+                or details.metrics.trial_count != len(cases) * report.trial_policy.trials_per_case
+            ):
+                return [f"{label} is missing required full-analysis cases or fresh trials"]
+            if details.graph_identity_digest != graph_digest or report.system_identity.graph_identity_digest != graph_digest:
+                return [f"{label} was produced by a stale or materially different production graph"]
+            if report.system_identity.evaluation_contract_version != FULL_ANALYSIS_EVALUATION_CONTRACT_VERSION:
+                return [f"{label} uses an unsupported full-analysis evaluator version"]
+            if report.execution_status != EvaluationRunStatus.COMPLETED:
+                return [f"{label} full-analysis run is partial"]
+    except (OSError, TypeError, ValueError):
+        return ["current full-analysis DEV corpus or graph contract could not be verified"]
+    return []
+
+
 def compare_system_reports(
     baseline: SystemEvaluationReport,
     candidate: SystemEvaluationReport,
@@ -163,6 +219,8 @@ def compare_system_reports(
     ]
     if baseline.dataset_hash != candidate.dataset_hash:
         reasons.append("dataset hashes differ")
+    if baseline.scope != candidate.scope or baseline.system_identity.scope != candidate.system_identity.scope:
+        reasons.append("evaluation scopes differ; investigator and full-analysis reports are not comparable")
     if baseline.dataset_version != candidate.dataset_version:
         reasons.append("dataset versions differ")
     if baseline.suite != candidate.suite:
@@ -343,6 +401,22 @@ def promote_check(
         )
     if candidate.metrics.provider_failures or candidate.metrics.harness_failures:
         reasons.append("candidate has provider or harness failures; successful behavior is not established")
+    if candidate.scope == "FULL_ANALYSIS_GRAPH":
+        details = candidate.full_analysis
+        if details is None:
+            reasons.append("full-analysis scope details are missing")
+        else:
+            if details.metrics.unsupported_confirmations > 0:
+                return PromotionDecision(
+                    outcome=PromotionOutcome.SAFETY_BLOCKED,
+                    eligible_for_human_review=False,
+                    reasons=["candidate confirmed structurally unsupported findings"],
+                    comparison=comparison,
+                )
+            if details.metrics.harness_failures > 0:
+                reasons.append("full-analysis candidate has harness failures")
+            if details.metrics.case_count != details.dataset_case_count:
+                reasons.append("full-analysis candidate did not cover the complete required dataset")
     if baseline.metrics.provider_failures or baseline.metrics.harness_failures:
         reasons.append("baseline has provider or harness failures; paired comparison is unreliable")
     if reasons:

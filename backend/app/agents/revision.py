@@ -7,7 +7,7 @@ from uuid import UUID
 
 from app.agents.helpers import extract_json_block, safe_to_uuid
 from app.agents.state import AnalysisState
-from app.context.runtime import AnalysisRuntimeContext
+from app.context.runtime import AnalysisRuntimeContext, resolve_analysis_llm_router
 from app.llm.budgets import REPOSITORY_ANALYSIS_BUDGET
 from app.llm.router import get_llm_router
 from app.llm.types import LLMMessage, LLMRequest, ModelCapability, TaskPolicy
@@ -140,7 +140,7 @@ async def run_revision_agent(
     rejection_map = {str(rf.get("finding_id")): rf for rf in state.get("rejected_findings", [])}
 
     scan_id = safe_to_uuid(state.get("scan_id", ""))
-    router = get_llm_router()
+    router = resolve_analysis_llm_router(runtime, get_llm_router)
     model_executions = []
     errors = []
     revised_findings: List[Finding] = []

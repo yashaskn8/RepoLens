@@ -178,6 +178,7 @@ class ScanIntelligenceRuntime:
         vector_index: Optional[VectorIndex] = None,
         reranker: Optional[QwenReranker] = None,
         prefer_complete_graph: bool = False,
+        disable_external_embeddings: bool = False,
     ) -> "ScanIntelligenceRuntime":
         """Asynchronously assemble the complete repository intelligence runtime from EvidenceStore."""
         manifest = evidence_store.manifest
@@ -223,7 +224,7 @@ class ScanIntelligenceRuntime:
         # 4. Resolve EmbeddingProvider
         settings = get_settings()
         provider = embedding_provider
-        if provider is None:
+        if provider is None and not disable_external_embeddings:
             if getattr(settings, "LOCAL_EMBEDDING_ENABLED", False):
                 from app.embeddings.adapter import LocalEmbeddingAdapter
                 provider = LocalEmbeddingAdapter()
@@ -408,3 +409,16 @@ class AnalysisRuntimeContext:
     @property
     def evidence_store(self) -> EvidenceStore:
         return self.scan_runtime.evidence_store
+
+
+def resolve_analysis_llm_router(runtime: Any = None, fallback: Any = None) -> Any:
+    """Resolve an isolated router override, otherwise use RepoLens' canonical singleton."""
+    context = getattr(runtime, "context", None) if runtime is not None else None
+    injected = getattr(context, "llm_router", None)
+    if injected is not None:
+        return injected
+    if callable(fallback):
+        return fallback()
+    from app.llm.router import get_llm_router
+
+    return get_llm_router()

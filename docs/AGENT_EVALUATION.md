@@ -120,6 +120,69 @@ Live evaluation remains absent from normal pull-request CI and does not require
 Docker, PostgreSQL, Redis, or provider secrets unless that manual option is
 selected.
 
-Current measured scope is the investigator graph only. Full analysis-workflow
-evaluation, authenticated report signing, and the future Agent Improvement Lab
-(automatic prompt optimization or harness modification) are not implemented.
+## Full production analysis graph scope
+
+The same CLI can now evaluate the production repository-analysis graph, while
+keeping the original investigator-only scope as the default and preserving old
+1.0 reports:
+
+```powershell
+.\.venv\Scripts\python.exe -m app.evaluation.system run `
+  --scope full-analysis --mode scripted --suite ALL --trials 1 `
+  --max-cases 64 --output full-analysis-scripted.json
+```
+
+The full-analysis harness executes RepoLens's actual mapper, parallel
+specialists, verifier, configured MCP-enrichment/investigator path, bounded
+revision, and finalization nodes through `run_analysis_workflow`. Each trial
+uses a newly populated temporary repository, a new scan ID, checkpointer,
+workflow state, repository runtime, and in-memory retrieval index. It passes
+only `LeakageDetector.bifurcate_input(case)` to the analysis fixture; benchmark
+annotations stay in the evaluator. Fixture contents are parsed and scanned as
+untrusted data but are never imported or executed. The deterministic core
+scanner runs locally; external scanner binaries, fixture tests, GitHub API
+delivery, remote MCP transport, and the production database are not part of
+this scope.
+
+Only DEV `REPOSITORY_SCAN` ground-truth cases are eligible. Reports use the
+separate `FULL_ANALYSIS_GRAPH` scope, include bounded content-free node events,
+structural final-output metrics, and deterministic failure attribution. A
+miss is attributed to a named stage only where node provenance and the
+structural matcher prove the causal connection; otherwise it is
+`UNKNOWN_ATTRIBUTION`. The evaluator has no caller-supplied case-root option;
+it reads only the canonical public benchmark tree and does not load sealed
+private holdout labels. Source text, labels, and private holdout artifacts are
+not included in reports.
+
+`scripted` mode is a zero-key graph/harness test, not model-capability evidence:
+its controlled router returns empty specialist outputs and abstains if the
+investigator is reached. It commonly grades issue cases as failures by design.
+Live evaluation is opt-in, requires `--allow-live` and one exact provider/model,
+uses RepoLens's canonical router and workflow budget, and runs serially. The
+hard limit is 64 cases, five fresh trials per case, and 320 case-trial work
+units. Partial reports are useful for diagnostics but cannot be compared or
+promoted as complete evidence.
+
+```powershell
+.\.venv\Scripts\python.exe -m app.evaluation.system run `
+  --scope full-analysis --mode live --allow-live `
+  --provider gemini --model <registered-model-id> `
+  --suite ALL --trials 5 --max-cases 64 --output full-analysis-candidate.json
+```
+
+Comparison rejects scope mismatches and requires matching graph, dataset,
+evaluation contract, tool, context, routing, and budget identities. The
+non-mutating promotion check additionally requires the complete DEV dataset,
+five trials, a passing security subset, no unsupported confirmations, and no
+hard safety or harness/provider failure. `PROMOTION_ELIGIBLE` is only a signal
+for human review; nothing is automatically promoted. Report SHA-256 digests
+detect content changes but are not signatures or proof of trusted origin.
+
+The existing manual `production-validation.yml` workflow exposes this scope as
+an explicit input. It remains excluded from ordinary pull-request CI; only the
+provider-specific execution steps receive credentials, while comparison and
+promotion steps do not.
+
+The future Agent Improvement Lab (automatic prompt optimization, skill/tool
+rewriting, or production configuration changes) is intentionally NOT
+implemented in this phase.

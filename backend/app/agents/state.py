@@ -94,6 +94,8 @@ class AnalysisState(TypedDict, total=False):
 
     # Checkpoint execution tracking
     completed_nodes: Annotated[List[str], operator.add]
+    # Bounded content-free provenance for full-workflow evaluation and audits.
+    workflow_trace: Annotated[List[Dict[str, Any]], operator.add]
 
     # Observability & telemetry
     model_executions: Annotated[List[ModelExecutionMetadata], operator.add]

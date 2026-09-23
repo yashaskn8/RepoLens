@@ -34,6 +34,12 @@ on:
         required: true
         default: false
         type: boolean
+      system_eval_scope:
+        description: Evaluation graph scope (full-analysis paired promotion requires the ALL DEV repository-scan suite)
+        required: true
+        default: investigator
+        type: choice
+        options: [investigator, full-analysis]
       system_eval_suite:
         description: System-evaluation case suite
         required: true
@@ -51,7 +57,7 @@ on:
         required: true
         default: "3"
         type: choice
-        options: ["1", "3", "8", "16", "32"]
+        options: ["1", "3", "8", "16", "32", "64"]
       system_eval_baseline_provider:
         description: Exact baseline provider; ignored unless system comparison is enabled
         required: false
@@ -221,15 +227,29 @@ jobs:
         env:
           BASELINE_MODEL: ${{ inputs.system_eval_baseline_model }}
           CANDIDATE_MODEL: ${{ inputs.system_eval_candidate_model }}
+          SYSTEM_EVAL_SCOPE: ${{ inputs.system_eval_scope }}
+          SYSTEM_EVAL_SUITE: ${{ inputs.system_eval_suite }}
+          SYSTEM_EVAL_MAX_CASES: ${{ inputs.system_eval_max_cases }}
         run: |
           test -n "$BASELINE_MODEL" || { echo "::error::system_eval_baseline_model is required"; exit 1; }
           test -n "$CANDIDATE_MODEL" || { echo "::error::system_eval_candidate_model is required"; exit 1; }
+          if [ "$SYSTEM_EVAL_SCOPE" = "full-analysis" ]; then
+            if [ "$SYSTEM_EVAL_SUITE" != "ALL" ]; then
+              echo "::error::full-analysis paired comparison and promotion require suite ALL"
+              exit 1
+            fi
+            if [ "$SYSTEM_EVAL_MAX_CASES" != "64" ]; then
+              echo "::error::full-analysis ALL comparison requires --max-cases 64 to cover the complete current DEV dataset"
+              exit 1
+            fi
+          fi
       - name: Run exact baseline candidate
         id: baseline
         continue-on-error: true
         working-directory: backend
         env:
           SYSTEM_EVAL_SUITE: ${{ inputs.system_eval_suite }}
+          SYSTEM_EVAL_SCOPE: ${{ inputs.system_eval_scope }}
           SYSTEM_EVAL_PROVIDER: ${{ inputs.system_eval_baseline_provider }}
           SYSTEM_EVAL_MODEL: ${{ inputs.system_eval_baseline_model }}
           SYSTEM_EVAL_TRIALS: ${{ inputs.system_eval_trials }}
@@ -244,6 +264,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ inputs.system_eval_baseline_provider == 'cloudflare' && secrets.CLOUDFLARE_ACCOUNT_ID || '' }}
         run: >-
           python -m app.evaluation.system run --mode live --allow-live
+          --scope "$SYSTEM_EVAL_SCOPE"
           --suite "$SYSTEM_EVAL_SUITE"
           --provider "$SYSTEM_EVAL_PROVIDER"
           --model "$SYSTEM_EVAL_MODEL"
@@ -256,6 +277,7 @@ jobs:
         working-directory: backend
         env:
           SYSTEM_EVAL_SUITE: ${{ inputs.system_eval_suite }}
+          SYSTEM_EVAL_SCOPE: ${{ inputs.system_eval_scope }}
           SYSTEM_EVAL_PROVIDER: ${{ inputs.system_eval_candidate_provider }}
           SYSTEM_EVAL_MODEL: ${{ inputs.system_eval_candidate_model }}
           SYSTEM_EVAL_TRIALS: ${{ inputs.system_eval_trials }}
@@ -270,6 +292,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ inputs.system_eval_candidate_provider == 'cloudflare' && secrets.CLOUDFLARE_ACCOUNT_ID || '' }}
         run: >-
           python -m app.evaluation.system run --mode live --allow-live
+          --scope "$SYSTEM_EVAL_SCOPE"
           --suite "$SYSTEM_EVAL_SUITE"
           --provider "$SYSTEM_EVAL_PROVIDER"
           --model "$SYSTEM_EVAL_MODEL"
