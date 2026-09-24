@@ -193,7 +193,13 @@ async def _prepare(state: dict, runtime) -> None:
 
 async def _one_tool_step(state: dict, runtime) -> None:
     _merge(state, await run_investigator_decide_node(state, runtime))
-    assert route_after_investigator_decide(state) == "tool"
+    assert route_after_investigator_decide(state) == "tool", {
+        "stop_reason": state.get("investigator", {}).get("active", {}).get("stop_reason"),
+        "progress": [
+            (item.get("progress_class"), item.get("consecutive_no_progress"))
+            for item in state.get("investigator", {}).get("active", {}).get("progress_history", [])
+        ],
+    }
     _merge(state, await run_investigator_tool_node(state, runtime))
     # This JSON round trip is the same payload boundary used by the checkpointer.
     state["investigator"] = json.loads(json.dumps(state["investigator"]))

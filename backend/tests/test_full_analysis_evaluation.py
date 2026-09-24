@@ -174,6 +174,9 @@ def test_full_analysis_scope_runs_real_graph_and_grades_structurally(one_case_fu
     assert report.full_analysis is not None
     assert report.full_analysis.dataset_split == "DEV"
     assert report.full_analysis.dataset_case_count == 35
+    assert report.full_analysis.progress_contract_version == "investigator-progress-policy/1.0"
+    assert report.full_analysis.metrics.investigator_efficiency is not None
+    assert report.full_analysis.metrics.investigator_efficiency.tool_calls.value == 0
     detail = report.full_analysis.trial_details[0]
     nodes = {event.node for event in detail.workflow_trace}
     assert {"mapper", "architecture", "integration", "security", "bug", "verifier", "finalize"} <= nodes
@@ -208,6 +211,18 @@ def test_full_report_aggregate_tampering_is_rejected(one_case_full_report):
         {key: value for key, value in payload.items() if key != "report_digest"}
     )
     with pytest.raises(ValueError, match="case count"):
+        type(report).model_validate(payload)
+
+
+def test_investigator_efficiency_aggregate_tampering_is_rejected(one_case_full_report):
+    report = one_case_full_report
+    payload = report.model_dump(mode="json")
+    efficiency = payload["full_analysis"]["metrics"]["investigator_efficiency"]
+    efficiency["progress_tool_calls"]["value"] += 1
+    payload["report_digest"] = system_evaluation_report_digest(
+        {key: value for key, value in payload.items() if key != "report_digest"}
+    )
+    with pytest.raises(ValueError, match="efficiency metrics disagree"):
         type(report).model_validate(payload)
 
 
@@ -524,6 +539,9 @@ def test_investigator_insufficient_evidence_attribution_requires_explicit_termin
         ({"status": "COMPLETED"}, [_event("bug", failure_codes=["MODEL_PROVIDER_FAILURE"])], FailureClass.MODEL_PROVIDER_FAILURE, False),
         ({"status": "COMPLETED", "ai_cloud_budget": {"exhausted": True}}, [], FailureClass.BUDGET_EXHAUSTION, False),
         ({"status": "COMPLETED"}, [_event("investigator_tool", failure_codes=["STAGNATION"])], FailureClass.STAGNATION, False),
+        ({"status": "COMPLETED"}, [_event("investigator_compact", failure_codes=["SEMANTIC_STAGNATION"])], FailureClass.SEMANTIC_STAGNATION, False),
+        ({"status": "COMPLETED"}, [_event("investigator_compact", failure_codes=["SEMANTIC_STAGNATION", "MODEL_PROVIDER_FAILURE"])], FailureClass.MODEL_PROVIDER_FAILURE, False),
+        ({"status": "COMPLETED"}, [_event("investigator_tool", failure_codes=["SEMANTIC_STAGNATION", "TOOL_FAILURE"])], FailureClass.INVESTIGATOR_TOOL_FAILURE, False),
         ({"status": "COMPLETED"}, [_event("investigator_prepare"), _event("investigator_tool", failure_codes=["TOOL_FAILURE"])], FailureClass.INVESTIGATOR_TOOL_FAILURE, False),
         ({"status": "FAILED"}, [], FailureClass.HARNESS_FAILURE, False),
         ({"status": "COMPLETED"}, [_event("investigator_tool", failure_codes=["UNAUTHORIZED_TOOL_EXECUTED"])], FailureClass.SECURITY_POLICY_VIOLATION, True),

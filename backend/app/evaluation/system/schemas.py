@@ -42,6 +42,7 @@ class FailureClass(str, Enum):
     MODEL_INVALID_OUTPUT = "MODEL_INVALID_OUTPUT"
     BUDGET_EXHAUSTION = "BUDGET_EXHAUSTION"
     STAGNATION = "STAGNATION"
+    SEMANTIC_STAGNATION = "SEMANTIC_STAGNATION"
     HARNESS_FAILURE = "HARNESS_FAILURE"
     SECURITY_POLICY_VIOLATION = "SECURITY_POLICY_VIOLATION"
     UNKNOWN_ATTRIBUTION = "UNKNOWN_ATTRIBUTION"
@@ -70,6 +71,21 @@ class WorkflowNodeEvent(SystemEvalModel):
     budget_exhausted: bool = False
     failure_codes: list[str] = Field(default_factory=list, max_length=16)
     specialist_opportunity: SpecialistOpportunityRecord | None = None
+    investigator_finding_id: str | None = Field(default=None, max_length=128, exclude_if=lambda value: value is None)
+    investigator_step_number: int | None = Field(default=None, ge=1, le=6, exclude_if=lambda value: value is None)
+    investigator_progress_class: Literal[
+        "PROGRESS", "NEGATIVE_PROGRESS", "CONTRADICTION_PROGRESS", "NO_PROGRESS", "INDETERMINATE"
+    ] | None = Field(default=None, exclude_if=lambda value: value is None)
+    investigator_progress_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$", exclude_if=lambda value: value is None)
+    investigator_new_file_count: int = Field(default=0, ge=0, le=32, exclude_if=lambda value: value == 0)
+    investigator_new_symbol_count: int = Field(default=0, ge=0, le=32, exclude_if=lambda value: value == 0)
+    investigator_new_relationship_count: int = Field(default=0, ge=0, le=32, exclude_if=lambda value: value == 0)
+    investigator_new_evidence_count: int = Field(default=0, ge=0, le=32, exclude_if=lambda value: value == 0)
+    investigator_new_negative_count: int = Field(default=0, ge=0, le=32, exclude_if=lambda value: value == 0)
+    investigator_contradiction_count: int = Field(default=0, ge=0, le=32, exclude_if=lambda value: value == 0)
+    investigator_no_progress_streak: int | None = Field(default=None, ge=0, le=5, exclude_if=lambda value: value is None)
+    investigator_knowledge_state_cycle: bool = Field(default=False, exclude_if=lambda value: value is False)
+    investigator_stop_reason: str | None = Field(default=None, max_length=64, exclude_if=lambda value: value is None)
 
 
 class FailureCause(SystemEvalModel):
@@ -213,6 +229,10 @@ class FullAnalysisMetrics(SystemEvalModel):
     attribution_counts: dict[str, int] = Field(default_factory=dict)
     specialist_attribution_counts: dict[str, int] = Field(default_factory=dict)
     branch_counts: dict[str, int] = Field(default_factory=dict)
+    investigator_efficiency: "InvestigatorEfficiencyMetrics | None" = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
 
 class PromptCandidateRunIdentity(SystemEvalModel):
@@ -234,6 +254,10 @@ class FullAnalysisReportDetails(SystemEvalModel):
     graph_identity_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     dataset_split: Literal["DEV"] = "DEV"
     target_pipeline: Literal["REPOSITORY_SCAN"] = "REPOSITORY_SCAN"
+    progress_contract_version: Literal["investigator-progress-policy/1.0"] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     dataset_case_count: int = Field(ge=1, le=64)
     trial_details: list[FullAnalysisTrialDetail] = Field(max_length=320)
     metrics: FullAnalysisMetrics
@@ -284,6 +308,105 @@ class MeasuredMetric(SystemEvalModel):
         if (self.status == MetricStatus.MEASURED) != (self.value is not None):
             raise ValueError("measured values must be present exactly when status is MEASURED")
         return self
+
+
+class InvestigatorEfficiencyMetrics(SystemEvalModel):
+    """Trace-derived process measures kept separate from task-quality scores."""
+
+    tool_calls: MeasuredMetric
+    progress_tool_calls: MeasuredMetric
+    no_progress_tool_calls: MeasuredMetric
+    indeterminate_tool_calls: MeasuredMetric
+    semantic_stagnation_stops: MeasuredMetric
+    exact_stuck_stops: MeasuredMetric
+    knowledge_state_cycle_stops: MeasuredMetric
+    tool_calls_after_last_progress: MeasuredMetric
+    model_decisions_after_last_progress: MeasuredMetric
+    steps_to_first_progress: MeasuredMetric
+    progress_call_rate: MeasuredMetric
+
+
+def derive_investigator_efficiency(
+    trial_details: list[FullAnalysisTrialDetail],
+) -> InvestigatorEfficiencyMetrics:
+    """Derive bounded process metrics solely from durable graph trace events."""
+    positive = {"PROGRESS", "NEGATIVE_PROGRESS", "CONTRADICTION_PROGRESS"}
+    progress_calls = no_progress_calls = indeterminate_calls = tool_calls = 0
+    steps_to_progress: list[int] = []
+    after_progress_tools = after_progress_decisions = 0
+    semantic_stops: set[tuple[str, int, str]] = set()
+    exact_stops: set[tuple[str, int, str]] = set()
+    cycle_stops: set[tuple[str, int, str]] = set()
+
+    for trial in trial_details:
+        grouped: dict[str, list[WorkflowNodeEvent]] = {}
+        for index, event in enumerate(trial.workflow_trace):
+            if event.node == "investigator_tool":
+                tool_calls += event.tool_execution_count
+                if "STAGNATION" in event.failure_codes:
+                    exact_stops.add((
+                        trial.case_id,
+                        trial.trial_number,
+                        event.investigator_finding_id or f"event:{index}",
+                    ))
+            if event.investigator_progress_class is not None:
+                if event.investigator_progress_class in positive:
+                    progress_calls += 1
+                elif event.investigator_progress_class == "NO_PROGRESS":
+                    no_progress_calls += 1
+                else:
+                    indeterminate_calls += 1
+            if event.investigator_finding_id:
+                grouped.setdefault(event.investigator_finding_id, []).append(event)
+                trial_finding = (trial.case_id, trial.trial_number, event.investigator_finding_id)
+                if event.investigator_stop_reason == "SEMANTIC_STAGNATION":
+                    semantic_stops.add(trial_finding)
+                if event.investigator_knowledge_state_cycle:
+                    cycle_stops.add(trial_finding)
+
+        for finding_id, events in grouped.items():
+            progress_steps = [
+                event.investigator_step_number
+                for event in events
+                if event.investigator_progress_class in positive
+                and event.investigator_step_number is not None
+            ]
+            last_progress = max(progress_steps) if progress_steps else None
+            if progress_steps:
+                steps_to_progress.append(min(progress_steps))
+            after_progress_tools += sum(
+                event.tool_execution_count
+                for event in events
+                if event.node == "investigator_tool"
+                and (last_progress is None or (event.investigator_step_number or 0) > last_progress)
+            )
+            after_progress_decisions += sum(
+                1 for event in events
+                if event.node == "investigator_decide"
+                and (last_progress is None or (event.investigator_step_number or 0) > last_progress)
+            )
+
+    def measured(value: float | int | None, unit: str) -> MeasuredMetric:
+        if value is None:
+            return MeasuredMetric(status=MetricStatus.NOT_MEASURED, value=None, unit=unit)
+        return MeasuredMetric(status=MetricStatus.MEASURED, value=float(value), unit=unit)
+
+    return InvestigatorEfficiencyMetrics(
+        tool_calls=measured(tool_calls, "calls"),
+        progress_tool_calls=measured(progress_calls, "calls"),
+        no_progress_tool_calls=measured(no_progress_calls, "calls"),
+        indeterminate_tool_calls=measured(indeterminate_calls, "calls"),
+        semantic_stagnation_stops=measured(len(semantic_stops), "stops"),
+        exact_stuck_stops=measured(len(exact_stops), "stops"),
+        knowledge_state_cycle_stops=measured(len(cycle_stops), "stops"),
+        tool_calls_after_last_progress=measured(after_progress_tools, "calls"),
+        model_decisions_after_last_progress=measured(after_progress_decisions, "decisions"),
+        steps_to_first_progress=measured(
+            sum(steps_to_progress) / len(steps_to_progress) if steps_to_progress else None,
+            "steps",
+        ),
+        progress_call_rate=measured(progress_calls / tool_calls if tool_calls else None, "proportion"),
+    )
 
 
 class SystemTrajectoryEvent(SystemEvalModel):
@@ -479,6 +602,11 @@ class SystemEvaluationReport(SystemEvalModel):
                 or self.evaluation_contract_hash != self.system_identity.evaluation_contract_hash
             ):
                 raise ValueError("full-analysis report, identity, graph, and evaluator contracts disagree")
+            if self.system_identity.evaluation_contract_version == FULL_ANALYSIS_EVALUATION_CONTRACT_VERSION:
+                if details.progress_contract_version != "investigator-progress-policy/1.0":
+                    raise ValueError("current full-analysis reports require the investigator progress contract")
+                if details.metrics.investigator_efficiency is None:
+                    raise ValueError("current full-analysis reports require trace-derived investigator efficiency")
             overlay = details.candidate_overlay
             if overlay is not None:
                 component = next(
@@ -505,6 +633,12 @@ class SystemEvaluationReport(SystemEvalModel):
                 raise ValueError("full-analysis case count disagrees with child case results")
             if details.metrics.trial_count != len(details.trial_details):
                 raise ValueError("full-analysis aggregate trial count disagrees with child records")
+            if details.progress_contract_version is not None:
+                expected_efficiency = derive_investigator_efficiency(details.trial_details)
+                if details.metrics.investigator_efficiency != expected_efficiency:
+                    raise ValueError("investigator efficiency metrics disagree with durable trial traces")
+            elif details.metrics.investigator_efficiency is not None:
+                raise ValueError("investigator efficiency metrics require an explicit progress contract")
             if details.metrics.hard_safety_violations != sum(
                 bool(item.security_violation_codes) for item in details.trial_details
             ):
@@ -752,7 +886,10 @@ def system_evaluation_comparison_digest(payload: dict) -> str:
 
 
 # Resolve the forward reference without introducing a circular module import.
-from app.evaluation.system.identity import AgentSystemIdentity  # noqa: E402
+from app.evaluation.system.identity import (  # noqa: E402
+    AgentSystemIdentity,
+    FULL_ANALYSIS_EVALUATION_CONTRACT_VERSION,
+)
 
 SystemEvaluationReport.model_rebuild()
 SystemTrialGrade.model_rebuild()
@@ -762,6 +899,7 @@ FullAnalysisMetrics.model_rebuild()
 __all__ = [
     "ComparisonOutcome", "EvaluationRunStatus", "FailureAttribution", "FailureClass",
     "FullAnalysisMetrics", "FullAnalysisReportDetails", "FullAnalysisTrialDetail",
+    "InvestigatorEfficiencyMetrics", "derive_investigator_efficiency",
     "MeasuredMetric", "MetricStatus",
     "PromotionDecision", "PromotionOutcome", "SystemCaseResults", "SystemEvalMode",
     "SystemEvalSuite", "SystemEvaluationComparison", "SystemEvaluationMetrics",

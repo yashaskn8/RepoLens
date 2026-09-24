@@ -179,7 +179,7 @@ def _workflow_source_digest(module_names: Iterable[str]) -> str:
 
 
 FULL_ANALYSIS_GRAPH_CONTRACT_VERSION = "full-analysis-graph/1.1"
-FULL_ANALYSIS_EVALUATION_CONTRACT_VERSION = "full-analysis-evaluation/1.7"
+FULL_ANALYSIS_EVALUATION_CONTRACT_VERSION = "full-analysis-evaluation/1.8"
 FULL_ANALYSIS_GRAPH_CONTRACT = {
     "version": FULL_ANALYSIS_GRAPH_CONTRACT_VERSION,
     "nodes": [
@@ -221,6 +221,9 @@ def full_analysis_evaluation_contract_hash(graph_digest: str | None = None) -> s
             "app.evaluation.system.full_analysis",
             "app.evaluation.system.specialist_attribution",
             "app.agents.specialist_provenance",
+            "app.agents.investigator",
+            "app.agent_runtime.context",
+            "app.agent_runtime.progress",
             "app.specialist_candidates",
             "app.mcp.executor",
             "app.evaluation.counterfactual.contracts",
@@ -266,6 +269,7 @@ def _evaluation_harness_digest() -> str:
         "app.evaluation.system.runner",
         "app.evaluation.system.schemas",
         "app.evaluation.system.full_analysis",
+        "app.agent_runtime.progress",
         "app.mcp.executor",
         "app.evaluation.counterfactual.contracts",
         "app.evaluation.counterfactual.policy",
@@ -342,6 +346,7 @@ def build_agent_system_identity(
     context_digest = _source_digest([
         "app.agent_runtime.context",
         "app.agent_runtime.policy",
+        "app.agent_runtime.progress",
     ])
     if scope == "FULL_ANALYSIS_GRAPH":
         workflow_implementation_digest = _workflow_source_digest([
@@ -349,12 +354,14 @@ def build_agent_system_identity(
             "app.agents.security", "app.agents.bug", "app.agents.verifier",
             "app.agents.investigator", "app.agents.revision", "app.agents.mcp_enrichment",
             "app.agent_runtime.stuck_detector", "app.agents.graph", "app.agents.state",
+            "app.agent_runtime.progress",
             "app.agents.specialist_provenance", "app.context.slices", "app.specialist_candidates",
         ])
     elif scope == "PRODUCTION_EVIDENCE_INVESTIGATOR_GRAPH":
         workflow_implementation_digest = _source_digest([
             "app.agents.investigator",
             "app.agent_runtime.stuck_detector",
+            "app.agent_runtime.progress",
             "app.agents.graph",
         ])
     else:

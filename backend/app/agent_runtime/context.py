@@ -21,6 +21,7 @@ from app.agent_runtime.schemas import (
 )
 from app.agent_runtime.prompts import INVESTIGATOR_SYSTEM_PROMPT
 from app.agent_runtime.prompt_overlay import resolve_agent_prompt
+from app.agent_runtime.progress import assess_progress, make_knowledge_key
 from app.agent_tools.schemas import ToolInvocationResult, ToolResultStatus
 from app.llm.types import AIContextMetrics, LLMMessage
 from app.security.redaction import redact_secrets, sanitize_metadata
@@ -98,6 +99,7 @@ def normalize_tool_result(
     result: ToolInvocationResult,
     *,
     step_number: int,
+    arguments: dict[str, Any] | None = None,
 ) -> InvestigatorObservation:
     payload = result.model_dump(mode="json")
     digest = hashlib.sha256(_canonical(payload).encode("utf-8")).hexdigest()
@@ -119,11 +121,15 @@ def normalize_tool_result(
         repository_snapshot=repository_snapshot,
         truncated=truncated,
         produced_new_evidence=False,
-        ledger_entries=_ledger_entries(result),
+        ledger_entries=_ledger_entries(result, arguments=arguments or {}),
     )
 
 
-def _ledger_entries(result: ToolInvocationResult) -> list[EvidenceLedgerEntry]:
+def _ledger_entries(
+    result: ToolInvocationResult,
+    *,
+    arguments: dict[str, Any],
+) -> list[EvidenceLedgerEntry]:
     entries: list[EvidenceLedgerEntry] = []
     snapshot = result.provenance.repository_snapshot if result.provenance else "unknown"
     for evidence in result.evidence[:32]:
@@ -158,29 +164,100 @@ def _ledger_entries(result: ToolInvocationResult) -> list[EvidenceLedgerEntry]:
             content_digest=(
                 evidence.source_id if evidence.source_id and len(evidence.source_id) == 64 else None
             ),
+            evidence_type=evidence.evidence_type.value,
+            knowledge_key=make_knowledge_key(
+                snapshot=snapshot,
+                evidence_type=evidence.evidence_type.value,
+                evidence_id=evidence.evidence_id,
+                file_path=evidence.file_path,
+                symbol_id=evidence.symbol if evidence.symbol and evidence.symbol.startswith("symbol:") else None,
+                start_line=evidence.start_line,
+                end_line=evidence.end_line,
+                relationship=evidence.relationship,
+                source_identity=evidence.source_id,
+                target_identity=evidence.target_id,
+            ),
+            relationship=evidence.relationship,
+            source_identity=evidence.source_id,
+            target_identity=evidence.target_id,
             warnings=[item.code for item in result.warnings[:12]],
         ))
-    if not entries and result.status in {
+    result_payload = result.result if isinstance(result.result, dict) else {}
+    empty_kinds = sorted(
+        key for key in ("matches", "relationships", "symbols", "callers", "callees", "paths")
+        if isinstance(result_payload.get(key), list) and not result_payload[key]
+    )
+    explicit_empty = result.status == ToolResultStatus.SUCCESS and bool(empty_kinds)
+    needs_coverage_fact = result.status in {
         ToolResultStatus.NOT_FOUND,
         ToolResultStatus.INSUFFICIENT_EVIDENCE,
         ToolResultStatus.RESOURCE_LIMIT,
-    }:
+    } or explicit_empty
+    if needs_coverage_fact:
         complete = not any(
             marker in item.code
             for item in result.warnings
-            for marker in ("COVERAGE", "INCOMPLETE", "LIMIT")
+            for marker in ("COVERAGE", "INCOMPLETE", "LIMIT", "PARTIAL")
+        )
+        coverage_explicit = any(
+            result_payload.get(key) is True
+            for key in ("manifest_scope_complete", "graph_complete", "coverage_complete")
+        )
+        complete = (
+            complete
+            and not bool(result_payload.get("truncated"))
+            and result_payload.get("manifest_scope_complete") is not False
+            and result_payload.get("graph_complete") is not False
+            and (
+                result.status == ToolResultStatus.NOT_FOUND
+                or (explicit_empty and coverage_explicit)
+            )
+        )
+        if result.status not in {ToolResultStatus.NOT_FOUND, ToolResultStatus.SUCCESS}:
+            complete = False
+        scope = {
+            key: value for key, value in arguments.items()
+            if key not in {"snapshot_id", "max_results", "max_depth", "max_paths", "max_nodes"}
+        }
+        if result_payload.get("query") is not None:
+            scope["query"] = str(result_payload["query"]).strip().casefold()[:256]
+        if empty_kinds:
+            scope["empty_result_kinds"] = empty_kinds
+        if result.tool == "find_callers":
+            scope["relationship_direction"] = "incoming"
+        elif result.tool == "find_callees":
+            scope["relationship_direction"] = "outgoing"
+        elif result.tool == "inspect_symbol" and "relationships" in empty_kinds:
+            scope["relationship_direction"] = "incoming_and_outgoing"
+        negative_key = hashlib.sha256(_canonical({
+            "kind": (
+                "negative-result" if complete
+                else "coverage-limitation"
+            ),
+            "snapshot": snapshot,
+            "scope": scope,
+            "warning_codes": sorted({item.code for item in result.warnings}),
+        }).encode("utf-8")).hexdigest()
+        query_label = str(
+            scope.get("query") or scope.get("symbol_id") or scope.get("file_path") or "the requested scope"
         )
         summary = f"{result.tool} returned {result.status.value}."
+        if result.status == ToolResultStatus.NOT_FOUND or explicit_empty:
+            summary = f"No matching repository fact was returned for {redact_secrets(query_label)[:256]}."
+            if empty_kinds:
+                summary = f"No {', '.join(empty_kinds)} were returned for {redact_secrets(query_label)[:256]}."
         if not complete:
             summary += " Coverage is incomplete; absence is not proven."
         entries.append(EvidenceLedgerEntry(
             source="agent_tool_registry",
             tool=result.tool,
-            status=result.status.value,
+            status=ToolResultStatus.NOT_FOUND.value if complete else result.status.value,
             repository_snapshot=snapshot,
             tool_contract_version=result.contract_version,
             fact_summary=summary,
-            content_digest=hashlib.sha256(_canonical(result.model_dump(mode="json")).encode()).hexdigest(),
+            evidence_type="NEGATIVE_RESULT" if complete else "COVERAGE_LIMITATION",
+            knowledge_key=negative_key,
+            coverage_complete=complete,
             warnings=[item.code for item in [*result.warnings, *result.errors][:12]],
         ))
     return entries
@@ -197,24 +274,55 @@ def compact_observation(
 
     updated = target.model_copy(deep=True)
     existing_keys = {(item.evidence_id, item.content_digest) for item in updated.evidence_ledger}
+    existing_result_keys = {
+        item.knowledge_key for item in updated.evidence_ledger
+        if item.evidence_type in {"NEGATIVE_RESULT", "COVERAGE_LIMITATION"} and item.knowledge_key
+    }
     existing_by_id = {
         item.evidence_id: item
         for item in updated.evidence_ledger
         if item.evidence_id is not None
     }
-    new_entries = [
-        item for item in observation.ledger_entries
-        if (item.evidence_id, item.content_digest) not in existing_keys
-    ]
+    assessment = assess_progress(
+        updated,
+        observation,
+        observation.ledger_entries,
+        argument_digest=updated.pending_call_fingerprint,
+    )
+    accepted_entries = observation.ledger_entries if assessment.accepted else []
+    new_entries = [item for item in accepted_entries if (
+        (
+            item.knowledge_key not in existing_result_keys
+            if item.evidence_type in {"NEGATIVE_RESULT", "COVERAGE_LIMITATION"}
+            else (item.evidence_id, item.content_digest) not in existing_keys
+        )
+    )]
+    if not assessment.accepted:
+        observation = observation.model_copy(update={
+            "useful_result": {"status": "SNAPSHOT_MISMATCH", "evidence_ignored": True},
+            "evidence_refs": [],
+            "ledger_entries": [],
+            "warnings": [*observation.warnings[:15], "CROSS_SNAPSHOT_EVIDENCE: evidence ignored"],
+        })
     new_digest = observation.result_digest not in updated.evidence_digests
-    observation = observation.model_copy(update={"produced_new_evidence": bool(new_entries or new_digest)})
+    observation = observation.model_copy(update={
+        "produced_new_evidence": assessment.meaningful,
+        "progress_class": assessment.certificate.progress_class,
+    })
     updated.evidence_ledger = [*updated.evidence_ledger, *new_entries][-64:]
     if new_digest:
         updated.evidence_digests = [*updated.evidence_digests, observation.result_digest][-64:]
 
     memory = updated.working_memory.model_copy(deep=True)
+    old_knowledge_keys = {item.knowledge_key for item in target.evidence_ledger if item.knowledge_key}
+    memory_entries: list[EvidenceLedgerEntry] = []
     for entry in new_entries:
         prior = existing_by_id.get(entry.evidence_id) if entry.evidence_id else None
+        if prior is None and entry.knowledge_key:
+            prior = next((
+                item for item in target.evidence_ledger
+                if item.knowledge_key == entry.knowledge_key
+            ), None)
         if (
             prior is not None
             and prior.content_digest is not None
@@ -226,7 +334,11 @@ def compact_observation(
                 text=f"Trusted tools returned conflicting digests for evidence {entry.evidence_id}.",
                 evidence_refs=[entry.evidence_id],
             ))
-    for entry in new_entries:
+        if entry.knowledge_key not in old_knowledge_keys or (
+            prior is not None and prior.content_digest != entry.content_digest
+        ):
+            memory_entries.append(entry)
+    for entry in memory_entries:
         if entry.file_path and entry.file_path not in memory.important_files:
             memory.important_files.append(entry.file_path)
         if entry.symbol_id and entry.symbol_id not in memory.discovered_symbols:
@@ -265,6 +377,9 @@ def compact_observation(
         useful_result=observation.useful_result,
     )
     updated.evidence_artifacts = [*updated.evidence_artifacts, artifact][-5:]
+    updated.progress_history = [*updated.progress_history, assessment.certificate][-5:]
+    updated.knowledge_state_history = list(assessment.knowledge_state_history)
+    updated.consecutive_no_progress = assessment.consecutive_no_progress
     updated.pending_observation = None
     updated.pending_decision = None
     updated.pending_call_fingerprint = None
@@ -309,8 +424,23 @@ def pack_decision_context(
 ) -> PackedInvestigatorContext:
     """Pack prioritized, bounded state; never include the full AnalysisState or transcript."""
 
-    recent = [item.model_dump(mode="json") for item in target.recent_observations[-2:]]
-    ledger = [item.model_dump(mode="json") for item in target.evidence_ledger[-20:]]
+    recent = []
+    for item in target.recent_observations[-2:]:
+        projection = item.model_dump(mode="json")
+        # Ledger facts are already included once below; duplicating them inside
+        # every observation causes context growth without adding decision value.
+        projection.pop("ledger_entries", None)
+        recent.append(projection)
+    ledger_fields = (
+        "evidence_id", "source", "tool", "status", "repository_snapshot",
+        "tool_contract_version", "file_path", "symbol_id", "start_line",
+        "end_line", "fact_summary", "content_digest", "supports",
+        "contradicts", "warnings",
+    )
+    ledger = [
+        {key: getattr(item, key) for key in ledger_fields if getattr(item, key) is not None}
+        for item in target.evidence_ledger[-20:]
+    ]
     payload = {
         "task": {
             "finding": target.finding.model_dump(mode="json"),

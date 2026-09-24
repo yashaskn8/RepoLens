@@ -34,7 +34,7 @@ Raw tool envelopes are redacted, bounded, normalized, digested, and compacted de
 
 ## Bounds and supported tools
 
-V1 hard ceilings are four sequential targets per workflow, six decisions per target, five tool executions per target, one execution per model response, two detailed recent observations, and explicit model/tool timeouts. Duplicate requests and evidence-free short cycles terminate as `STUCK`.
+V1 hard ceilings are four sequential targets per workflow, six decisions per target, five tool executions per target, one execution per model response, two detailed recent observations, and explicit model/tool timeouts. Exact duplicate/short call cycles terminate as `STUCK`. Separately, a two-call unchanged semantic knowledge state terminates as `SEMANTIC_STAGNATION`; tool/result digest churn, model explanations, repeated facts from another tool, and a new range in an already-known file do not count as progress. New snapshot-bound files, symbols, relationships, source slices, scanner/dataflow facts, complete negative results, and evidence contradictions can count. Failed, partial, cross-snapshot, and truncated-without-evidence results are `INDETERMINATE`, never proof of absence.
 
 Bug, architecture, and integration investigations may use `inspect_file`, `search_symbol`, `inspect_symbol`, `find_callers`, `find_callees`, and `read_source_slice`. Security investigations may additionally use `trace_dataflow` and `scan_security`. Change, write, shell, execution, network, and GitHub-delivery capabilities are not exposed.
 
@@ -43,3 +43,13 @@ Bug, architecture, and integration investigations may use `inspect_file`, `searc
 ## Telemetry and state
 
 Checkpointed trajectory entries record the finding and step through their containing state, action, tool name, argument/result digests, evidence references, provider/model metadata, prompt and tool versions, duration, status, remaining budgets, stop reason, and content-free context metrics. Full source is not written to general event logs. Live registry/router/database objects are transient runtime dependencies and are never part of `AnalysisState`.
+
+Each tool result also leaves a bounded, content-minimized progress certificate in
+the target checkpoint. A certificate binds before/after semantic knowledge
+digests, the normalized result/argument digests, progress class, bounded novelty
+counts, and the no-progress/cycle state; it never contains source text. Full
+analysis reports derive investigator efficiency metrics from these durable
+workflow events and validate aggregates against per-trial traces. They remain
+separate from precision/recall/task-quality metrics. The state and progress
+contracts are versioned so resumed legacy checkpoints do not silently inherit
+new progress semantics.

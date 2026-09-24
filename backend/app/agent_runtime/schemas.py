@@ -10,10 +10,13 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.agent_runtime.prompts import INVESTIGATOR_PROMPT_VERSION
 
 INVESTIGATOR_DECISION_SCHEMA_VERSION = "investigator-decision/1.0"
-INVESTIGATOR_STATE_VERSION = "investigator-state/1.0"
+INVESTIGATOR_STATE_VERSION = "investigator-state/1.1"
+INVESTIGATOR_PROGRESS_POLICY_VERSION = "investigator-progress-policy/1.0"
 MAX_INVESTIGATOR_TARGETS = 4
 MAX_INVESTIGATOR_STEPS = 6
 MAX_INVESTIGATOR_TOOL_CALLS = 5
+MAX_INVESTIGATOR_PROGRESS_HISTORY = MAX_INVESTIGATOR_TOOL_CALLS
+INVESTIGATOR_NO_PROGRESS_WINDOW = 2
 
 
 class InvestigatorModel(BaseModel):
@@ -34,6 +37,7 @@ class InvestigatorStopReason(str, Enum):
     MAX_STEPS = "MAX_STEPS"
     MAX_TOOL_CALLS = "MAX_TOOL_CALLS"
     STUCK = "STUCK"
+    SEMANTIC_STAGNATION = "SEMANTIC_STAGNATION"
     TOOL_FAILURE = "TOOL_FAILURE"
     INVALID_MODEL_OUTPUT = "INVALID_MODEL_OUTPUT"
     CONTEXT_BUDGET_EXCEEDED = "CONTEXT_BUDGET_EXCEEDED"
@@ -69,6 +73,64 @@ class MemoryKind(str, Enum):
     CONTRADICTION = "CONTRADICTION"
 
 
+class InvestigatorProgressClass(str, Enum):
+    PROGRESS = "PROGRESS"
+    NEGATIVE_PROGRESS = "NEGATIVE_PROGRESS"
+    CONTRADICTION_PROGRESS = "CONTRADICTION_PROGRESS"
+    NO_PROGRESS = "NO_PROGRESS"
+    INDETERMINATE = "INDETERMINATE"
+
+
+class InvestigatorProgressCertificate(InvestigatorModel):
+    """Content-minimized deterministic progress proof for one tool result."""
+
+    policy_version: str = INVESTIGATOR_PROGRESS_POLICY_VERSION
+    step_number: int = Field(ge=1, le=MAX_INVESTIGATOR_STEPS)
+    progress_class: InvestigatorProgressClass
+    knowledge_state_before: str = Field(pattern=r"^[0-9a-f]{64}$")
+    knowledge_state_after: str = Field(pattern=r"^[0-9a-f]{64}$")
+    result_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    argument_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    new_file_count: int = Field(default=0, ge=0, le=32)
+    new_symbol_count: int = Field(default=0, ge=0, le=32)
+    new_relationship_count: int = Field(default=0, ge=0, le=32)
+    new_evidence_count: int = Field(default=0, ge=0, le=32)
+    new_negative_count: int = Field(default=0, ge=0, le=8)
+    contradiction_count: int = Field(default=0, ge=0, le=8)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=32)
+    consecutive_no_progress: int = Field(default=0, ge=0, le=MAX_INVESTIGATOR_TOOL_CALLS)
+    knowledge_state_cycle: bool = False
+
+    @model_validator(mode="after")
+    def validate_semantic_delta(self) -> "InvestigatorProgressCertificate":
+        novelty = (
+            self.new_file_count + self.new_symbol_count + self.new_relationship_count
+            + self.new_evidence_count + self.new_negative_count + self.contradiction_count
+        )
+        if self.progress_class == InvestigatorProgressClass.NO_PROGRESS:
+            if self.knowledge_state_before != self.knowledge_state_after or novelty:
+                raise ValueError("NO_PROGRESS must preserve the semantic knowledge state")
+            if self.consecutive_no_progress < 1:
+                raise ValueError("NO_PROGRESS must advance the bounded no-progress streak")
+        elif self.progress_class == InvestigatorProgressClass.NEGATIVE_PROGRESS:
+            if self.new_negative_count < 1 or self.knowledge_state_before == self.knowledge_state_after:
+                raise ValueError("NEGATIVE_PROGRESS requires a new complete negative fact")
+        elif self.progress_class == InvestigatorProgressClass.CONTRADICTION_PROGRESS:
+            if self.contradiction_count < 1 or self.knowledge_state_before == self.knowledge_state_after:
+                raise ValueError("CONTRADICTION_PROGRESS requires a conflicting trusted fact")
+        elif self.progress_class == InvestigatorProgressClass.PROGRESS:
+            if novelty < 1 or self.knowledge_state_before == self.knowledge_state_after:
+                raise ValueError("PROGRESS requires a deterministic semantic knowledge delta")
+        if self.progress_class != InvestigatorProgressClass.NO_PROGRESS and self.consecutive_no_progress:
+            raise ValueError("only NO_PROGRESS may advance the no-progress streak")
+        if self.knowledge_state_cycle and (
+            self.progress_class != InvestigatorProgressClass.NO_PROGRESS
+            or self.consecutive_no_progress < INVESTIGATOR_NO_PROGRESS_WINDOW
+        ):
+            raise ValueError("knowledge-state cycles require a repeated no-progress window")
+        return self
+
+
 class MemoryEntry(InvestigatorModel):
     kind: MemoryKind
     text: str = Field(min_length=1, max_length=800)
@@ -97,6 +159,12 @@ class EvidenceLedgerEntry(InvestigatorModel):
     end_line: int | None = Field(default=None, ge=1)
     fact_summary: str = Field(min_length=1, max_length=1_200)
     content_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    evidence_type: str | None = Field(default=None, max_length=64)
+    knowledge_key: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    relationship: str | None = Field(default=None, max_length=128)
+    source_identity: str | None = Field(default=None, max_length=2048)
+    target_identity: str | None = Field(default=None, max_length=2048)
+    coverage_complete: bool | None = None
     supports: list[str] = Field(default_factory=list, max_length=12)
     contradicts: list[str] = Field(default_factory=list, max_length=12)
     warnings: list[str] = Field(default_factory=list, max_length=12)
@@ -114,6 +182,7 @@ class InvestigatorObservation(InvestigatorModel):
     repository_snapshot: str | None = Field(default=None, max_length=128)
     truncated: bool = False
     produced_new_evidence: bool = False
+    progress_class: InvestigatorProgressClass | None = None
     ledger_entries: list[EvidenceLedgerEntry] = Field(default_factory=list, max_length=32)
 
 
@@ -219,6 +288,12 @@ class InvestigatorTargetState(InvestigatorModel):
     evidence_artifacts: list[InvestigatorEvidenceArtifact] = Field(default_factory=list, max_length=5)
     call_fingerprints: list[str] = Field(default_factory=list, max_length=MAX_INVESTIGATOR_TOOL_CALLS)
     evidence_digests: list[str] = Field(default_factory=list, max_length=64)
+    progress_history: list[InvestigatorProgressCertificate] = Field(
+        default_factory=list,
+        max_length=MAX_INVESTIGATOR_PROGRESS_HISTORY,
+    )
+    knowledge_state_history: list[str] = Field(default_factory=list, max_length=MAX_INVESTIGATOR_PROGRESS_HISTORY + 1)
+    consecutive_no_progress: int = Field(default=0, ge=0, le=MAX_INVESTIGATOR_TOOL_CALLS)
     stop_reason: InvestigatorStopReason | None = None
     result: InvestigatorResult | None = None
 
@@ -252,5 +327,8 @@ __all__ = [name for name in globals() if name.startswith("Investigator") or name
     "VerifierGap",
     "INVESTIGATOR_DECISION_OUTPUT_SCHEMA",
     "INVESTIGATOR_DECISION_SCHEMA_VERSION",
+    "INVESTIGATOR_PROGRESS_POLICY_VERSION",
+    "INVESTIGATOR_NO_PROGRESS_WINDOW",
+    "MAX_INVESTIGATOR_PROGRESS_HISTORY",
     "INVESTIGATOR_PROMPT_VERSION",
 }]

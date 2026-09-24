@@ -317,9 +317,68 @@ def _workflow_node_event(node: str, before: AnalysisState, output: Dict[str, Any
             tool_execution_count += 1
     investigator = output.get("investigator", {})
     before_investigator = before.get("investigator", {})
+    active = investigator.get("active", {}) if isinstance(investigator, dict) else {}
+    before_active = before_investigator.get("active", {}) if isinstance(before_investigator, dict) else {}
+    active = active if isinstance(active, dict) else {}
+    before_active = before_active if isinstance(before_active, dict) else {}
+    investigator_finding_id = None
+    investigator_step_number = None
+    investigator_progress_class = None
+    investigator_progress_digest = None
+    investigator_progress_counts = {
+        "investigator_new_file_count": 0,
+        "investigator_new_symbol_count": 0,
+        "investigator_new_relationship_count": 0,
+        "investigator_new_evidence_count": 0,
+        "investigator_new_negative_count": 0,
+        "investigator_contradiction_count": 0,
+    }
+    investigator_no_progress_streak = None
+    investigator_knowledge_state_cycle = False
+    investigator_stop_reason = None
+    if node.startswith("investigator_"):
+        finding = active.get("finding", {})
+        if isinstance(finding, dict):
+            investigator_finding_id = str(finding.get("finding_id") or "")[:128] or None
+        trajectory = active.get("trajectory", [])
+        if isinstance(trajectory, list) and trajectory and isinstance(trajectory[-1], dict):
+            investigator_step_number = trajectory[-1].get("step_number")
+        progress_history = active.get("progress_history", [])
+        if node == "investigator_compact" and isinstance(progress_history, list) and progress_history:
+            certificate = progress_history[-1]
+            if isinstance(certificate, dict):
+                investigator_progress_class = str(certificate.get("progress_class") or "")[:32] or None
+                investigator_progress_digest = _safe_event_digest(certificate)
+                for source, target_name in (
+                    ("new_file_count", "investigator_new_file_count"),
+                    ("new_symbol_count", "investigator_new_symbol_count"),
+                    ("new_relationship_count", "investigator_new_relationship_count"),
+                    ("new_evidence_count", "investigator_new_evidence_count"),
+                    ("new_negative_count", "investigator_new_negative_count"),
+                    ("contradiction_count", "investigator_contradiction_count"),
+                ):
+                    try:
+                        investigator_progress_counts[target_name] = max(0, min(32, int(certificate.get(source, 0))))
+                    except (TypeError, ValueError):
+                        investigator_progress_counts[target_name] = 0
+                investigator_no_progress_streak = certificate.get("consecutive_no_progress")
+                investigator_knowledge_state_cycle = bool(certificate.get("knowledge_state_cycle"))
+        stop = active.get("stop_reason")
+        if stop:
+            investigator_stop_reason = str(getattr(stop, "value", stop))[:64]
+        if node == "investigator_complete" and isinstance(investigator, dict):
+            current_results = investigator.get("results", {})
+            previous_results = before_investigator.get("results", {}) if isinstance(before_investigator, dict) else {}
+            if isinstance(current_results, dict):
+                completed = [
+                    (key, value) for key, value in current_results.items()
+                    if key not in previous_results and isinstance(value, dict)
+                ]
+                if completed:
+                    result_id, result = completed[-1]
+                    investigator_finding_id = str(result.get("finding_id") or result_id)[:128]
+                    investigator_stop_reason = str(result.get("stop_reason") or "")[:64] or None
     if node == "investigator_tool" and isinstance(investigator, dict):
-        active = investigator.get("active", {})
-        before_active = before_investigator.get("active", {}) if isinstance(before_investigator, dict) else {}
         trajectory = active.get("trajectory", []) if isinstance(active, dict) else []
         if trajectory and isinstance(trajectory[-1], dict):
             step = trajectory[-1]
@@ -367,6 +426,23 @@ def _workflow_node_event(node: str, before: AnalysisState, output: Dict[str, Any
                 failure_codes.append("TOOL_FAILURE")
             elif status == "STUCK_LOOP":
                 failure_codes.append("STAGNATION")
+    if investigator_stop_reason == "SEMANTIC_STAGNATION" or investigator_knowledge_state_cycle:
+        failure_codes.append("SEMANTIC_STAGNATION")
+    recent_observations = active.get("recent_observations", [])
+    if any(
+        isinstance(item, dict)
+        and any(str(warning).startswith("CROSS_SNAPSHOT_EVIDENCE:") for warning in item.get("warnings", []))
+        for item in (recent_observations[:2] if isinstance(recent_observations, list) else [])
+    ):
+        failure_codes.append("CROSS_SNAPSHOT_EVIDENCE")
+    output_projection["investigator_finding_id"] = investigator_finding_id
+    output_projection["investigator_step_number"] = investigator_step_number
+    output_projection["investigator_progress_class"] = investigator_progress_class
+    output_projection["investigator_progress_digest"] = investigator_progress_digest
+    output_projection["investigator_progress_counts"] = investigator_progress_counts
+    output_projection["investigator_no_progress_streak"] = investigator_no_progress_streak
+    output_projection["investigator_knowledge_state_cycle"] = investigator_knowledge_state_cycle
+    output_projection["investigator_stop_reason"] = investigator_stop_reason
     output_projection["tool_names"] = list(dict.fromkeys(tool_names))[:16]
     output_projection["tool_call_digests"] = list(dict.fromkeys(tool_call_digests))[:16]
     output_projection["tool_execution_count"] = min(tool_execution_count, 16)
@@ -396,6 +472,14 @@ def _workflow_node_event(node: str, before: AnalysisState, output: Dict[str, Any
             specialist_opportunity.model_dump(mode="json")
             if specialist_opportunity is not None else None
         ),
+        "investigator_finding_id": investigator_finding_id,
+        "investigator_step_number": investigator_step_number,
+        "investigator_progress_class": investigator_progress_class,
+        "investigator_progress_digest": investigator_progress_digest,
+        **investigator_progress_counts,
+        "investigator_no_progress_streak": investigator_no_progress_streak,
+        "investigator_knowledge_state_cycle": investigator_knowledge_state_cycle,
+        "investigator_stop_reason": investigator_stop_reason,
     }
 
 

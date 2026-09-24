@@ -8,6 +8,7 @@ from typing import Any
 
 from app.agent_runtime.schemas import (
     INVESTIGATOR_DECISION_SCHEMA_VERSION,
+    INVESTIGATOR_PROGRESS_POLICY_VERSION,
     INVESTIGATOR_STATE_VERSION,
     InvestigatorAction,
     InvestigatorStopReason,
@@ -17,7 +18,7 @@ from app.agent_runtime.schemas import (
 from app.agent_tools.schemas import AGENT_TOOL_CONTRACT_VERSION
 
 
-EVALUATION_CONTRACT_VERSION = "agent-eval-contract/1.2"
+EVALUATION_CONTRACT_VERSION = "agent-eval-contract/1.3"
 
 # The committed scripted gate is a release policy, not user-editable input.
 # Keep its values in the versioned contract so lowering a threshold cannot
@@ -32,6 +33,7 @@ def evaluation_contract_payload() -> dict[str, Any]:
         "evaluation_contract_version": EVALUATION_CONTRACT_VERSION,
         "investigator_decision_schema_version": INVESTIGATOR_DECISION_SCHEMA_VERSION,
         "investigator_state_version": INVESTIGATOR_STATE_VERSION,
+        "investigator_progress_policy_version": INVESTIGATOR_PROGRESS_POLICY_VERSION,
         "agent_tool_contract_version": AGENT_TOOL_CONTRACT_VERSION,
         "actions": [item.value for item in InvestigatorAction],
         "stop_reasons": [item.value for item in InvestigatorStopReason],

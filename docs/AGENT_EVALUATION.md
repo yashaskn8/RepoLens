@@ -154,6 +154,21 @@ it reads only the canonical public benchmark tree and does not load sealed
 private holdout labels. Source text, labels, and private holdout artifacts are
 not included in reports.
 
+Investigator progress is measured separately from task quality. Tool results
+are compared as snapshot-bound semantic facts rather than serialized result
+envelopes: genuinely new files/symbols/relationships, bounded source/scanner/
+dataflow evidence, complete negative results, and contradictions are retained
+as progress; unchanged facts, result-digest churn, model explanations, and
+same-file range changes are not. Two consecutive unchanged knowledge states
+stop as `SEMANTIC_STAGNATION`, distinct from exact duplicate/cycle `STAGNATION`.
+Provider and tool failures remain their own failure classes and do not become
+no-progress evidence. Full-analysis report efficiency fields (progress,
+no-progress, indeterminate calls, stagnation/cycle stops, work after last
+progress, and steps to first progress) are derived from bounded workflow traces
+and validated against trial details; they never contribute to quality scores.
+Legacy reports without the progress contract leave those efficiency metrics
+unreported rather than synthesizing zeros.
+
 `scripted` mode is a zero-key graph/harness test, not model-capability evidence:
 its controlled router returns empty specialist outputs and abstains if the
 investigator is reached. It commonly grades issue cases as failures by design.

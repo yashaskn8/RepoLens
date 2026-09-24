@@ -508,7 +508,9 @@ def test_promotion_requires_current_harness_identity(dataset, monkeypatch):
 
     def changed_context_policy_digest(module_names):
         result = original_source_digest(module_names)
-        if set(module_names) == {"app.agent_runtime.context", "app.agent_runtime.policy"}:
+        if set(module_names) == {
+            "app.agent_runtime.context", "app.agent_runtime.policy", "app.agent_runtime.progress",
+        }:
             return identity_module._digest({"prior": result, "context_policy_revision": "changed"})
         return result
 

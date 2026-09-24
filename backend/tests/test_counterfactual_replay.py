@@ -673,3 +673,209 @@ def test_replay_rejects_current_graph_and_evaluation_contract_mismatch():
     })))
     assert contract_mismatch.effect.value == "INVALID_REPLAY"
     assert contract_mismatch.reason_code == "SYSTEM_IDENTITY_INVALID"
+
+
+def test_live_replay_branches_each_start_from_same_factual_checkpoint(monkeypatch):
+    """A prior sibling branch must not contaminate later replay branches."""
+    import copy
+    from types import SimpleNamespace
+
+    import app.evaluation.counterfactual.replay as replay_module
+    from app.evaluation.counterfactual.checkpoints import checkpoint_state_digest
+    from app.evaluation.counterfactual.eligibility import ReplayEligibility
+
+    case = _case()
+    finding_id = UUID("00000000-0000-0000-0000-000000000061")
+    candidate = _matched_candidate(case, finding_id).model_dump(mode="json")
+    factual_trace = [{
+        "node": "verifier",
+        "sequence": 1,
+        "superstep": 1,
+        "status": "COMPLETED",
+        "duration_ms": 1.0,
+        "input_digest": "a" * 64,
+        "output_digest": "b" * 64,
+        "candidate_ids": [str(finding_id)],
+        "verified_ids": [],
+        "rejected_ids": [str(finding_id)],
+        "finding_refs": [],
+        "model_identities": [],
+        "model_execution_count": 0,
+        "tool_names": [],
+        "tool_call_digests": [],
+        "tool_execution_count": 0,
+        "evidence_count": 1,
+        "budget_exhausted": False,
+        "failure_codes": [],
+    }]
+    factual_state = {
+        "status": "COMPLETED",
+        "commit_hash": "snapshot-counterfactual-isolation",
+        "verification_decision": "verified",
+        "candidate_findings": [candidate],
+        "verified_findings": [],
+        "rejected_findings": [{
+            "finding_id": str(finding_id),
+            "verdict": "REJECTED",
+            "reason": "Factual rejection.",
+        }],
+        "revision_target_ids": [],
+        "workflow_trace": factual_trace,
+        "model_executions": [{"provider": "gemini", "model_name": "registered-model-x"}],
+        "ai_cloud_budget": {
+            "mode": "balanced",
+            "max_cloud_calls": 20,
+            "max_cloud_tokens": 200_000,
+            "used_cloud_calls": 0,
+            "used_cloud_tokens": 0,
+            "exhausted": False,
+        },
+        "mcp_call_count": 0,
+        "mcp_tool_events": [],
+    }
+    factual_config = {"configurable": {"thread_id": "replay-isolation", "checkpoint_id": "factual-a"}}
+    checkpoint = SimpleNamespace(
+        values=copy.deepcopy(factual_state),
+        config=factual_config,
+        next=("finalize",),
+    )
+
+    class FakeGraph:
+        def __init__(self):
+            self.factual_values = copy.deepcopy(factual_state)
+            self.branch_values = {}
+            self.branch_parents = []
+            self.branch_start_digests = []
+            self.invoked_branches = []
+
+        async def aget_state_history(self, config, *, limit):
+            assert config == factual_config
+            assert limit == replay_module.COUNTERFACTUAL_REPLAY_POLICY.max_history_checkpoints
+            yield checkpoint
+
+        async def aupdate_state(self, config, patch, *, as_node):
+            self.branch_parents.append(config["configurable"]["checkpoint_id"])
+            assert as_node == "verifier"
+            parent_id = config["configurable"]["checkpoint_id"]
+            source = self.factual_values if parent_id == "factual-a" else self.branch_values[parent_id]
+            branch_base = copy.deepcopy(source)
+            self.branch_start_digests.append(checkpoint_state_digest(branch_base))
+            branch_base.update(copy.deepcopy(patch))
+            branch_id = f"replay-{len(self.branch_parents)}"
+            self.branch_values[branch_id] = branch_base
+            return {"configurable": {"thread_id": "replay-isolation", "checkpoint_id": branch_id}}
+
+        async def aget_state(self, config):
+            branch_id = config["configurable"]["checkpoint_id"]
+            return SimpleNamespace(values=self.branch_values[branch_id], next=("finalize",))
+
+        async def ainvoke(self, value, *, config, context):
+            assert value is None
+            branch_id = config["configurable"]["checkpoint_id"]
+            branch = self.branch_values[branch_id]
+            assert "sibling_contamination" not in branch
+            self.invoked_branches.append(branch_id)
+            output = copy.deepcopy(branch)
+            output["workflow_trace"] = [
+                *copy.deepcopy(factual_trace),
+                {
+                    "node": "finalize",
+                    "sequence": 2,
+                    "superstep": 2,
+                    "status": "COMPLETED",
+                    "duration_ms": 1.0,
+                    "input_digest": "c" * 64,
+                    "output_digest": "d" * 64,
+                    "candidate_ids": [],
+                    "verified_ids": [],
+                    "rejected_ids": [],
+                    "finding_refs": [],
+                    "model_identities": [],
+                    "model_execution_count": 0,
+                    "tool_names": [],
+                    "tool_call_digests": [],
+                    "tool_execution_count": 0,
+                    "evidence_count": 0,
+                    "budget_exhausted": False,
+                    "failure_codes": [],
+                },
+            ]
+            # Model LangGraph writing new sibling checkpoints after this branch.
+            branch["sibling_contamination"] = branch_id
+            branch["verified_findings"] = [{"id": f"contaminated-by-{branch_id}"}]
+            return output
+
+    graph = FakeGraph()
+    monkeypatch.setattr(
+        replay_module,
+        "select_replay_intervention",
+        lambda *args, **kwargs: ReplayEligibility(
+            True,
+            "ELIGIBLE_VERIFIER_FALSE_REJECTION",
+            "VERIFIER_ACCEPT_MATCHED_FINDING",
+            "verifier",
+            str(finding_id),
+        ),
+    )
+    monkeypatch.setattr(
+        replay_module,
+        "_state_patch",
+        lambda *args, **kwargs: ({
+            "verified_findings": [candidate],
+            "rejected_findings": [],
+            "verification_decision": "verified",
+            "revision_target_ids": [],
+        }, "BUILT"),
+    )
+    monkeypatch.setattr(replay_module, "_safe_trace_events", lambda events: ())
+    monkeypatch.setattr(
+        replay_module,
+        "_outcome_for_state",
+        lambda case, state, judge, **kwargs: ReplayOutcomeMetrics(
+            success=state.get("verification_decision") == "verified"
+            and bool(state.get("verified_findings")),
+            tp=1 if state.get("verified_findings") else 0,
+            fp=0,
+            fn=0 if state.get("verified_findings") else 1,
+            unsupported_claims=0,
+            invalid_references=0,
+            hard_safety_violation=False,
+        ),
+    )
+    graph_digest = full_analysis_graph_identity_digest()
+    identity = SimpleNamespace(
+        scope="FULL_ANALYSIS_GRAPH",
+        system_digest="f" * 64,
+        graph_identity_digest=graph_digest,
+        evaluation_contract_hash=full_analysis_evaluation_contract_hash(graph_digest),
+    )
+    coordinator = CounterfactualReplayCoordinator(
+        mode=SystemEvalMode.LIVE,
+        expected_provider="gemini",
+        expected_model="registered-model-x",
+        allowed_case_digests={case.case_id: canonical_digest(case.model_dump(mode="json"))},
+    )
+
+    results = asyncio.run(coordinator.replay_trial(
+        case=case,
+        trial_number=1,
+        factual_state=factual_state,
+        attribution=_attribution(case, FailureClass.VERIFIER_FALSE_REJECTION),
+        judged=None,
+        published_judged=None,
+        judge=None,
+        graph=graph,
+        factual_config=factual_config,
+        runtime_context=SimpleNamespace(mcp_executor=None),
+        fixture=SimpleNamespace(snapshot_id="snapshot-counterfactual-isolation"),
+        system_identity=identity,
+    ))
+
+    expected_base_digest = checkpoint_state_digest(factual_state)
+    assert [item.execution_status for item in results] == ["COMPLETED"] * 3
+    assert graph.branch_parents == ["factual-a"] * 3
+    assert graph.branch_start_digests == [expected_base_digest] * 3
+    assert len(set(graph.invoked_branches)) == 3
+    assert all("sibling_contamination" in graph.branch_values[item] for item in graph.invoked_branches)
+    assert factual_state["verified_findings"] == []
+    assert factual_state["workflow_trace"] == factual_trace

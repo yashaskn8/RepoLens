@@ -485,7 +485,11 @@ async def run_investigator_tool_node(
             errors=[ToolError(code="TOOL_TIMEOUT", message="The deterministic tool exceeded its timeout.")],
         )
     duration_ms = (time.perf_counter() - started) * 1000.0
-    observation = normalize_tool_result(tool_result, step_number=target.budget.step_number)
+    observation = normalize_tool_result(
+        tool_result,
+        step_number=target.budget.step_number,
+        arguments=decision.arguments,
+    )
     target.pending_observation = observation
     if tool_result.status == ToolResultStatus.INTERNAL_ERROR:
         target.stop_reason = InvestigatorStopReason.TOOL_FAILURE
@@ -516,12 +520,37 @@ async def run_investigator_compact_node(
     run = _run_state(state)
     target = run.active
     if target is not None and target.pending_observation is not None and target.pending_call_fingerprint:
+        snapshot_mismatch = any(
+            warning.startswith("CROSS_SNAPSHOT_EVIDENCE:")
+            for warning in target.pending_observation.warnings
+        ) or target.pending_observation.repository_snapshot != target.finding.repository_snapshot
         target = compact_observation(
             target,
             target.pending_observation,
             call_fingerprint=target.pending_call_fingerprint,
             recent_limit=get_settings().AGENT_INVESTIGATOR_RECENT_OBSERVATIONS,
         )
+        certificate = target.progress_history[-1] if target.progress_history else None
+        if snapshot_mismatch:
+            target.stop_reason = InvestigatorStopReason.INFRASTRUCTURE_FAILURE
+        if certificate is not None:
+            from app.observability import span
+
+            with span(
+                "agent.investigator.progress",
+                attributes={
+                    "repolens.investigator.progress.class": certificate.progress_class.value,
+                    "repolens.investigator.progress.new_files": certificate.new_file_count,
+                    "repolens.investigator.progress.new_symbols": certificate.new_symbol_count,
+                    "repolens.investigator.progress.new_relationships": certificate.new_relationship_count,
+                    "repolens.investigator.progress.new_evidence": certificate.new_evidence_count,
+                    "repolens.investigator.progress.no_progress_streak": certificate.consecutive_no_progress,
+                    "repolens.investigator.progress.knowledge_state_cycle": certificate.knowledge_state_cycle,
+                },
+            ):
+                pass
+            if certificate.knowledge_state_cycle:
+                target.stop_reason = InvestigatorStopReason.SEMANTIC_STAGNATION
         if target.stop_reason is None and target.budget.step_number >= target.budget.max_steps:
             target.stop_reason = InvestigatorStopReason.MAX_STEPS
         run.active = target
@@ -600,6 +629,7 @@ def route_after_investigator_complete(state: AnalysisState) -> str:
         InvestigatorStopReason.POLICY_BLOCKED,
         InvestigatorStopReason.BUDGET_EXHAUSTED,
         InvestigatorStopReason.INFRASTRUCTURE_FAILURE,
+        InvestigatorStopReason.SEMANTIC_STAGNATION,
     }
     if any(item.stop_reason in fail_closed for item in run.results.values()):
         return "uncertain"

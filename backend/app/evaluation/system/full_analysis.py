@@ -67,7 +67,9 @@ from app.evaluation.system.schemas import (
     WorkflowNodeEvent,
     system_evaluation_report_digest,
     specialist_attribution_counts,
+    derive_investigator_efficiency,
 )
+from app.agent_runtime.schemas import INVESTIGATOR_PROGRESS_POLICY_VERSION
 from app.evaluation.system.specialist_attribution import (
     SpecialistOpportunityMatch,
     specialist_input_gap_evidence,
@@ -523,6 +525,16 @@ def attribute_full_analysis_failure(
         upstream = "A node recorded a sanitized model provider failure code."
         observed = "At least one model-dependent node failed before producing validated output."
         basis = "The failure code was recorded in the workflow trace; provider text is not used."
+    elif any(code in {"TOOL_FAILURE", "TOOL_TIMEOUT", "INTERNAL_ERROR"} for code in all_codes):
+        failure_class, stage, primary_node = FailureClass.INVESTIGATOR_TOOL_FAILURE, "INVESTIGATOR", "investigator_tool"
+        upstream = "A bounded repository evidence tool recorded an execution failure."
+        observed = "The attempted tool result was unavailable or incomplete; it is not treated as semantic no-progress."
+        basis = "The normalized workflow trace contains an explicit tool failure code."
+    elif "SEMANTIC_STAGNATION" in all_codes:
+        failure_class, stage, primary_node = FailureClass.SEMANTIC_STAGNATION, "INVESTIGATOR", "investigator_compact"
+        upstream = "The investigator observed repeated unchanged deterministic knowledge states across its bounded no-progress window."
+        observed = "Safe repository tools returned no novel deterministic evidence before the semantic stagnation limit."
+        basis = "Checkpointed progress certificates and the semantic stagnation failure code agree."
     elif "STAGNATION" in all_codes:
         failure_class, stage, primary_node = FailureClass.STAGNATION, "INVESTIGATOR", "investigator_tool"
         upstream = "The investigator's deterministic duplicate/cycle detector stopped a repeated call sequence."
@@ -1528,6 +1540,7 @@ async def run_full_analysis_evaluation(
         attribution_counts=attributions,
         specialist_attribution_counts=specialist_attributions,
         branch_counts=branches,
+        investigator_efficiency=derive_investigator_efficiency(list(details)),
     )
     dataset_hash = compute_canonical_benchmark_hash(eligible)
     contract_hash = identity.evaluation_contract_hash
@@ -1561,6 +1574,7 @@ async def run_full_analysis_evaluation(
             "graph_identity_digest": full_analysis_graph_identity_digest(),
             "dataset_split": "DEV",
             "target_pipeline": "REPOSITORY_SCAN",
+            "progress_contract_version": INVESTIGATOR_PROGRESS_POLICY_VERSION,
             "dataset_case_count": len(eligible),
             "trial_details": [item.model_dump(mode="json") for item in trial_details],
             "metrics": full_metrics.model_dump(mode="json"),
