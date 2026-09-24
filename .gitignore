@@ -64,6 +64,7 @@ output/
 backend/output/
 reports/
 backend/reports/
+backend/evaluation_artifacts/model_campaigns/
 scale-report.json
 *.png
 skills-lock.json

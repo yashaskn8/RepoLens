@@ -346,3 +346,8 @@ observed by the evaluator. There is no automatic source patch, commit, push,
 PR, deployment, or private-final holdout execution. A generated candidate is
 not evidence of improvement; absent an actual compatible comparison,
 `REAL PROMPT IMPROVEMENT NOT MEASURED`.
+
+For provider/model comparisons across the unchanged full-analysis workflow, see
+[Live Model Evaluation Campaigns](LIVE_MODEL_EVALUATION.md). Campaign reports
+are separate from prompt optimization and do not alter model routing or
+production configuration.
