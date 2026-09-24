@@ -4,11 +4,12 @@ from typing import Any, Dict, Optional
 from langgraph.runtime import Runtime
 from app.agents.helpers import parse_llm_findings, safe_to_uuid, validated_candidate_findings_payload
 from app.agent_runtime.prompt_overlay import resolve_agent_prompt, resolve_agent_prompt_version
+from app.evaluation.context_tool.overlay import record_model_presentation
 from app.agents.deterministic import scanner_candidates
 from app.agents.state import AnalysisState
 from app.agents.specialist_provenance import build_specialist_opportunity
 from app.context.runtime import AnalysisRuntimeContext, get_scan_context_engine, resolve_analysis_llm_router
-from app.context.slices import build_specialist_context, candidate_evidence_authority
+from app.context.slices import build_specialist_context, candidate_evidence_authority, required_candidate_evidence_refs
 from app.agents.grounding import build_evidence_index
 from app.llm.admission import AdmissionDecision, admission_for_state
 from app.llm.budgets import REPOSITORY_ANALYSIS_BUDGET
@@ -117,6 +118,8 @@ async def run_security_agent(
         retrieved_context_tokens=specialist_context.estimated_tokens,
         packed_context_tokens=specialist_context.estimated_tokens,
         packed_context_bytes=specialist_context.packed_bytes,
+        deduplicated_items=specialist_context.deduplicated_fact_count,
+        deduplicated_bytes=specialist_context.deduplicated_bytes,
     )
 
     system_prompt = (
@@ -200,6 +203,23 @@ async def run_security_agent(
             confidence_threshold=0.75,
             budget=REPOSITORY_ANALYSIS_BUDGET,
             context_metrics=context_metrics,
+        )
+        required_ids = required_candidate_evidence_refs(specialist_context.slices)
+        record_model_presentation(
+            request,
+            component="security-agent",
+            node="security",
+            repository_snapshot=str(state.get("commit_hash") or "") or None,
+            evidence_ids=list(evidence_index),
+            available_fact_count=specialist_context.available_fact_count,
+            included_fact_count=len(evidence_index),
+            required_fact_count=len(required_ids),
+            optional_fact_count=max(0, len(evidence_index) - len(required_ids)),
+            token_budget=packed_budget,
+            deduplicated_fact_count=specialist_context.deduplicated_fact_count,
+            deduplicated_bytes=specialist_context.deduplicated_bytes,
+            truncated=bool(specialist_context.truncated_candidate_ids),
+            truncated_candidate_ids=list(specialist_context.truncated_candidate_ids),
         )
         response = await router.generate(request)
         model_executions.append(response.metadata)

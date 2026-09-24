@@ -63,14 +63,37 @@ def compact_tool_definitions(
     registry: AgentToolRegistry,
     category: str | None,
 ) -> list[CompactToolDefinition]:
+    from app.evaluation.context_tool.overlay import active_context_tool_overlay
+
+    overlay = active_context_tool_overlay()
+    experiment_component = {
+        "security": "security-agent",
+        "architecture": "architecture-agent",
+        "integration": "integration-agent",
+        "bug": "bug-agent",
+        "general": "bug-agent",
+        "quality": "bug-agent",
+    }.get(normalized_category(category), "bug-agent")
+    tool_presentation_experiment = bool(overlay and overlay.target_component == "evidence-investigator")
+    if overlay is not None and not tool_presentation_experiment and overlay.target_component != experiment_component:
+        overlay = None
+    if overlay is not None and overlay.target_component == "evidence-investigator" and overlay.dimension.value not in {
+        "TOOL_VISIBILITY", "TOOL_DESCRIPTION_PRESENTATION",
+    }:
+        overlay = None
     definitions: list[CompactToolDefinition] = []
     for name in permitted_tool_names(category):
+        if overlay is not None and overlay.hidden_tool_name == name:
+            continue
         metadata = registry.get_tool(name)
         if metadata is None or not metadata.read_only:
             continue
+        purpose = metadata.description[:600]
+        if overlay is not None and overlay.description_tool_name == name:
+            purpose = overlay.description_text or purpose
         definitions.append(CompactToolDefinition(
             name=metadata.tool_name,
-            purpose=metadata.description[:600],
+            purpose=purpose,
             capability=metadata.capability.value,
             input_schema=metadata.input_schema,
         ))

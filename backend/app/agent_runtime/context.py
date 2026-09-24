@@ -458,6 +458,9 @@ def pack_decision_context(
             "reason": "short operational explanation",
         },
     }
+    from app.evaluation.context_tool.overlay import effective_context_budget
+
+    max_context_tokens = effective_context_budget("evidence-investigator", max_context_tokens)
     system_prompt = resolve_agent_prompt("evidence-investigator", INVESTIGATOR_SYSTEM_PROMPT)
     system = f"<SYSTEM_CONTRACT>\n{system_prompt}\n</SYSTEM_CONTRACT>"
     max_bytes = max_context_tokens * 3

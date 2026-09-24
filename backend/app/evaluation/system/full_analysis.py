@@ -18,6 +18,13 @@ from app.agents.graph import run_analysis_workflow
 from app.analysis.core import analyze_core_repository
 from app.analysis.store import EvidenceStore
 from app.agent_runtime.prompt_overlay import PromptCandidateOverlay, evaluation_prompt_overlay
+from app.evaluation.context_tool.contracts import ContextPresentationManifest, ContextToolOverlay
+from app.evaluation.context_tool.overlay import evaluation_context_tool_overlay
+from app.evaluation.context_tool.policy import (
+    validate_overlay_contract,
+    validate_overlay_for_registry,
+    validate_overlay_identity,
+)
 from app.context.runtime import ScanIntelligenceRuntime
 from app.evaluation.ground_truth.leakage import LeakageDetector
 from app.evaluation.ground_truth.loader import compute_canonical_benchmark_hash
@@ -891,11 +898,40 @@ async def _execute_trial(
     prompt_overlay: PromptCandidateOverlay | None = None,
     evaluation_after_run: Any = None,
     llm_router_override: Any = None,
+    context_tool_overlay: ContextToolOverlay | None = None,
+    evaluation_case_id: str = "evaluation",
+    trial_number: int = 1,
+    presentation_stage: str = "FULL_DEV",
+    presentation_manifest_sink: Any = None,
+    allow_context_overlay_identity_mismatch: bool = False,
 ) -> tuple[dict[str, Any], float, bool, Any]:
     started = time.perf_counter()
     fixture = FullAnalysisFixture(analysis_input)
     try:
         await fixture.initialize_runtime()
+        if context_tool_overlay is not None:
+            trial_identity = build_agent_system_identity(
+                provider=provider,
+                model=model,
+                registry=fixture.registry,
+                scope="FULL_ANALYSIS_GRAPH",
+            )
+            if allow_context_overlay_identity_mismatch:
+                if mode != SystemEvalMode.SCRIPTED:
+                    raise ValueError("identity-relaxed overlay checks are reserved for scripted boundary probes")
+                validate_overlay_contract(
+                    context_tool_overlay,
+                    tool_manifest_digest=trial_identity.tool_manifest_digest,
+                    context_policy_digest=trial_identity.context_policy_digest,
+                )
+            else:
+                validate_overlay_identity(
+                    context_tool_overlay,
+                    system_digest=trial_identity.system_digest,
+                    tool_manifest_digest=trial_identity.tool_manifest_digest,
+                    context_policy_digest=trial_identity.context_policy_digest,
+                )
+            validate_overlay_for_registry(context_tool_overlay, fixture.registry)
         checkpointer = InMemorySaver()
         scripted_router = ScriptedFullAnalysisRouter() if mode == SystemEvalMode.SCRIPTED else None
         kwargs: dict[str, Any] = {}
@@ -915,20 +951,27 @@ async def _execute_trial(
 
         async def invoke() -> dict[str, Any]:
             with evaluation_prompt_overlay(prompt_overlay):
-                workflow_kwargs: dict[str, Any] = {}
-                if evaluation_after_run is not None:
-                    workflow_kwargs["_evaluation_after_run"] = evaluation_hook
-                return dict(await run_analysis_workflow(
-                    evidence_store=fixture.evidence_store,
-                    scan_id=fixture.scan_id,
-                    repo_dir=str(fixture.repository_root),
-                    checkpointer=checkpointer,
-                    resume_if_exists=True,
-                    scan_runtime=fixture.scan_runtime,
-                    interrupt_after=interrupt_after,
-                    **kwargs,
-                    **workflow_kwargs,
-                ))
+                with evaluation_context_tool_overlay(
+                    context_tool_overlay,
+                    case_id=evaluation_case_id,
+                    trial_number=trial_number,
+                    evaluation_stage=presentation_stage,
+                    manifest_sink=presentation_manifest_sink,
+                ):
+                    workflow_kwargs: dict[str, Any] = {}
+                    if evaluation_after_run is not None:
+                        workflow_kwargs["_evaluation_after_run"] = evaluation_hook
+                    return dict(await run_analysis_workflow(
+                        evidence_store=fixture.evidence_store,
+                        scan_id=fixture.scan_id,
+                        repo_dir=str(fixture.repository_root),
+                        checkpointer=checkpointer,
+                        resume_if_exists=True,
+                        scan_runtime=fixture.scan_runtime,
+                        interrupt_after=interrupt_after,
+                        **kwargs,
+                        **workflow_kwargs,
+                    ))
 
         if mode == SystemEvalMode.LIVE:
             if provider is None:
@@ -1157,6 +1200,10 @@ async def run_full_analysis_evaluation(
     case_ids: Sequence[str] | None = None,
     allow_live: bool = False,
     prompt_overlay: PromptCandidateOverlay | None = None,
+    context_tool_overlay: ContextToolOverlay | None = None,
+    allow_context_tool_experiments: bool = False,
+    presentation_manifest_sink: Any = None,
+    presentation_stage: str = "FULL_DEV",
     counterfactual_replay: bool = False,
 ) -> SystemEvaluationReport:
     """Run bounded real production-graph trials over DEV repository-scan cases only."""
@@ -1187,6 +1234,15 @@ async def run_full_analysis_evaluation(
         )
         if not sanitizer_result.accepted or sanitizer_result.prompt_digest != prompt_overlay.candidate_digest:
             raise ValueError("prompt candidate failed deterministic safety or content-integrity validation")
+    if context_tool_overlay is not None:
+        if prompt_overlay is not None:
+            raise ValueError("context/tool experiments cannot be combined with prompt optimization")
+        if counterfactual_replay:
+            raise ValueError("context/tool experiment evaluation cannot be combined with counterfactual replay")
+        if mode == SystemEvalMode.LIVE and not (allow_live and allow_context_tool_experiments):
+            raise ValueError("LIVE context/tool experiments require --allow-live and --allow-context-tool-experiments")
+        if mode == SystemEvalMode.SCRIPTED and (provider is not None or model is not None or allow_live):
+            raise ValueError("scripted context/tool experiment evaluation does not accept provider/model settings")
     if mode == SystemEvalMode.SCRIPTED and (provider is not None or model is not None or allow_live):
         raise ValueError("SCRIPTED full-analysis evaluation does not accept provider/model or live permission")
     if suite not in {SystemEvalSuite.ALL, SystemEvalSuite.SECURITY}:
@@ -1228,6 +1284,13 @@ async def run_full_analysis_evaluation(
             scope="FULL_ANALYSIS_GRAPH",
             prompt_overlay=prompt_overlay,
         )
+        if context_tool_overlay is not None:
+            validate_overlay_identity(
+                context_tool_overlay,
+                system_digest=identity.system_digest,
+                tool_manifest_digest=identity.tool_manifest_digest,
+            )
+            validate_overlay_for_registry(context_tool_overlay, identity_fixture.registry)
     finally:
         identity_fixture.close()
 
@@ -1341,6 +1404,11 @@ async def run_full_analysis_evaluation(
                 provider=selected_provider,
                 model=selected_model,
                 prompt_overlay=prompt_overlay,
+                context_tool_overlay=context_tool_overlay,
+                evaluation_case_id=case.case_id,
+                trial_number=trial_number,
+                presentation_stage=presentation_stage,
+                presentation_manifest_sink=presentation_manifest_sink,
                 evaluation_after_run=(replay_after_factual_run if replay_coordinator is not None else None),
             )
             all_durations.append(duration_ms)

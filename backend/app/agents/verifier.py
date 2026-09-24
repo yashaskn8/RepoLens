@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from app.agents.helpers import extract_json_block
 from app.agent_runtime.prompt_overlay import resolve_agent_prompt, resolve_agent_prompt_version
+from app.evaluation.context_tool.overlay import evidence_ids_from_payload, record_model_presentation
 from app.agents.state import AnalysisState
 from app.context.runtime import AnalysisRuntimeContext, get_scan_context_engine, get_scan_runtime, resolve_analysis_llm_router
 from app.llm.budgets import REPOSITORY_VERIFICATION_BUDGET
@@ -704,6 +705,18 @@ async def run_verifier_agent(
                 max_tokens=3000,
                 confidence_threshold=0.78,
                 budget=REPOSITORY_VERIFICATION_BUDGET,
+            )
+            presented_evidence = evidence_ids_from_payload(batch_items)
+            record_model_presentation(
+                request,
+                component="verifier-agent",
+                node="verifier",
+                repository_snapshot=str(state.get("commit_hash") or "") or None,
+                evidence_ids=presented_evidence,
+                available_fact_count=len(presented_evidence),
+                included_fact_count=len(presented_evidence),
+                required_fact_count=len(presented_evidence),
+                optional_fact_count=0,
             )
             response = await router.generate(request)
             model_executions.append(response.metadata)

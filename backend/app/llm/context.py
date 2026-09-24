@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
 import math
+from dataclasses import dataclass
 
 from app.llm.types import LLMRequest
 
@@ -33,10 +34,17 @@ class ContextEstimator:
     def estimate(self, request: LLMRequest) -> ContextEstimate:
         content_bytes = sum(len(message.content.encode("utf-8")) for message in request.messages)
         role_bytes = sum(len(message.role) for message in request.messages)
+        schema_bytes = len(json.dumps(
+            request.output_schema,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")) if request.output_schema is not None else 0
         input_tokens = max(
             1,
-            math.ceil((content_bytes + role_bytes) / self.bytes_per_token)
-            + len(request.messages) * self.message_overhead_tokens,
+            math.ceil((content_bytes + role_bytes + schema_bytes) / self.bytes_per_token)
+            + len(request.messages) * self.message_overhead_tokens
+            + (self.message_overhead_tokens if schema_bytes else 0),
         )
         requested_output = request.max_tokens or min(4_096, request.budget.max_output_tokens)
         return ContextEstimate(
@@ -44,4 +52,3 @@ class ContextEstimator:
             requested_output_tokens=requested_output,
             total_tokens=input_tokens + requested_output,
         )
-

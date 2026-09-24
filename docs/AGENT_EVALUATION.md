@@ -1,5 +1,10 @@
 # Evidence Investigator evaluation
 
+Context packing and investigator tool presentation ablations are documented in
+[`CONTEXT_TOOL_OPTIMIZATION.md`](CONTEXT_TOOL_OPTIMIZATION.md). These
+evaluation-only experiments do not alter canonical tool authorization or
+production configuration.
+
 The separate adversarial agent-runtime security harness is documented in
 [AGENT_SECURITY_EVALUATION.md](AGENT_SECURITY_EVALUATION.md). Its scripted
 mode validates harness and deterministic boundaries only; it is not evidence

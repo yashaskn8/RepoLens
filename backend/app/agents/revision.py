@@ -7,6 +7,7 @@ from uuid import UUID
 
 from app.agents.helpers import extract_json_block, safe_to_uuid
 from app.agent_runtime.prompt_overlay import resolve_agent_prompt, resolve_agent_prompt_version
+from app.evaluation.context_tool.overlay import evidence_ids_from_payload, record_model_presentation
 from app.agents.state import AnalysisState
 from app.context.runtime import AnalysisRuntimeContext, resolve_analysis_llm_router
 from app.llm.budgets import REPOSITORY_ANALYSIS_BUDGET
@@ -225,6 +226,18 @@ async def run_revision_agent(
                     output_schema_version="finding-revision/2.0",
                     evidence=[{"finding_id": target_id, "verifier_feedback": verifier_reason}],
                 ),
+            )
+            presented_evidence = evidence_ids_from_payload(investigation_items or original.evidences)
+            record_model_presentation(
+                request,
+                component="revision-agent",
+                node="revise",
+                repository_snapshot=str(state.get("commit_hash") or "") or None,
+                evidence_ids=presented_evidence,
+                available_fact_count=len(presented_evidence),
+                included_fact_count=len(presented_evidence),
+                required_fact_count=len(presented_evidence),
+                optional_fact_count=0,
             )
             response = await router.generate(request)
             model_executions.append(response.metadata)

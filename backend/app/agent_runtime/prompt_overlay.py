@@ -48,6 +48,11 @@ _ACTIVE_PROMPT_OVERLAY: ContextVar[PromptCandidateOverlay | None] = ContextVar(
 )
 
 
+def active_prompt_overlay() -> PromptCandidateOverlay | None:
+    """Expose overlay presence for evaluation-only causal-isolation checks."""
+    return _ACTIVE_PROMPT_OVERLAY.get()
+
+
 @contextmanager
 def evaluation_prompt_overlay(overlay: PromptCandidateOverlay | None) -> Iterator[None]:
     """Install one candidate overlay for the current async execution context."""
@@ -79,6 +84,7 @@ def resolve_agent_prompt_version(component: str, baseline_version: str) -> str:
 
 __all__ = [
     "PromptCandidateOverlay",
+    "active_prompt_overlay",
     "evaluation_prompt_overlay",
     "prompt_digest",
     "resolve_agent_prompt",

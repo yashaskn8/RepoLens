@@ -26,6 +26,10 @@ class SpecialistContextPack:
     estimated_tokens: int
     packed_bytes: int
     truncated_candidate_ids: tuple[str, ...] = ()
+    available_fact_count: int = 0
+    included_fact_count: int = 0
+    deduplicated_fact_count: int = 0
+    deduplicated_bytes: int = 0
 
 
 def candidate_evidence_authority(
@@ -49,6 +53,35 @@ def candidate_evidence_authority(
             + item.config_evidence_refs
         )
     return authority
+
+
+def required_candidate_evidence_refs(slices: Iterable[EvidenceSlice]) -> set[str]:
+    """Return declared primary and explicitly required role anchors only."""
+    role_fields = {
+        "primary": "primary_evidence_refs",
+        "supporting": "supporting_evidence_refs",
+        "counter": "counter_evidence_refs",
+        "graph": "graph_evidence_refs",
+        "contract": "contract_evidence_refs",
+        "scanner": "scanner_evidence_refs",
+        "flow": "flow_evidence_refs",
+        "caller": "caller_evidence_refs",
+        "callee": "callee_evidence_refs",
+        "guard": "guard_evidence_refs",
+        "test": "test_evidence_refs",
+        "config": "config_evidence_refs",
+    }
+    result: set[str] = set()
+    for item in slices:
+        result.update(item.primary_evidence_refs)
+        roles = item.candidate_metadata.get("required_evidence_roles", ["primary"])
+        if not isinstance(roles, list):
+            continue
+        for role in roles:
+            field_name = role_fields.get(role) if isinstance(role, str) else None
+            if field_name:
+                result.update(getattr(item, field_name))
+    return result
 
 
 def build_evidence_slice(
@@ -181,6 +214,28 @@ async def build_specialist_context(
     max_candidates: int = 3,
 ) -> SpecialistContextPack:
     """Retrieve and pack one small compatible candidate batch without losing anchors."""
+    from app.evaluation.context_tool.contracts import ContextToolDimension
+    from app.evaluation.context_tool.overlay import (
+        active_context_tool_overlay,
+        effective_context_budget,
+        effective_max_chunks,
+    )
+    from app.evaluation.context_tool.policy import context_component_for_intent
+
+    overlay = active_context_tool_overlay()
+    component = context_component_for_intent(analysis_intent)
+    baseline_token_budget = token_budget
+    applies_context_overlay = bool(
+        overlay is not None
+        and overlay.target_component == component
+        and overlay.dimension in {
+            ContextToolDimension.CONTEXT_TOKEN_BUDGET,
+            ContextToolDimension.MAX_RETRIEVED_CHUNKS,
+            ContextToolDimension.OPTIONAL_CONTEXT_KIND,
+        }
+    )
+    if overlay is not None and overlay.target_component == component:
+        token_budget = effective_context_budget(component, token_budget)
     if token_budget <= 0 or max_candidates <= 0:
         return SpecialistContextPack("", hashlib.sha256(b"").hexdigest(), {}, (), 0, 0)
     selected = []
@@ -195,12 +250,17 @@ async def build_specialist_context(
             break
     if not selected:
         return SpecialistContextPack("", hashlib.sha256(b"").hexdigest(), {}, (), 0, 0)
+    baseline_per_candidate_budget = max(256, (baseline_token_budget // len(selected)) - 384)
     per_candidate_budget = max(256, (token_budget // len(selected)) - 384)
     slices: list[EvidenceSlice] = []
     contexts: list[dict] = []
     evidence_index: dict[str, dict] = {}
     conflicted_evidence_ids: set[str] = set()
     truncated_candidate_ids: set[str] = set()
+    available_fact_count = 0
+    included_fact_count = 0
+    deduplicated_fact_count = 0
+    deduplicated_bytes = 0
 
     for candidate in selected:
         role_refs: dict[str, list[str]] = {"primary": list(candidate.evidence_refs)}
@@ -226,6 +286,16 @@ async def build_specialist_context(
         # Non-chunk graph/scanner contracts retain canonical context assembly.
         # Chunk-only candidates need no repository-wide search at all.
         anchor_only = all(ref.startswith("chunk:") for ref in declared_refs) and not targeted_roles
+        baseline_max_chunks = max(6, len(declared_refs) + min(2, len(missing_roles)))
+        protected_required_refs = set(candidate.evidence_refs)
+        for role in required_roles:
+            protected_required_refs.update(role_refs.get(role, []))
+        protected_chunk_count = sum(1 for ref in protected_required_refs if ref.startswith("chunk:"))
+        retrieval_max_chunks = effective_max_chunks(
+            component,
+            baseline_max_chunks,
+            protected_chunk_count=protected_chunk_count,
+        )
         bundle = await context_engine.build_context_bundle(
             scan_id=scan_id,
             query=(
@@ -234,13 +304,38 @@ async def build_specialist_context(
             ),
             analysis_intent=analysis_intent,
             context_budget=per_candidate_budget,
-            max_chunks=max(6, len(declared_refs) + min(2, len(missing_roles))),
+            max_chunks=retrieval_max_chunks,
             required_chunk_ids=declared_refs,
             anchor_only=anchor_only,
             targeted_roles=targeted_roles or None,
             file_path_filter=target_file if targeted_roles else None,
         )
-        packed = pack_repository_context(bundle, token_budget=per_candidate_budget)
+        baseline_packed = (
+            pack_repository_context(bundle, token_budget=baseline_per_candidate_budget)
+            if applies_context_overlay else None
+        )
+        candidate_bundle = bundle
+        if (
+            overlay is not None
+            and overlay.target_component == component
+            and overlay.dimension == ContextToolDimension.OPTIONAL_CONTEXT_KIND
+            and overlay.excluded_context_kind is not None
+        ):
+            kind = overlay.excluded_context_kind
+            candidate_bundle = bundle.model_copy(update={kind: []})
+        packed = pack_repository_context(candidate_bundle, token_budget=per_candidate_budget)
+        if baseline_packed is None:
+            baseline_packed = packed
+        available_fact_count += sum(baseline_packed.available.values())
+        included_fact_count += sum(packed.included.values())
+        deduplicated_fact_count += sum(packed.deduplicated.values())
+        deduplicated_bytes += packed.deduplicated_bytes
+        protected_refs = set(candidate.evidence_refs)
+        for role in required_roles:
+            protected_refs.update(role_refs.get(role, []))
+        protected_refs.intersection_update(baseline_packed.evidence_index)
+        if not protected_refs.issubset(packed.evidence_index):
+            raise ValueError("context experiment would remove deterministic candidate-anchor evidence")
         if packed.truncated:
             truncated_candidate_ids.add(candidate.candidate_id)
         candidate_for_slice = candidate.model_copy(deep=True)
@@ -320,6 +415,10 @@ async def build_specialist_context(
         estimated_tokens=max(1, (packed_bytes + 3) // 4),
         packed_bytes=packed_bytes,
         truncated_candidate_ids=tuple(sorted(truncated_candidate_ids)),
+        available_fact_count=available_fact_count,
+        included_fact_count=included_fact_count,
+        deduplicated_fact_count=deduplicated_fact_count,
+        deduplicated_bytes=deduplicated_bytes,
     )
 
 
@@ -328,4 +427,5 @@ __all__ = [
     "build_evidence_slice",
     "build_specialist_context",
     "candidate_evidence_authority",
+    "required_candidate_evidence_refs",
 ]

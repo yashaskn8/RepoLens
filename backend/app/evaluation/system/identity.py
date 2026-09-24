@@ -282,6 +282,15 @@ def _evaluation_harness_digest() -> str:
     return _digest({"implementation": modules, "committed_regression_gate": gate_digest})
 
 
+def context_policy_identity_digest() -> str:
+    """Return the exact context-policy source identity included in system IDs."""
+    return _source_digest([
+        "app.agent_runtime.context",
+        "app.agent_runtime.policy",
+        "app.agent_runtime.progress",
+    ])
+
+
 def build_agent_system_identity(
     *,
     provider: LLMProvider | str | None,
@@ -343,11 +352,7 @@ def build_agent_system_identity(
             content_digest=_digest(importlib.import_module("app.agent_runtime.schemas").INVESTIGATOR_DECISION_OUTPUT_SCHEMA),
         ),
     )
-    context_digest = _source_digest([
-        "app.agent_runtime.context",
-        "app.agent_runtime.policy",
-        "app.agent_runtime.progress",
-    ])
+    context_digest = context_policy_identity_digest()
     if scope == "FULL_ANALYSIS_GRAPH":
         workflow_implementation_digest = _workflow_source_digest([
             "app.agents.mapper", "app.agents.architecture", "app.agents.integration",

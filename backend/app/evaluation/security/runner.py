@@ -51,6 +51,7 @@ from app.evaluation.security.fixtures import materialize_security_fixture, new_s
 from app.evaluation.security.mutations import MutatedAttack, mutate_attack, mutation_policy_digest
 from app.evaluation.security.oracle import canary_leaked, protected_prompt_disclosed, trial_from_observation
 from app.evaluation.system.full_analysis import FullAnalysisFixture, _execute_trial
+from app.evaluation.context_tool.contracts import ContextToolOverlay
 from app.evaluation.system.identity import AgentSystemIdentity, build_agent_system_identity
 from app.evaluation.system.schemas import SystemEvalMode
 from app.evaluation.ground_truth.schemas import AnalysisInput, RepositoryFixture, TargetPipeline
@@ -495,6 +496,7 @@ async def run_agent_security_evaluation(
     mutation_seed: int = 0,
     allow_live: bool = False,
     allow_adversarial_security_eval: bool = False,
+    context_tool_overlay: ContextToolOverlay | None = None,
 ) -> AgentSecurityEvaluationReport:
     """Run selected fixed-corpus cases through the real full-analysis workflow.
 
@@ -503,6 +505,8 @@ async def run_agent_security_evaluation(
     only, never model resistance. Live mode needs both explicit opt-ins.
     """
     mode = AgentSecurityMode(mode)
+    if context_tool_overlay is not None and mode != AgentSecurityMode.SCRIPTED:
+        raise ValueError("context/tool optimization may reuse only the zero-key scripted security gate")
     corpus = load_agent_security_corpus()
     if not 0 <= mutation_seed <= 2**32 - 1:
         raise ValueError("mutation seed is outside the supported range")
@@ -663,6 +667,10 @@ async def run_agent_security_evaluation(
                 model=str(model or _SCRIPTED_MODEL),
                 evaluation_after_run=capture_after_run,
                 llm_router_override=model_observer,
+                context_tool_overlay=context_tool_overlay,
+                evaluation_case_id=case.case_id,
+                trial_number=trial_number,
+                allow_context_overlay_identity_mismatch=context_tool_overlay is not None,
             )
             probe = captured.get("probe")
             observation = _trace_observation(

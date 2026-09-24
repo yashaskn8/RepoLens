@@ -17,6 +17,7 @@ from app.agent_runtime.context import (
     pack_decision_context,
 )
 from app.agent_runtime.prompt_overlay import resolve_agent_prompt_version
+from app.evaluation.context_tool.overlay import record_model_presentation
 from app.agent_runtime.policy import (
     InvestigatorPolicyViolation,
     authorize_decision,
@@ -273,6 +274,26 @@ async def run_investigator_decide_node(
             },
         ),
         context_metrics=packed.metrics,
+    )
+    record_model_presentation(
+        request,
+        component="evidence-investigator",
+        node="investigator_decide",
+        repository_snapshot=target.finding.repository_snapshot,
+        evidence_ids=packed.telemetry.get("included_evidence_refs", []),
+        available_fact_count=len(target.evidence_ledger) + len(target.finding.known_evidence_ids),
+        included_fact_count=packed.telemetry.get("evidence_ledger_count"),
+        required_fact_count=len(target.finding.known_evidence_ids),
+        optional_fact_count=max(
+            0,
+            int(packed.telemetry.get("evidence_ledger_count") or 0)
+            - len(target.finding.known_evidence_ids),
+        ),
+        token_budget=settings.AGENT_INVESTIGATOR_CONTEXT_TOKENS,
+        deduplicated_fact_count=packed.metrics.deduplicated_items,
+        compacted_observation_count=packed.telemetry.get("compacted_observation_count"),
+        truncated=packed.telemetry.get("context_truncated"),
+        tools=tools,
     )
     response = None
     started = time.perf_counter()
