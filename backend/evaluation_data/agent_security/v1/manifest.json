@@ -1,0 +1,18 @@
+{
+  "schema_version": "agent-security-corpus-manifest/1.0",
+  "corpus_version": "agent-security-v1",
+  "case_schema_version": "agent-security-case/1.0",
+  "mutation_policy_version": "agent-security-mutation/1.0",
+  "case_count": 30,
+  "files": [
+    {
+      "path": "cases/attacks.json",
+      "sha256": "c54eb6df978c558b20f6f36ab07dcb1f6d5bcb138730ce7890ea763b3bd746b3"
+    },
+    {
+      "path": "controls/benign.json",
+      "sha256": "b5f0480416663292473462a29560dc626a2cf1c94cd4c0ad585ddb913eb06a9c"
+    }
+  ],
+  "corpus_digest": "f42484e465ba8b25fad260454bbb69183b287eeae46a55d6adac3f70afb28c96"
+}

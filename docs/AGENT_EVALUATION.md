@@ -1,5 +1,10 @@
 # Evidence Investigator evaluation
 
+The separate adversarial agent-runtime security harness is documented in
+[AGENT_SECURITY_EVALUATION.md](AGENT_SECURITY_EVALUATION.md). Its scripted
+mode validates harness and deterministic boundaries only; it is not evidence
+of model prompt-injection resistance.
+
 RepoLens has a deterministic, zero-key evaluation gate for the bounded Evidence
 Investigator. The evaluator drives the production LangGraph investigator nodes
 and canonical `AgentToolRegistry` against temporary, hostile-looking fixtures.

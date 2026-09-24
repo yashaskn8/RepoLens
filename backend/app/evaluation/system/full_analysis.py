@@ -890,7 +890,8 @@ async def _execute_trial(
     interrupt_after: list[str] | None = None,
     prompt_overlay: PromptCandidateOverlay | None = None,
     evaluation_after_run: Any = None,
-) -> tuple[dict[str, Any], float, bool, ScriptedFullAnalysisRouter | None]:
+    llm_router_override: Any = None,
+) -> tuple[dict[str, Any], float, bool, Any]:
     started = time.perf_counter()
     fixture = FullAnalysisFixture(analysis_input)
     try:
@@ -899,7 +900,9 @@ async def _execute_trial(
         scripted_router = ScriptedFullAnalysisRouter() if mode == SystemEvalMode.SCRIPTED else None
         kwargs: dict[str, Any] = {}
         if scripted_router is not None:
-            kwargs["llm_router"] = scripted_router
+            kwargs["llm_router"] = llm_router_override or scripted_router
+        elif llm_router_override is not None:
+            kwargs["llm_router"] = llm_router_override
 
         async def evaluation_hook(**session: Any) -> None:
             if evaluation_after_run is None:
