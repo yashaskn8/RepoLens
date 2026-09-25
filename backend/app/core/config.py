@@ -151,6 +151,8 @@ class Settings(BaseSettings):
 
     # LangGraph Checkpoint Settings
     CHECKPOINT_DB_FILE: str = "checkpoints.db"
+    CHECKPOINT_BACKEND: Literal["AUTO", "SQLITE", "POSTGRES", "MEMORY_TEST_ONLY"] = "AUTO"
+    CHECKPOINT_DATABASE_URL: str = Field(default="", max_length=2048)
 
     # Redis Runtime Infrastructure (Phase 1)
     REDIS_URL: Optional[str] = None
@@ -261,6 +263,13 @@ class Settings(BaseSettings):
             return v
         return ["localhost", "127.0.0.1", "testserver"]
 
+    @field_validator("CHECKPOINT_BACKEND", mode="before")
+    @classmethod
+    def normalize_checkpoint_backend(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip().upper()
+        return value
+
     @model_validator(mode="after")
     def validate_production_and_cookie_invariants(self) -> "Settings":
         """Enforce strict fail-closed production security and cookie invariants."""
@@ -300,6 +309,23 @@ class Settings(BaseSettings):
             raise ValueError("When AUTH_COOKIE_SAMESITE is 'none', AUTH_COOKIE_SECURE must be True.")
 
         if self.is_production:
+            if self.CHECKPOINT_BACKEND in {"SQLITE", "MEMORY_TEST_ONLY"}:
+                raise ValueError(
+                    "Production LangGraph execution requires CHECKPOINT_BACKEND=AUTO or POSTGRES."
+                )
+            checkpoint_url = self.CHECKPOINT_DATABASE_URL or self.DATABASE_URL
+            if self.CHECKPOINT_BACKEND == "POSTGRES" and not checkpoint_url.lower().startswith(
+                (
+                    "postgresql://",
+                    "postgresql+psycopg://",
+                    "postgresql+psycopg2://",
+                    "postgresql+asyncpg://",
+                    "postgres://",
+                )
+            ):
+                raise ValueError(
+                    "CHECKPOINT_BACKEND=POSTGRES requires a PostgreSQL CHECKPOINT_DATABASE_URL or DATABASE_URL."
+                )
             if not self.AUTH_COOKIE_SECURE:
                 raise ValueError("CRITICAL CONFIGURATION ERROR: In production environment, AUTH_COOKIE_SECURE must be True.")
 

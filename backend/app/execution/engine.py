@@ -463,6 +463,21 @@ class DurableExecutionEngine:
             self._rollback_on_error()
             raise
 
+    def assert_active_lease(self, work_item_id: str, lease_token: str) -> None:
+        """Validate and lock the current lease without mutating its budget/state.
+
+        Callers that perform a domain write can use the same SQLAlchemy
+        transaction for this check and the domain commit. PostgreSQL then holds
+        the lease row lock until commit, preventing an expired-lease recovery
+        worker from acquiring authority in the middle of that short transaction.
+        """
+
+        try:
+            self._owned_execution(work_item_id, lease_token, self.clock())
+        except Exception:
+            self._rollback_on_error()
+            raise
+
     def consume_budget(
         self,
         work_item_id: str,

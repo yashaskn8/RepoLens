@@ -10,6 +10,7 @@ Guarantees:
 """
 
 import asyncio
+from contextvars import ContextVar, Token
 from datetime import datetime, timezone
 import logging
 from typing import Any, Dict, List, Optional, TypedDict
@@ -30,6 +31,26 @@ from app.schemas.change_analysis import (
 )
 
 logger = logging.getLogger(__name__)
+
+_change_workspaces: ContextVar[tuple[str, str] | None] = ContextVar(
+    "repolens_change_analysis_workspaces", default=None
+)
+
+
+def bind_change_workspaces(base_workspace: str, head_workspace: str) -> Token:
+    """Bind freshly materialized workspaces for one graph invocation only."""
+    return _change_workspaces.set((base_workspace, head_workspace))
+
+
+def reset_change_workspaces(token: Token) -> None:
+    _change_workspaces.reset(token)
+
+
+def _workspace_for(state: "ChangeAnalysisState", key: str) -> Optional[str]:
+    current = _change_workspaces.get()
+    if current is not None:
+        return current[0 if key == "base_workspace" else 1]
+    return state.get(key)
 
 
 class ChangeAnalysisState(TypedDict, total=False):
@@ -55,7 +76,8 @@ class ChangeAnalysisState(TypedDict, total=False):
 async def run_acquire_node(state: ChangeAnalysisState) -> Dict[str, Any]:
     """Node 1: Acquire exact base and head workspaces if not already available."""
     completed = list(state.get("completed_nodes", []))
-    if state.get("base_workspace") and state.get("head_workspace"):
+    current = _change_workspaces.get()
+    if current is not None or (state.get("base_workspace") and state.get("head_workspace")):
         completed.append("acquire")
         return {"status": "DIFFING", "completed_nodes": completed}
 
@@ -87,8 +109,8 @@ async def run_diff_node(state: ChangeAnalysisState) -> Dict[str, Any]:
     diff_engine = get_diff_engine()
     diff_res = await asyncio.to_thread(
         diff_engine.compute_structural_diff,
-        base_workspace=state["base_workspace"],
-        head_workspace=state["head_workspace"],
+        base_workspace=_workspace_for(state, "base_workspace"),
+        head_workspace=_workspace_for(state, "head_workspace"),
         base_commit_sha=state["base_commit_sha"],
         head_commit_sha=state["head_commit_sha"],
         repository_url=state["repository_url"],
@@ -174,7 +196,7 @@ async def run_impact_node(state: ChangeAnalysisState) -> Dict[str, Any]:
     impact_engine = get_impact_engine()
 
     base_graph = await build_canonical_phase6_graph(
-        workspace_path=state.get("base_workspace"),
+        workspace_path=_workspace_for(state, "base_workspace"),
         repository_url=state.get("repository_url", ""),
         commit_sha=state.get("base_commit_sha", ""),
         branch_ref=state.get("base_ref"),
@@ -222,7 +244,7 @@ async def run_review_node(state: ChangeAnalysisState) -> Dict[str, Any]:
     blast_radius = state["blast_radius"]
 
     base_graph = await build_canonical_phase6_graph(
-        workspace_path=state.get("base_workspace"),
+        workspace_path=_workspace_for(state, "base_workspace"),
         repository_url=state.get("repository_url", ""),
         commit_sha=state.get("base_commit_sha", ""),
         branch_ref=state.get("base_ref"),
@@ -231,7 +253,7 @@ async def run_review_node(state: ChangeAnalysisState) -> Dict[str, Any]:
     try:
         review_report = await reviewer.review_changes(
             analysis_id=UUID(state["analysis_id"]), diff_result=diff_res, blast_radius=blast_radius,
-            base_graph=base_graph, base_workspace=state.get("base_workspace"), head_workspace=state.get("head_workspace"))
+            base_graph=base_graph, base_workspace=_workspace_for(state, "base_workspace"), head_workspace=_workspace_for(state, "head_workspace"))
     finally:
         if (index_db := getattr(base_graph, "_index_db", None)) is not None:
             index_db.close()
@@ -253,7 +275,7 @@ async def run_verify_node(state: ChangeAnalysisState) -> Dict[str, Any]:
     review_report = state["review_report"]
 
     base_graph = await build_canonical_phase6_graph(
-        workspace_path=state.get("base_workspace"),
+        workspace_path=_workspace_for(state, "base_workspace"),
         repository_url=state.get("repository_url", ""),
         commit_sha=state.get("base_commit_sha", ""),
         branch_ref=state.get("base_ref"),
@@ -262,7 +284,7 @@ async def run_verify_node(state: ChangeAnalysisState) -> Dict[str, Any]:
     try:
         verified_report = verifier.verify_report(
             report=review_report, diff_result=diff_res, blast_radius=blast_radius,
-            base_graph=base_graph, base_workspace=state.get("base_workspace"), head_workspace=state.get("head_workspace"))
+            base_graph=base_graph, base_workspace=_workspace_for(state, "base_workspace"), head_workspace=_workspace_for(state, "head_workspace"))
     finally:
         if (index_db := getattr(base_graph, "_index_db", None)) is not None:
             index_db.close()

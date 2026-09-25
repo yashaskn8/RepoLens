@@ -95,7 +95,7 @@ For complete threat evaluations and defense-in-depth matrices, see [Security & T
 - **Backend**: FastAPI, Python 3.11+, Pydantic Settings & Schemas.
 - **Persistence**: SQLAlchemy 2.0 ORM, Alembic head `16c9a2e71f40`, SQLite default, and opt-in PostgreSQL/pgvector with bounded pools, statement/lock timeouts, snapshot pins, and retention.
 - **Static Analysis**: Tree-sitter AST parsers (Python, JS, TS, TSX, JSX), NetworkX graph engine, optional CLI adapters for Semgrep, Trivy, and OSV-Scanner.
-- **Agent Orchestration**: LangGraph state machine with durable SQLite checkpointing.
+- **Agent Orchestration**: LangGraph workflows use official SQLite checkpointing for local development and PostgreSQL checkpointing for production durable execution.
 - **LLM Abstraction**: One `LLMRouter` owns capability policy, cheap-first selection, bounded retry/fallback, evidence-scoped caching, and optional low-risk Ollama execution across configured providers.
 - **Integrations**: GitHub Git Data API & REST API, Model Context Protocol (MCP) stdio adapters.
 
@@ -241,6 +241,7 @@ RepoLens enforces strict controls around external GitHub writes:
 ## Documentation Index
 
 - [Architecture Specification](docs/architecture.md): System components, data flow, LangGraph workflows, and 3 Mermaid diagrams.
+- [Production Durable Graph Execution](docs/PRODUCTION_DURABLE_GRAPHS.md): checkpoint backends, explicit schema bootstrap, recovery identity, and lease-fenced scan execution.
 - [Evidence Investigator](docs/EVIDENCE_INVESTIGATOR.md): Feature flag, durable model-directed tool loop, context compaction, limits, and security boundary.
 - [Agent Evaluation](docs/AGENT_EVALUATION.md): Zero-key scripted regression gate, isolated live system evaluation, compatible baseline/candidate comparison, and non-mutating human promotion check.
 - [Security & Threat Model](docs/threat-model.md): Trust boundaries, threat actors, 20 evaluated vectors, and deployment checklist.

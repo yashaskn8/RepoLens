@@ -762,6 +762,12 @@ class DurableWorkDispatcher:
             # Shutdown deliberately leaves the SQL lease active. A later worker
             # recovers it after expiry instead of claiming false completion.
             raise
+        except LeaseLost:
+            # Domain boundaries may detect lease loss before the independent
+            # heartbeat task observes it. Never let a stale attempt rewrite the
+            # work item or domain status after that point.
+            logger.warning("Durable work lease was lost during handler execution for %s", claim.work_item_id)
+            return
         except DomainWorkFailed as exc:
             logger.warning(
                 "Domain work %s failed with %s (retryable=%s): %s",

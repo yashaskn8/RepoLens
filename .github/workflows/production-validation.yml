@@ -126,6 +126,7 @@ jobs:
     timeout-minutes: 30
     env:
       REPOLENS_POSTGRES_TEST_URL: ${{ secrets.REPOLENS_POSTGRES_TEST_URL }}
+      TEST_POSTGRES_URL: ${{ secrets.REPOLENS_POSTGRES_TEST_URL }}
       PGVECTOR_TEST_URL: ${{ secrets.REPOLENS_POSTGRES_TEST_URL }}
       ENABLE_PGVECTOR: "true"
       REPOLENS_POSTGRES_TEST_ALLOW_SCHEMA_RESET: ${{ inputs.allow_schema_reset && '1' || '0' }}
@@ -143,7 +144,7 @@ jobs:
         run: pip install -e ".[dev,postgres]"
       - name: Run PostgreSQL and pgvector integration
         working-directory: backend
-        run: python -m pytest tests/test_postgres_integration.py tests/test_pgvector_index.py -m integration -q
+        run: python -m pytest tests/test_postgres_integration.py tests/test_pgvector_index.py tests/test_checkpoint_recovery.py -m integration -q
 
   live-providers:
     if: ${{ inputs.run_live_providers }}

@@ -65,7 +65,7 @@ flowchart TB
 
     subgraph Persistence["Persistence Tier"]
         SQLAlchemy["SQLAlchemy ORM + Alembic (001–010)"]
-        Checkpointer["Durable LangGraph Checkpoints (SQLite)"]
+        Checkpointer["Official LangGraph Checkpoints (SQLite local / PostgreSQL production)"]
         RelationalDB[(Relational DB<br/>SQLite / PostgreSQL)]
 
         ScanWorkflow --> SQLAlchemy
@@ -170,7 +170,7 @@ Workflow execution is driven by **LangGraph** state machines with typed state di
   - *Deterministic Nodes*: File ingestion, Tree-sitter parsing, scanner execution, graph traversal, diff calculation, patch validation, and drift checking.
   - *LLM Reasoning Nodes*: Root-cause explanation, multi-file synthesis, architectural summarization, fix strategy generation, and PR review comments.
 - **Termination Guarantees**: State graphs have bounded iteration counts, explicit error edges, and graceful exit conditions to prevent infinite execution loops.
-- **Durable Checkpointing**: Intermediate graph checkpoints are written to `checkpoints.db`, allowing crash recovery and inspection.
+- **Durable Checkpointing**: Local runs use SQLite; production graph runs require the official PostgreSQL saver. Production saver schema setup is an explicit deployment bootstrap, and each graph uses synchronous checkpoint durability plus generation-bound resume checks.
 - **Optional Evidence Investigator**: When `AGENT_INVESTIGATOR_ENABLED=true`, only genuine verifier `POSSIBLE` targets enter a bounded `prepare -> decide -> tool -> compact` loop. The model selects one next evidence action, application policy authorizes and executes it through `AgentToolRegistry`, and revision plus the independent verifier remain authoritative. The disabled path continues to use deterministic MCP enrichment.
 
 ---

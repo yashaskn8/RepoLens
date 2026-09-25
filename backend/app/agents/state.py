@@ -42,10 +42,12 @@ class AnalysisState(TypedDict, total=False):
     """
 
     scan_id: str
+    tenant_id: Optional[str]
     repository_url: str
     commit_hash: str
     branch: Optional[str]
-    repo_dir: str
+    # Checkpoint compatibility identity, content-free and generation-bound.
+    graph_execution_contract: Dict[str, str]
 
     # Structural facts populated by Repository Mapper
     manifest_summary: Dict[str, Any]

@@ -49,6 +49,7 @@ pdf-qa = [
 ]
 postgres = [
     "psycopg[binary]>=3.2.0,<4.0.0",
+    "langgraph-checkpoint-postgres>=3.1.2,<4.0.0",
 ]
 observability = [
     "opentelemetry-sdk>=1.27.0,<2.0.0",

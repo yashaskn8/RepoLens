@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+from functools import lru_cache
 import hashlib
 import inspect
 import json
@@ -13,7 +14,6 @@ from pydantic import ValidationError
 
 from app.agents.architecture import run_architecture_agent
 from app.agents.bug import run_bug_agent
-from app.agents.checkpointer import get_sqlite_checkpointer
 from app.agents.integration import run_integration_agent
 from app.agents.investigator import (
     route_after_investigator_compact,
@@ -142,9 +142,37 @@ def _checkpoint_requires_investigator(checkpoint_state: Any) -> bool:
     return any(str(node) in _INVESTIGATOR_GRAPH_NODES for node in next_nodes)
 
 
+@lru_cache(maxsize=1)
+def _graph_execution_contract() -> Dict[str, str]:
+    """Return the process-stable full graph identity used to fence resumes."""
+    from app.evaluation.system.identity import (
+        FULL_ANALYSIS_GRAPH_CONTRACT_VERSION,
+        full_analysis_graph_identity_digest,
+    )
+
+    return {
+        "version": FULL_ANALYSIS_GRAPH_CONTRACT_VERSION,
+        "digest": full_analysis_graph_identity_digest(),
+    }
+
+
 async def _budgeted_node(fn: Any, state: AnalysisState, runtime: Any = None) -> Dict[str, Any]:
     """Attach the current economy snapshot to every durable checkpoint write."""
     from app.observability import span
+    from app.execution.context import assert_current_claim
+    from app.execution.errors import LeaseLost
+
+    production = get_settings().is_production
+    if production:
+        if not state.get("scan_id") or not state.get("tenant_id"):
+            raise LeaseLost("durable scan identity is missing")
+        assert_current_claim(
+            work_kind="SCAN",
+            resource_type="SCAN",
+            resource_id=state["scan_id"],
+            tenant_id=state["tenant_id"],
+            required=True,
+        )
 
     function_name = getattr(fn, "__name__", "workflow_node")
     node_name = {
@@ -184,6 +212,17 @@ async def _budgeted_node(fn: Any, state: AnalysisState, runtime: Any = None) -> 
                 result = fn(state)
             if inspect.isawaitable(result):
                 result = await result
+            if production:
+                assert_current_claim(
+                    work_kind="SCAN",
+                    resource_type="SCAN",
+                    resource_id=state["scan_id"],
+                    tenant_id=state["tenant_id"],
+                    required=True,
+                )
+        except LeaseLost:
+            node_span.set_attribute("repolens.workflow.failure_code", "LEASE_LOST")
+            raise
         except Exception:
             node_span.set_attribute("repolens.workflow.failure_code", "NODE_ERROR")
             trace_event = _workflow_node_event(
@@ -635,6 +674,7 @@ async def run_analysis_workflow(
     llm_router: Any = None,
     interrupt_after: Optional[List[str]] = None,
     scan_runtime: Optional[ScanIntelligenceRuntime] = None,
+    tenant_id: Optional[str] = None,
     _evaluation_after_run: Any = None,
 ) -> AnalysisState:
     """Execute or resume the durable LangGraph multi-agent analysis workflow using scan_id as thread identifier.
@@ -647,6 +687,20 @@ async def run_analysis_workflow(
     - Failed nodes or terminal failures capture sanitized errors without corrupting the checkpointer.
     """
     from app.observability import span_event
+    from app.execution.context import assert_current_claim
+
+    settings = get_settings()
+    if settings.is_production and not tenant_id:
+        from app.execution.errors import LeaseLost
+
+        raise LeaseLost("durable scan tenant identity is missing")
+    assert_current_claim(
+        work_kind="SCAN",
+        resource_type="SCAN",
+        resource_id=scan_id,
+        tenant_id=tenant_id,
+        required=settings.is_production,
+    )
 
     config = {
         "configurable": {"thread_id": scan_id},
@@ -656,13 +710,12 @@ async def run_analysis_workflow(
     }
     app = build_analysis_graph(checkpointer=checkpointer, interrupt_after=interrupt_after)
 
-    # Assemble and register ScanIntelligenceRuntime for this scan_id
+    # Assemble ScanIntelligenceRuntime; it is registered only for graph execution.
     try:
         if scan_runtime is not None:
             if scan_runtime.evidence_store is not evidence_store:
                 raise ValueError("injected scan runtime must use the active EvidenceStore")
             runtime = scan_runtime
-            register_scan_runtime(scan_id, runtime)
         elif context_engine is not None:
             runtime = ScanIntelligenceRuntime(
                 evidence_store=evidence_store,
@@ -674,13 +727,11 @@ async def run_analysis_workflow(
                 context_engine=context_engine,
                 repo_dir=repo_dir,
             )
-            register_scan_runtime(scan_id, runtime)
         else:
             runtime = await ScanIntelligenceRuntime.build(
                 evidence_store=evidence_store,
                 repo_dir=repo_dir,
             )
-            register_scan_runtime(scan_id, runtime)
     except Exception as exc:
         safe_msg = redact_secrets(str(exc))[:2048]
         logger.warning("Notice during ScanIntelligenceRuntime setup for scan %s: %s", scan_id, safe_msg)
@@ -694,18 +745,15 @@ async def run_analysis_workflow(
             context_engine=context_engine or ContextEngine(evidence_store),
             repo_dir=repo_dir,
         )
-        register_scan_runtime(scan_id, runtime)
 
     # Inspect an existing checkpoint before constructing transient investigator
     # services.  New scans use the current rollout flag; resumed scans use the
     # checkpointed execution mode (or their next investigator node) instead.
     current_state = None
     if checkpointer is not None and resume_if_exists:
-        try:
-            current_state = await app.aget_state(config)
-        except Exception as exc:
-            safe_msg = redact_secrets(str(exc))[:2048]
-            logger.warning("Failed to retrieve existing checkpoint state for %s: %s", scan_id, safe_msg)
+        # A failed checkpoint read is not equivalent to a missing checkpoint:
+        # treating it as fresh could duplicate already-completed model work.
+        current_state = await app.aget_state(config)
 
     checkpoint_values = getattr(current_state, "values", None) if current_state is not None else None
     checkpoint_has_values = isinstance(checkpoint_values, dict) and bool(checkpoint_values)
@@ -759,6 +807,7 @@ async def run_analysis_workflow(
         "repository_id": persistent_index.repository_id,
         "commit_sha": persistent_index.commit_sha,
     }
+    graph_execution_contract = _graph_execution_contract()
 
     async def invoke_with_cloud_budget(payload: Any) -> AnalysisState:
         from app.observability import span
@@ -774,7 +823,12 @@ async def run_analysis_workflow(
                     "repolens.workflow.recursion_limit": ANALYSIS_RECURSION_LIMIT,
                 },
             ):
-                result = await app.ainvoke(payload, config=config, context=runtime_context)
+                result = await app.ainvoke(
+                    payload,
+                    config=config,
+                    context=runtime_context,
+                    **({"durability": "sync"} if checkpointer is not None else {}),
+                )
         finally:
             reset_workflow_cloud_budget(token)
         result = dict(result)
@@ -782,6 +836,7 @@ async def run_analysis_workflow(
         return result
 
     try:
+        register_scan_runtime(scan_id, runtime)
         # Check for existing checkpoint state for this scan_id thread
         if checkpointer is not None and resume_if_exists:
             if checkpoint_has_values:
@@ -792,17 +847,27 @@ async def run_analysis_workflow(
                 checkpoint_authority = (current_state.values.get("manifest_summary") or {}).get("index_authority")
                 expected_commit = evidence_store.manifest.commit_hash
                 checkpoint_commit = current_state.values.get("commit_hash")
+                checkpoint_identity_incompatible = (
+                    current_state.values.get("scan_id") != scan_id
+                    or current_state.values.get("tenant_id") != tenant_id
+                    or current_state.values.get("repository_url") != evidence_store.manifest.repository_url
+                    or current_state.values.get("graph_execution_contract") != graph_execution_contract
+                )
                 commit_incompatible = (
                     (checkpoint_commit is not None and checkpoint_commit != expected_commit)
                     or (checkpoint_commit is None and index_authority is None)
                 )
-                if index_authority != checkpoint_authority or commit_incompatible:
+                if (
+                    checkpoint_identity_incompatible
+                    or index_authority != checkpoint_authority
+                    or commit_incompatible
+                ):
                     # Never apply checkpoint findings or evidence IDs to a different
                     # generation, including legacy checkpoints without provenance.
                     return {
                         "scan_id": scan_id,
                         "status": "FAILED",
-                        "errors": ["Checkpoint evidence generation is incompatible; start a new scan."],
+                        "errors": ["Checkpoint generation is incompatible (CHECKPOINT_GENERATION_INCOMPATIBLE); start a new scan."],
                         "ai_cloud_budget": cloud_budget.snapshot().as_dict(),
                     }
                 # If all nodes already finished, return the completed state directly
@@ -827,6 +892,10 @@ async def run_analysis_workflow(
                     resumed_result = await invoke_with_cloud_budget(None)
                     return resumed_result
                 except Exception as exc:
+                    from app.execution.errors import LeaseLost
+
+                    if isinstance(exc, LeaseLost):
+                        raise
                     safe_msg = redact_secrets(str(exc))[:2048]
                     logger.error("Terminal workflow failure during resume of scan %s: %s", scan_id, safe_msg)
                     failed_state = dict(current_state.values)
@@ -906,10 +975,11 @@ async def run_analysis_workflow(
         }
         initial_state: AnalysisState = {
             "scan_id": scan_id,
+            "tenant_id": tenant_id,
             "repository_url": evidence_store.manifest.repository_url,
             "commit_hash": evidence_store.manifest.commit_hash,
+            "graph_execution_contract": graph_execution_contract,
             "branch": evidence_store.manifest.branch,
-            "repo_dir": repo_dir,
             "manifest_summary": summary,
             "languages": evidence_store.manifest.languages,
             "frameworks": [fw.name for fw in evidence_store.manifest.frameworks],
@@ -996,6 +1066,10 @@ async def run_analysis_workflow(
                     )
             return final_state
         except Exception as exc:
+            from app.execution.errors import LeaseLost
+
+            if isinstance(exc, LeaseLost):
+                raise
             safe_msg = redact_secrets(str(exc))[:2048]
             logger.error("Terminal workflow failure for scan %s: %s", scan_id, safe_msg)
             failed_state = initial_state

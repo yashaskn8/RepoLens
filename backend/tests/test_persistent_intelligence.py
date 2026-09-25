@@ -451,7 +451,7 @@ async def test_verifier_cannot_disable_independent_retrieval(indexed_repository)
 async def test_checkpoint_requires_same_evidence_authority(indexed_repository, mismatch, pending):
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
-    from app.agents.graph import run_analysis_workflow
+    from app.agents.graph import _graph_execution_contract, run_analysis_workflow
     from app.analysis.store import EvidenceStore
     from app.context.runtime import ScanIntelligenceRuntime
     repo, _, _, factory = indexed_repository
@@ -465,13 +465,22 @@ async def test_checkpoint_requires_same_evidence_authority(indexed_repository, m
         authority = None
     elif mismatch:
         authority[mismatch] = "other-generation"
-    state = {"scan_id": "scan", "status": "COMPLETED", "manifest_summary": {"index_authority": authority},
-        "verified_findings": [{"id": "old-evidence"}]}
+    state = {
+        "scan_id": "scan",
+        "tenant_id": index.tenant_id,
+        "repository_url": store.manifest.repository_url,
+        "commit_hash": store.manifest.commit_hash,
+        "graph_execution_contract": _graph_execution_contract(),
+        "status": "COMPLETED",
+        "manifest_summary": {"index_authority": authority},
+        "verified_findings": [{"id": "old-evidence"}],
+    }
     app = SimpleNamespace(aget_state=AsyncMock(return_value=SimpleNamespace(values=state, next=("bug",) if pending else ())),
         ainvoke=AsyncMock(return_value=state))
     with patch("app.agents.graph.build_analysis_graph", return_value=app):
-        result = await run_analysis_workflow(store, "scan", str(repo), checkpointer=object(),
-            context_engine=runtime.context_engine, repository_graph=runtime.repository_graph)
+            result = await run_analysis_workflow(store, "scan", str(repo), checkpointer=object(),
+                context_engine=runtime.context_engine, repository_graph=runtime.repository_graph,
+                tenant_id=index.tenant_id)
     if mismatch:
         assert result["status"] == "FAILED"
         assert "generation is incompatible" in result["errors"][0]

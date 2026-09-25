@@ -11,6 +11,7 @@ from langgraph.graph import END, START, StateGraph
 
 from app.agents.checkpointer import get_sqlite_checkpointer
 from app.agents.graph import (
+    _budgeted_node,
     _checkpoint_requires_investigator,
     build_analysis_graph,
     run_analysis_workflow,
@@ -115,6 +116,9 @@ async def test_durable_workflow_full_execution(sample_evidence_store):
                 saved_state = await app.aget_state({"configurable": {"thread_id": scan_id}})
                 assert saved_state is not None
                 assert saved_state.values["status"] == "COMPLETED"
+                assert "repo_dir" not in saved_state.values
+                assert saved_state.values["scan_id"] == scan_id
+                assert saved_state.values["graph_execution_contract"]["digest"]
 
 
 @pytest.mark.asyncio
@@ -265,6 +269,100 @@ async def test_resume_rejects_different_commit_without_persistent_index(sample_e
         app.ainvoke.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "changed_field,changed_value",
+    [
+        ("tenant_id", "different-tenant"),
+        ("repository_url", "https://github.com/other/repository.git"),
+        ("graph_execution_contract", {"version": "changed", "digest": "0" * 64}),
+    ],
+)
+async def test_resume_rejects_checkpoint_identity_drift(
+    sample_evidence_store,
+    changed_field,
+    changed_value,
+):
+    """Tenant, repository, and graph contract drift must not reuse saved state."""
+    values = _checkpoint_values(sample_evidence_store, investigator_enabled=False)
+    values["scan_id"] = "identity-drift"
+    values[changed_field] = changed_value
+    app = MagicMock()
+    app.aget_state = AsyncMock(return_value=MagicMock(values=values, next=("verifier",)))
+    app.ainvoke = AsyncMock(return_value={"status": "COMPLETED"})
+    with patch("app.agents.graph.build_analysis_graph", return_value=app):
+        result = await run_analysis_workflow(
+            evidence_store=sample_evidence_store,
+            scan_id="identity-drift",
+            repo_dir=".",
+            checkpointer=object(),
+        )
+    assert result["status"] == "FAILED"
+    assert "generation is incompatible" in result["errors"][0]
+    app.ainvoke.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_read_failure_does_not_start_a_fresh_workflow(sample_evidence_store):
+    from app.context.runtime import get_scan_runtime
+
+    app = MagicMock()
+    app.aget_state = AsyncMock(side_effect=RuntimeError("checkpoint store unavailable"))
+    app.ainvoke = AsyncMock(return_value={"status": "COMPLETED"})
+    with patch("app.agents.graph.build_analysis_graph", return_value=app):
+        with pytest.raises(RuntimeError, match="checkpoint store unavailable"):
+            await run_analysis_workflow(
+                evidence_store=sample_evidence_store,
+                scan_id="checkpoint-read-failure",
+                repo_dir=".",
+                checkpointer=object(),
+                context_engine=MagicMock(),
+                repository_graph=MagicMock(),
+            )
+    app.ainvoke.assert_not_awaited()
+    assert get_scan_runtime("checkpoint-read-failure") is None
+
+
+@pytest.mark.asyncio
+async def test_production_graph_node_is_fenced_before_and_after_execution():
+    from app.execution.errors import LeaseLost
+
+    production_settings = get_settings().model_copy(update={"ENVIRONMENT": "production"})
+    ran = False
+
+    async def node(_state):
+        nonlocal ran
+        ran = True
+        return {"status": "COMPLETED"}
+
+    state = {"scan_id": "scan-lease-fence", "tenant_id": "tenant-1", "completed_nodes": []}
+    with (
+        patch("app.agents.graph.get_settings", return_value=production_settings),
+        patch("app.execution.context.assert_current_claim", side_effect=[None, LeaseLost("expired")]) as fence,
+    ):
+        with pytest.raises(LeaseLost, match="expired"):
+            await _budgeted_node(node, state)
+
+    assert ran
+    assert fence.call_count == 2
+    assert all(call.kwargs["required"] for call in fence.call_args_list)
+
+
+@pytest.mark.asyncio
+async def test_production_scan_graph_requires_tenant_bound_durable_claim(sample_evidence_store):
+    from app.execution.errors import LeaseLost
+
+    production_settings = get_settings().model_copy(update={"ENVIRONMENT": "production"})
+    with patch("app.agents.graph.get_settings", return_value=production_settings):
+        with pytest.raises(LeaseLost, match="canonical execution claim required"):
+            await run_analysis_workflow(
+                evidence_store=sample_evidence_store,
+                scan_id="unclaimed-production-scan",
+                repo_dir=".",
+                tenant_id="tenant-1",
+            )
+
+
 def _checkpointed_resume_app(checkpointer, next_node, seen_runtime):
     """Build a real checkpointer-backed app paused immediately before next_node."""
 
@@ -285,9 +383,20 @@ def _checkpointed_resume_app(checkpointer, next_node, seen_runtime):
 
 
 def _checkpoint_values(sample_evidence_store, *, investigator_enabled):
+    from app.evaluation.system.identity import (
+        FULL_ANALYSIS_GRAPH_CONTRACT_VERSION,
+        full_analysis_graph_identity_digest,
+    )
+
     return {
         "scan_id": "resume-mode-test",
+        "tenant_id": None,
+        "repository_url": sample_evidence_store.manifest.repository_url,
         "commit_hash": sample_evidence_store.manifest.commit_hash,
+        "graph_execution_contract": {
+            "version": FULL_ANALYSIS_GRAPH_CONTRACT_VERSION,
+            "digest": full_analysis_graph_identity_digest(),
+        },
         "manifest_summary": {"index_authority": None},
         "agent_investigator_enabled": investigator_enabled,
         "investigator": {"active": {"budget": {"tool_calls": 1}}}

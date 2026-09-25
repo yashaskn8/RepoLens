@@ -12,7 +12,11 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from app.analysis.workflow_graph import build_change_analysis_graph
+from app.analysis.workflow_graph import (
+    bind_change_workspaces,
+    build_change_analysis_graph,
+    reset_change_workspaces,
+)
 from app.core.database import SessionLocal
 from app.ingestion.comparison_snapshot import get_comparison_snapshot_service
 from app.models.change_analysis import ChangeAnalysisModel, ChangeImpactModel
@@ -115,23 +119,30 @@ async def execute_background_change_analysis(
                 "head_commit_sha": analysis_model.head_commit_sha,
                 "base_ref": analysis_model.base_ref,
                 "head_ref": analysis_model.head_ref,
-                "base_workspace": base_ws,
-                "head_workspace": head_ws,
                 "diff_result": diff_res_cached,
                 "blast_radius": blast_radius_cached,
-                "completed_nodes": ["acquire"],
+                "completed_nodes": [],
             }
 
             # Compile and execute durable LangGraph workflow
-            from app.agents.checkpointer import get_sqlite_checkpointer
-            async with get_sqlite_checkpointer(db_path=checkpoint_db_path) as checkpointer:
+            from app.agents.checkpointer import get_analysis_checkpointer
+            async with get_analysis_checkpointer(
+                db_path=checkpoint_db_path,
+                state_profile="change_analysis",
+            ) as checkpointer:
                 graph = build_change_analysis_graph(checkpointer=checkpointer)
                 config = {"configurable": {"thread_id": f"change-analysis:{analysis_id}"}}
                 cloud_budget = WorkflowCloudBudget.from_settings()
                 budget_token = bind_workflow_cloud_budget(cloud_budget)
+                workspace_token = bind_change_workspaces(base_ws, head_ws)
                 try:
-                    final_state = await graph.ainvoke(initial_state, config=config)
+                    final_state = await graph.ainvoke(
+                        initial_state,
+                        config=config,
+                        durability="sync",
+                    )
                 finally:
+                    reset_change_workspaces(workspace_token)
                     reset_workflow_cloud_budget(budget_token)
                 final_state = dict(final_state)
                 final_state["ai_cloud_budget"] = cloud_budget.snapshot().as_dict()

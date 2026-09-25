@@ -56,6 +56,10 @@ async def lifespan(app: FastAPI):
     configure_tracing(settings)
 
     available_tables = set(inspect(engine).get_table_names())
+    if settings.is_production:
+        from app.agents.checkpointer import validate_analysis_checkpointer_ready
+
+        await validate_analysis_checkpointer_ready()
     from app.core.redis import get_redis_manager
     redis_mgr = get_redis_manager()
     await redis_mgr.initialize()

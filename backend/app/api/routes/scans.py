@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, R
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
-from app.agents.checkpointer import get_sqlite_checkpointer
+from app.agents.checkpointer import get_analysis_checkpointer
 from app.agents.graph import run_analysis_workflow
 from app.analysis.service import get_intelligence_service
 from app.analysis.authority import authority_digest, compatibility_digest, runtime_authorities
@@ -37,7 +37,8 @@ from app.execution.application import (
     deterministic_resource_id,
 )
 from app.execution.dispatcher import DurableWorkDispatcher
-from app.execution.errors import IdempotencyConflict
+from app.execution.errors import IdempotencyConflict, LeaseLost
+from app.execution.context import assert_current_claim
 from app.execution.types import RequestBudget, ResourceProfile, WorkKind
 from app.governance.taxonomy import FailureCode as GovernanceFailureCode, safe_failure
 from app.governance.events import AuditLedger, DomainOutbox
@@ -88,6 +89,19 @@ def _scan_request_budget() -> RequestBudget:
         max_escalation_tier=2,
         max_retrieval_context_tokens=250_000,
     )
+
+
+def _commit_scan_execution(db: Session, *, scan_id: str, tenant_id: str) -> None:
+    """Fence scan-domain writes against the active durable-work lease."""
+    assert_current_claim(
+        work_kind="SCAN",
+        resource_type="SCAN",
+        resource_id=scan_id,
+        tenant_id=tenant_id,
+        required=get_settings().is_production,
+        db=db,
+    )
+    db.commit()
 
 
 def _scan_resource(db: Session, scan_model: ScanModel) -> Scan:
@@ -147,8 +161,9 @@ async def execute_background_scan(
         scan_model = db.query(ScanModel).filter(ScanModel.id == scan_id).first()
         if not scan_model:
             return
+        tenant_id = str(scan_model.owner_user_id or "legacy-local")
         scan_model.status = ScanStatus.RUNNING.value
-        db.commit()
+        _commit_scan_execution(db, scan_id=scan_id, tenant_id=tenant_id)
         WorkflowEventService.emit(
             db=db,
             event=WorkflowEventCreate(
@@ -190,7 +205,7 @@ async def execute_background_scan(
             })
             scan_model.model_metadata = meta
             flag_modified(scan_model, "model_metadata")
-            db.commit()
+            _commit_scan_execution(db, scan_id=scan_id, tenant_id=tenant_id)
 
         revision_artifact_id = publish_repository_revision(
             db,
@@ -202,7 +217,7 @@ async def execute_background_scan(
         revision_meta["repository_revision_artifact_id"] = revision_artifact_id
         scan_model.model_metadata = revision_meta
         flag_modified(scan_model, "model_metadata")
-        db.commit()
+        _commit_scan_execution(db, scan_id=scan_id, tenant_id=tenant_id)
 
         # 3. Run deterministic intelligence service (manifest + scanners)
         WorkflowEventService.emit(
@@ -335,7 +350,7 @@ async def execute_background_scan(
         ]
         scan_model.model_metadata = meta
         flag_modified(scan_model, "model_metadata")
-        db.commit()
+        _commit_scan_execution(db, scan_id=scan_id, tenant_id=tenant_id)
 
         # Emit tool events and stage completion independently
         for tool_event in tool_events_to_emit:
@@ -374,7 +389,6 @@ async def execute_background_scan(
         graph_meta["graph_complete"] = bool(graph_data.complete)
         if graph_data.contract_report is not None:
             graph_meta["route_contract_coverage"] = graph_data.contract_report.model_dump(mode="json")
-        tenant_id = str(scan_model.owner_user_id or "legacy-local")
         authority_values = runtime_authorities(
             repository_url=repo_url,
             commit_sha=commit_sha,
@@ -392,7 +406,7 @@ async def execute_background_scan(
         ]
         scan_model.model_metadata = graph_meta
         flag_modified(scan_model, "model_metadata")
-        db.commit()
+        _commit_scan_execution(db, scan_id=scan_id, tenant_id=tenant_id)
 
         # Exact immutable analysis reuse is checked only after the canonical
         # commit, scanner, graph, and authority fingerprints are known.  A
@@ -436,7 +450,7 @@ async def execute_background_scan(
             scan_model.status = ScanStatus.COMPLETED.value
             scan_model.completed_at = _utc_now()
             flag_modified(scan_model, "model_metadata")
-            db.commit()
+            _commit_scan_execution(db, scan_id=scan_id, tenant_id=tenant_id)
             WorkflowEventService.emit(
                 db=db,
                 event=WorkflowEventCreate(
@@ -453,7 +467,7 @@ async def execute_background_scan(
             )
             return
 
-        # 5. Run durable LangGraph multi-agent analysis workflow using canonical SQLite checkpointer
+        # 5. Run durable LangGraph multi-agent analysis workflow using the configured saver
         WorkflowEventService.emit(
             db=db,
             event=WorkflowEventCreate(
@@ -464,9 +478,12 @@ async def execute_background_scan(
                 message="LangGraph multi-agent analysis workflow started",
             ),
         )
-        db.commit()
+        _commit_scan_execution(db, scan_id=scan_id, tenant_id=tenant_id)
 
-        async with get_sqlite_checkpointer(db_path=checkpoint_db_path) as checkpointer:
+        async with get_analysis_checkpointer(
+            db_path=checkpoint_db_path,
+            state_profile="analysis",
+        ) as checkpointer:
             final_state = await run_analysis_workflow(
                 evidence_store=evidence_store,
                 scan_id=scan_id,
@@ -475,6 +492,7 @@ async def execute_background_scan(
                 resume_if_exists=True,
                 context_engine=runtime.context_engine,
                 repository_graph=runtime.repository_graph,
+                tenant_id=tenant_id,
             )
 
         WorkflowEventService.emit(
@@ -487,7 +505,7 @@ async def execute_background_scan(
                 message="LangGraph multi-agent analysis workflow completed",
             ),
         )
-        db.commit()
+        _commit_scan_execution(db, scan_id=scan_id, tenant_id=tenant_id)
 
         # 6. Check for terminal workflow failure
         if final_state.get("status") == "FAILED":
@@ -498,7 +516,7 @@ async def execute_background_scan(
             existing_meta["error"] = "; ".join(errors) if errors else "Terminal workflow failure"
             scan_model.model_metadata = existing_meta
             flag_modified(scan_model, "model_metadata")
-            db.commit()
+            _commit_scan_execution(db, scan_id=scan_id, tenant_id=tenant_id)
             WorkflowEventService.emit(
                 db=db,
                 event=WorkflowEventCreate(
@@ -702,7 +720,7 @@ async def execute_background_scan(
             existing_meta["retrieval_coverage"] = dict(persistent_index.query_coverage)
         scan_model.model_metadata = existing_meta
         flag_modified(scan_model, "model_metadata")
-        db.commit()
+        _commit_scan_execution(db, scan_id=scan_id, tenant_id=tenant_id)
 
         # Emit finding confirmed events and scan completed event independently
         for f in newly_persisted_findings:
@@ -733,6 +751,9 @@ async def execute_background_scan(
             ),
         )
 
+    except LeaseLost:
+        db.rollback()
+        raise
     except Exception as exc:
         failure = safe_failure(exc, default=GovernanceFailureCode.INTERNAL_INVARIANT_VIOLATION)
         logger.error("Scan %s failed (%s)", scan_id, failure.code.value, exc_info=True)
@@ -746,7 +767,7 @@ async def execute_background_scan(
                 meta["failure_message"] = failure.message
                 scan_model.model_metadata = meta
                 flag_modified(scan_model, "model_metadata")
-                db.commit()
+                _commit_scan_execution(db, scan_id=scan_id, tenant_id=tenant_id)
                 WorkflowEventService.emit(
                     db=db,
                     event=WorkflowEventCreate(
