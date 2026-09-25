@@ -433,6 +433,199 @@ def test_preflight_does_not_disclose_credentials_or_probe_runtime(monkeypatch) -
     assert "never-print-this-secret" not in serialized
 
 
+def _run_preflight_with_spec(
+    monkeypatch,
+    spec,
+    *,
+    provider: LLMProvider = LLMProvider.GEMINI,
+    adapter=None,
+    adapter_error: bool = False,
+):
+    from app.evaluation.campaign import preflight
+
+    class Adapter:
+        api_key = "test-key-that-must-not-be-serialized"
+        api_token = "test-token-that-must-not-be-serialized"
+        account_id = "test-account"
+        authorization_header = "Bearer test-header-that-must-not-be-serialized"
+
+        def generate(self, *_args, **_kwargs):
+            raise AssertionError("preflight must never call a provider")
+
+        async def agenerate(self, *_args, **_kwargs):
+            raise AssertionError("preflight must never call a provider")
+
+    class Router:
+        _capability_gateway = SimpleNamespace(
+            registry=SimpleNamespace(
+                get=lambda requested_provider, model: (
+                    spec if requested_provider == provider and model == spec.model else None
+                )
+            )
+        )
+
+        @staticmethod
+        def get_adapter(_provider):
+            if adapter_error:
+                raise ValueError("adapter unavailable")
+            return adapter if adapter is not None else Adapter()
+
+    monkeypatch.setattr(preflight, "get_llm_router", lambda: Router())
+    monkeypatch.setattr(preflight, "get_settings", lambda: SimpleNamespace(LOCAL_LLM_ENABLED=True))
+    return preflight.run_campaign_preflight([("candidate", provider, spec.model if spec else "exact-model")])
+
+
+def _preflight_spec(**overrides):
+    from app.evaluation.campaign.plan import FULL_ANALYSIS_CAPABILITY_SET
+
+    values = {
+        "provider": LLMProvider.GEMINI,
+        "model": "exact-model",
+        "enabled": True,
+        "supports_structured_output": True,
+        "context_window_tokens": 100_000,
+        "max_output_tokens": 8_000,
+        "model_revision": None,
+        "capabilities": FULL_ANALYSIS_CAPABILITY_SET,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_preflight_reports_declared_capability_gaps_as_warnings(monkeypatch) -> None:
+    from app.evaluation.campaign.plan import FULL_ANALYSIS_CAPABILITY_SET
+    from app.llm.types import ModelCapability
+
+    one_gap = _preflight_spec(capabilities=FULL_ANALYSIS_CAPABILITY_SET - {ModelCapability.SECURITY_REASONING})
+    one_gap_result = _run_preflight_with_spec(monkeypatch, one_gap).candidate_readiness[0]
+    assert one_gap_result.status == "READY_WITH_CAPABILITY_WARNINGS"
+    assert one_gap_result.capability_gaps == ["SECURITY_REASONING"]
+
+    multiple_gaps = _preflight_spec(capabilities=FULL_ANALYSIS_CAPABILITY_SET - {
+        ModelCapability.SECURITY_REASONING,
+        ModelCapability.VERIFICATION,
+    })
+    multiple_gap_result = _run_preflight_with_spec(monkeypatch, multiple_gaps).candidate_readiness[0]
+    assert multiple_gap_result.status == "READY_WITH_CAPABILITY_WARNINGS"
+    assert multiple_gap_result.capability_gaps == ["SECURITY_REASONING", "VERIFICATION"]
+    assert multiple_gap_result.credential_configured is True
+    assert multiple_gap_result.local_runtime_reachability == "NOT_PROBED"
+
+
+@pytest.mark.parametrize(
+    ("spec_overrides", "adapter_error", "adapter", "provider", "expected"),
+    [
+        ({"enabled": False}, False, None, LLMProvider.GEMINI, "DISABLED"),
+        ({"supports_structured_output": False}, False, None, LLMProvider.GEMINI, "NO_STRUCTURED_OUTPUT"),
+        ({"context_window_tokens": 100}, False, None, LLMProvider.GEMINI, "INSUFFICIENT_CONTEXT"),
+        ({"max_output_tokens": 100}, False, None, LLMProvider.GEMINI, "INSUFFICIENT_CONTEXT"),
+        ({"capabilities": frozenset()}, False, SimpleNamespace(api_key=""), LLMProvider.GEMINI, "NO_CREDENTIAL"),
+        ({"capabilities": frozenset()}, True, None, LLMProvider.GEMINI, "NO_ADAPTER"),
+        ({}, False, SimpleNamespace(api_token="configured-token", account_id=""), LLMProvider.CLOUDFLARE, "NO_CREDENTIAL"),
+    ],
+)
+def test_preflight_keeps_technical_blockers_hard_and_precedes_warnings(
+    monkeypatch, spec_overrides, adapter_error, adapter, provider, expected,
+) -> None:
+    spec = _preflight_spec(provider=provider, **spec_overrides)
+    result = _run_preflight_with_spec(
+        monkeypatch,
+        spec,
+        provider=provider,
+        adapter=adapter,
+        adapter_error=adapter_error,
+    ).candidate_readiness[0]
+    assert result.status == expected
+
+
+def test_preflight_reports_unregistered_model_as_hard_blocker(monkeypatch) -> None:
+    from app.evaluation.campaign import preflight
+
+    router = SimpleNamespace(
+        _capability_gateway=SimpleNamespace(registry=SimpleNamespace(get=lambda *_args: None)),
+        get_adapter=lambda _provider: SimpleNamespace(api_key="unused"),
+    )
+    monkeypatch.setattr(preflight, "get_llm_router", lambda: router)
+    result = preflight.run_campaign_preflight([("unknown", LLMProvider.GEMINI, "not-registered")])
+    assert result.candidate_readiness[0].status == "NOT_REGISTERED"
+
+
+def test_preflight_schema_is_versioned_and_preserves_warnings_without_secrets(monkeypatch) -> None:
+    from app.evaluation.campaign import preflight
+    from app.evaluation.campaign.plan import FULL_ANALYSIS_CAPABILITY_SET
+    from app.llm.types import ModelCapability
+
+    spec = _preflight_spec(capabilities=FULL_ANALYSIS_CAPABILITY_SET - {ModelCapability.SECURITY_REASONING})
+    result = _run_preflight_with_spec(monkeypatch, spec)
+    serialized = result.model_dump_json()
+    assert result.schema_version == preflight.PREFLIGHT_SCHEMA_VERSION
+    assert result.candidate_readiness[0].status == "READY_WITH_CAPABILITY_WARNINGS"
+    assert result.candidate_readiness[0].capability_gaps == ["SECURITY_REASONING"]
+    assert "test-key-that-must-not-be-serialized" not in serialized
+    assert "test-token-that-must-not-be-serialized" not in serialized
+    assert "test-header-that-must-not-be-serialized" not in serialized
+
+
+def test_campaign_plan_accepts_warning_ready_candidate_and_preserves_declared_gaps(monkeypatch) -> None:
+    from app.evaluation.campaign import plan as campaign_plan
+    from app.evaluation.campaign.plan import FULL_ANALYSIS_CAPABILITY_SET
+    from app.llm.types import ModelCapability
+
+    gap_capabilities = FULL_ANALYSIS_CAPABILITY_SET - {ModelCapability.SECURITY_REASONING}
+    specifications = {
+        (LLMProvider.GEMINI, "gemini-exact"): _preflight_spec(
+            provider=LLMProvider.GEMINI, model="gemini-exact", capabilities=gap_capabilities,
+        ),
+        (LLMProvider.GROQ, "groq-exact"): _preflight_spec(
+            provider=LLMProvider.GROQ, model="groq-exact",
+        ),
+    }
+    router = SimpleNamespace(
+        _capability_gateway=SimpleNamespace(
+            registry=SimpleNamespace(get=lambda provider, model: specifications.get((provider, model)))
+        ),
+        get_adapter=lambda _provider: object(),
+    )
+
+    class Fixture:
+        def __init__(self, _case):
+            self.registry = object()
+
+        async def initialize_runtime(self):
+            return None
+
+        def close(self):
+            return None
+
+    identity = SimpleNamespace(
+        system_digest="a" * 64,
+        compatibility_digest="c" * 64,
+        graph_identity_digest="2" * 64,
+        evaluation_contract_hash="3" * 64,
+        tool_manifest_digest="5" * 64,
+        context_policy_digest="6" * 64,
+        prompt_components=[],
+    )
+    cases = [SimpleNamespace(case_id=f"case-{index:02d}") for index in range(35)]
+    monkeypatch.setattr(campaign_plan, "get_llm_router", lambda: router)
+    monkeypatch.setattr(campaign_plan, "load_public_dev_repository_cases", lambda: cases)
+    monkeypatch.setattr(campaign_plan, "compute_canonical_benchmark_hash", lambda _cases: "d" * 64)
+    monkeypatch.setattr(campaign_plan, "FullAnalysisFixture", Fixture)
+    monkeypatch.setattr(campaign_plan.LeakageDetector, "bifurcate_input", staticmethod(lambda case: case))
+    monkeypatch.setattr(campaign_plan, "build_agent_system_identity", lambda **_kwargs: identity)
+    monkeypatch.setattr(campaign_plan, "_git_head", lambda: "1" * 40)
+
+    result = asyncio.run(campaign_plan.create_campaign_plan(
+        [
+            ("baseline", LLMProvider.GEMINI, "gemini-exact"),
+            ("candidate", LLMProvider.GROQ, "groq-exact"),
+        ],
+        baseline_candidate_id="baseline",
+    ))
+    baseline = next(item for item in result.candidate_arms if item.candidate_id == "baseline")
+    assert baseline.declared_capability_gaps == [ModelCapability.SECURITY_REASONING.value]
+
+
 def test_supplemental_gate_report_digest_cannot_be_forged() -> None:
     from app.evaluation.campaign.contracts import SupplementalGateCandidate
 

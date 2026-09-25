@@ -20,12 +20,24 @@ from app.llm.types import LLMProvider
 from app.core.config import get_settings
 
 
+PREFLIGHT_SCHEMA_VERSION = "live-model-campaign-preflight/1.1"
+
+
 class CandidateReadiness(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     candidate_id: str = Field(min_length=1, max_length=128)
     provider: LLMProvider
     model: str = Field(min_length=1, max_length=256)
-    status: Literal["READY", "NOT_REGISTERED", "DISABLED", "NO_ADAPTER", "NO_CREDENTIAL", "INSUFFICIENT_CONTEXT", "NO_STRUCTURED_OUTPUT", "CAPABILITY_GAP"]
+    status: Literal[
+        "READY",
+        "READY_WITH_CAPABILITY_WARNINGS",
+        "NOT_REGISTERED",
+        "DISABLED",
+        "NO_ADAPTER",
+        "NO_CREDENTIAL",
+        "INSUFFICIENT_CONTEXT",
+        "NO_STRUCTURED_OUTPUT",
+    ]
     registry_enabled: bool
     structured_output: bool
     context_window_tokens: int | None
@@ -39,6 +51,7 @@ class CandidateReadiness(BaseModel):
 
 class CampaignPreflight(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+    schema_version: Literal["live-model-campaign-preflight/1.1"] = PREFLIGHT_SCHEMA_VERSION
     source_revision: str = Field(pattern=r"^[0-9a-f]{40,64}$")
     dataset_version: str
     dataset_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -69,6 +82,9 @@ def run_campaign_preflight(candidates: list[tuple[str, LLMProvider | str, str]])
     for candidate_id, provider_value, model in candidates:
         provider = LLMProvider(provider_value)
         spec = registry.get(provider, model)
+        capability_gaps = sorted(
+            item.value for item in FULL_ANALYSIS_CAPABILITY_SET - spec.capabilities
+        ) if spec else sorted(item.value for item in FULL_ANALYSIS_CAPABILITY_SET)
         try:
             adapter = router.get_adapter(provider)
             has_adapter = True
@@ -88,8 +104,8 @@ def run_campaign_preflight(candidates: list[tuple[str, LLMProvider | str, str]])
             status = "INSUFFICIENT_CONTEXT"
         elif not credentials:
             status = "NO_CREDENTIAL"
-        elif spec is not None and FULL_ANALYSIS_CAPABILITY_SET - spec.capabilities:
-            status = "CAPABILITY_GAP"
+        elif capability_gaps:
+            status = "READY_WITH_CAPABILITY_WARNINGS"
         else:
             status = "READY"
         readiness.append(CandidateReadiness(
@@ -102,9 +118,7 @@ def run_campaign_preflight(candidates: list[tuple[str, LLMProvider | str, str]])
             context_window_tokens=spec.context_window_tokens if spec else None,
             max_output_tokens=spec.max_output_tokens if spec else None,
             declared_revision=spec.model_revision if spec else None,
-            capability_gaps=sorted(
-                item.value for item in FULL_ANALYSIS_CAPABILITY_SET - spec.capabilities
-            ) if spec else sorted(item.value for item in FULL_ANALYSIS_CAPABILITY_SET),
+            capability_gaps=capability_gaps,
             stability=_candidate_stability(spec) if spec else ModelStability.UNKNOWN_STABILITY,
             credential_configured=credentials,
         ))

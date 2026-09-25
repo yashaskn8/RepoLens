@@ -18,9 +18,10 @@ Execution requires a clean checkout of that exact source revision.
 ## Stages
 
 1. `preflight` checks exact registry entries, adapter availability, configured
-   credentials (as booleans only), context/output budgets, and declared
-   capability gaps. It makes no provider call. Ollama reachability is not
-   probed.
+   credentials (as booleans only), and context/output budgets. These are
+   technical execution requirements. It makes no provider call, Ollama
+   reachability is not probed, and the result is versioned as
+   `live-model-campaign-preflight/1.1`.
 2. `plan` freezes two to four candidate arms, one baseline, exact identities,
    the source revision, and deterministic case selection. It makes no provider
    call.
@@ -39,14 +40,28 @@ Execution requires a clean checkout of that exact source revision.
    eligibility requires both supplemental gates to pass. It never applies a
    model, changes production configuration, or performs a promotion.
 
-Provider/model pairs may have declared capability gaps for full-graph roles.
-Preflight reports those gaps honestly; planning never invents capabilities.
-Because the campaign pins one model for every role, a missing required
-capability may lead to a controlled provider/routing failure rather than a
-substitute model. Use those results as an evaluated limitation, not as a
-successful full-role comparison. Mutable model aliases are identified as such;
-provider-returned revisions are retained when available, and `UNKNOWN` is not
-treated as pinned.
+The campaign distinguishes three kinds of readiness/evidence:
+
+- **Technical execution readiness** means the exact model is registered and
+  enabled, has a canonical adapter and configured credentials, supports
+  structured output, and satisfies the fixed context and output budgets. A
+  missing technical requirement remains a hard preflight blocker.
+- **Declared capability coverage** describes the static registry's intended
+  routing roles. Missing labels are reported as
+  `READY_WITH_CAPABILITY_WARNINGS`, and are retained in the frozen plan as
+  `declared_capability_gaps`; they do not by themselves prevent the benchmark
+  from measuring the model. Capability declarations are not changed to make a
+  candidate ready.
+- **Empirical performance** is what the live full-graph campaign observes and
+  is the evidence for whether the exact model actually performs well.
+
+A declared capability gap does not mean measured inability, and declared
+capability presence does not mean measured success. Because the campaign pins
+one model for every role and has no cross-model fallback, a candidate with a
+gap may still encounter a controlled provider/routing failure during the
+benchmark; that outcome is recorded rather than hidden by a substitute model.
+Mutable model aliases are identified as such; provider-returned revisions are
+retained when available, and `UNKNOWN` is not treated as pinned.
 
 ## Commands
 
