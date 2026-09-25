@@ -6,6 +6,7 @@ from app.api.routes import (
     change_analysis,
     deliveries,
     findings,
+    github_app,
     health,
     jobs,
     operations,
@@ -28,4 +29,5 @@ api_router.include_router(patches.router)
 api_router.include_router(deliveries.router)
 api_router.include_router(change_analysis.router)
 api_router.include_router(review_publication.router)
+api_router.include_router(github_app.router)
 api_router.include_router(operations.router)

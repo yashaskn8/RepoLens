@@ -61,6 +61,38 @@ def _utc_now():
     return datetime.now(timezone.utc)
 
 
+async def publication_provider_for_analysis(
+    db: Session,
+    analysis: ChangeAnalysisModel,
+    *,
+    write: bool = False,
+) -> PullRequestReviewPublicationProvider:
+    """Use App-scoped credentials for App-originated PRs; never fall back to a PAT."""
+    settings = get_settings()
+    if not analysis.github_app_installation_id:
+        return GitHubReviewPublicationProvider(settings=settings)
+    from app.github_app.auth import get_github_app_token_service
+    from app.github_app.authorization import token_for_analysis
+
+    token_service = get_github_app_token_service()
+    token = await token_for_analysis(
+        db,
+        analysis,
+        permission_profile="pull_requests_write" if write else "pull_requests_read",
+        settings=settings,
+        token_service=token_service,
+    )
+    return GitHubReviewPublicationProvider(
+        token=token,
+        write_enabled=settings.GITHUB_PR_REVIEW_WRITE_ENABLED,
+        settings=settings,
+        on_authentication_failure=lambda: token_service.invalidate_repository(
+            analysis.github_app_installation_id,
+            analysis.github_app_repository_id,
+        ),
+    )
+
+
 class ReviewPublicationService:
     """Coordinates deterministic rendering, authorization, drift checks, publication, and reconciliation."""
 

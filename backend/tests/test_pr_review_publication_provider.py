@@ -132,6 +132,27 @@ async def test_provider_status_code_mappings():
     with pytest.raises(GitHubAuthFailedError):
         await provider.get_current_pull_request("owner", "repo", 1)
 
+    # App-backed providers evict the scoped cached token after a rejected credential.
+    invalidate = MagicMock()
+    app_provider = GitHubReviewPublicationProvider(
+        token="tok",
+        client=mock_client,
+        on_authentication_failure=invalidate,
+    )
+    with pytest.raises(GitHubAuthFailedError):
+        await app_provider.get_current_pull_request("owner", "repo", 1)
+    invalidate.assert_called_once_with()
+
+    # Permission denials are not treated as stale credentials.
+    resp_403 = MagicMock()
+    resp_403.status_code = 403
+    resp_403.text = "Resource access blocked"
+    mock_client.request = AsyncMock(return_value=resp_403)
+    invalidate.reset_mock()
+    with pytest.raises(GitHubAuthFailedError):
+        await app_provider.get_current_pull_request("owner", "repo", 1)
+    invalidate.assert_not_called()
+
     # 429 Rate Limited
     resp_429 = MagicMock()
     resp_429.status_code = 429

@@ -73,6 +73,16 @@ async def execute_background_change_analysis(
             ),
         )
 
+        installation_token: str | None = None
+        if analysis_model.github_app_installation_id:
+            from app.github_app.authorization import token_for_analysis
+
+            installation_token = await token_for_analysis(
+                db,
+                analysis_model,
+                permission_profile="contents_read",
+            )
+
         # 2. Acquire dual workspaces using safe context manager
         async with snapshot_service.open_comparison_metadata_snapshot(
             repository_url=analysis_model.repository_url,
@@ -80,7 +90,9 @@ async def execute_background_change_analysis(
             head_commit_sha=analysis_model.head_commit_sha,
             base_ref=analysis_model.base_ref,
             head_ref=analysis_model.head_ref,
+            installation_token=installation_token,
         ) as (base_ws, head_ws):
+            installation_token = None
 
 
             WorkflowEventService.emit(

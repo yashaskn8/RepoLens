@@ -22,6 +22,9 @@ class ChangeAnalysisModel(Base):
     repository_url = Column(String(512), nullable=False)
     repository_owner = Column(String(256), nullable=False)
     repository_name = Column(String(256), nullable=False)
+    github_app_installation_id = Column(String(32), nullable=True, index=True)
+    github_app_repository_id = Column(String(32), nullable=True, index=True)
+    github_app_pull_number = Column(Integer, nullable=True)
 
     base_ref = Column(String(128), nullable=True)
     base_commit_sha = Column(String(40), nullable=False, index=True)

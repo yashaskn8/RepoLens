@@ -27,6 +27,7 @@ _SECRET_PATTERNS = [
     (re.compile(r"\b(nvapi-[a-zA-Z0-9_\-]{16,})\b"), r"nvapi-[REDACTED]"),
     (re.compile(r"\b(AIza[0-9A-Za-z\-_]{20,})\b"), r"AIza[REDACTED]"),
     (re.compile(r"\b(ghp_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9_]{22,})\b"), r"[REDACTED_GITHUB_TOKEN]"),
+    (re.compile(r"\b(ghs_|ghu_|ghr_)[a-zA-Z0-9_.\-]{10,}\b"), r"[REDACTED_GITHUB_APP_TOKEN]"),
     (re.compile(r"\b(eyJ[a-zA-Z0-9_\-]{10,}\.eyJ[a-zA-Z0-9_\-]{10,}\.[a-zA-Z0-9_\-]{10,})\b"), r"[REDACTED_JWT]"),
     (re.compile(r"\b(cfut_[a-zA-Z0-9_\-]{16,})\b"), r"cfut_[REDACTED]"),
     (re.compile(r"\b(cohere_[a-zA-Z0-9_\-]{16,})\b"), r"cohere_[REDACTED]"),

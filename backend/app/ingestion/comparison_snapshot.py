@@ -185,6 +185,7 @@ class ComparisonSnapshotService:
         head_commit_sha: str,
         base_ref: Optional[str] = None,
         head_ref: Optional[str] = None,
+        installation_token: Optional[str] = None,
     ) -> ComparisonWorkspacePair:
         """Safely materialize isolated base and head workspaces directly from repository metadata.
         
@@ -229,20 +230,26 @@ class ComparisonSnapshotService:
         try:
             # 4. Materialize base workspace
             logger.info(f"Materializing base workspace for {normalized_url} at commit {base_sha_clean}")
-            base_workspace = self.snapshot_service.materialize_snapshot_from_metadata(
+            base_args = dict(
                 repository_url=normalized_url,
                 commit_hash=base_sha_clean,
                 branch=base_ref,
             )
+            if installation_token is not None:
+                base_args["installation_token"] = installation_token
+            base_workspace = self.snapshot_service.materialize_snapshot_from_metadata(**base_args)
             validate_workspace_safety(base_workspace, self.settings)
 
             # 5. Materialize head workspace
             logger.info(f"Materializing head workspace for {normalized_url} at commit {head_sha_clean}")
-            head_workspace = self.snapshot_service.materialize_snapshot_from_metadata(
+            head_args = dict(
                 repository_url=normalized_url,
                 commit_hash=head_sha_clean,
                 branch=head_ref,
             )
+            if installation_token is not None:
+                head_args["installation_token"] = installation_token
+            head_workspace = self.snapshot_service.materialize_snapshot_from_metadata(**head_args)
             validate_workspace_safety(head_workspace, self.settings)
 
             return ComparisonWorkspacePair(
@@ -416,6 +423,7 @@ class ComparisonSnapshotService:
         head_commit_sha: str,
         base_ref: Optional[str] = None,
         head_ref: Optional[str] = None,
+        installation_token: Optional[str] = None,
     ) -> AsyncIterator[ComparisonWorkspacePair]:
         """Asynchronous metadata context manager guaranteeing dual workspace cleanup."""
         import asyncio
@@ -426,7 +434,9 @@ class ComparisonSnapshotService:
             head_commit_sha,
             base_ref,
             head_ref,
+            installation_token,
         )
+        installation_token = None
         try:
             yield pair
         finally:

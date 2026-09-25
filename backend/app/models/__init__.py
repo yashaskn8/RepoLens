@@ -16,6 +16,14 @@ from app.models.artifact import (
     ArtifactTombstoneModel,
 )
 from app.models.change_analysis import ChangeAnalysisModel, ChangeImpactModel
+from app.models.github_app import (
+    GitHubAppBindingGrantModel,
+    GitHubAppInstallationModel,
+    GitHubAppOAuthStateModel,
+    GitHubAppPullRequestHeadModel,
+    GitHubAppRepositoryModel,
+    GitHubAppWebhookDeliveryModel,
+)
 from app.models.delivery import DeliveryModel
 from app.models.execution import (
     FailureRecordModel,
@@ -78,6 +86,12 @@ __all__ = [
     "DeliveryModel",
     "ChangeAnalysisModel",
     "ChangeImpactModel",
+    "GitHubAppBindingGrantModel",
+    "GitHubAppInstallationModel",
+    "GitHubAppRepositoryModel",
+    "GitHubAppOAuthStateModel",
+    "GitHubAppWebhookDeliveryModel",
+    "GitHubAppPullRequestHeadModel",
     "PullRequestReviewPublicationModel",
     "ReportModel",
     "UserModel",

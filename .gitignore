@@ -48,6 +48,15 @@ yarn-error.log*
 .env
 .env.local
 .env.*.local
+# Local GitHub App credentials (downloaded private keys and secret bundles)
+/private-key*.pem
+/github-app*.pem
+/*.private-key.pem
+/backend/private-key*.pem
+/backend/github-app*.pem
+/backend/*.private-key.pem
+/.secrets/github-app/
+/backend/.secrets/github-app/
 .vscode/
 .idea/
 .claude/

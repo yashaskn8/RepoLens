@@ -23,6 +23,7 @@ from app.execution.application import NewWorkPaused, WorkPolicyViolation, WorkSu
 from app.execution.dispatcher import DurableWorkDispatcher
 from app.execution.errors import IdempotencyConflict
 from app.execution.types import RequestBudget, ResourceProfile, SideEffectClass, WorkKind
+from app.github_app.auth import GitHubAppError
 from app.models.review_publication import PullRequestReviewPublicationModel
 from app.schemas.auth import CurrentUser
 from app.schemas.review_publication import (
@@ -36,6 +37,7 @@ from app.schemas.review_publication import (
 )
 from app.services.authorization_service import get_owned_change_analysis_or_404
 from app.services.review_publication_service import ReviewPublicationService
+from app.services.review_publication_service import publication_provider_for_analysis
 
 logger = logging.getLogger(__name__)
 
@@ -134,8 +136,15 @@ async def generate_preview(
     db: Session = Depends(get_db),
 ):
     """Generate a deterministic preview of the review that would be published to GitHub."""
-    get_owned_change_analysis_or_404(db, str(analysis_id), current_user)
-    service = ReviewPublicationService(db=db)
+    analysis = get_owned_change_analysis_or_404(db, str(analysis_id), current_user)
+    try:
+        provider = await publication_provider_for_analysis(db, analysis, write=False)
+    except GitHubAppError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error_code": "GITHUB_APP_AUTH_UNAVAILABLE", "message": str(exc)},
+        ) from exc
+    service = ReviewPublicationService(db=db, provider=provider)
     try:
         pub = await service.generate_preview(analysis_id)
         return _pub_to_preview_response(pub)

@@ -19,7 +19,7 @@ RepoLens treats all submitted codebases as untrusted data, enforcing strict cont
 1. **Deterministic Evidence Precedes Model Reasoning**: Structural AST parsing (Tree-sitter), static vulnerability analysis (Semgrep, Trivy, OSV), and dependency graph modeling execute prior to agentic reasoning. Models reason only over verified machine facts.
 2. **Untrusted Repository Confinement**: Submitted repositories are passive data. RepoLens never executes arbitrary repository code, never runs test suites, never imports dynamic reflection modules, and never triggers external build scripts or Makefiles.
 3. **Cross-Layer Contract Parity**: Frontend HTTP client calls, backend API routes, Pydantic schemas, database models, and migration steps are cross-referenced across architectural boundaries to detect contract breaks.
-4. **Guarded GitHub Boundaries**: Public repository and PR analyses operate credential-free. Remote GitHub writes require server `GITHUB_TOKEN`, `OPERATOR` privileges, resource ownership, human approval, explicit feature flags, and remote branch drift checks.
+4. **Guarded GitHub Boundaries**: Public repository and PR analyses remain credential-free. Optional private-repository PR analysis uses a user-bound GitHub App installation and repository-scoped, short-lived credentials. Remote GitHub writes require `OPERATOR` privileges, resource ownership, human approval, explicit feature flags, and remote branch drift checks.
 5. **Human-in-the-Loop Authority**: Remediation patches pause at human approval boundaries (`VERIFIED` / `NEEDS_REVIEW`). Machine systems never mark patches as `APPROVED`.
 6. **Optional Infrastructure**: The deterministic core operates in-process without Docker, Redis, Celery, or Kafka. Redis can improve cache reuse and loopback Ollama can handle eligible low-risk generation, but neither is required.
 
@@ -28,6 +28,8 @@ RepoLens treats all submitted codebases as untrusted data, enforcing strict cont
 ## 3. High-Level Architecture
 
 RepoLens consists of a Next.js frontend communicating over typed REST and Server-Sent Events (SSE) with a FastAPI backend. Workflow orchestration is governed by LangGraph state machines, persisting execution state into SQLAlchemy relational models (SQLite by default, PostgreSQL compatible).
+
+The optional GitHub App control plane adds signed webhook intake and installation-scoped private PR reads without replacing the existing durable analysis or publication paths. It is disabled by default; see [GitHub App integration](GITHUB_APP_INTEGRATION.md) for configuration, permissions, and authorization boundaries.
 
 ### System Context Diagram
 

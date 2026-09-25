@@ -12,7 +12,7 @@ Reuses canonical shared GitHubHttpTransport infrastructure:
 from abc import ABC, abstractmethod
 import asyncio
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 import httpx
 
 from app.core.config import Settings, get_settings
@@ -90,6 +90,7 @@ class GitHubReviewPublicationProvider(PullRequestReviewPublicationProvider):
         base_url: str = GITHUB_API_BASE_URL,
         settings: Optional[Settings] = None,
         client: Optional[httpx.AsyncClient] = None,
+        on_authentication_failure: Optional[Callable[[], None]] = None,
     ):
         app_settings = settings or get_settings()
         self._token = token if token is not None else getattr(app_settings, "GITHUB_TOKEN", "")
@@ -108,6 +109,7 @@ class GitHubReviewPublicationProvider(PullRequestReviewPublicationProvider):
         self.base_url = self.transport.base_url
         self._client = client
         self._timeout = self.transport._timeout
+        self._on_authentication_failure = on_authentication_failure
 
     @property
     def write_enabled(self) -> bool:
@@ -155,6 +157,8 @@ class GitHubReviewPublicationProvider(PullRequestReviewPublicationProvider):
             elif status in (401, 403):
                 if "rate limit" in err_msg.lower():
                     raise GitHubRateLimitedError(f"GitHub API rate limit exceeded: {err_msg}") from exc
+                if status == 401 and self._on_authentication_failure is not None:
+                    self._on_authentication_failure()
                 raise GitHubAuthFailedError(f"GitHub authentication or authorization failed: {err_msg}") from exc
             elif status == 429:
                 raise GitHubRateLimitedError("GitHub API rate limit exceeded") from exc

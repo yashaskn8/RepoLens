@@ -525,8 +525,12 @@ class DurableWorkDispatcher:
                     safe_to_retry = outcome == "ABSENT_SAFE_TO_RETRY"
                     outcome_detail = {"delivery_id": resource_id, "reconciliation": outcome}
                 elif work_kind == WorkKind.REVIEW_PUBLICATION.value:
+                    from app.models.change_analysis import ChangeAnalysisModel
                     from app.models.review_publication import PullRequestReviewPublicationModel
-                    from app.services.review_publication_service import ReviewPublicationService
+                    from app.services.review_publication_service import (
+                        ReviewPublicationService,
+                        publication_provider_for_analysis,
+                    )
 
                     publication = record_db.query(PullRequestReviewPublicationModel).filter(
                         PullRequestReviewPublicationModel.id == resource_id
@@ -534,14 +538,24 @@ class DurableWorkDispatcher:
                     if publication is None:
                         outcome_detail = {"publication_id": resource_id, "reconciliation": "MISSING"}
                     else:
-                        publication = await ReviewPublicationService(record_db).reconcile_publication(publication)
-                        completed = publication.status == "PUBLISHED"
-                        outcome_detail = {
-                            "publication_id": resource_id,
-                            "github_review_id": publication.github_review_id,
-                            "github_review_url": publication.github_review_url,
-                            "reconciliation": "COMPLETED" if completed else "UNCERTAIN",
-                        }
+                        analysis = record_db.query(ChangeAnalysisModel).filter_by(
+                            id=publication.analysis_id,
+                            owner_user_id=tenant_id,
+                        ).first()
+                        if analysis is None:
+                            outcome_detail = {"publication_id": resource_id, "reconciliation": "TENANT_BOUNDARY"}
+                        else:
+                            provider = await publication_provider_for_analysis(record_db, analysis, write=False)
+                            publication = await ReviewPublicationService(
+                                record_db, provider=provider
+                            ).reconcile_publication(publication)
+                            completed = publication.status == "PUBLISHED"
+                            outcome_detail = {
+                                "publication_id": resource_id,
+                                "github_review_id": publication.github_review_id,
+                                "github_review_url": publication.github_review_url,
+                                "reconciliation": "COMPLETED" if completed else "UNCERTAIN",
+                            }
 
                 record_db.expire_all()
                 record = (
@@ -1365,6 +1379,8 @@ class DurableWorkDispatcher:
             from app.models.review_publication import PullRequestReviewPublicationModel
             from app.schemas.review_publication import ReviewPublicationError
             from app.services.review_publication_service import ReviewPublicationService
+            from app.services.review_publication_service import publication_provider_for_analysis
+            from app.github_app.auth import GitHubAppError
 
             await asyncio.to_thread(cls._assert_github_write_authorized, claim)
             db = SessionLocal()
@@ -1385,10 +1401,29 @@ class DurableWorkDispatcher:
                         retryable=False,
                     )
                 try:
-                    result = await ReviewPublicationService(db=db).publish_review(
+                    analysis = db.query(ChangeAnalysisModel).filter_by(
+                        id=publication.analysis_id,
+                        owner_user_id=claim.tenant_id,
+                    ).first()
+                    if analysis is None:
+                        raise DomainWorkFailed(
+                            FailureCode.INTERNAL_INVARIANT_VIOLATION,
+                            "The review publication analysis violates its tenant boundary.",
+                            retryable=False,
+                        )
+                    provider = await publication_provider_for_analysis(db, analysis, write=True)
+                    result = await ReviewPublicationService(db=db, provider=provider).publish_review(
+                        # The token is scoped to this installation and repository;
+                        # publication remains explicitly human-approved above.
                         UUID(publication.analysis_id),
                         publication.preview_digest,
                     )
+                except GitHubAppError as exc:
+                    raise DomainWorkFailed(
+                        FailureCode.PROVIDER_UNAVAILABLE,
+                        "GitHub App authorization is unavailable for this approved review.",
+                        retryable=True,
+                    ) from exc
                 except ReviewPublicationError as exc:
                     db.expire_all()
                     current = db.query(PullRequestReviewPublicationModel).filter(

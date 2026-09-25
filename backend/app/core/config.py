@@ -1,6 +1,7 @@
 """Application settings and configuration using Pydantic Settings."""
 
 from functools import lru_cache
+import re
 from typing import List, Literal, Optional, Union
 from urllib.parse import urlparse
 from pydantic import Field, field_validator, model_validator
@@ -181,6 +182,19 @@ class Settings(BaseSettings):
     MAX_REVIEW_INLINE_COMMENTS: int = 20
     MAX_REVIEW_BODY_CHARS: int = 50_000
 
+    # Optional GitHub App control plane. Disabled by default; no PAT fallback is
+    # permitted for app-originated work.
+    GITHUB_APP_ENABLED: bool = False
+    GITHUB_APP_ID: str = ""
+    GITHUB_APP_CLIENT_ID: str = ""
+    GITHUB_APP_CLIENT_SECRET: str = ""
+    GITHUB_APP_PRIVATE_KEY_PEM: str = ""
+    GITHUB_APP_WEBHOOK_SECRET: str = ""
+    GITHUB_APP_STATE_ENCRYPTION_KEY: str = ""
+    GITHUB_APP_CALLBACK_URL: str = ""
+    GITHUB_APP_MAX_WEBHOOK_BYTES: int = Field(default=1_048_576, ge=1024, le=5_242_880)
+    GITHUB_APP_TOKEN_TIMEOUT_SECONDS: float = Field(default=10.0, gt=0, le=30)
+
     # Authentication & Session Settings (Phase 8)
     AUTH_SESSION_TTL_SECONDS: int = 86400  # 24 hours
     AUTH_MAX_FAILED_LOGIN_ATTEMPTS: int = 5
@@ -307,6 +321,61 @@ class Settings(BaseSettings):
 
         if self.AUTH_COOKIE_SAMESITE == "none" and not self.AUTH_COOKIE_SECURE:
             raise ValueError("When AUTH_COOKIE_SAMESITE is 'none', AUTH_COOKIE_SECURE must be True.")
+
+        if self.GITHUB_APP_ENABLED:
+            required_app_values = (
+                self.GITHUB_APP_ID,
+                self.GITHUB_APP_CLIENT_ID,
+                self.GITHUB_APP_CLIENT_SECRET,
+                self.GITHUB_APP_PRIVATE_KEY_PEM,
+                self.GITHUB_APP_WEBHOOK_SECRET,
+                self.GITHUB_APP_STATE_ENCRYPTION_KEY,
+                self.GITHUB_APP_CALLBACK_URL,
+            )
+            if any(not value.strip() for value in required_app_values):
+                raise ValueError("GitHub App mode requires all GITHUB_APP_* credentials, callback, and state key.")
+            if not self.GITHUB_APP_ID.isdigit() or not 1 <= int(self.GITHUB_APP_ID) <= 9_223_372_036_854_775_807:
+                raise ValueError("GITHUB_APP_ID must be a positive decimal application ID.")
+            if len(self.GITHUB_APP_WEBHOOK_SECRET) < 32:
+                raise ValueError("GITHUB_APP_WEBHOOK_SECRET must contain at least 32 characters.")
+            if len(self.GITHUB_APP_STATE_ENCRYPTION_KEY) != 64:
+                raise ValueError("GITHUB_APP_STATE_ENCRYPTION_KEY must be 32 bytes encoded as 64 hex characters.")
+            if not re.fullmatch(r"[0-9a-fA-F]{64}", self.GITHUB_APP_STATE_ENCRYPTION_KEY):
+                raise ValueError("GITHUB_APP_STATE_ENCRYPTION_KEY must contain exactly 64 hexadecimal characters.")
+            try:
+                bytes.fromhex(self.GITHUB_APP_STATE_ENCRYPTION_KEY)
+                from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
+                from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+                private_key = load_pem_private_key(
+                    self.GITHUB_APP_PRIVATE_KEY_PEM.encode("utf-8"),
+                    password=None,
+                )
+                if not isinstance(private_key, RSAPrivateKey) or private_key.key_size < 2048:
+                    raise ValueError("GitHub App signing key must be an RSA private key of at least 2048 bits.")
+            except ValueError:
+                raise
+            except Exception as exc:
+                raise ValueError("GitHub App private key or state encryption key is invalid.") from exc
+            callback = urlparse(self.GITHUB_APP_CALLBACK_URL)
+            if callback.scheme != "https" and not (
+                not self.is_production and callback.scheme == "http" and callback.hostname in {"localhost", "127.0.0.1"}
+            ):
+                raise ValueError("GITHUB_APP_CALLBACK_URL must use HTTPS (HTTP localhost is development-only).")
+            expected_callback_path = f"{self.API_V1_STR.rstrip('/')}/github-app/connect/callback"
+            if (
+                not callback.hostname
+                or callback.path != expected_callback_path
+                or callback.query
+                or callback.fragment
+                or callback.username
+                or callback.password
+            ):
+                raise ValueError("GITHUB_APP_CALLBACK_URL must target the RepoLens GitHub App callback route.")
+            try:
+                callback.port
+            except ValueError as exc:
+                raise ValueError("GITHUB_APP_CALLBACK_URL contains an invalid port.") from exc
 
         if self.is_production:
             if self.CHECKPOINT_BACKEND in {"SQLITE", "MEMORY_TEST_ONLY"}:
