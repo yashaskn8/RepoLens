@@ -308,3 +308,70 @@ async def test_optional_postgres_checkpoint_round_trip():
             await graph.ainvoke(state, config=config, durability="sync")
             checkpoint = await graph.aget_state(config)
             assert checkpoint.values["events"] == ["postgres"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_postgres_pending_parallel_write_survives_real_saver_reopen():
+    """A completed PostgreSQL sibling is not rerun when a new saver resumes the thread."""
+    url = os.environ.get("TEST_POSTGRES_URL")
+    if not url:
+        pytest.skip("TEST_POSTGRES_URL is not configured")
+
+    settings = _settings(
+        CHECKPOINT_BACKEND="POSTGRES",
+        CHECKPOINT_DATABASE_URL=url,
+    )
+    left_runs = 0
+    right_runs = 0
+    left_finished = asyncio.Event()
+
+    async def left(_state):
+        nonlocal left_runs
+        left_runs += 1
+        left_finished.set()
+        return {"events": ["left"]}
+
+    async def right(_state):
+        nonlocal right_runs
+        right_runs += 1
+        await left_finished.wait()
+        if right_runs == 1:
+            raise RuntimeError("intentional one-time PostgreSQL interruption")
+        return {"events": ["right"]}
+
+    def build(saver):
+        builder = StateGraph(_PlainState)
+        builder.add_node("left", left)
+        builder.add_node("right", right)
+        builder.add_edge(START, "left")
+        builder.add_edge(START, "right")
+        builder.add_edge("left", END)
+        builder.add_edge("right", END)
+        return builder.compile(checkpointer=saver)
+
+    config = {"configurable": {"thread_id": f"postgres-sibling-reopen-{os.urandom(12).hex()}"}}
+    with patch("app.agents.checkpointer.get_settings", return_value=settings):
+        async with get_analysis_checkpointer(
+            backend=CheckpointBackend.POSTGRES,
+            database_url=url,
+            state_profile="plain",
+        ) as saver_a:
+            await saver_a.setup()
+            graph_a = build(saver_a)
+            with pytest.raises(RuntimeError, match="intentional one-time PostgreSQL interruption"):
+                await graph_a.ainvoke({"events": []}, config=config, durability="sync")
+
+        async with get_analysis_checkpointer(
+            backend=CheckpointBackend.POSTGRES,
+            database_url=url,
+            state_profile="plain",
+        ) as saver_b:
+            graph_b = build(saver_b)
+            resumed = await graph_b.ainvoke(None, config=config, durability="sync")
+            saved = await graph_b.aget_state(config)
+
+    assert left_runs == 1
+    assert right_runs == 2
+    assert sorted(resumed["events"]) == ["left", "right"]
+    assert sorted(saved.values["events"]) == ["left", "right"]

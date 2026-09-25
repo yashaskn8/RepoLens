@@ -10,6 +10,7 @@ from app.evaluation.campaign.contracts import (
     ModelEvaluationCampaignPlan,
     canonical_digest,
 )
+from app.evaluation.campaign.smoke_paths import SMOKE_MODEL_PATH_MANIFEST
 from app.evaluation.ground_truth.loader import compute_canonical_benchmark_hash
 from app.evaluation.ground_truth.public_dev import load_public_dev_repository_cases
 
@@ -28,19 +29,32 @@ def _fixed_cases(plan: ModelEvaluationCampaignPlan):
 
 
 def select_smoke_case_ids(plan: ModelEvaluationCampaignPlan) -> list[str]:
-    """Select one correctness and one security case without inspecting labels."""
+    """Select one statically model-exercising case per required smoke category.
+
+    Execution-path expectations are versioned campaign metadata, separate
+    from benchmark labels and runtime AnalysisInput. Refuse to spend live
+    calls when either category lacks a qualified public DEV case.
+    """
     cases = _fixed_cases(plan)
     by_group: dict[str, list[str]] = {"CORRECTNESS": [], "SECURITY": []}
-    for case in cases:
-        group = str(case.category.value).upper()
-        if group in by_group:
-            by_group[group].append(case.case_id)
+    cases_by_id = {case.case_id: case for case in cases}
+    for entry in SMOKE_MODEL_PATH_MANIFEST.entries:
+        case = cases_by_id.get(entry.case_id)
+        if case is None or str(case.category.value).upper() != entry.category:
+            raise ValueError("smoke model-path manifest does not match the fixed public DEV inventory")
+        by_group[entry.category].append(entry.case_id)
+    missing = [group.lower() for group, choices in by_group.items() if not choices]
+    if missing:
+        joined = " and ".join(missing)
+        raise ValueError(
+            f"fixed public DEV corpus has no {joined} case with an expected live model path"
+        )
     selected: list[str] = []
     for group in ("CORRECTNESS", "SECURITY"):
         choices = by_group[group]
-        if not choices:
-            raise ValueError(f"fixed public DEV corpus has no {group.lower()} smoke case")
-        selected.append(min(choices, key=lambda item: _rank(plan.schedule_seed, "smoke/1.0/" + group, item)))
+        selected.append(min(choices, key=lambda item: _rank(
+            plan.schedule_seed, "smoke/2.0/" + group, item,
+        )))
     return sorted(selected)
 
 

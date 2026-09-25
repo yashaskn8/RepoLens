@@ -93,6 +93,20 @@ def build_parser() -> argparse.ArgumentParser:
     context.add_argument("--allow-model-campaign", action="store_true")
     context.add_argument("--allow-context-tool-experiments", action="store_true")
 
+    qualification = commands.add_parser(
+        "qualify-paths",
+        help="Prove public DEV and separate execution-probe model reachability without provider calls.",
+    )
+    qualification.add_argument("--arm", action="append", metavar="ID=PROVIDER:MODEL")
+
+    execution_proof = commands.add_parser(
+        "execution-proof",
+        help="Run exactly four opted-in, non-scoring live graph executions for provider identity proof.",
+    )
+    execution_proof.add_argument("--arm", action="append", required=True, metavar="ID=PROVIDER:MODEL")
+    execution_proof.add_argument("--allow-live", action="store_true")
+    execution_proof.add_argument("--allow-model-campaign", action="store_true")
+
     analyze = commands.add_parser("analyze", help="Build deterministic paired analysis from completed campaign artifacts.")
     analyze.add_argument("campaign_id")
     return parser
@@ -109,6 +123,38 @@ def _load_supplemental_if_present(campaign_id: str, kind: SupplementalGateKind):
 
 
 async def _run(args: argparse.Namespace) -> object:
+    if args.command == "qualify-paths":
+        from app.evaluation.campaign.execution_probes import (
+            qualify_live_execution_probe_set,
+            qualify_pinned_model_probe_paths,
+        )
+        from app.evaluation.campaign.path_qualification import qualify_public_dev_model_paths
+
+        public_dev = await qualify_public_dev_model_paths()
+        execution_probes = await qualify_live_execution_probe_set()
+        result = {
+            "public_dev_path_qualification": public_dev.model_dump(mode="json"),
+            "execution_probe_qualification": execution_probes.model_dump(mode="json"),
+            "canonical_dev_security_model_path_available": any(
+                item.category == "SECURITY" and item.model_gateway_reached
+                for item in public_dev.cases
+            ),
+        }
+        if args.arm:
+            pinned_routes = await qualify_pinned_model_probe_paths(_parse_candidates(args.arm))
+            result["pinned_model_route_qualification"] = pinned_routes.model_dump(mode="json")
+        return result
+
+    if args.command == "execution-proof":
+        from app.evaluation.campaign.execution_probes import run_live_execution_proof
+
+        report, artifact = await run_live_execution_proof(
+            _parse_candidates(args.arm),
+            allow_live=args.allow_live,
+            allow_model_campaign=args.allow_model_campaign,
+        )
+        return {"report": report.model_dump(mode="json"), "artifact": str(artifact)}
+
     if args.command == "preflight":
         return run_campaign_preflight(_parse_candidates(args.arm))
 

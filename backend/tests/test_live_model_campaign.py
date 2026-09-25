@@ -21,6 +21,7 @@ from app.evaluation.campaign.contracts import (
     CampaignCandidateSummary,
     CampaignExecutionStatus,
     CampaignStagePolicy,
+    CampaignUnitStatus,
     ModelEvaluationCampaignPlan,
     ModelStability,
     SupplementalGateKind,
@@ -38,7 +39,11 @@ from app.evaluation.campaign.runner import (
     _validate_live_permissions,
     _validate_prior_stage,
 )
-from app.evaluation.campaign.schedule import build_stage_schedule
+from app.evaluation.campaign.smoke_paths import (
+    SMOKE_MODEL_PATH_MANIFEST,
+    SmokeModelPathManifest,
+)
+from app.evaluation.campaign.schedule import build_stage_schedule, select_smoke_case_ids
 from app.evaluation.ground_truth.loader import compute_canonical_benchmark_hash
 from app.evaluation.ground_truth.public_dev import load_public_dev_repository_cases
 from app.llm.types import LLMProvider
@@ -168,10 +173,10 @@ def test_campaign_arm_parser_preserves_colons_inside_model_name() -> None:
 
 def test_deterministic_campaign_stage_schedules_are_bounded_and_paired() -> None:
     plan = _plan()
-    smoke = build_stage_schedule(plan, CampaignStage.LIVE_SMOKE)
-    assert len(smoke) == 2 * 1 * 3
-    assert smoke == build_stage_schedule(plan, CampaignStage.LIVE_SMOKE)
-    assert len({unit.case_id for unit in smoke}) == 2
+    with pytest.raises(ValueError, match="security case.*expected live model path"):
+        select_smoke_case_ids(plan)
+    with pytest.raises(ValueError, match="security case.*expected live model path"):
+        build_stage_schedule(plan, CampaignStage.LIVE_SMOKE)
 
     selected = ["baseline", "candidate-a"]
     pilot = build_stage_schedule(plan, CampaignStage.LIVE_PILOT, candidate_ids=selected)
@@ -189,6 +194,80 @@ def test_deterministic_campaign_stage_schedules_are_bounded_and_paired() -> None
     )
     assert len(full) == 35 * 5 * 2 == 350
     assert max(unit.ordinal for unit in full) <= plan.stage_policy.max_full_work_units
+
+
+def test_smoke_selector_uses_only_reviewed_model_paths_and_never_passes_them_to_runtime(monkeypatch) -> None:
+    from app.evaluation.campaign import schedule
+    from app.evaluation.ground_truth.leakage import LeakageDetector
+
+    plan = _plan()
+    cases = load_public_dev_repository_cases()
+    correctness = next(item for item in cases if item.case_id == "BUG-EXCEPT-01A")
+    security = next(item for item in cases if item.category.value == "SECURITY")
+    assert [(entry.case_id, entry.expected_model_nodes) for entry in SMOKE_MODEL_PATH_MANIFEST.entries] == [
+        ("BUG-EXCEPT-01A", ("bug",)),
+    ]
+    assert all(entry.category != "SECURITY" for entry in SMOKE_MODEL_PATH_MANIFEST.entries)
+
+    payload = {
+        "version": SMOKE_MODEL_PATH_MANIFEST.version,
+        "entries": [
+            entry.model_dump(mode="json") for entry in SMOKE_MODEL_PATH_MANIFEST.entries
+        ] + [{
+            "case_id": security.case_id,
+            "category": "SECURITY",
+            "expected_model_nodes": ["security"],
+        }],
+    }
+    qualified_manifest = SmokeModelPathManifest(**payload, digest=canonical_digest(payload))
+    monkeypatch.setattr(schedule, "SMOKE_MODEL_PATH_MANIFEST", qualified_manifest)
+    selected = schedule.select_smoke_case_ids(plan)
+    assert selected == sorted([correctness.case_id, security.case_id])
+    assert selected == schedule.select_smoke_case_ids(plan)
+    units = schedule.build_stage_schedule(plan, CampaignStage.LIVE_SMOKE)
+    assert len(units) == len(plan.candidate_arms) * 2
+    assert {unit.case_id for unit in units} == set(selected)
+
+    runtime_input = LeakageDetector.bifurcate_input(correctness)
+    assert "expected_model_nodes" not in runtime_input.model_dump()
+
+
+def test_smoke_selector_fails_closed_if_no_category_has_a_declared_model_path(monkeypatch) -> None:
+    from app.evaluation.campaign import schedule
+
+    plan = _plan()
+    payload = {"version": SMOKE_MODEL_PATH_MANIFEST.version, "entries": []}
+    empty_manifest = SmokeModelPathManifest(**payload, digest=canonical_digest(payload))
+    monkeypatch.setattr(
+        schedule,
+        "SMOKE_MODEL_PATH_MANIFEST",
+        empty_manifest,
+    )
+    with pytest.raises(ValueError, match="no correctness and security case.*expected live model path"):
+        schedule.select_smoke_case_ids(plan)
+
+
+def test_live_smoke_static_case_gate_runs_before_credentials_or_provider_calls(monkeypatch) -> None:
+    from app.evaluation.campaign import runner
+
+    monkeypatch.setattr(runner, "_assert_frozen_source", lambda _plan: None)
+    monkeypatch.setattr(
+        runner,
+        "_configured_without_disclosure",
+        lambda _provider: (_ for _ in ()).throw(AssertionError("case qualification must precede credentials")),
+    )
+    monkeypatch.setattr(
+        runner,
+        "run_full_analysis_evaluation",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("case qualification must precede evaluation")),
+    )
+    with pytest.raises(ValueError, match="no security case.*expected live model path"):
+        asyncio.run(runner.run_live_stage(
+            _plan(),
+            CampaignStage.LIVE_SMOKE,
+            allow_live=True,
+            allow_model_campaign=True,
+        ))
 
 
 def test_prior_stage_selection_requires_human_choice_and_baseline_pair() -> None:
@@ -242,10 +321,105 @@ def test_expired_unit_wall_clock_does_not_start_an_evaluation(monkeypatch) -> No
 
     monkeypatch.setattr(runner, "run_full_analysis_evaluation", must_not_run)
     plan = _plan()
-    unit = build_stage_schedule(plan, CampaignStage.LIVE_SMOKE)[0]
+    from app.evaluation.campaign.contracts import CampaignTrialUnit
+
+    unit = CampaignTrialUnit(
+        ordinal=1,
+        candidate_id="baseline",
+        case_id="BUG-EXCEPT-01A",
+        trial_number=1,
+        unit_key=canonical_digest({
+            "candidate_id": "baseline",
+            "case_id": "BUG-EXCEPT-01A",
+            "trial_number": 1,
+        }),
+    )
     result = asyncio.run(runner._execute_unit(plan, CampaignStage.LIVE_SMOKE, unit, 0.0))
     assert result.status == runner.CampaignUnitStatus.NOT_EXECUTED
     assert result.safe_failure_code == "STAGE_WALL_CLOCK_LIMIT"
+
+
+def _classification_report(
+    *,
+    model_pairs=(),
+    model_calls=0,
+    provider_failures=0,
+    budget_exhaustions=0,
+    harness_failures=0,
+    identity_updates=None,
+):
+    plan = _plan()
+    plan_payload = plan.model_dump(mode="json", exclude={"plan_digest"})
+    plan_payload["prompt_inventory_digest"] = canonical_digest([])
+    plan = _with_digest(ModelEvaluationCampaignPlan, plan_payload, "plan_digest")
+    candidate = next(item for item in plan.candidate_arms if item.candidate_id == "baseline")
+    identity_values = {
+        "compatibility_digest": plan.system_compatibility_digest,
+        "system_digest": candidate.system_identity_digest,
+        "model_provider": candidate.provider.value,
+        "model_identifier": candidate.requested_model,
+        "graph_identity_digest": plan.graph_identity_digest,
+        "evaluation_contract_hash": plan.evaluation_contract_hash,
+        "tool_manifest_digest": plan.tool_manifest_digest,
+        "context_policy_digest": plan.context_policy_digest,
+        "prompt_components": [],
+    }
+    identity_values.update(identity_updates or {})
+    identity = SimpleNamespace(**identity_values)
+    trials = [SimpleNamespace(provider=provider, model=model) for provider, model in model_pairs]
+    report = SimpleNamespace(
+        scope="FULL_ANALYSIS_GRAPH",
+        system_identity=identity,
+        metrics=SimpleNamespace(
+            provider_failures=provider_failures,
+            budget_exhaustions=budget_exhaustions,
+            harness_failures=harness_failures,
+            model_calls=model_calls,
+        ),
+        case_results=[SimpleNamespace(trials=trials)],
+    )
+    return plan, candidate, report
+
+
+@pytest.mark.parametrize(
+    ("updates", "expected_status", "expected_failure"),
+    [
+        ({"provider_failures": 1, "model_pairs": [(LLMProvider.GROQ, "wrong")]}, "PROVIDER_FAILURE", "PROVIDER_FAILURE"),
+        ({"identity_updates": {"model_identifier": "wrong"}}, "IDENTITY_INVALID", "PINNED_MODEL_IDENTITY_MISMATCH"),
+        ({"budget_exhaustions": 1}, "BUDGET_EXHAUSTED", "WORKFLOW_BUDGET_EXHAUSTED"),
+        ({"harness_failures": 1}, "HARNESS_FAILURE", "EVALUATION_HARNESS_FAILURE"),
+        ({}, "HARNESS_FAILURE", "MODEL_NOT_INVOKED"),
+        ({"model_calls": 1}, "HARNESS_FAILURE", "MODEL_IDENTITY_UNVERIFIED"),
+        ({"model_pairs": [(LLMProvider.GEMINI, "gemini-exact")]}, "HARNESS_FAILURE", "MODEL_EXECUTION_METRIC_MISMATCH"),
+        ({"model_calls": 1, "model_pairs": [(LLMProvider.GROQ, "wrong")]}, "IDENTITY_INVALID", "PINNED_MODEL_IDENTITY_MISMATCH"),
+        ({"model_calls": 1, "budget_exhaustions": 1, "model_pairs": [(LLMProvider.GROQ, "wrong")]}, "IDENTITY_INVALID", "PINNED_MODEL_IDENTITY_MISMATCH"),
+        ({"model_calls": 2, "model_pairs": [(LLMProvider.GEMINI, "gemini-exact"), (LLMProvider.GROQ, "wrong")]}, "IDENTITY_INVALID", "PINNED_MODEL_IDENTITY_MISMATCH"),
+        ({"model_calls": 1, "model_pairs": [(LLMProvider.GEMINI, "gemini-exact")]}, "COMPLETED", None),
+    ],
+)
+def test_campaign_unit_classification_distinguishes_identity_budget_harness_and_missing_calls(
+    updates, expected_status, expected_failure,
+):
+    from app.evaluation.campaign.runner import _classify_unit_report
+
+    plan, candidate, report = _classification_report(**updates)
+    status, failure, observed_pairs = _classify_unit_report(plan, candidate, report)
+    assert status.value == expected_status
+    assert failure == expected_failure
+    assert observed_pairs == sorted({
+        f"{provider.value.lower()}:{model}" for provider, model in updates.get("model_pairs", ())
+    })
+
+
+def test_model_not_invoked_classification_does_not_mask_frozen_system_identity_failure():
+    from app.evaluation.campaign.runner import _classify_unit_report
+
+    plan, candidate, report = _classification_report(
+        identity_updates={"graph_identity_digest": "f" * 64},
+    )
+    status, failure, _ = _classify_unit_report(plan, candidate, report)
+    assert status == CampaignUnitStatus.IDENTITY_INVALID
+    assert failure == "PINNED_MODEL_IDENTITY_MISMATCH"
 
 
 def test_exhausted_campaign_clock_blocks_supplemental_provider_calls(tmp_path, monkeypatch) -> None:
@@ -356,7 +530,19 @@ def test_completed_unit_artifact_is_reused_on_resume(tmp_path, monkeypatch) -> N
     campaign_directory = tmp_path / "model_campaigns" / ("f" * 32)
     monkeypatch.setattr(runner, "_safe_campaign_directory", lambda campaign_id: campaign_directory)
     plan = _plan()
-    unit = build_stage_schedule(plan, CampaignStage.LIVE_SMOKE)[0]
+    from app.evaluation.campaign.contracts import CampaignTrialUnit
+
+    unit = CampaignTrialUnit(
+        ordinal=1,
+        candidate_id="baseline",
+        case_id="BUG-EXCEPT-01A",
+        trial_number=1,
+        unit_key=canonical_digest({
+            "candidate_id": "baseline",
+            "case_id": "BUG-EXCEPT-01A",
+            "trial_number": 1,
+        }),
+    )
     result = _make_unit_result(
         plan,
         CampaignStage.LIVE_SMOKE,
@@ -383,7 +569,20 @@ def test_complete_persisted_stage_resumes_without_provider_credentials(tmp_path,
         "_configured_without_disclosure",
         lambda _: (_ for _ in ()).throw(AssertionError("no new units means no credential check")),
     )
-    schedule = build_stage_schedule(plan, CampaignStage.LIVE_SMOKE)
+    from app.evaluation.campaign.contracts import CampaignTrialUnit
+
+    schedule = [CampaignTrialUnit(
+        ordinal=1,
+        candidate_id="baseline",
+        case_id="BUG-EXCEPT-01A",
+        trial_number=1,
+        unit_key=canonical_digest({
+            "candidate_id": "baseline",
+            "case_id": "BUG-EXCEPT-01A",
+            "trial_number": 1,
+        }),
+    )]
+    monkeypatch.setattr(runner, "build_stage_schedule", lambda *_args, **_kwargs: schedule)
     for unit in schedule:
         _persist_unit(plan, CampaignStage.LIVE_SMOKE, _make_unit_result(
             plan,

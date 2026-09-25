@@ -255,6 +255,58 @@ def _persist_unit(plan: ModelEvaluationCampaignPlan, stage: CampaignStage, resul
         stream.write(result.model_dump_json(indent=2) + "\n")
 
 
+def _report_model_pairs(report: Any) -> set[str]:
+    pairs: set[str] = set()
+    for case in report.case_results:
+        for trial in case.trials:
+            if trial.provider is not None and trial.model:
+                pairs.add(f"{trial.provider.value.lower()}:{trial.model}")
+    return pairs
+
+
+def _classify_unit_report(
+    plan: ModelEvaluationCampaignPlan,
+    candidate: Any,
+    report: Any,
+) -> tuple[CampaignUnitStatus, str | None, list[str]]:
+    """Classify workflow failures separately from pinned-model identity failures."""
+    expected_pair = f"{candidate.provider.value.lower()}:{candidate.requested_model}"
+    actual_pairs = _report_model_pairs(report)
+    identity = report.system_identity
+    identity_valid = (
+        report.scope == "FULL_ANALYSIS_GRAPH"
+        and identity.compatibility_digest == plan.system_compatibility_digest
+        and identity.system_digest == candidate.system_identity_digest
+        and identity.model_provider == candidate.provider.value
+        and identity.model_identifier == candidate.requested_model
+        and identity.graph_identity_digest == plan.graph_identity_digest
+        and identity.evaluation_contract_hash == plan.evaluation_contract_hash
+        and identity.tool_manifest_digest == plan.tool_manifest_digest
+        and identity.context_policy_digest == plan.context_policy_digest
+        and canonical_digest([item.model_dump(mode="json") for item in identity.prompt_components])
+        == plan.prompt_inventory_digest
+    )
+    if report.metrics.provider_failures > 0:
+        status, failure = CampaignUnitStatus.PROVIDER_FAILURE, "PROVIDER_FAILURE"
+    elif not identity_valid or (actual_pairs and actual_pairs != {expected_pair}):
+        status, failure = CampaignUnitStatus.IDENTITY_INVALID, "PINNED_MODEL_IDENTITY_MISMATCH"
+    elif report.metrics.budget_exhaustions > 0:
+        status, failure = CampaignUnitStatus.BUDGET_EXHAUSTED, "WORKFLOW_BUDGET_EXHAUSTED"
+    elif report.metrics.harness_failures > 0:
+        status, failure = CampaignUnitStatus.HARNESS_FAILURE, "EVALUATION_HARNESS_FAILURE"
+    elif actual_pairs and report.metrics.model_calls == 0:
+        status, failure = CampaignUnitStatus.HARNESS_FAILURE, "MODEL_EXECUTION_METRIC_MISMATCH"
+    elif not actual_pairs and report.metrics.model_calls == 0:
+        status, failure = CampaignUnitStatus.HARNESS_FAILURE, "MODEL_NOT_INVOKED"
+    elif not actual_pairs:
+        # The report records a call but lacks identity attestation. This is a
+        # harness failure, not contradictory evidence that another model ran.
+        status, failure = CampaignUnitStatus.HARNESS_FAILURE, "MODEL_IDENTITY_UNVERIFIED"
+    else:
+        status, failure = CampaignUnitStatus.COMPLETED, None
+    return status, failure, sorted(actual_pairs)
+
+
 async def _execute_unit(
     plan: ModelEvaluationCampaignPlan,
     stage: CampaignStage,
@@ -299,39 +351,10 @@ async def _execute_unit(
         status = CampaignUnitStatus.PROVIDER_FAILURE if failure == "PROVIDER_FAILURE" else CampaignUnitStatus.HARNESS_FAILURE
         return _make_unit_result(plan, stage, unit, status, started_at, failure_code=failure)
 
-    expected_pair = f"{candidate.provider.value.lower()}:{candidate.requested_model}"
-    actual_pairs: set[str] = set()
-    for case in report.case_results:
-        for trial in case.trials:
-            if trial.provider is not None and trial.model:
-                actual_pairs.add(f"{trial.provider.value.lower()}:{trial.model}")
-    identity = report.system_identity
-    identity_valid = (
-        report.scope == "FULL_ANALYSIS_GRAPH"
-        and report.system_identity.compatibility_digest == plan.system_compatibility_digest
-        and report.system_identity.system_digest == candidate.system_identity_digest
-        and report.system_identity.model_provider == candidate.provider.value
-        and report.system_identity.model_identifier == candidate.requested_model
-        and report.system_identity.graph_identity_digest == plan.graph_identity_digest
-        and report.system_identity.evaluation_contract_hash == plan.evaluation_contract_hash
-        and report.system_identity.tool_manifest_digest == plan.tool_manifest_digest
-        and report.system_identity.context_policy_digest == plan.context_policy_digest
-        and canonical_digest([item.model_dump(mode="json") for item in identity.prompt_components])
-        == plan.prompt_inventory_digest
-    )
-    if report.metrics.provider_failures > 0:
-        status, failure = CampaignUnitStatus.PROVIDER_FAILURE, "PROVIDER_FAILURE"
-    elif not identity_valid or actual_pairs != {expected_pair}:
-        status, failure = CampaignUnitStatus.IDENTITY_INVALID, "PINNED_MODEL_IDENTITY_MISMATCH"
-    elif report.metrics.budget_exhaustions > 0:
-        status, failure = CampaignUnitStatus.BUDGET_EXHAUSTED, "WORKFLOW_BUDGET_EXHAUSTED"
-    elif report.metrics.harness_failures > 0:
-        status, failure = CampaignUnitStatus.HARNESS_FAILURE, "EVALUATION_HARNESS_FAILURE"
-    else:
-        status, failure = CampaignUnitStatus.COMPLETED, None
+    status, failure, actual_pairs = _classify_unit_report(plan, candidate, report)
     return _make_unit_result(
         plan, stage, unit, status, started_at, report=report,
-        observed_model_pairs=sorted(actual_pairs), failure_code=failure,
+        observed_model_pairs=actual_pairs, failure_code=failure,
     )
 
 
