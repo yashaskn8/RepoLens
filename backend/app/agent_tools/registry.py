@@ -294,6 +294,14 @@ class AgentToolRegistry:
     def list_tools(self) -> list[ToolMetadata]:
         return [self._specs[name].metadata.model_copy(deep=True) for name in sorted(self._specs)]
 
+    @classmethod
+    def canonical_metadata(cls) -> list[ToolMetadata]:
+        """Return the trusted registry catalog without scan-bound context."""
+        return [
+            spec.metadata.model_copy(deep=True)
+            for spec in sorted(_SPECS, key=lambda item: item.metadata.tool_name)
+        ]
+
     @property
     def default_snapshot_id(self) -> str:
         """Return the immutable snapshot identity bound to this registry."""

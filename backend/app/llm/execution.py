@@ -59,6 +59,20 @@ class AIExecutionRecord(BaseModel):
     created_at: datetime
 
 
+def measured_provider_token_observations(record: AIExecutionRecord) -> tuple[tuple[str, int], ...]:
+    """Return only provider-measured usage fields; absent usage is not zero."""
+    observations: list[tuple[str, int]] = []
+    for field, metric_name in (
+        ("total_tokens", "provider.tokens"),
+        ("input_tokens", "provider.input_tokens"),
+        ("output_tokens", "provider.output_tokens"),
+    ):
+        value = getattr(record, field)
+        if value is not None:
+            observations.append((metric_name, value))
+    return tuple(observations)
+
+
 class AIExecutionStore(Protocol):
     def append(self, record: AIExecutionRecord) -> None: ...
 
@@ -210,16 +224,19 @@ class CanonicalSQLAlchemyAIExecutionStore:
                 unit="milliseconds",
                 dimensions=dimensions,
             )
-            TelemetryRecorder.record(
-                db,
-                tenant_id=record.tenant_id,
-                request_id=record.request_id,
-                work_item_id=record.work_item_id,
-                metric_name="provider.tokens",
-                value=float(record.total_tokens or 0),
-                unit="tokens",
-                dimensions=dimensions,
-            )
+            # Provider token usage is unknown unless the adapter actually
+            # supplied it. Never turn missing usage metadata into a false zero.
+            for metric_name, token_count in measured_provider_token_observations(record):
+                TelemetryRecorder.record(
+                    db,
+                    tenant_id=record.tenant_id,
+                    request_id=record.request_id,
+                    work_item_id=record.work_item_id,
+                    metric_name=metric_name,
+                    value=float(token_count),
+                    unit="tokens",
+                    dimensions=dimensions,
+                )
             context_metrics = record.generation_settings.get("context_metrics")
             if isinstance(context_metrics, dict):
                 for metric_name, field_name, unit in (

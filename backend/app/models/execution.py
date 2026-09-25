@@ -91,6 +91,8 @@ class WorkItemModel(Base):
         Index("ix_execution_claim", "state", "available_at", "priority", "created_at"),
         Index("ix_execution_tenant_active", "tenant_id", "state"),
         Index("ix_execution_subject", "tenant_id", "resource_type", "resource_id"),
+        Index("ix_execution_terminal_window", "terminal_at", "state"),
+        Index("ix_execution_started_window", "started_at"),
     )
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))

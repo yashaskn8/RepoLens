@@ -11,6 +11,15 @@ from .tracing import (
     mcp_server_tool_span_active,
     is_mcp_server_tool_span_active,
 )
+from .metrics import (
+    METRIC_CATALOG,
+    METRIC_CATALOG_VERSION,
+    configure_metrics,
+    metrics_enabled,
+    record_metric,
+    replace_metric_gauges,
+    shutdown_metrics,
+)
 
 __all__ = [
     "configure_tracing",
@@ -22,4 +31,11 @@ __all__ = [
     "span_event",
     "mcp_server_tool_span_active",
     "is_mcp_server_tool_span_active",
+    "METRIC_CATALOG",
+    "METRIC_CATALOG_VERSION",
+    "configure_metrics",
+    "metrics_enabled",
+    "record_metric",
+    "replace_metric_gauges",
+    "shutdown_metrics",
 ]

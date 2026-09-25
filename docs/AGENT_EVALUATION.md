@@ -351,3 +351,7 @@ For provider/model comparisons across the unchanged full-analysis workflow, see
 [Live Model Evaluation Campaigns](LIVE_MODEL_EVALUATION.md). Campaign reports
 are separate from prompt optimization and do not alter model routing or
 production configuration.
+
+For process/readiness probes, operator-only operations snapshots, SQL-backed
+SLIs, and optional content-minimized OTLP metrics, see
+[Agent Operations and SLOs](AGENT_OPERATIONS.md).

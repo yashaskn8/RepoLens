@@ -51,9 +51,15 @@ async def lifespan(app: FastAPI):
     from app.execution.dispatcher import DurableWorkDispatcher
     from app.governance.outbox import RelationalOutboxRelay
     from app.llm.router import configure_persistent_llm_router
-    from app.observability import configure_tracing, shutdown_tracing
+    from app.observability import (
+        configure_metrics,
+        configure_tracing,
+        shutdown_metrics,
+        shutdown_tracing,
+    )
 
     configure_tracing(settings)
+    configure_metrics(settings)
 
     available_tables = set(inspect(engine).get_table_names())
     if settings.is_production:
@@ -90,6 +96,7 @@ async def lifespan(app: FastAPI):
     RelationalOutboxRelay.stop()
     await DurableWorkDispatcher.stop()
     await redis_mgr.close()
+    shutdown_metrics()
     shutdown_tracing()
 
 
@@ -172,6 +179,24 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             response: Response = await call_next(request)
             request_span.set_attribute("http.response.status_code", response.status_code)
         duration_ms = max(0.0, (time.monotonic() - started) * 1000.0)
+        try:
+            from app.observability import record_metric
+
+            method = request.method if request.method in {
+                "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"
+            } else "UNKNOWN"
+            status_class = f"{response.status_code // 100}xx" if 100 <= response.status_code <= 599 else "unknown"
+            record_metric(
+                "http.server.request.duration",
+                duration_ms / 1000.0,
+                {
+                    "http.request.method": method,
+                    "http.response.status_class": status_class,
+                },
+            )
+        except Exception:
+            # Metric/exporter failures never affect the HTTP response.
+            pass
         response.headers["X-Request-ID"] = request_id
         response.headers["X-API-Version"] = settings.API_CURRENT_VERSION
         response.headers["X-API-Minimum-Version"] = settings.API_MINIMUM_SUPPORTED_VERSION

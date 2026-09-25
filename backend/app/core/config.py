@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 import re
-from typing import List, Literal, Optional, Union
+from typing import Dict, List, Literal, Optional, Union
 from urllib.parse import urlparse
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -90,10 +90,18 @@ class Settings(BaseSettings):
     # Optional vendor-neutral distributed tracing. Disabled by default and
     # content-free even when enabled. OTLP headers are exporter-only secrets.
     OTEL_ENABLED: bool = False
+    OTEL_METRICS_ENABLED: bool = False
     OTEL_SERVICE_NAME: str = Field(default="repolens", min_length=1, max_length=128)
     OTEL_SAMPLE_RATIO: float = Field(default=1.0, ge=0.0, le=1.0)
     OTEL_EXPORTER_OTLP_ENDPOINT: str = ""
     OTEL_EXPORTER_OTLP_HEADERS: str = ""
+
+    # SQL-authoritative SLO evaluation. Objectives are intentionally empty by
+    # default: deployments must set explicit targets before ENFORCED mode.
+    AGENT_SLO_MODE: Literal["OBSERVE", "ENFORCED"] = "OBSERVE"
+    AGENT_SLO_OBJECTIVES: Dict[str, float] = Field(default_factory=dict)
+    AGENT_SLO_MIN_SAMPLES: int = Field(default=20, ge=1, le=100_000)
+    AGENT_SLO_BURN_RATE_THRESHOLD: Optional[float] = Field(default=None, gt=0, le=10_000)
 
     # Shared workflow cloud-use governor.  Local Ollama, cache hits, and
     # deterministic work never consume these limits.
@@ -313,6 +321,20 @@ class Settings(BaseSettings):
             self.AI_ECONOMY_QUALITY_MAX_CLOUD_TOKENS,
         ) < 1:
             raise ValueError("AI economy cloud ceilings must be positive")
+        allowed_sli_names = {
+            "work_reliability",
+            "github_automation_reliability",
+            "provider_reliability",
+        }
+        if set(self.AGENT_SLO_OBJECTIVES) - allowed_sli_names:
+            raise ValueError("AGENT_SLO_OBJECTIVES contains an unsupported SLI name")
+        if any(
+            not 0.0 <= objective < 1.0
+            for objective in self.AGENT_SLO_OBJECTIVES.values()
+        ):
+            raise ValueError("SLO objectives must be between 0 and 1, excluding 1")
+        if self.AGENT_SLO_MODE == "ENFORCED" and not self.AGENT_SLO_OBJECTIVES:
+            raise ValueError("AGENT_SLO_MODE=ENFORCED requires explicit AGENT_SLO_OBJECTIVES")
         if self.ENABLE_API_DOCS is None:
             self.ENABLE_API_DOCS = not self.is_production
 

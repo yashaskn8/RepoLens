@@ -3,7 +3,7 @@ import logging
 import os
 import tempfile
 from typing import Any, Dict, List
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.schema_readiness import missing_scan_storage_tables
+from app.api.dependencies import require_operator
 from app.models.finding import FindingModel
 from app.models.patch import PatchModel
 from app.models.scan import ScanModel
@@ -23,6 +24,7 @@ from app.schemas.telemetry import (
     StorageTelemetry,
     TelemetryReport,
 )
+from app.schemas.auth import CurrentUser
 
 router = APIRouter(prefix="/health", tags=["Health & Telemetry"])
 settings = get_settings()
@@ -30,6 +32,35 @@ settings = get_settings()
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+@router.get("/live", status_code=status.HTTP_200_OK)
+def liveness() -> dict[str, str]:
+    """Process-only probe: deliberately performs no database/provider work."""
+    return {"status": "alive"}
+
+
+@router.get("/ready")
+async def readiness(response: Response, db: Session = Depends(get_db)) -> dict[str, str]:
+    """Readiness requires schema and checkpointer, but never calls an LLM."""
+    from app.observability.operations import check_checkpointer_readiness, schema_readiness
+
+    database_ready = False
+    schema: dict[str, Any] = {"ready": False}
+    try:
+        db.execute(text("SELECT 1"))
+        database_ready = True
+        schema = schema_readiness(db)
+    except Exception:
+        database_ready = False
+        schema = {"ready": False}
+    checkpointer = await check_checkpointer_readiness(get_settings())
+    ready = database_ready and bool(schema["ready"]) and bool(checkpointer["ready"])
+    if not ready:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    # Public health responses reveal no database names, paths, provider states,
+    # checkpoint details, or operational counts.
+    return {"status": "ready" if ready else "not_ready"}
 
 
 @router.get(
@@ -197,8 +228,11 @@ def _build_telemetry_report(db: Session) -> TelemetryReport:
     description="Returns comprehensive system observability metrics, database status, provider availability, and storage health.",
     response_model=TelemetryReport,
 )
-def get_detailed_health(db: Session = Depends(get_db)) -> TelemetryReport:
-    """Retrieve complete system observability telemetry."""
+def get_detailed_health(
+    _operator: CurrentUser = Depends(require_operator),
+    db: Session = Depends(get_db),
+) -> TelemetryReport:
+    """Retrieve detailed system telemetry for authenticated operators only."""
     return _build_telemetry_report(db)
 
 
@@ -209,6 +243,9 @@ def get_detailed_health(db: Session = Depends(get_db)) -> TelemetryReport:
     description="Operational telemetry and observability monitoring endpoint.",
     response_model=TelemetryReport,
 )
-def get_api_telemetry(db: Session = Depends(get_db)) -> TelemetryReport:
-    """Retrieve operational telemetry."""
+def get_api_telemetry(
+    _operator: CurrentUser = Depends(require_operator),
+    db: Session = Depends(get_db),
+) -> TelemetryReport:
+    """Retrieve operational telemetry for authenticated operators only."""
     return _build_telemetry_report(db)

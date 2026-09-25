@@ -884,6 +884,16 @@ class DurableWorkDispatcher:
                 tenant_id=claim.tenant_id,
                 request_id=work.request_id,
                 work_item_id=claim.work_item_id,
+                metric_name="job.started",
+                value=1,
+                unit="count",
+                dimensions={"work_kind": claim.work_kind.value},
+            )
+            TelemetryRecorder.record(
+                db,
+                tenant_id=claim.tenant_id,
+                request_id=work.request_id,
+                work_item_id=claim.work_item_id,
                 metric_name="job.queue_wait",
                 value=queue_wait,
                 unit="seconds",
@@ -952,6 +962,16 @@ class DurableWorkDispatcher:
                     unit="seconds",
                     dimensions={"work_kind": claim.work_kind.value, "outcome": result.outcome.value},
                 )
+            TelemetryRecorder.record(
+                db,
+                tenant_id=claim.tenant_id,
+                request_id=work.request_id,
+                work_item_id=claim.work_item_id,
+                metric_name="job.completed",
+                value=1,
+                unit="count",
+                dimensions={"work_kind": claim.work_kind.value},
+            )
             db.commit()
         except Exception:
             db.rollback()
@@ -1002,6 +1022,16 @@ class DurableWorkDispatcher:
                 resource_id=claim.work_item_id,
                 state_digest=work.request_digest,
                 payload={"failure_code": failure.code.value, "next_state": next_state.value},
+            )
+            TelemetryRecorder.record(
+                db,
+                tenant_id=claim.tenant_id,
+                request_id=work.request_id,
+                work_item_id=claim.work_item_id,
+                metric_name="job.attempt_failed",
+                value=1,
+                unit="count",
+                dimensions={"work_kind": claim.work_kind.value},
             )
             TelemetryRecorder.record(
                 db,

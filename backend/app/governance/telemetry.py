@@ -33,6 +33,13 @@ class TelemetryRecorder:
         )
         db.add(model)
         db.flush()
+        try:
+            from app.observability.metrics import emit_sql_metric
+
+            emit_sql_metric(metric_name, float(value), unit, dimensions or {})
+        except Exception:
+            # SQL remains the durable authority; optional metric export is best effort.
+            pass
         return model
 
     @staticmethod

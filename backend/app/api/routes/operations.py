@@ -1,14 +1,15 @@
 """Operator-only policy, audit-integrity, outbox, and telemetry controls."""
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import require_operator, verify_csrf
+from app.core.config import Settings, get_settings
 from app.core.database import get_db
 from app.governance.events import AuditLedger, DomainOutbox
 from app.governance.policies import OperationalPolicy, OperationalPolicyService
@@ -25,6 +26,33 @@ from app.schemas.auth import CurrentUser
 
 
 router = APIRouter(prefix="/operations", tags=["Operations"])
+
+
+@router.get("/overview")
+async def get_operations_overview(
+    _operator: CurrentUser = Depends(require_operator),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    """Operator-only bounded snapshot over existing runtime authorities."""
+    from app.observability.operations import build_operations_overview, check_checkpointer_readiness
+
+    checkpointer = await check_checkpointer_readiness(settings)
+    return build_operations_overview(db, settings=settings, checkpointer=checkpointer)
+
+
+@router.get("/slo")
+def get_operations_slo(
+    window: Literal["5m", "1h", "6h", "24h", "7d"] = Query(default="24h"),
+    _operator: CurrentUser = Depends(require_operator),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    """Operator-only SLO view computed from canonical SQL domain records."""
+    from app.observability.slo import SLOPolicy, build_slo_report
+
+    policy = SLOPolicy.from_settings(settings)
+    return build_slo_report(db, policy=policy, primary_window=window).model_dump(mode="json")
 
 
 class PolicyResource(BaseModel):
