@@ -1,6 +1,7 @@
 """SQL-authoritative SLO and optional low-cardinality metric contracts."""
 
 from datetime import datetime, timedelta, timezone
+from contextlib import contextmanager
 import hashlib
 from types import SimpleNamespace
 from uuid import uuid4
@@ -308,12 +309,30 @@ def test_sql_snapshot_gauges_replace_old_bounded_series(monkeypatch) -> None:
 
 def test_operator_operations_endpoints_are_bounded_and_public_probes_are_minimal(client, monkeypatch) -> None:
     from app.observability import operations
+    import app.observability as observability
+    import app.main as main
 
     async def ready_check(_settings):
         return {"ready": True, "backend": "TEST", "state": "CONNECTED"}
 
+    monkeypatch.setattr(operations, "schema_readiness", lambda _db: {"ready": True})
     monkeypatch.setattr(operations, "check_checkpointer_readiness", ready_check)
+    liveness_telemetry_calls = []
+    span_calls = []
+    metric_calls = []
+
+    @contextmanager
+    def track_span(*args, **kwargs):
+        span_calls.append(args[0] if args else "unknown")
+        yield SimpleNamespace(set_attribute=lambda *_args, **_kwargs: None)
+
+    monkeypatch.setattr(observability, "span", track_span)
+    monkeypatch.setattr(observability, "record_metric", lambda *args, **kwargs: metric_calls.append(args))
+    monkeypatch.setattr(main, "_record_request_duration", lambda **kwargs: liveness_telemetry_calls.append(kwargs))
     assert client.get("/health/live").json() == {"status": "alive"}
+    assert liveness_telemetry_calls == []
+    assert span_calls == []
+    assert metric_calls == []
     ready = client.get("/health/ready")
     assert ready.status_code == 200
     assert ready.json() == {"status": "ready"}

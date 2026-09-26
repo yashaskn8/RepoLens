@@ -13,28 +13,36 @@ RepoLens is an AI-powered repository intelligence and automated remediation engi
 ## Canonical Package Metadata
 
 `pyproject.toml` is the authoritative source for all package dependencies and configuration.
-`requirements.txt` is aligned with `pyproject.toml` for standard pip workflows.
+`requirements.txt` is a local-development compatibility wrapper around the `dev` extra. Do not use it for production.
 
 ## Installation & Setup
 
 ```bash
-# Install package with all runtime dependencies
-pip install .
-
-# Install with development and test dependencies
-pip install -e ".[dev]"
-
-# Optional PostgreSQL/pgvector runtime support
-pip install -e ".[postgres]"
+# Local development and tests
+python -m pip install -e ".[dev]"
 ```
 
-## Running Migrations & Server
+## Production install and startup
+
+Production requires PostgreSQL for both the SQL execution authority and LangGraph durable checkpoints. From `backend`, install the production extra, configure the environment, migrate before startup, then run the zero-network import preflight:
 
 ```bash
-# Apply latest schema migrations
-alembic upgrade head
+python -m pip install -e ".[production]"
+# Set DATABASE_URL, AUTH_COOKIE_SECURE=true, deployed CORS_ORIGINS,
+# and TRUSTED_HOSTS in the deployment environment.
+python -m alembic upgrade head
+python -m app.cli.production_preflight
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
 
-# Start FastAPI development server
+Application startup fails closed before background workers if PostgreSQL, the exact repository Alembic head, the complete ORM schema, the PostgreSQL checkpointer, or required local artifact storage is unavailable. Startup never applies migrations. `/health/live` is process-only; `/health/ready` checks database connectivity, migration revision, complete application schema, and checkpointer readiness, and returns only `ready` or `not_ready`.
+
+For local development, SQLite remains supported:
+
+```bash
+python -m pip install -e ".[dev]"
+python -m alembic upgrade head
+
 uvicorn app.main:app --reload --port 8000
 ```
 
@@ -44,7 +52,7 @@ uvicorn app.main:app --reload --port 8000
 pytest
 ```
 
-The suite currently collects 953 tests; external-service tests skip cleanly unless explicitly configured.
+External-service tests skip cleanly unless explicitly configured.
 
 ## Manual Validation
 

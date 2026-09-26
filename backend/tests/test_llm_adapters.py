@@ -6,6 +6,7 @@ import httpx
 from unittest.mock import patch, MagicMock
 
 from app.llm.adapters import GeminiAdapter, GroqAdapter, HuggingFaceAdapter, NvidiaAdapter
+from app.llm.exceptions import LLMError, ProviderFailureCode, ProviderFailureOrigin
 from app.llm.types import LLMMessage, LLMProvider, LLMRequest
 
 
@@ -211,3 +212,146 @@ async def test_huggingface_adapter_mock_generation():
     assert response.content == "HF Qwen code reasoning output"
     assert response.metadata.prompt_tokens == 95
     assert response.metadata.completion_tokens == 50
+
+
+_PROVIDER_ADAPTER_CASES = (
+    (GeminiAdapter, LLMProvider.GEMINI, "gemini-3.8-flash"),
+    (GroqAdapter, LLMProvider.GROQ, "openai/gpt-oss-120b"),
+)
+
+
+def _error_request(model: str) -> LLMRequest:
+    return LLMRequest(
+        messages=[LLMMessage(role="user", content="Synthetic transport test.")],
+        model=model,
+        temperature=0,
+    )
+
+
+@pytest.mark.parametrize(("adapter_type", "provider", "model"), _PROVIDER_ADAPTER_CASES)
+@pytest.mark.parametrize(
+    ("status", "failure_code"),
+    [
+        (500, ProviderFailureCode.UNAVAILABLE),
+        (502, ProviderFailureCode.UNAVAILABLE),
+        (503, ProviderFailureCode.UNAVAILABLE),
+        (401, ProviderFailureCode.AUTH_FAILURE),
+        (403, ProviderFailureCode.AUTH_FAILURE),
+        (429, ProviderFailureCode.RATE_LIMITED),
+    ],
+)
+@pytest.mark.asyncio
+async def test_provider_adapters_retain_sanitized_http_failure_origin(
+    adapter_type, provider, model, status, failure_code, monkeypatch,
+) -> None:
+    response = httpx.Response(
+        status,
+        json={"error": {"message": "synthetic response text must not escape"}},
+        request=httpx.Request("POST", "https://provider.invalid/endpoint"),
+    )
+
+    class FakeAsyncClient:
+        def __init__(self, **_kwargs):
+            self.post_calls = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            self.post_calls += 1
+            return response
+
+    clients = []
+
+    def make_client(**kwargs):
+        client = FakeAsyncClient(**kwargs)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr("httpx.AsyncClient", make_client)
+    adapter = adapter_type(api_key="synthetic-test-key")
+
+    with pytest.raises(LLMError) as captured:
+        await adapter.generate(_error_request(model))
+
+    error = captured.value
+    assert error.provider == provider
+    assert error.model == model
+    assert error.failure_code == failure_code
+    assert error.failure_origin == ProviderFailureOrigin.HTTP
+    assert error.http_status == status
+    assert error.transport_exception_type is None
+    assert len(clients) == 1
+    assert clients[0].post_calls == 1
+    assert "synthetic response text must not escape" not in str(error)
+    assert "synthetic-test-key" not in str(error)
+
+
+@pytest.mark.parametrize(("adapter_type", "provider", "model"), _PROVIDER_ADAPTER_CASES)
+@pytest.mark.parametrize(
+    ("exception_factory", "failure_code", "exception_type"),
+    [
+        (
+            lambda request: httpx.ConnectError("proxy detail must not escape", request=request),
+            ProviderFailureCode.UNAVAILABLE,
+            "ConnectError",
+        ),
+        (
+            lambda request: httpx.ConnectTimeout("timeout detail must not escape", request=request),
+            ProviderFailureCode.TIMEOUT,
+            "ConnectTimeout",
+        ),
+        (
+            lambda request: httpx.ProxyError("proxy credential detail must not escape", request=request),
+            ProviderFailureCode.UNAVAILABLE,
+            "ProxyError",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_provider_adapters_retain_sanitized_transport_failure_origin(
+    adapter_type, provider, model, exception_factory, failure_code, exception_type, monkeypatch,
+) -> None:
+    class FakeAsyncClient:
+        def __init__(self, **_kwargs):
+            self.post_calls = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, **_kwargs):
+            self.post_calls += 1
+            request = httpx.Request("POST", url)
+            raise exception_factory(request)
+
+    clients = []
+
+    def make_client(**kwargs):
+        client = FakeAsyncClient(**kwargs)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr("httpx.AsyncClient", make_client)
+    adapter = adapter_type(api_key="synthetic-test-key")
+
+    with pytest.raises(LLMError) as captured:
+        await adapter.generate(_error_request(model))
+
+    error = captured.value
+    assert error.provider == provider
+    assert error.model == model
+    assert error.failure_code == failure_code
+    assert error.failure_origin == ProviderFailureOrigin.TRANSPORT
+    assert error.http_status is None
+    assert error.transport_exception_type == exception_type
+    assert len(clients) == 1
+    assert clients[0].post_calls == 1
+    assert "detail must not escape" not in str(error)
+    assert "credential detail must not escape" not in str(error)
+    assert "synthetic-test-key" not in str(error)

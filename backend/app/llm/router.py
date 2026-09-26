@@ -247,12 +247,19 @@ class LLMRouter:
         """Generate under one logical content-free router span."""
         from app.observability import span
         from opentelemetry.trace import SpanKind
+        from app.llm.execution import ExecutionProvenanceStage, observe_execution_stage
         from app.llm.evaluation_route import apply_evaluation_model_route
 
         # The context-local evaluator may pin this request to an exact
         # provider/model. Routing still proceeds through the same governed
         # capability gateway and provider adapter path.
         request = apply_evaluation_model_route(request)
+        observe_execution_stage(
+            ExecutionProvenanceStage.MODEL_GATEWAY_REACHED,
+            provider=request.provider,
+            model=request.model,
+            capability=request.capability,
+        )
 
         with span(
             "chat",
@@ -271,6 +278,20 @@ class LLMRouter:
         ) as llm_span:
             response = await self._generate_with_cache(request)
             extra = response.metadata.extra_metadata or {}
+            if extra.get("cache_hit") is True:
+                observe_execution_stage(
+                    ExecutionProvenanceStage.CACHE_HIT,
+                    provider=response.provider,
+                    model=response.model,
+                    capability=request.capability,
+                )
+            if extra.get("provider_call_avoided") is True:
+                observe_execution_stage(
+                    ExecutionProvenanceStage.PROVIDER_CALL_AVOIDED,
+                    provider=response.provider,
+                    model=response.model,
+                    capability=request.capability,
+                )
             reused = bool(extra.get("cache_hit", False) or extra.get("provider_call_avoided", False))
             llm_span.set_attribute("gen_ai.provider.name", response.provider.value)
             llm_span.set_attribute("gen_ai.response.model", response.model)

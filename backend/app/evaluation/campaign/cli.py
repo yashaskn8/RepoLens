@@ -101,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     execution_proof = commands.add_parser(
         "execution-proof",
-        help="Run exactly four opted-in, non-scoring live graph executions for provider identity proof.",
+        help="Run exactly two opted-in, non-scoring live graph executions for provider identity proof.",
     )
     execution_proof.add_argument("--arm", action="append", required=True, metavar="ID=PROVIDER:MODEL")
     execution_proof.add_argument("--allow-live", action="store_true")

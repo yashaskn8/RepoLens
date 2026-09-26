@@ -8,6 +8,16 @@ from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+_DEVELOPMENT_ONLY_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "testserver"})
+
+
+def _normalized_host(value: str) -> str:
+    try:
+        return (urlparse(f"//{value.strip()}").hostname or value).rstrip(".").casefold()
+    except ValueError:
+        return value.casefold()
+
+
 class Settings(BaseSettings):
     """Application settings class supporting .env loading and environment overrides."""
 
@@ -65,7 +75,7 @@ class Settings(BaseSettings):
     OLLAMA_MAX_OUTPUT_TOKENS: int = 2048
 
     # Canonical Policy Model IDs
-    MODEL_ARCHITECTURE: str = "gemini-3.7-flash"
+    MODEL_ARCHITECTURE: str = "gemini-3.8-flash"
     MODEL_INTEGRATION_CODE: str = "Qwen/Qwen3-Coder-Next"
     MODEL_BUG_REASONING: str = "poolside/laguna-xs-2.1"
     MODEL_SECURITY_REASONING: str = "openai/gpt-oss-120b"
@@ -400,23 +410,6 @@ class Settings(BaseSettings):
                 raise ValueError("GITHUB_APP_CALLBACK_URL contains an invalid port.") from exc
 
         if self.is_production:
-            if self.CHECKPOINT_BACKEND in {"SQLITE", "MEMORY_TEST_ONLY"}:
-                raise ValueError(
-                    "Production LangGraph execution requires CHECKPOINT_BACKEND=AUTO or POSTGRES."
-                )
-            checkpoint_url = self.CHECKPOINT_DATABASE_URL or self.DATABASE_URL
-            if self.CHECKPOINT_BACKEND == "POSTGRES" and not checkpoint_url.lower().startswith(
-                (
-                    "postgresql://",
-                    "postgresql+psycopg://",
-                    "postgresql+psycopg2://",
-                    "postgresql+asyncpg://",
-                    "postgres://",
-                )
-            ):
-                raise ValueError(
-                    "CHECKPOINT_BACKEND=POSTGRES requires a PostgreSQL CHECKPOINT_DATABASE_URL or DATABASE_URL."
-                )
             if not self.AUTH_COOKIE_SECURE:
                 raise ValueError("CRITICAL CONFIGURATION ERROR: In production environment, AUTH_COOKIE_SECURE must be True.")
 
@@ -426,6 +419,7 @@ class Settings(BaseSettings):
                 raise ValueError("CRITICAL CONFIGURATION ERROR: In production environment, CORS_ORIGINS must not be empty.")
             if "*" in cors:
                 raise ValueError("CRITICAL CONFIGURATION ERROR: Wildcard CORS origin ('*') is prohibited in production.")
+            cors_hosts: set[str] = set()
             for origin in cors:
                 parsed = urlparse(origin)
                 if not parsed.scheme or not parsed.netloc or parsed.scheme not in ("http", "https"):
@@ -434,13 +428,44 @@ class Settings(BaseSettings):
                     raise ValueError(f"Invalid CORS origin '{origin}': origin must not contain paths")
                 if parsed.query or parsed.fragment:
                     raise ValueError(f"Invalid CORS origin '{origin}': origin must not contain query parameters or fragments")
+                if parsed.hostname is None or "*" in parsed.hostname:
+                    raise ValueError("CRITICAL CONFIGURATION ERROR: Wildcard CORS hosts are prohibited in production.")
+                cors_hosts.add(_normalized_host(parsed.hostname))
+            if cors_hosts and cors_hosts.issubset(_DEVELOPMENT_ONLY_HOSTS):
+                raise ValueError(
+                    "CRITICAL CONFIGURATION ERROR: Production CORS_ORIGINS cannot contain only development hosts."
+                )
 
             # Trusted hosts validation in production
             hosts = self.TRUSTED_HOSTS if isinstance(self.TRUSTED_HOSTS, list) else [self.TRUSTED_HOSTS]
             if not hosts:
                 raise ValueError("CRITICAL CONFIGURATION ERROR: In production environment, TRUSTED_HOSTS must not be empty.")
-            if "*" in hosts:
+            if any("*" in host for host in hosts):
                 raise ValueError("CRITICAL CONFIGURATION ERROR: Wildcard Trusted Hosts ('*') is prohibited in production.")
+            normalized_hosts = {_normalized_host(host) for host in hosts}
+            if normalized_hosts and normalized_hosts.issubset(_DEVELOPMENT_ONLY_HOSTS):
+                raise ValueError(
+                    "CRITICAL CONFIGURATION ERROR: Production TRUSTED_HOSTS cannot contain only development hosts."
+                )
+
+            database_scheme = urlparse(self.DATABASE_URL).scheme.casefold()
+            database_backend, separator, database_driver = database_scheme.partition("+")
+            if database_backend not in {"postgres", "postgresql"} or (
+                separator and database_driver != "psycopg"
+            ):
+                raise ValueError(
+                    "Production DATABASE_URL must use PostgreSQL with the supported psycopg driver."
+                )
+            if self.CHECKPOINT_BACKEND in {"SQLITE", "MEMORY_TEST_ONLY"}:
+                raise ValueError(
+                    "Production LangGraph execution requires CHECKPOINT_BACKEND=AUTO or POSTGRES."
+                )
+            checkpoint_url = self.CHECKPOINT_DATABASE_URL or self.DATABASE_URL
+            checkpoint_scheme = urlparse(checkpoint_url).scheme.casefold()
+            if checkpoint_scheme.partition("+")[0] not in {"postgres", "postgresql"}:
+                raise ValueError(
+                    "Production checkpoint configuration must use PostgreSQL."
+                )
 
         return self
 
@@ -459,6 +484,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
 

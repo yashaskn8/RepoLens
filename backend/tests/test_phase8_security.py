@@ -181,6 +181,8 @@ def test_production_and_dev_enable_api_docs_defaults():
     """Verify ENABLE_API_DOCS defaults to False in production and True in dev."""
     prod_s = Settings(
         ENVIRONMENT="production",
+        DATABASE_URL="postgresql+psycopg://test:test@db.example/repolens",
+        CHECKPOINT_BACKEND="POSTGRES",
         AUTH_COOKIE_SECURE=True,
         CORS_ORIGINS=["https://app.example.com"],
         TRUSTED_HOSTS=["app.example.com"],
@@ -195,6 +197,8 @@ def test_production_and_dev_enable_api_docs_defaults():
     # Explicit override in production is preserved if configured
     prod_custom = Settings(
         ENVIRONMENT="production",
+        DATABASE_URL="postgresql+psycopg://test:test@db.example/repolens",
+        CHECKPOINT_BACKEND="POSTGRES",
         AUTH_COOKIE_SECURE=True,
         CORS_ORIGINS=["https://app.example.com"],
         TRUSTED_HOSTS=["app.example.com"],
@@ -537,6 +541,8 @@ def test_production_csrf_rejects_localhost_and_arbitrary_origins():
     """In production, CSRF validation must reject localhost, testserver, and subdomain evil origins."""
     prod_settings = Settings(
         ENVIRONMENT="production",
+        DATABASE_URL="postgresql+psycopg://test:test@db.example/repolens",
+        CHECKPOINT_BACKEND="POSTGRES",
         AUTH_COOKIE_SECURE=True,
         CORS_ORIGINS=["https://app.example.com"],
         TRUSTED_HOSTS=["app.example.com"],

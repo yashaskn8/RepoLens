@@ -54,13 +54,22 @@ def test_offline_qualification_covers_fixed_dev_inventory_without_network(monkey
         item.first_model_node is None or item.model_gateway_reached
         for item in report.cases
     )
+    assert all(
+        item.first_model_capability is not None
+        for item in report.cases if item.model_gateway_reached
+    )
+    assert all(
+        item.first_model_provider is not None and item.first_model_name
+        for item in report.cases if item.model_gateway_reached
+    )
 
     # The report contains only the authorized path fields and content-free
     # identity/digest metadata; annotations and fixture source are absent.
     for item in report.cases:
         assert set(item.model_dump()) == {
             "case_id", "category", "target_pipeline", "model_gateway_reached",
-            "first_model_node", "pre_model_terminal_reason",
+            "first_model_node", "first_model_capability", "first_model_provider",
+            "first_model_name", "pre_model_terminal_reason",
         }
     reloaded = ModelPathQualificationReport.model_validate_json(report.model_dump_json())
     assert reloaded.report_digest == report.report_digest
@@ -123,7 +132,7 @@ def test_report_digest_rejects_forged_reachability_or_provider_count() -> None:
         for index in range(35)
     ]
     payload = {
-        "schema_version": "offline-llm-path-qualification/1.0",
+        "schema_version": "offline-llm-path-qualification/1.2",
         "dataset_digest": "a" * 64,
         "graph_identity_digest": "b" * 64,
         "public_dev_case_count": 35,

@@ -26,11 +26,11 @@ from app.llm.gateway import CapabilityAIGateway
 from app.llm.health import ProviderHealthRegistry
 from app.llm.quota import LocalProviderQuotaLedger
 from app.llm.router import LLMRouter, get_llm_router
-from app.llm.types import LLMProvider, LLMRequest
+from app.llm.types import LLMProvider, LLMRequest, ModelCapability
 from app.schemas.metadata import ModelExecutionMetadata
 
 
-PATH_QUALIFICATION_SCHEMA_VERSION = "offline-llm-path-qualification/1.0"
+PATH_QUALIFICATION_SCHEMA_VERSION = "offline-llm-path-qualification/1.2"
 _PUBLIC_DEV_CASE_COUNT = 35
 _QUALIFICATION_TIMEOUT_SECONDS = 90.0
 
@@ -61,22 +61,37 @@ class ModelPathQualificationCase(CampaignModel):
     target_pipeline: Literal["REPOSITORY_SCAN"]
     model_gateway_reached: bool
     first_model_node: str | None = Field(default=None, max_length=64)
+    first_model_capability: ModelCapability | None = None
+    first_model_provider: LLMProvider | None = None
+    first_model_name: str | None = Field(default=None, min_length=1, max_length=256)
     pre_model_terminal_reason: str | None = Field(default=None, max_length=64)
 
     @model_validator(mode="after")
     def validate_reachability(self) -> "ModelPathQualificationCase":
         if self.model_gateway_reached:
-            if self.pre_model_terminal_reason is not None:
-                raise ValueError("reached cases cannot have a pre-model terminal reason")
-        elif self.first_model_node is not None or self.pre_model_terminal_reason is None:
-            raise ValueError("unreached cases require a terminal reason and no model node")
+            if (
+                self.pre_model_terminal_reason is not None
+                or self.first_model_node is None
+                or self.first_model_capability is None
+                or self.first_model_provider is None
+                or self.first_model_name is None
+            ):
+                raise ValueError("reached cases require exact model node/capability/identity metadata")
+        elif (
+            self.first_model_node is not None
+            or self.first_model_capability is not None
+            or self.first_model_provider is not None
+            or self.first_model_name is not None
+            or self.pre_model_terminal_reason is None
+        ):
+            raise ValueError("unreached cases require a terminal reason and no model metadata")
         return self
 
 
 class ModelPathQualificationReport(CampaignModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["offline-llm-path-qualification/1.0"] = PATH_QUALIFICATION_SCHEMA_VERSION
+    schema_version: Literal["offline-llm-path-qualification/1.2"] = PATH_QUALIFICATION_SCHEMA_VERSION
     dataset_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     graph_identity_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     public_dev_case_count: int = Field(ge=35, le=35)
@@ -206,16 +221,16 @@ def _pre_model_terminal_reason(state: dict[str, Any]) -> str:
     budget = state.get("ai_cloud_budget")
     if isinstance(budget, dict) and budget.get("exhausted") is True:
         return "BUDGET_EXHAUSTED"
+    trace = state.get("workflow_trace", [])
+    trace = trace if isinstance(trace, list) else []
+    failure_codes = {
+        str(code)
+        for event in trace if isinstance(event, dict)
+        for code in (event.get("failure_codes", []) if isinstance(event.get("failure_codes", []), list) else [])
+    }
+    if "BUDGET_EXHAUSTION" in failure_codes:
+        return "BUDGET_EXHAUSTED"
     if state.get("status") == "FAILED":
-        trace = state.get("workflow_trace", [])
-        trace = trace if isinstance(trace, list) else []
-        failure_codes = [
-            str(code)
-            for event in trace if isinstance(event, dict)
-            for code in event.get("failure_codes", [])[:4]
-        ]
-        if "BUDGET_EXHAUSTION" in failure_codes:
-            return "BUDGET_EXHAUSTED"
         return "WORKFLOW_FAILED"
     return "DETERMINISTIC_TERMINAL"
 
@@ -254,6 +269,12 @@ async def _qualify_analysis_input(
             target_pipeline=target_pipeline,
             model_gateway_reached=True,
             first_model_node=node,
+            first_model_capability=(
+                ModelCapability(reached.observation.capability)
+                if reached.observation.capability is not None else None
+            ),
+            first_model_provider=LLMProvider(reached.observation.provider),
+            first_model_name=reached.observation.model,
         )
         return result
 

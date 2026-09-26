@@ -19,6 +19,14 @@ class ProviderFailureCode(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
+class ProviderFailureOrigin(str, Enum):
+    """Content-free origin of a provider failure, separate from its stable code."""
+
+    HTTP = "HTTP"
+    TRANSPORT = "TRANSPORT"
+    UNKNOWN = "UNKNOWN"
+
+
 class LLMError(Exception):
     """Base exception class for all LLM Gateway errors."""
 
@@ -30,6 +38,9 @@ class LLMError(Exception):
         status_code: Optional[int] = None,
         retryable: bool = False,
         failure_code: ProviderFailureCode = ProviderFailureCode.UNKNOWN,
+        failure_origin: ProviderFailureOrigin = ProviderFailureOrigin.UNKNOWN,
+        http_status: Optional[int] = None,
+        transport_exception_type: Optional[str] = None,
     ):
         super().__init__(message)
         self.message = message
@@ -38,6 +49,9 @@ class LLMError(Exception):
         self.status_code = status_code
         self.retryable = retryable
         self.failure_code = failure_code
+        self.failure_origin = failure_origin
+        self.http_status = http_status
+        self.transport_exception_type = transport_exception_type
 
     def __repr__(self) -> str:
         return (

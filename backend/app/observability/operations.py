@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
@@ -16,7 +17,11 @@ from app.agents.checkpointer import (
     validate_analysis_checkpointer_ready,
 )
 from app.agent_tools.registry import AgentToolRegistry
-from app.core.schema_readiness import missing_scan_storage_tables
+from app.core.schema_readiness import (
+    REQUIRED_SCAN_STORAGE_TABLES,
+    migration_revision_is_current,
+    required_application_tables,
+)
 from app.execution.types import ExecutionState
 from app.llm.capabilities import ModelCapabilityRegistry
 from app.models.ai_execution import AIExecutionModel, AIProviderHealthModel
@@ -25,15 +30,7 @@ from app.models.github_app import GitHubAppInstallationModel, GitHubAppWebhookDe
 from app.models.platform import OutboxEventModel, ReconciliationRecordModel
 
 
-CORE_REQUIRED_TABLES = frozenset({
-    "execution_work_items",
-    "execution_attempts",
-    "ai_executions",
-    "ai_provider_health",
-    "telemetry_metrics",
-    "outbox_events",
-    "reconciliation_records",
-})
+CORE_REQUIRED_TABLES = required_application_tables()
 CHECKPOINTER_TABLES = frozenset({"checkpoints"})
 MAX_RECENT_MODELS = 25
 MAX_CONFIGURED_MODELS = 64
@@ -46,7 +43,8 @@ async def check_checkpointer_readiness(settings: Any) -> dict[str, Any]:
         if backend == CheckpointBackend.MEMORY_TEST_ONLY:
             return {"ready": not settings.is_production, "backend": backend.value, "state": "TEST_ONLY"}
         if backend == CheckpointBackend.POSTGRES:
-            await validate_analysis_checkpointer_ready()
+            timeout = float(getattr(settings, "DATABASE_POOL_TIMEOUT_SECONDS", 5.0))
+            await asyncio.wait_for(validate_analysis_checkpointer_ready(), timeout=timeout)
             return {"ready": True, "backend": backend.value, "state": "CONNECTED"}
         path = Path(settings.CHECKPOINT_DB_FILE)
         if not path.is_file():
@@ -72,9 +70,12 @@ async def check_checkpointer_readiness(settings: Any) -> dict[str, Any]:
 def schema_readiness(db: Session) -> dict[str, Any]:
     available = set(inspect(db.get_bind()).get_table_names())
     missing = CORE_REQUIRED_TABLES.difference(available)
-    missing_scan = missing_scan_storage_tables(db)
+    missing_scan = REQUIRED_SCAN_STORAGE_TABLES.difference(available)
+    migration_current = migration_revision_is_current(db, available)
     return {
-        "ready": not missing and not missing_scan,
+        "ready": not missing and not missing_scan and migration_current,
+        "migration_current": migration_current,
+        "required_application_table_count": len(CORE_REQUIRED_TABLES),
         "missing_core_table_count": len(missing),
         "missing_scan_table_count": len(missing_scan),
     }

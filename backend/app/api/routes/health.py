@@ -54,7 +54,9 @@ async def readiness(response: Response, db: Session = Depends(get_db)) -> dict[s
     except Exception:
         database_ready = False
         schema = {"ready": False}
-    checkpointer = await check_checkpointer_readiness(get_settings())
+    checkpointer = {"ready": False}
+    if database_ready and bool(schema.get("ready")):
+        checkpointer = await check_checkpointer_readiness(get_settings())
     ready = database_ready and bool(schema["ready"]) and bool(checkpointer["ready"])
     if not ready:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE

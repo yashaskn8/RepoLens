@@ -12,6 +12,7 @@ from app.context.slices import build_specialist_context, candidate_evidence_auth
 from app.agents.grounding import build_evidence_index
 from app.llm.admission import AdmissionDecision, admission_for_state
 from app.llm.budgets import REPOSITORY_ANALYSIS_BUDGET
+from app.llm.execution import ExecutionFailureStage, infer_execution_failure_stage, record_execution_exception
 from app.llm.router import get_llm_router
 from app.llm.types import AIContextMetrics, LLMMessage, LLMRequest, ModelCapability, TaskPolicy
 from app.llm.workflow_contracts import CANDIDATE_FINDINGS_OUTPUT_SCHEMA, lineage_for_scan
@@ -153,6 +154,7 @@ async def run_bug_agent(
     model_executions = []
     errors = []
     candidate_findings = []
+    response = None
 
     if not any(anchor.is_locatable for anchor in evidence_index.values()):
         return with_opportunity({
@@ -222,6 +224,11 @@ async def run_bug_agent(
                 model_output_findings = list(candidate_findings)
                 model_succeeded = True
     except Exception as exc:
+        record_execution_exception(
+            ExecutionFailureStage.SPECIALIST_POSTPROCESS
+            if response is not None else infer_execution_failure_stage(),
+            exc,
+        )
         safe_msg = redact_secrets(str(exc))[:2048]
         errors.append(f"Bug Agent error: {safe_msg}")
 

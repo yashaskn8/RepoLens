@@ -93,7 +93,7 @@ For complete threat evaluations and defense-in-depth matrices, see [Security & T
 
 - **Frontend**: Next.js 15, React 19, TypeScript, Vanilla CSS design system.
 - **Backend**: FastAPI, Python 3.11+, Pydantic Settings & Schemas.
-- **Persistence**: SQLAlchemy 2.0 ORM, Alembic head `16c9a2e71f40`, SQLite default, and opt-in PostgreSQL/pgvector with bounded pools, statement/lock timeouts, snapshot pins, and retention.
+- **Persistence**: SQLAlchemy 2.0 ORM, Alembic head `20c1d4a7f922`, SQLite for local development, and PostgreSQL as the production execution authority with bounded pools, statement/lock timeouts, snapshot pins, and retention.
 - **Static Analysis**: Tree-sitter AST parsers (Python, JS, TS, TSX, JSX), NetworkX graph engine, optional CLI adapters for Semgrep, Trivy, and OSV-Scanner.
 - **Agent Orchestration**: LangGraph workflows use official SQLite checkpointing for local development and PostgreSQL checkpointing for production durable execution.
 - **LLM Abstraction**: One `LLMRouter` owns capability policy, cheap-first selection, bounded retry/fallback, evidence-scoped caching, and optional low-risk Ollama execution across configured providers.
@@ -127,16 +127,29 @@ python -m pip install -e ".[dev]"
 # No model is downloaded by normal installation or CI.
 python -m pip install -e ".[local-ml]"
 
-# Optional: install the PostgreSQL driver for a configured production database.
-python -m pip install -e ".[postgres]"
-
-# Apply migrations through 16c9a2e71f40
+# Local/development schema setup
 alembic upgrade head
 
 # Start development server
 uvicorn app.main:app --reload --port 8000
 ```
 Backend API will be available at `http://localhost:8000` (`/api/v1/docs` for Swagger UI, `/health` for health check).
+
+### Production deployment
+
+Production requires PostgreSQL for the application database and LangGraph checkpoints. The single production dependency command installs the PostgreSQL driver and PostgreSQL checkpoint saver; pytest, local ML, and optional OTLP exporters are not part of this extra.
+
+```bash
+cd backend
+python -m pip install -e ".[production]"
+# Configure production DATABASE_URL, secure cookies, deployed CORS origins,
+# and trusted hosts through the deployment environment.
+python -m alembic upgrade head
+python -m app.cli.production_preflight
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+Apply migrations before starting any application workers. Startup and `/health/ready` verify the repository Alembic head, all ORM tables, and PostgreSQL checkpointer readiness without running migrations. `/health/live` remains process-only. Provider or optional Redis outages do not determine API readiness. See [Production Durable Graph Execution](docs/PRODUCTION_DURABLE_GRAPHS.md) for checkpoint bootstrap details.
 
 ### 2. Frontend Setup
 

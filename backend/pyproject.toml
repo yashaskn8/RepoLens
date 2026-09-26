@@ -49,7 +49,7 @@ local-ml = [
 pdf-qa = [
     "pdfplumber>=0.11.0,<0.12.0",
 ]
-postgres = [
+production = [
     "psycopg[binary]>=3.2.0,<4.0.0",
     "langgraph-checkpoint-postgres>=3.1.2,<4.0.0",
 ]

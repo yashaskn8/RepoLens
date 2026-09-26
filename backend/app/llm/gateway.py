@@ -22,7 +22,11 @@ from app.llm.exceptions import (
     ProviderFailureCode,
 )
 from app.llm.economy import current_workflow_cloud_budget
-from app.llm.execution import AIExecutionRecorder
+from app.llm.execution import (
+    AIExecutionRecorder,
+    ExecutionProvenanceStage,
+    observe_execution_stage,
+)
 from app.llm.health import ProviderHealth, ProviderHealthRegistry
 from app.llm.quota import LocalProviderQuotaLedger, ProviderQuotaLedger
 from app.llm.structured import StructuredOutputGateway
@@ -124,6 +128,12 @@ class CapabilityAIGateway:
             raise LLMContextLimitError(
                 f"No enabled model satisfies capability {request.capability.value} within the request budget."
             )
+        observe_execution_stage(
+            ExecutionProvenanceStage.ROUTE_CANDIDATES_SELECTED,
+            provider=request.provider,
+            model=request.model,
+            capability=request.capability,
+        )
 
         attempted: list[LLMError] = []
         call_count = 0
@@ -267,6 +277,13 @@ class CapabilityAIGateway:
                 })
                 started = time.monotonic()
                 try:
+                    observe_execution_stage(
+                        ExecutionProvenanceStage.PROVIDER_ATTEMPT_STARTED,
+                        provider=candidate.provider,
+                        model=candidate.model,
+                        capability=request.capability,
+                        attempt_sequence=call_count,
+                    )
                     if candidate.cost_tier == ModelCostTier.FREE:
                         endpoint_lock = self._free_endpoint_locks.setdefault(
                             (candidate.provider, candidate.model),
@@ -279,6 +296,14 @@ class CapabilityAIGateway:
                         started = time.monotonic()
                         response = await adapter.generate(attempt_request)
                     latency_ms = max(0.0, (time.monotonic() - started) * 1000.0)
+                    observe_execution_stage(
+                        ExecutionProvenanceStage.PROVIDER_ATTEMPT_RETURNED,
+                        provider=candidate.provider,
+                        model=candidate.model,
+                        capability=request.capability,
+                        attempt_sequence=call_count,
+                        latency_ms=latency_ms,
+                    )
                     validation = AIValidationResult.NOT_REQUESTED
                     uncertain = False
                     confidence: float | None = None
@@ -377,6 +402,18 @@ class CapabilityAIGateway:
                     return response
                 except LLMError as exc:
                     latency_ms = max(0.0, (time.monotonic() - started) * 1000.0)
+                    observe_execution_stage(
+                        ExecutionProvenanceStage.PROVIDER_ATTEMPT_FAILED,
+                        provider=candidate.provider,
+                        model=candidate.model,
+                        capability=request.capability,
+                        failure_code=exc.failure_code,
+                        failure_origin=exc.failure_origin,
+                        http_status=exc.http_status,
+                        transport_exception_type=exc.transport_exception_type,
+                        attempt_sequence=call_count,
+                        latency_ms=latency_ms,
+                    )
                     self.quota.settle(
                         reservation,
                         consume=True,
@@ -450,6 +487,16 @@ class CapabilityAIGateway:
                     break
                 except Exception as exc:
                     latency_ms = max(0.0, (time.monotonic() - started) * 1000.0)
+                    observe_execution_stage(
+                        ExecutionProvenanceStage.PROVIDER_ATTEMPT_FAILED,
+                        provider=candidate.provider,
+                        model=candidate.model,
+                        capability=request.capability,
+                        failure_code=ProviderFailureCode.UNKNOWN,
+                        attempt_sequence=call_count,
+                        latency_ms=latency_ms,
+                        exception_type=type(exc).__name__,
+                    )
                     self.quota.settle(
                         reservation,
                         consume=True,

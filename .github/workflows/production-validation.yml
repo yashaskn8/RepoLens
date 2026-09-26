@@ -141,7 +141,16 @@ jobs:
         run: test -n "$REPOLENS_POSTGRES_TEST_URL"
       - name: Install PostgreSQL support
         working-directory: backend
-        run: pip install -e ".[dev,postgres]"
+        run: pip install -e ".[dev,production]"
+      - name: Verify production runtime dependencies
+        working-directory: backend
+        env:
+          ENVIRONMENT: production
+          DATABASE_URL: ${{ secrets.REPOLENS_POSTGRES_TEST_URL }}
+          AUTH_COOKIE_SECURE: "true"
+          CORS_ORIGINS: https://app.example.com
+          TRUSTED_HOSTS: app.example.com
+        run: python -m app.cli.production_preflight
       - name: Run PostgreSQL and pgvector integration
         working-directory: backend
         run: python -m pytest tests/test_postgres_integration.py tests/test_pgvector_index.py tests/test_checkpoint_recovery.py -m integration -q

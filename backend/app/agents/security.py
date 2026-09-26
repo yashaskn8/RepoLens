@@ -1,4 +1,4 @@
-"""Security specialist using scanner-grounded evidence and free-first routing."""
+"""Security specialist using scanner-grounded evidence and bounded tier routing."""
 
 from typing import Any, Dict, Optional
 from langgraph.runtime import Runtime
@@ -12,7 +12,8 @@ from app.context.runtime import AnalysisRuntimeContext, get_scan_context_engine,
 from app.context.slices import build_specialist_context, candidate_evidence_authority, required_candidate_evidence_refs
 from app.agents.grounding import build_evidence_index
 from app.llm.admission import AdmissionDecision, admission_for_state
-from app.llm.budgets import REPOSITORY_ANALYSIS_BUDGET
+from app.llm.budgets import SECURITY_ANALYSIS_BUDGET
+from app.llm.execution import ExecutionFailureStage, infer_execution_failure_stage, record_execution_exception
 from app.llm.router import get_llm_router
 from app.llm.types import AIContextMetrics, LLMMessage, LLMRequest, ModelCapability, TaskPolicy
 from app.llm.workflow_contracts import CANDIDATE_FINDINGS_OUTPUT_SCHEMA, lineage_for_scan
@@ -172,6 +173,7 @@ async def run_security_agent(
     model_executions = []
     errors = []
     candidate_findings = deterministic_candidates
+    response = None
 
     if not any(anchor.is_locatable for anchor in evidence_index.values()):
         return with_opportunity({
@@ -201,7 +203,7 @@ async def run_security_agent(
             temperature=0.0,
             max_tokens=admission.max_output_tokens,
             confidence_threshold=0.75,
-            budget=REPOSITORY_ANALYSIS_BUDGET,
+            budget=SECURITY_ANALYSIS_BUDGET,
             context_metrics=context_metrics,
         )
         required_ids = required_candidate_evidence_refs(specialist_context.slices)
@@ -261,6 +263,11 @@ async def run_security_agent(
                 model_output_findings = list(model_candidates)
                 model_succeeded = True
     except Exception as exc:
+        record_execution_exception(
+            ExecutionFailureStage.SPECIALIST_POSTPROCESS
+            if response is not None else infer_execution_failure_stage(),
+            exc,
+        )
         safe_msg = redact_secrets(str(exc))[:2048]
         errors.append(f"Security Agent error: {safe_msg}")
 

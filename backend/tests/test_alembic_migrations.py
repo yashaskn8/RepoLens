@@ -69,6 +69,12 @@ def test_alembic_upgrade_head_on_empty_db_creates_complete_schema():
             inspector = inspect(engine)
 
             table_names = set(inspector.get_table_names())
+            from app.core.schema_readiness import required_application_tables
+
+            assert required_application_tables().issubset(table_names), (
+                "Empty-database migrations did not create every canonical ORM table: "
+                f"{required_application_tables() - table_names}"
+            )
             expected_tables = {
                 "scans",
                 "findings",

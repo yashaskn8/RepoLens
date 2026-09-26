@@ -6,7 +6,11 @@ import httpx
 
 from app.core.config import get_settings
 from app.llm.base import BaseLLMAdapter
-from app.llm.exceptions import LLMAuthenticationError, LLMResponseValidationError
+from app.llm.exceptions import (
+    LLMAuthenticationError,
+    LLMResponseValidationError,
+    ProviderFailureOrigin,
+)
 from app.llm.types import LLMMessage, LLMProvider, LLMRequest, LLMResponse
 
 
@@ -85,15 +89,15 @@ class GeminiAdapter(BaseLLMAdapter):
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(url, json=payload, headers=headers)
+        except (httpx.TransportError, TimeoutError) as exc:
+            raise self._normalize_transport_error(exc, model) from None
 
-            if response.status_code != 200:
-                raise self._normalize_http_error(response, model)
-
+        if response.status_code != 200:
+            raise self._normalize_http_error(response, model)
+        try:
             data = response.json()
-        except Exception as exc:
-            if not isinstance(exc, Exception) or not hasattr(exc, "status_code"):
-                raise self._normalize_transport_error(exc, model)
-            raise
+        except Exception:
+            raise self._normalize_response_validation_error(response, model) from None
 
         execution_time_ms = (time.perf_counter() - start_time) * 1000.0
 
@@ -132,11 +136,9 @@ class GeminiAdapter(BaseLLMAdapter):
                 metadata=metadata,
                 finish_reason=finish_reason,
             )
-        except LLMResponseValidationError:
+        except LLMResponseValidationError as exc:
+            exc.failure_origin = ProviderFailureOrigin.HTTP
+            exc.http_status = response.status_code
             raise
-        except Exception as exc:
-            raise LLMResponseValidationError(
-                f"Failed to parse Gemini response payload: {str(exc)}",
-                provider=self.provider,
-                model=model,
-            )
+        except Exception:
+            raise self._normalize_response_validation_error(response, model) from None

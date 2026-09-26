@@ -42,7 +42,7 @@ async def test_router_policy_mappings():
     router = LLMRouter()
 
     arch_primary, _ = router.get_policy_routes(TaskPolicy.ARCHITECTURE)
-    assert arch_primary == (LLMProvider.GEMINI, "gemini-3.7-flash")
+    assert arch_primary == (LLMProvider.GEMINI, "gemini-3.8-flash")
 
     code_primary, _ = router.get_policy_routes(TaskPolicy.INTEGRATION_CODE)
     assert code_primary == (LLMProvider.HUGGINGFACE, "Qwen/Qwen3-Coder-Next")
@@ -65,7 +65,7 @@ async def test_router_dispatches_to_primary():
     """Verify router calls primary provider adapter when successful."""
     mock_gemini = MagicMock(spec=BaseLLMAdapter)
     mock_gemini.generate = AsyncMock(
-        return_value=_create_mock_response(LLMProvider.GEMINI, "gemini-3.7-flash", "Architectural overview")
+        return_value=_create_mock_response(LLMProvider.GEMINI, "gemini-3.8-flash", "Architectural overview")
     )
 
     router = LLMRouter(adapters={LLMProvider.GEMINI: mock_gemini})
@@ -76,7 +76,7 @@ async def test_router_dispatches_to_primary():
 
     response = await router.generate(request)
     assert response.provider == LLMProvider.GEMINI
-    assert response.model == "gemini-3.7-flash"
+    assert response.model == "gemini-3.8-flash"
     assert response.content == "Architectural overview"
     mock_gemini.generate.assert_called_once()
 
@@ -93,7 +93,7 @@ async def test_router_fallback_on_primary_failure():
     # First fallback (Gemini) succeeds
     mock_gemini = MagicMock(spec=BaseLLMAdapter)
     mock_gemini.generate = AsyncMock(
-        return_value=_create_mock_response(LLMProvider.GEMINI, "gemini-3.7-flash", "Fallback code analysis")
+        return_value=_create_mock_response(LLMProvider.GEMINI, "gemini-3.8-flash", "Fallback code analysis")
     )
 
     router = LLMRouter(adapters={
@@ -109,7 +109,7 @@ async def test_router_fallback_on_primary_failure():
 
     response = await router.generate(request)
     assert response.provider == LLMProvider.GEMINI
-    assert response.model == "gemini-3.7-flash"
+    assert response.model == "gemini-3.8-flash"
     assert response.content == "Fallback code analysis"
     # HF fails transiently with RateLimitError -> retried 2 times (total 3 attempts)
     assert mock_hf.generate.call_count == 3
@@ -131,7 +131,7 @@ async def test_router_all_fallbacks_failed():
 
     mock_gemini = MagicMock(spec=BaseLLMAdapter)
     mock_gemini.generate = AsyncMock(
-        side_effect=LLMAuthenticationError("Gemini key missing", provider=LLMProvider.GEMINI, model="gemini-3.7-flash")
+        side_effect=LLMAuthenticationError("Gemini key missing", provider=LLMProvider.GEMINI, model="gemini-3.8-flash")
     )
 
     router = LLMRouter(adapters={

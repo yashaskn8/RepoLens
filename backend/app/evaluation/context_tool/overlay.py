@@ -45,7 +45,13 @@ def evaluation_context_tool_overlay(
     """Install one evaluation-only overlay and recorder for this async trial."""
     if overlay is not None and active_prompt_overlay() is not None:
         raise ValueError("prompt and context/tool overlays cannot be combined in one experiment")
-    if evaluation_stage not in {"BASELINE", "SCREEN", "FULL_DEV", "MICRO_EVAL"}:
+    if evaluation_stage not in {
+        "BASELINE",
+        "SCREEN",
+        "FULL_DEV",
+        "MICRO_EVAL",
+        "LIVE_EXECUTION_PROOF_ONLY",
+    }:
         raise ValueError("unknown context experiment evaluation stage")
     overlay_token = _ACTIVE_OVERLAY.set(overlay)
     sink_token = _ACTIVE_SINK.set(manifest_sink)

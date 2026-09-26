@@ -3,17 +3,230 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from contextlib import contextmanager
+from contextvars import ContextVar, Token
+from dataclasses import dataclass, field
+from enum import Enum
 import hashlib
 import json
 from threading import RLock
-from typing import Callable, Protocol
+from typing import Callable, Iterator, Protocol
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
-from app.llm.exceptions import ProviderFailureCode
+from app.llm.exceptions import ProviderFailureCode, ProviderFailureOrigin
 from app.llm.types import AIValidationResult, LLMProvider, LLMRequest, ModelCapability
+
+
+class ExecutionProvenanceStage(str, Enum):
+    """Content-free stages captured only inside an explicitly scoped observer."""
+
+    PROOF_UNIT_STARTED = "PROOF_UNIT_STARTED"
+    GRAPH_INITIALIZATION_STARTED = "GRAPH_INITIALIZATION_STARTED"
+    GRAPH_INITIALIZATION_COMPLETED = "GRAPH_INITIALIZATION_COMPLETED"
+    GRAPH_INITIALIZATION_FAILED = "GRAPH_INITIALIZATION_FAILED"
+    GRAPH_EXECUTION_STARTED = "GRAPH_EXECUTION_STARTED"
+    GRAPH_RETURNED = "GRAPH_RETURNED"
+    GRAPH_FAILED = "GRAPH_FAILED"
+    MODEL_GATEWAY_REACHED = "MODEL_GATEWAY_REACHED"
+    ROUTE_CANDIDATES_SELECTED = "ROUTE_CANDIDATES_SELECTED"
+    PROVIDER_ATTEMPT_STARTED = "PROVIDER_ATTEMPT_STARTED"
+    PROVIDER_ATTEMPT_RETURNED = "PROVIDER_ATTEMPT_RETURNED"
+    PROVIDER_ATTEMPT_FAILED = "PROVIDER_ATTEMPT_FAILED"
+    PROVIDER_EXECUTION_RECORDED = "PROVIDER_EXECUTION_RECORDED"
+    CACHE_HIT = "CACHE_HIT"
+    PROVIDER_CALL_AVOIDED = "PROVIDER_CALL_AVOIDED"
+    POSTPROCESS_STARTED = "POSTPROCESS_STARTED"
+    POSTPROCESS_COMPLETED = "POSTPROCESS_COMPLETED"
+    FIXTURE_CLOSE_STARTED = "FIXTURE_CLOSE_STARTED"
+    FIXTURE_CLOSE_COMPLETED = "FIXTURE_CLOSE_COMPLETED"
+    FIXTURE_CLOSE_FAILED = "FIXTURE_CLOSE_FAILED"
+    ARTIFACT_VALIDATION_STARTED = "ARTIFACT_VALIDATION_STARTED"
+    ARTIFACT_VALIDATION_COMPLETED = "ARTIFACT_VALIDATION_COMPLETED"
+    ARTIFACT_VALIDATION_FAILED = "ARTIFACT_VALIDATION_FAILED"
+    FINALIZATION_STARTED = "FINALIZATION_STARTED"
+    FINALIZATION_COMPLETED = "FINALIZATION_COMPLETED"
+    FINALIZATION_FAILED = "FINALIZATION_FAILED"
+
+
+class ExecutionFailureStage(str, Enum):
+    """Safe failure locations used by evaluation proof artifacts."""
+
+    GRAPH_INITIALIZATION = "GRAPH_INITIALIZATION"
+    ROUTING = "ROUTING"
+    PROVIDER_PRECALL = "PROVIDER_PRECALL"
+    PROVIDER_CALL = "PROVIDER_CALL"
+    PROVIDER_RESPONSE_VALIDATION = "PROVIDER_RESPONSE_VALIDATION"
+    EXECUTION_RECORDING = "EXECUTION_RECORDING"
+    SPECIALIST_POSTPROCESS = "SPECIALIST_POSTPROCESS"
+    GRAPH_POSTPROCESS = "GRAPH_POSTPROCESS"
+    PROOF_POSTPROCESS = "PROOF_POSTPROCESS"
+    ARTIFACT_VALIDATION = "ARTIFACT_VALIDATION"
+    FINALIZATION = "FINALIZATION"
+    UNKNOWN = "UNKNOWN"
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionProvenanceEvent:
+    """A bounded event that deliberately has no prompt, output, or exception text."""
+
+    stage: ExecutionProvenanceStage
+    provider: LLMProvider | None = None
+    model: str | None = None
+    capability: ModelCapability | None = None
+    success: bool | None = None
+    failure_code: ProviderFailureCode | None = None
+    failure_origin: ProviderFailureOrigin | None = None
+    http_status: int | None = None
+    transport_exception_type: str | None = None
+    attempt_sequence: int | None = None
+    latency_ms: float | None = None
+    fallback: bool = False
+    exception_type: str | None = None
+
+
+@dataclass(slots=True)
+class ExecutionProvenanceCapture:
+    """Mutable only within one ContextVar scope; never stored in application state."""
+
+    events: list[ExecutionProvenanceEvent] = field(default_factory=list)
+    exception_stage: ExecutionFailureStage | None = None
+    exception_type: str | None = None
+    truncated: bool = False
+
+    def append(self, event: ExecutionProvenanceEvent) -> None:
+        if len(self.events) >= 256:
+            self.truncated = True
+            return
+        self.events.append(event)
+
+
+_active_execution_provenance: ContextVar[ExecutionProvenanceCapture | None] = ContextVar(
+    "repolens_scoped_execution_provenance", default=None
+)
+
+
+@contextmanager
+def capture_execution_provenance() -> Iterator[ExecutionProvenanceCapture]:
+    """Capture safe model-execution facts in the current async task only."""
+
+    capture = ExecutionProvenanceCapture()
+    token: Token[ExecutionProvenanceCapture | None] = _active_execution_provenance.set(capture)
+    try:
+        yield capture
+    finally:
+        _active_execution_provenance.reset(token)
+
+
+def observe_execution_stage(
+    stage: ExecutionProvenanceStage,
+    *,
+    provider: LLMProvider | None = None,
+    model: str | None = None,
+    capability: ModelCapability | None = None,
+    success: bool | None = None,
+    failure_code: ProviderFailureCode | None = None,
+    failure_origin: ProviderFailureOrigin | None = None,
+    http_status: int | None = None,
+    transport_exception_type: str | None = None,
+    attempt_sequence: int | None = None,
+    latency_ms: float | None = None,
+    fallback: bool = False,
+    exception_type: str | None = None,
+) -> None:
+    """Append bounded identifiers only when a proof/evaluation scope is active."""
+
+    capture = _active_execution_provenance.get()
+    if capture is None:
+        return
+    safe_http_status = (
+        http_status if isinstance(http_status, int) and 100 <= http_status <= 599 else None
+    )
+    safe_transport_type = (
+        transport_exception_type[:64]
+        if transport_exception_type and transport_exception_type.isidentifier()
+        else None
+    )
+    if failure_origin == ProviderFailureOrigin.HTTP:
+        safe_transport_type = None
+    elif failure_origin == ProviderFailureOrigin.TRANSPORT:
+        safe_http_status = None
+    else:
+        safe_http_status = None
+        safe_transport_type = None
+    capture.append(ExecutionProvenanceEvent(
+        stage=stage,
+        provider=provider,
+        model=model[:256] if model else None,
+        capability=capability,
+        success=success,
+        failure_code=failure_code,
+        failure_origin=failure_origin,
+        http_status=safe_http_status,
+        transport_exception_type=safe_transport_type,
+        attempt_sequence=(max(0, min(64, attempt_sequence)) if attempt_sequence is not None else None),
+        latency_ms=(max(0.0, min(120_000.0, latency_ms)) if latency_ms is not None else None),
+        fallback=bool(fallback),
+        exception_type=(exception_type[:64] if exception_type and exception_type.isidentifier() else None),
+    ))
+
+
+def record_execution_exception(
+    stage: ExecutionFailureStage,
+    exception: BaseException,
+    *,
+    replace: bool = False,
+) -> None:
+    """Store only the exception class name, never provider/error message text."""
+
+    capture = _active_execution_provenance.get()
+    if capture is None or (capture.exception_stage is not None and not replace):
+        return
+    exception_type = type(exception).__name__
+    capture.exception_stage = stage
+    capture.exception_type = exception_type[:64] if exception_type.isidentifier() else "Exception"
+
+
+def infer_execution_failure_stage() -> ExecutionFailureStage:
+    """Classify the last bounded gateway boundary without inspecting exception text."""
+
+    capture = _active_execution_provenance.get()
+    if capture is None:
+        return ExecutionFailureStage.UNKNOWN
+    if capture.exception_stage is not None:
+        return capture.exception_stage
+    last_gateway = max(
+        (
+            index for index, event in enumerate(capture.events)
+            if event.stage == ExecutionProvenanceStage.MODEL_GATEWAY_REACHED
+        ),
+        default=-1,
+    )
+    if last_gateway < 0:
+        return ExecutionFailureStage.UNKNOWN
+    events = capture.events[last_gateway:]
+    stages = [event.stage for event in events]
+    if ExecutionProvenanceStage.PROVIDER_ATTEMPT_STARTED in stages:
+        if ExecutionProvenanceStage.PROVIDER_ATTEMPT_RETURNED not in stages:
+            return ExecutionFailureStage.PROVIDER_CALL
+        if ExecutionProvenanceStage.PROVIDER_EXECUTION_RECORDED not in stages:
+            return ExecutionFailureStage.EXECUTION_RECORDING
+        if any(
+            event.stage == ExecutionProvenanceStage.PROVIDER_ATTEMPT_FAILED
+            and event.failure_code == ProviderFailureCode.INVALID_OUTPUT
+            for event in events
+        ):
+            return ExecutionFailureStage.PROVIDER_RESPONSE_VALIDATION
+        return ExecutionFailureStage.SPECIALIST_POSTPROCESS
+    if ExecutionProvenanceStage.MODEL_GATEWAY_REACHED in stages:
+        return (
+            ExecutionFailureStage.PROVIDER_PRECALL
+            if ExecutionProvenanceStage.ROUTE_CANDIDATES_SELECTED in stages
+            else ExecutionFailureStage.ROUTING
+        )
+    return ExecutionFailureStage.UNKNOWN
 
 
 class AIExecutionRecord(BaseModel):
@@ -348,7 +561,22 @@ class AIExecutionRecorder:
             "created_at": created_at.isoformat(),
         }
         record = AIExecutionRecord(**payload, record_digest=_digest(payload))
-        self.store.append(record)
+        try:
+            self.store.append(record)
+        except Exception as exc:
+            record_execution_exception(ExecutionFailureStage.EXECUTION_RECORDING, exc)
+            raise
+        observe_execution_stage(
+            ExecutionProvenanceStage.PROVIDER_EXECUTION_RECORDED,
+            provider=provider,
+            model=model,
+            capability=capability,
+            success=success,
+            failure_code=failure_code,
+            attempt_sequence=sequence,
+            latency_ms=latency_ms,
+            fallback=fallback_reason is not None,
+        )
         return record
 
 

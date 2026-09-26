@@ -905,10 +905,27 @@ async def _execute_trial(
     presentation_manifest_sink: Any = None,
     allow_context_overlay_identity_mismatch: bool = False,
 ) -> tuple[dict[str, Any], float, bool, Any]:
+    from app.llm.execution import (
+        ExecutionFailureStage,
+        ExecutionProvenanceStage,
+        observe_execution_stage,
+        record_execution_exception,
+    )
+
     started = time.perf_counter()
     fixture = FullAnalysisFixture(analysis_input)
     try:
-        await fixture.initialize_runtime()
+        observe_execution_stage(ExecutionProvenanceStage.GRAPH_INITIALIZATION_STARTED)
+        try:
+            await fixture.initialize_runtime()
+        except Exception as exc:
+            observe_execution_stage(
+                ExecutionProvenanceStage.GRAPH_INITIALIZATION_FAILED,
+                exception_type=type(exc).__name__,
+            )
+            record_execution_exception(ExecutionFailureStage.GRAPH_INITIALIZATION, exc)
+            raise
+        observe_execution_stage(ExecutionProvenanceStage.GRAPH_INITIALIZATION_COMPLETED)
         if context_tool_overlay is not None:
             trial_identity = build_agent_system_identity(
                 provider=provider,
@@ -961,17 +978,31 @@ async def _execute_trial(
                     workflow_kwargs: dict[str, Any] = {}
                     if evaluation_after_run is not None:
                         workflow_kwargs["_evaluation_after_run"] = evaluation_hook
-                    return dict(await run_analysis_workflow(
-                        evidence_store=fixture.evidence_store,
-                        scan_id=fixture.scan_id,
-                        repo_dir=str(fixture.repository_root),
-                        checkpointer=checkpointer,
-                        resume_if_exists=True,
-                        scan_runtime=fixture.scan_runtime,
-                        interrupt_after=interrupt_after,
-                        **kwargs,
-                        **workflow_kwargs,
-                    ))
+                    observe_execution_stage(ExecutionProvenanceStage.GRAPH_EXECUTION_STARTED)
+                    try:
+                        result = dict(await run_analysis_workflow(
+                            evidence_store=fixture.evidence_store,
+                            scan_id=fixture.scan_id,
+                            repo_dir=str(fixture.repository_root),
+                            checkpointer=checkpointer,
+                            resume_if_exists=True,
+                            scan_runtime=fixture.scan_runtime,
+                            interrupt_after=interrupt_after,
+                            **kwargs,
+                            **workflow_kwargs,
+                        ))
+                    except Exception as exc:
+                        observe_execution_stage(
+                            ExecutionProvenanceStage.GRAPH_FAILED,
+                            exception_type=type(exc).__name__,
+                        )
+                        record_execution_exception(ExecutionFailureStage.GRAPH_POSTPROCESS, exc)
+                        raise
+                    observe_execution_stage(
+                        ExecutionProvenanceStage.GRAPH_RETURNED,
+                        success=result.get("status") != "FAILED",
+                    )
+                    return result
 
         if mode == SystemEvalMode.LIVE:
             if provider is None:
@@ -988,7 +1019,17 @@ async def _execute_trial(
         resumed = bool(state.pop("_evaluation_resumed", False))
         return state, (time.perf_counter() - started) * 1000.0, resumed, scripted_router
     finally:
-        fixture.close()
+        observe_execution_stage(ExecutionProvenanceStage.FIXTURE_CLOSE_STARTED)
+        try:
+            fixture.close()
+        except Exception as exc:
+            observe_execution_stage(
+                ExecutionProvenanceStage.FIXTURE_CLOSE_FAILED,
+                exception_type=type(exc).__name__,
+            )
+            record_execution_exception(ExecutionFailureStage.FINALIZATION, exc, replace=True)
+            raise
+        observe_execution_stage(ExecutionProvenanceStage.FIXTURE_CLOSE_COMPLETED)
 
 
 def _trial_failure_codes(state: dict[str, Any], trace: Sequence[WorkflowNodeEvent]) -> list[str]:

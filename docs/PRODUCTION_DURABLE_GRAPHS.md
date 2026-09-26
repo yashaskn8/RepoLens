@@ -6,19 +6,22 @@ RepoLens uses LangGraph's official async saver implementations. Local developmen
 
 `CHECKPOINT_BACKEND=AUTO` selects SQLite for local SQLite deployments and PostgreSQL when `CHECKPOINT_DATABASE_URL` or `DATABASE_URL` is PostgreSQL. Set `CHECKPOINT_BACKEND=POSTGRES` to make that choice explicit. A dedicated checkpoint database is optional; when omitted, the application database URL is used. The PostgreSQL URL is parsed and normalized for psycopg while preserving its credentials, host, port, database, and query parameters; it is never logged.
 
-Install the optional production dependencies from `backend`:
+Install the production dependencies from `backend` (this is the single production installation contract):
 
 ```powershell
-python -m pip install -e ".[postgres]"
+python -m pip install -e ".[production]"
 ```
 
-Run the schema setup command once as an explicit deployment/bootstrap operation:
+Apply application migrations, initialize the checkpointer schema once as an explicit deployment/bootstrap operation, and run the dependency preflight before starting the server:
 
 ```powershell
+python -m alembic upgrade head
 python -m app.agents.checkpointer_cli setup
+python -m app.cli.production_preflight
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-Application startup only checks connectivity and schema readiness. It does not create or migrate checkpoint tables on each scan. SQLite's idempotent saver setup remains local/test behavior.
+Application startup and `/health/ready` perform read-only checks for the exact Alembic head, every mapped ORM table, PostgreSQL connectivity, and initialized checkpoint schema. They never apply migrations or create checkpoint tables. SQLite's idempotent saver setup remains local/test behavior. `/health/live` checks process state only.
 
 ## Recovery and authority
 
