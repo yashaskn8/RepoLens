@@ -10,7 +10,11 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from app.artifacts.lifecycle import ArtifactDeletionReconciler, ArtifactLifecycleService
+from app.artifacts.lifecycle import (
+    ArtifactDeletionReconciler,
+    ArtifactLifecycleService,
+    ArtifactPublicationIntentReconciler,
+)
 from app.artifacts.registry import (
     ArtifactLifecycleConflict,
     ArtifactProvenanceError,
@@ -39,6 +43,7 @@ from app.artifacts.store import (
     ProductionBlobArtifactStore,
     ProductionBlobStoreConfig,
 )
+from app.models.artifact import ArtifactPublicationIntentModel
 
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -282,3 +287,75 @@ def test_artifact_records_are_frozen_and_reject_ambiguous_coverage(tmp_path: Pat
         artifact.producer = "mutated"
     with pytest.raises(ValidationError):
         ArtifactCoverage(status=CoverageStatus.UNAVAILABLE)
+
+
+def test_publication_intent_reconciles_crash_after_object_write_before_registry(
+    db_session,
+    tmp_path: Path,
+):
+    store = LocalArtifactStore(tmp_path / "canonical")
+    artifact_id = "orphan-report-pdf"
+    payload = b"%PDF-1.4\norphaned-after-process-crash"
+    metadata = _put(store, artifact_id, payload, tenant_id="tenant-a")
+    db_session.add(ArtifactPublicationIntentModel(
+        artifact_id=artifact_id,
+        tenant_id="tenant-a",
+        payload_locator=metadata.locator,
+        content_digest=metadata.content_digest,
+        payload_size_bytes=metadata.size_bytes,
+        media_type=metadata.content_type,
+        artifact_type="PDF_REPORT",
+        status="PENDING",
+        created_at=NOW - timedelta(hours=1),
+    ))
+    db_session.flush()
+
+    result = ArtifactPublicationIntentReconciler(
+        db_session,
+        store,
+        grace_period=timedelta(minutes=15),
+    ).reconcile(now=NOW)
+
+    intent = db_session.get(ArtifactPublicationIntentModel, artifact_id)
+    assert result.examined == 1
+    assert result.discarded == 1
+    assert result.retryable_failures == 0
+    assert intent.status == "CLEANED"
+    assert store.exists(metadata.locator, include_tombstoned=True) is False
+
+
+def test_publication_intent_reconciles_payload_written_before_metadata_sidecar(
+    db_session,
+    tmp_path: Path,
+):
+    store = LocalArtifactStore(tmp_path / "canonical")
+    artifact_id = "orphan-before-sidecar"
+    payload = b"%PDF-1.4\ncrash-before-metadata"
+    metadata = _put(store, artifact_id, payload, tenant_id="tenant-a")
+    payload_path = store._resolve(metadata.locator)
+    metadata_path = store._metadata_path(metadata.locator)
+    metadata_path.unlink()
+    assert payload_path.is_file()
+    assert not store.exists(metadata.locator, include_tombstoned=True)
+
+    db_session.add(ArtifactPublicationIntentModel(
+        artifact_id=artifact_id,
+        tenant_id="tenant-a",
+        payload_locator=metadata.locator,
+        content_digest=metadata.content_digest,
+        payload_size_bytes=metadata.size_bytes,
+        media_type=metadata.content_type,
+        artifact_type="PDF_REPORT",
+        status="PENDING",
+        created_at=NOW - timedelta(hours=1),
+    ))
+    db_session.flush()
+    result = ArtifactPublicationIntentReconciler(
+        db_session,
+        store,
+        grace_period=timedelta(minutes=15),
+    ).reconcile(now=NOW)
+
+    assert result.discarded == 1
+    assert result.retryable_failures == 0
+    assert not payload_path.exists()

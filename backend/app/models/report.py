@@ -25,7 +25,8 @@ class ReportModel(Base):
             name="ck_reports_status",
         ),
         CheckConstraint(
-            "status != 'READY' OR (pdf_digest IS NOT NULL AND pdf_artifact_id IS NOT NULL AND generated_at IS NOT NULL)",
+            "status != 'READY' OR (pdf_digest IS NOT NULL AND pdf_artifact_id IS NOT NULL "
+            "AND document_digest IS NOT NULL AND document_artifact_id IS NOT NULL AND generated_at IS NOT NULL)",
             name="ck_reports_ready_artifact",
         ),
     )

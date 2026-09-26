@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import timedelta
 
 from sqlalchemy import inspect
 
-from app.artifacts.lifecycle import ArtifactDeletionReconciler, ArtifactLifecycleService
+from app.artifacts.lifecycle import (
+    ArtifactDeletionReconciler,
+    ArtifactLifecycleService,
+    ArtifactPublicationIntentReconciler,
+)
 from app.artifacts.registry import ArtifactRegistry
 from app.artifacts.service import get_artifact_store
 from app.core.config import get_settings
@@ -28,7 +33,16 @@ class ArtifactLifecycleRuntime:
         db = SessionLocal()
         try:
             if not inspect(db.get_bind()).has_table("artifact_tombstones"):
-                return {"requested": 0, "deleted": 0, "blocked": 0, "retryable": 0, "permanent": 0}
+                return {
+                    "requested": 0,
+                    "deleted": 0,
+                    "blocked": 0,
+                    "retryable": 0,
+                    "permanent": 0,
+                    "publication_intents_examined": 0,
+                    "publication_intents_discarded": 0,
+                    "publication_intents_retryable": 0,
+                }
             store = get_artifact_store(settings)
             registry = ArtifactRegistry(db, store=store)
             lifecycle = ArtifactLifecycleService(registry)
@@ -65,6 +79,13 @@ class ArtifactLifecycleRuntime:
             summary = ArtifactDeletionReconciler(registry, store).reconcile(
                 limit=settings.ARTIFACT_GC_BATCH_SIZE
             )
+            intent_summary = None
+            if inspect(db.get_bind()).has_table("artifact_publication_intents"):
+                intent_summary = ArtifactPublicationIntentReconciler(
+                    db,
+                    store,
+                    grace_period=timedelta(seconds=settings.ARTIFACT_PUBLICATION_INTENT_GRACE_SECONDS),
+                ).reconcile(limit=settings.ARTIFACT_GC_BATCH_SIZE)
             TelemetryRecorder.record(
                 db,
                 metric_name="artifact.deletion_reconciliation",
@@ -75,6 +96,9 @@ class ArtifactLifecycleRuntime:
                     "blocked": summary.blocked,
                     "retryable": summary.retryable_failures,
                     "permanent": summary.permanent_failures,
+                    "publication_intents_examined": intent_summary.examined if intent_summary else 0,
+                    "publication_intents_discarded": intent_summary.discarded if intent_summary else 0,
+                    "publication_intents_retryable": intent_summary.retryable_failures if intent_summary else 0,
                 },
             )
             db.commit()
@@ -84,6 +108,9 @@ class ArtifactLifecycleRuntime:
                 "blocked": summary.blocked,
                 "retryable": summary.retryable_failures,
                 "permanent": summary.permanent_failures,
+                "publication_intents_examined": intent_summary.examined if intent_summary else 0,
+                "publication_intents_discarded": intent_summary.discarded if intent_summary else 0,
+                "publication_intents_retryable": intent_summary.retryable_failures if intent_summary else 0,
             }
         except Exception:
             db.rollback()

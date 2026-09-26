@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
 from typing import Mapping
+from sqlalchemy.orm import Session
 
 from app.artifacts.registry import (
     ArtifactLifecycleConflict,
@@ -20,6 +21,7 @@ from app.artifacts.store import (
     ArtifactStore,
     ArtifactStoreError,
 )
+from app.models.artifact import ArtifactModel, ArtifactPublicationIntentModel
 
 
 @dataclass(frozen=True)
@@ -372,6 +374,124 @@ class ArtifactDeletionReconciler:
             return "RETRYABLE_FAILURE"
 
 
+@dataclass(frozen=True)
+class PublicationIntentSummary:
+    examined: int
+    registered: int
+    discarded: int
+    retryable_failures: int
+
+
+class ArtifactPublicationIntentReconciler:
+    """Resolve crash leftovers while serializing against publishers by intent row."""
+
+    def __init__(
+        self,
+        session: Session,
+        store: ArtifactStore,
+        *,
+        grace_period: timedelta = timedelta(minutes=15),
+    ) -> None:
+        if grace_period.total_seconds() < 0:
+            raise ValueError("publication intent grace period cannot be negative")
+        self.session = session
+        self.store = store
+        self.grace_period = grace_period
+
+    def reconcile(
+        self,
+        *,
+        now: datetime | None = None,
+        limit: int = 100,
+    ) -> PublicationIntentSummary:
+        now = _as_utc(now or datetime.now(timezone.utc))
+        pending = (
+            self.session.query(ArtifactPublicationIntentModel)
+            .filter(
+                ArtifactPublicationIntentModel.status.in_(("PENDING", "RETRYABLE_FAILURE")),
+                ArtifactPublicationIntentModel.created_at <= now - self.grace_period,
+            )
+            .order_by(
+                ArtifactPublicationIntentModel.created_at,
+                ArtifactPublicationIntentModel.artifact_id,
+            )
+            .with_for_update(skip_locked=True)
+            .limit(max(1, min(limit, 1000)))
+            .all()
+        )
+        registered = discarded = retryable = 0
+        for intent in pending:
+            artifact = (
+                self.session.query(ArtifactModel)
+                .filter(ArtifactModel.id == intent.artifact_id)
+                .one_or_none()
+            )
+            if artifact is not None:
+                if (
+                    artifact.tenant_id == intent.tenant_id
+                    and artifact.payload_locator == intent.payload_locator
+                    and artifact.content_digest == intent.content_digest
+                    and artifact.payload_size_bytes == intent.payload_size_bytes
+                    and artifact.media_type == intent.media_type
+                    and artifact.artifact_type == intent.artifact_type
+                ):
+                    intent.status = "REGISTERED"
+                    intent.failure_code = None
+                    intent.resolved_at = now
+                    registered += 1
+                else:
+                    intent.status = "RETRYABLE_FAILURE"
+                    intent.failure_code = "INTENT_REGISTRY_MISMATCH"
+                    intent.created_at = now
+                    retryable += 1
+                continue
+
+            try:
+                if self.store.exists(intent.payload_locator, include_tombstoned=True):
+                    metadata = self.store.metadata(intent.payload_locator, include_tombstoned=True)
+                    if (
+                        metadata.content_digest != intent.content_digest
+                        or metadata.size_bytes != intent.payload_size_bytes
+                        or metadata.content_type != intent.media_type
+                    ):
+                        raise ArtifactIntegrityError("publication intent does not match physical object")
+                    if metadata.tombstoned:
+                        result = self.store.delete(
+                            intent.payload_locator,
+                            expected_digest=intent.content_digest,
+                        )
+                    else:
+                        discard = getattr(self.store, "discard_unregistered", None)
+                        if discard is None:
+                            raise ArtifactStoreError("store does not support safe unregistered-object cleanup")
+                        result = discard(
+                            intent.payload_locator,
+                            expected_digest=intent.content_digest,
+                        )
+                else:
+                    # `exists()` can be false for a partial local publication
+                    # (payload renamed but sidecar not written). Give the store
+                    # a chance to clean that exact digest-bound remnant.
+                    discard = getattr(self.store, "discard_unregistered", None)
+                    if discard is None:
+                        raise ArtifactStoreError("store does not support safe unregistered-object cleanup")
+                    result = discard(
+                        intent.payload_locator,
+                        expected_digest=intent.content_digest,
+                    )
+                if not (result.deleted or result.already_absent):
+                    raise ArtifactStoreError("unregistered object cleanup was inconclusive")
+                intent.status = "CLEANED"
+                intent.failure_code = None
+                intent.resolved_at = now
+                discarded += 1
+            except Exception as exc:
+                intent.status = "RETRYABLE_FAILURE"
+                intent.failure_code = f"CLEANUP_{type(exc).__name__}"[:64]
+                intent.created_at = now
+                retryable += 1
+        self.session.flush()
+        return PublicationIntentSummary(len(pending), registered, discarded, retryable)
 def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         return value.replace(tzinfo=timezone.utc)

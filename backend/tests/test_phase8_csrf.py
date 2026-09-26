@@ -17,6 +17,7 @@ import hashlib
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from starlette.datastructures import Headers
 from sqlalchemy.orm import Session
 from tests.request_helpers import cookie_headers
 from app.api.dependencies import verify_csrf
@@ -229,3 +230,73 @@ def test_login_cookie_scope_uses_independent_csrf_domain(client: TestClient, mon
         assert "httponly" not in csrf_cookie.lower()
     finally:
         get_settings.cache_clear()
+
+
+def _production_csrf_request(client, *, origin_headers=(), referer_headers=()):
+    pairs = [(b"x-csrf-token", client.cookies["repolens_csrf"].encode())]
+    pairs.extend((b"origin", value.encode()) for value in origin_headers)
+    pairs.extend((b"referer", value.encode()) for value in referer_headers)
+
+    class RequestStub:
+        method = "POST"
+        headers = Headers(raw=pairs)
+        cookies = {
+            "repolens_session": client.cookies["repolens_session"],
+            "repolens_csrf": client.cookies["repolens_csrf"],
+        }
+
+    return RequestStub()
+
+
+def test_production_csrf_requires_origin_or_referer_even_with_valid_session_and_token(client, db_session):
+    settings = Settings(
+        _env_file=None,
+        ENVIRONMENT="production",
+        DATABASE_URL="postgresql+psycopg://test:test@db.example/repolens",
+        CHECKPOINT_BACKEND="POSTGRES",
+        AUTH_COOKIE_SECURE=True,
+        CSRF_COOKIE_DOMAIN=".example.com",
+        ARTIFACT_DEPLOYMENT_MODE="single_persistent_local",
+        CORS_ORIGINS=["https://app.example.com"],
+        TRUSTED_HOSTS=["api.example.com"],
+    )
+    with pytest.raises(HTTPException) as raised:
+        verify_csrf(request=_production_csrf_request(client), db=db_session, settings=settings)
+    assert raised.value.detail["error_code"] == "CSRF_ORIGIN_REQUIRED"
+
+
+def test_production_csrf_accepts_exact_origin_and_rejects_hostile_or_ambiguous_origin(client, db_session):
+    settings = Settings(
+        _env_file=None,
+        ENVIRONMENT="production",
+        DATABASE_URL="postgresql+psycopg://test:test@db.example/repolens",
+        CHECKPOINT_BACKEND="POSTGRES",
+        AUTH_COOKIE_SECURE=True,
+        CSRF_COOKIE_DOMAIN=".example.com",
+        ARTIFACT_DEPLOYMENT_MODE="single_persistent_local",
+        CORS_ORIGINS=["https://app.example.com"],
+        TRUSTED_HOSTS=["api.example.com"],
+    )
+    verify_csrf(
+        request=_production_csrf_request(client, origin_headers=("https://app.example.com",)),
+        db=db_session,
+        settings=settings,
+    )
+    verify_csrf(
+        request=_production_csrf_request(client, referer_headers=("https://app.example.com/security/settings",)),
+        db=db_session,
+        settings=settings,
+    )
+    for values in (
+        ("https://example.com.evil.org",),
+        ("https://app.example.com@evil.org",),
+        ("https://app.example.com", "https://evil.org"),
+        ("null",),
+    ):
+        with pytest.raises(HTTPException) as raised:
+            verify_csrf(
+                request=_production_csrf_request(client, origin_headers=values),
+                db=db_session,
+                settings=settings,
+            )
+        assert raised.value.status_code == 403

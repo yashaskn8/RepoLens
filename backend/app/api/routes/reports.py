@@ -1,6 +1,7 @@
 """Authenticated report-resource creation, status, recovery, and PDF download."""
 
 import re
+from typing import BinaryIO, Iterator
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from fastapi.responses import StreamingResponse
@@ -25,10 +26,34 @@ from app.services.report_generation import (
     ReportGenerationService,
     report_to_resource,
     spool_canonical_report_pdf,
+    verify_ready_report_artifacts,
 )
 
 
 router = APIRouter(tags=["Reports"])
+
+
+def _iter_pdf_spool(spool: BinaryIO) -> Iterator[bytes]:
+    """Yield bounded response chunks and close the spool on every exit path."""
+    try:
+        while chunk := spool.read(64 * 1024):
+            yield chunk
+    finally:
+        spool.close()
+
+
+def _report_resource(db: Session, report: ReportModel, *, reused: bool = False) -> ReportResource:
+    try:
+        verify_ready_report_artifacts(db, report)
+    except RuntimeError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error_code": "REPORT_ARTIFACT_UNAVAILABLE",
+                "message": "The canonical report artifacts failed availability verification.",
+            },
+        ) from None
+    return report_to_resource(report, reused=reused)
 
 
 @router.post("/scans/{scan_id}/reports", response_model=ReportResource, status_code=status.HTTP_202_ACCEPTED)
@@ -113,7 +138,7 @@ async def request_scan_report(
             response.headers["Cache-Control"] = "private, no-store"
             if existing_report.status == ReportStatus.READY.value:
                 response.status_code = status.HTTP_200_OK
-            return report_to_resource(existing_report, reused=True)
+            return _report_resource(db, existing_report, reused=True)
 
     result = service.request_report(
         db,
@@ -183,7 +208,7 @@ async def request_scan_report(
     response.headers["X-Job-Location"] = f"/api/v1/jobs/{submission.result.work_item_id}"
     response.headers["Idempotency-Replayed"] = "true" if submission.result.reused else "false"
     response.headers["Cache-Control"] = "private, no-store"
-    return report_to_resource(result.report, reused=result.reused)
+    return _report_resource(db, result.report, reused=result.reused)
 
 
 @router.get("/scans/{scan_id}/reports/latest", response_model=ReportResource)
@@ -203,7 +228,7 @@ def get_latest_scan_report(
     if report is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
     response.headers["Cache-Control"] = "private, no-store"
-    return report_to_resource(report)
+    return _report_resource(db, report)
 
 
 @router.get("/reports/{report_id}", response_model=ReportResource)
@@ -214,7 +239,7 @@ def get_report_status(
     db: Session = Depends(get_db),
 ):
     response.headers["Cache-Control"] = "private, no-store"
-    return report_to_resource(get_owned_report_or_404(db, report_id, current_user))
+    return _report_resource(db, get_owned_report_or_404(db, report_id, current_user))
 
 
 @router.get("/reports/{report_id}/download")
@@ -231,6 +256,9 @@ def download_report(
             detail={"error_code": "REPORT_NOT_READY", "message": "The PDF report is not ready for download."},
         )
     try:
+        # READY represents a coherent immutable report, not only a readable PDF.
+        # Reject a substituted/unavailable canonical document as well.
+        verify_ready_report_artifacts(db, report)
         spool = spool_canonical_report_pdf(db, report)
     except RuntimeError:
         raise HTTPException(
@@ -255,16 +283,9 @@ def download_report(
         db.rollback()
         raise
 
-    def body():
-        try:
-            while chunk := spool.read(64 * 1024):
-                yield chunk
-        finally:
-            spool.close()
-
     filename_id = re.sub(r"[^A-Za-z0-9]", "", report.id)[:8] or "download"
     return StreamingResponse(
-        body(),
+        _iter_pdf_spool(spool),
         media_type="application/pdf",
         headers={
             "Content-Disposition": f'attachment; filename="repolens-report-{filename_id}.pdf"',

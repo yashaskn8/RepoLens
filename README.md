@@ -93,7 +93,7 @@ For complete threat evaluations and defense-in-depth matrices, see [Security & T
 
 - **Frontend**: Next.js 15, React 19, TypeScript, Vanilla CSS design system.
 - **Backend**: FastAPI, Python 3.11+, Pydantic Settings & Schemas.
-- **Persistence**: SQLAlchemy 2.0 ORM, Alembic head `20c1d4a7f922`, SQLite for local development, and PostgreSQL as the production execution authority with bounded pools, statement/lock timeouts, snapshot pins, and retention.
+- **Persistence**: SQLAlchemy 2.0 ORM, Alembic head `22a746f1b809`, SQLite for local development, and PostgreSQL as the production execution authority with bounded pools, statement/lock timeouts, snapshot pins, and retention.
 - **Static Analysis**: Tree-sitter AST parsers (Python, JS, TS, TSX, JSX), NetworkX graph engine, optional CLI adapters for Semgrep, Trivy, and OSV-Scanner.
 - **Agent Orchestration**: LangGraph workflows use official SQLite checkpointing for local development and PostgreSQL checkpointing for production durable execution.
 - **LLM Abstraction**: One `LLMRouter` owns capability policy, cheap-first selection, bounded retry/fallback, evidence-scoped caching, and optional low-risk Ollama execution across configured providers.

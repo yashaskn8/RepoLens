@@ -252,6 +252,48 @@ def spool_canonical_report_pdf(
         raise RuntimeError("REPORT_ARTIFACT_UNAVAILABLE") from None
 
 
+def verify_ready_report_artifacts(
+    db: Session,
+    report: ReportModel,
+    *,
+    settings: Settings | None = None,
+) -> None:
+    """Fail closed unless every artifact required by READY resolves canonically."""
+    if report.status != ReportStatus.READY.value:
+        return
+    active_settings = settings or get_settings()
+    if not report.pdf_artifact_id or not report.pdf_digest or not report.generated_at:
+        raise RuntimeError("REPORT_ARTIFACT_UNAVAILABLE")
+    if not report.document_artifact_id or not report.document_digest:
+        raise RuntimeError("REPORT_DOCUMENT_UNAVAILABLE")
+    pdf, _ = _canonical_report_artifact(
+        db,
+        report,
+        artifact_id=report.pdf_artifact_id,
+        expected_type=ArtifactType.PDF_REPORT,
+        expected_digest=report.pdf_digest,
+        settings=active_settings,
+    )
+    document, _ = _canonical_report_artifact(
+        db,
+        report,
+        artifact_id=report.document_artifact_id,
+        expected_type=ArtifactType.REPORT_DOCUMENT,
+        expected_digest=report.document_digest,
+        settings=active_settings,
+    )
+    if (
+        pdf.artifact_id != report.pdf_artifact_id
+        or pdf.media_type != "application/pdf"
+        or pdf.payload_size_bytes != report.payload_size_bytes
+        or pdf.payload_size_bytes > active_settings.REPORT_MAX_PDF_BYTES
+        or document.artifact_id != report.document_artifact_id
+        or document.media_type != "application/json"
+        or document.payload_size_bytes > active_settings.REPORT_MAX_PDF_BYTES
+    ):
+        raise RuntimeError("REPORT_ARTIFACT_INTEGRITY_FAILURE")
+
+
 def report_to_resource(report: ReportModel, *, reused: bool = False) -> ReportResource:
     status = ReportStatus(report.status)
     return ReportResource(
@@ -316,15 +358,8 @@ class ReportGenerationService:
         if existing is not None:
             if existing.status == ReportStatus.READY.value:
                 try:
-                    artifact, _ = _canonical_report_artifact(
-                        db,
-                        existing,
-                        artifact_id=existing.pdf_artifact_id,
-                        expected_type=ArtifactType.PDF_REPORT,
-                        expected_digest=existing.pdf_digest or "",
-                        settings=self.settings,
-                    )
-                    available = artifact.payload_size_bytes == existing.payload_size_bytes
+                    verify_ready_report_artifacts(db, existing, settings=self.settings)
+                    available = True
                 except RuntimeError:
                     available = False
                 if available:
@@ -610,16 +645,7 @@ class ReportGenerationService:
                 raise RuntimeError("REPORT_NOT_FOUND")
             if report.status == ReportStatus.READY.value:
                 try:
-                    artifact, _ = _canonical_report_artifact(
-                        db,
-                        report,
-                        artifact_id=report.pdf_artifact_id,
-                        expected_type=ArtifactType.PDF_REPORT,
-                        expected_digest=report.pdf_digest or "",
-                        settings=effective_settings,
-                    )
-                    if artifact.payload_size_bytes != report.payload_size_bytes:
-                        raise RuntimeError("REPORT_ARTIFACT_INTEGRITY_FAILURE")
+                    verify_ready_report_artifacts(db, report, settings=effective_settings)
                     return
                 except RuntimeError:
                     report.status = ReportStatus.FAILED.value

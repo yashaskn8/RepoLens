@@ -11,6 +11,7 @@ from app.models.artifact import (
     ArtifactDeletionAttemptModel,
     ArtifactLineageModel,
     ArtifactModel,
+    ArtifactPublicationIntentModel,
     ArtifactReferenceModel,
     ArtifactReferenceReleaseModel,
     ArtifactTombstoneModel,
@@ -55,6 +56,7 @@ from app.models.intelligence import IndexEntryModel, IndexPinModel, IndexProject
 __all__ = [
     "Base",
     "ArtifactModel",
+    "ArtifactPublicationIntentModel",
     "ArtifactLineageModel",
     "ArtifactReferenceModel",
     "ArtifactReferenceReleaseModel",

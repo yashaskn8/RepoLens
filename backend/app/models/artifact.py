@@ -102,6 +102,42 @@ class ArtifactModel(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utc_now, index=True)
 
 
+class ArtifactPublicationIntentModel(Base):
+    """Durable guard for payloads published before their SQL transaction commits.
+
+    The row is committed before object publication, then locked by the publisher
+    until artifact registration commits. Recovery uses the same row lock before
+    removing an unregistered object, serializing cleanup against republish.
+    """
+
+    __tablename__ = "artifact_publication_intents"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('PENDING','REGISTERED','CLEANED','RETRYABLE_FAILURE')",
+            name="ck_artifact_publication_intent_status",
+        ),
+        CheckConstraint("length(content_digest) = 64", name="ck_artifact_publication_intent_digest"),
+        CheckConstraint("payload_size_bytes >= 0", name="ck_artifact_publication_intent_size"),
+        CheckConstraint(
+            f"artifact_type IN ({_sql_values(_ARTIFACT_TYPES)})",
+            name="ck_artifact_publication_intent_type",
+        ),
+        Index("ix_artifact_publication_intent_reconcile", "status", "created_at"),
+    )
+
+    artifact_id = Column(String(128), primary_key=True)
+    tenant_id = Column(String(128), nullable=False, index=True)
+    payload_locator = Column(String(1024), nullable=False)
+    content_digest = Column(String(64), nullable=False)
+    payload_size_bytes = Column(Integer, nullable=False)
+    media_type = Column(String(128), nullable=False)
+    artifact_type = Column(String(64), nullable=False)
+    status = Column(String(32), nullable=False, default="PENDING", index=True)
+    failure_code = Column(String(64), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utc_now, index=True)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+
+
 class ArtifactLineageModel(Base):
     __tablename__ = "artifact_lineage"
     __table_args__ = (

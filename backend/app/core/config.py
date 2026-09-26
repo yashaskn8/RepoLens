@@ -307,6 +307,7 @@ class Settings(BaseSettings):
     ARTIFACT_BLOB_CONTAINER: str = ""
     ARTIFACT_RETENTION_DEFAULT_DAYS: int = 90
     ARTIFACT_GC_BATCH_SIZE: int = 100
+    ARTIFACT_PUBLICATION_INTENT_GRACE_SECONDS: int = Field(default=900, ge=60, le=86_400)
     ARTIFACT_RECONCILIATION_INTERVAL_SECONDS: int = 60
 
     # API compatibility and idempotency contract

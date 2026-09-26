@@ -10,7 +10,9 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
-from sqlalchemy.orm import Session
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.artifacts.registry import ArtifactRegistration, ArtifactRegistry
 from app.artifacts.schemas import (
@@ -23,10 +25,11 @@ from app.artifacts.schemas import (
     LineageRelation,
     RetentionClass,
 )
-from app.artifacts.store import ArtifactPutRequest, ArtifactStore, LocalArtifactStore
+from app.artifacts.store import ArtifactPutRequest, ArtifactStore, LocalArtifactStore, artifact_locator
 from app.core.config import Settings, get_settings
 from app.governance.events import AuditLedger, DomainOutbox
 from app.governance.telemetry import TelemetryRecorder
+from app.models.artifact import ArtifactPublicationIntentModel
 
 
 _configured_store: ArtifactStore | None = None
@@ -194,16 +197,21 @@ class CanonicalArtifactService:
             separators=(",", ":"),
         )
         artifact_id = str(uuid5(NAMESPACE_URL, f"repolens-artifact:{identity}"))
+        put_request = ArtifactPutRequest(
+            tenant_id=tenant_id,
+            artifact_id=artifact_id,
+            expected_digest=content_digest,
+            expected_size_bytes=len(payload),
+            content_type=media_type,
+            sensitivity=sensitivity,
+            retention_class=retention_class,
+        )
+        intent = self._lock_publication_intent(
+            request=put_request,
+            artifact_type=artifact_type,
+        )
         metadata = self.store.publish_atomic(
-            ArtifactPutRequest(
-                tenant_id=tenant_id,
-                artifact_id=artifact_id,
-                expected_digest=content_digest,
-                expected_size_bytes=len(payload),
-                content_type=media_type,
-                sensitivity=sensitivity,
-                retention_class=retention_class,
-            ),
+            put_request,
             io.BytesIO(payload),
         )
         now = datetime.now(timezone.utc)
@@ -283,7 +291,81 @@ class CanonicalArtifactService:
             unit="boolean",
             dimensions={"artifact_type": artifact_type.value},
         )
+        intent.status = "REGISTERED"
+        intent.failure_code = None
+        intent.resolved_at = now
+        self.db.flush()
         return registration
+
+    def _lock_publication_intent(
+        self,
+        *,
+        request: ArtifactPutRequest,
+        artifact_type: ArtifactType,
+    ) -> ArtifactPublicationIntentModel:
+        """Commit the recovery marker before storage, then lock through caller commit.
+
+        Production sessions are engine-bound, so the intent is written in a
+        separate durable transaction before object publication. Connection-bound
+        test/outer transactions keep the marker in their own transaction; durable
+        orphan recovery is separately exercised with engine-bound sessions.
+        """
+        bind = self.db.get_bind()
+        locator = artifact_locator(request)
+        # PostgreSQL is the production transactional authority. SQLite uses the
+        # caller transaction to avoid competing writers in local/dev databases.
+        durable_elsewhere = isinstance(bind, Engine) and bind.dialect.name == "postgresql"
+        intent_session = sessionmaker(bind=bind, expire_on_commit=False)() if durable_elsewhere else None
+        try:
+            intent_db = intent_session or self.db
+            existing = intent_db.get(ArtifactPublicationIntentModel, request.artifact_id)
+            if existing is None:
+                intent_db.add(
+                    ArtifactPublicationIntentModel(
+                        artifact_id=request.artifact_id,
+                        tenant_id=request.tenant_id,
+                        payload_locator=locator,
+                        content_digest=request.expected_digest,
+                        payload_size_bytes=request.expected_size_bytes or 0,
+                        media_type=request.content_type,
+                        artifact_type=artifact_type.value,
+                        status="PENDING",
+                    )
+                )
+                try:
+                    if durable_elsewhere:
+                        intent_db.commit()
+                    else:
+                        intent_db.flush()
+                except IntegrityError:
+                    intent_db.rollback()
+                    if intent_db.get(ArtifactPublicationIntentModel, request.artifact_id) is None:
+                        raise
+            intent = (
+                self.db.query(ArtifactPublicationIntentModel)
+                .filter(ArtifactPublicationIntentModel.artifact_id == request.artifact_id)
+                .with_for_update()
+                .one()
+            )
+            if (
+                intent.tenant_id != request.tenant_id
+                or intent.payload_locator != locator
+                or intent.content_digest != request.expected_digest
+                or intent.payload_size_bytes != (request.expected_size_bytes or 0)
+                or intent.media_type != request.content_type
+                or intent.artifact_type != artifact_type.value
+            ):
+                raise RuntimeError("ARTIFACT_PUBLICATION_INTENT_MISMATCH")
+            if intent.status in {"CLEANED", "RETRYABLE_FAILURE"}:
+                intent.status = "PENDING"
+                intent.failure_code = None
+                intent.created_at = datetime.now(timezone.utc)
+                intent.resolved_at = None
+                self.db.flush()
+            return intent
+        finally:
+            if intent_session is not None:
+                intent_session.close()
 
 
 __all__ = [

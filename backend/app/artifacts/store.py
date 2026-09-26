@@ -107,6 +107,7 @@ class ArtifactStore(Protocol):
     ) -> ArtifactObjectMetadata: ...
     def tombstone(self, locator: str, *, reason_code: str) -> bool: ...
     def delete(self, locator: str, *, expected_digest: str) -> ArtifactDeleteResult: ...
+    def discard_unregistered(self, locator: str, *, expected_digest: str) -> ArtifactDeleteResult: ...
 
 
 def _utc_now() -> datetime:
@@ -355,6 +356,47 @@ class LocalArtifactStore:
         metadata_path.unlink(missing_ok=True)
         return ArtifactDeleteResult(deleted=True, already_absent=False)
 
+    def discard_unregistered(self, locator: str, *, expected_digest: str) -> ArtifactDeleteResult:
+        """Conditionally remove an unregistered object under its DB intent lock."""
+        expected_digest = _require_digest(expected_digest)
+        path = self._resolve(locator)
+        metadata_path = self._metadata_path(locator)
+        if self._marker_path(locator).exists():
+            raise ArtifactTombstonedError("cannot discard an object with a durable tombstone")
+        payload_present = path.exists()
+        metadata_present = metadata_path.exists()
+        if not payload_present and not metadata_present:
+            return ArtifactDeleteResult(deleted=False, already_absent=True)
+        if payload_present:
+            if not path.is_file() or not self._verify_path(path, expected_digest):
+                raise ArtifactIntegrityError("refused to discard an unregistered object with a digest mismatch")
+            if metadata_present:
+                metadata = self.metadata(locator)
+                if (
+                    metadata.content_digest != expected_digest
+                    or metadata.size_bytes != path.stat().st_size
+                ):
+                    raise ArtifactIntegrityError("refused to discard unregistered object with mismatched metadata")
+        elif metadata_present:
+            # A crash can leave either side of the payload/metadata pair behind.
+            # Remove a metadata-only remnant only when its identity is exact.
+            try:
+                raw = json.loads(metadata_path.read_text(encoding="utf-8"))
+                metadata_size = int(raw["size_bytes"])
+            except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise ArtifactIntegrityError("refused to discard invalid orphan metadata") from exc
+            if (
+                raw.get("locator") != locator
+                or raw.get("content_digest") != expected_digest
+                or metadata_size < 0
+            ):
+                raise ArtifactIntegrityError("refused to discard mismatched orphan metadata")
+        if payload_present:
+            path.unlink()
+        if metadata_present:
+            metadata_path.unlink()
+        return ArtifactDeleteResult(deleted=True, already_absent=False)
+
 
 @dataclass(frozen=True)
 class BlobObjectHead:
@@ -550,4 +592,22 @@ class ProductionBlobArtifactStore:
         deleted = self.client.delete_if_match(self._key(locator), etag=head.etag)
         if not deleted:
             raise ArtifactConflictError("blob changed during conditional deletion")
+        return ArtifactDeleteResult(deleted=True, already_absent=False)
+
+    def discard_unregistered(self, locator: str, *, expected_digest: str) -> ArtifactDeleteResult:
+        """Delete an unpublished-to-registry blob with exact digest and ETag CAS."""
+        expected_digest = _require_digest(expected_digest)
+        if self._is_tombstoned(locator):
+            raise ArtifactTombstonedError("cannot discard an object with a durable tombstone")
+        key = self._key(locator)
+        head = self.client.head(key)
+        if head is None:
+            return ArtifactDeleteResult(deleted=False, already_absent=True)
+        if (
+            head.metadata.get(self.config.digest_metadata_key) != expected_digest
+            or not self.verify_digest(locator, expected_digest)
+        ):
+            raise ArtifactIntegrityError("refused to discard an unregistered blob with a digest mismatch")
+        if not self.client.delete_if_match(key, etag=head.etag):
+            raise ArtifactConflictError("unregistered blob changed during conditional deletion")
         return ArtifactDeleteResult(deleted=True, already_absent=False)

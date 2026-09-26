@@ -100,7 +100,7 @@ def verify_csrf(
 
     Contract:
     1. Unsafe HTTP methods (POST, PUT, PATCH, DELETE) require CSRF.
-    2. Origin / Referer validation against CORS_ORIGINS when header is present.
+    2. Origin / Referer validation against CORS_ORIGINS (required in production).
     3. Double-submit verification: raw cookie == raw header (constant-time).
     4. Session binding verification: SHA256(raw_header) == session.csrf_token_hash (constant-time).
     """
@@ -108,31 +108,58 @@ def verify_csrf(
     if request.method in ("GET", "HEAD", "OPTIONS"):
         return
 
-    # Check origin/referer if present
-    origin = request.headers.get("Origin") or request.headers.get("Referer")
-    if origin:
-        parsed = urlparse(origin)
-        if not parsed.scheme or not parsed.netloc or parsed.scheme not in ("http", "https"):
+    def values_for_header(name: str) -> list[str]:
+        getlist = getattr(request.headers, "getlist", None)
+        if getlist is not None:
+            return list(getlist(name))
+        value = request.headers.get(name) or request.headers.get(name.title())
+        return [value] if value else []
+
+    origin_values = values_for_header("origin")
+    referer_values = values_for_header("referer")
+    if len(origin_values) > 1 or len(referer_values) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error_code": "CSRF_ORIGIN_INVALID", "message": "Multiple origin headers are not accepted"},
+        )
+    supplied_origins = [(value, True) for value in origin_values]
+    supplied_origins.extend((value, False) for value in referer_values)
+    if settings.is_production and not supplied_origins:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error_code": "CSRF_ORIGIN_REQUIRED", "message": "Origin or Referer is required for mutations"},
+        )
+    allowed_origins = settings.CORS_ORIGINS if isinstance(settings.CORS_ORIGINS, list) else [settings.CORS_ORIGINS]
+    dev_allowed = set(allowed_origins) | {
+        "http://testserver", "http://localhost", "http://127.0.0.1",
+        "http://localhost:3000", "http://127.0.0.1:3000",
+    }
+    for supplied, is_origin in supplied_origins:
+        parsed = urlparse(supplied)
+        try:
+            _ = parsed.port
+            valid_authority = bool(parsed.hostname) and parsed.username is None and parsed.password is None
+        except ValueError:
+            valid_authority = False
+        if (
+            not parsed.scheme
+            or not parsed.netloc
+            or parsed.scheme.lower() not in ("http", "https")
+            or not valid_authority
+            or parsed.fragment
+            or (is_origin and (parsed.path not in ("", "/") or parsed.query))
+        ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail={"error_code": "CSRF_ORIGIN_INVALID", "message": "Invalid origin or referer header"},
             )
-        origin_base = f"{parsed.scheme}://{parsed.netloc}"
-        allowed_origins = settings.CORS_ORIGINS if isinstance(settings.CORS_ORIGINS, list) else [settings.CORS_ORIGINS]
-
-        if settings.is_production:
-            if origin_base not in allowed_origins:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail={"error_code": "CSRF_ORIGIN_INVALID", "message": "Cross-origin request rejected in production"},
-                )
-        else:
-            dev_allowed = set(allowed_origins) | {"http://testserver", "http://localhost", "http://127.0.0.1", "http://localhost:3000", "http://127.0.0.1:3000"}
-            if origin_base not in dev_allowed and "*" not in allowed_origins:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail={"error_code": "CSRF_ORIGIN_INVALID", "message": "Cross-origin request rejected"},
-                )
+        origin_base = f"{parsed.scheme.lower()}://{parsed.netloc}"
+        permitted = allowed_origins if settings.is_production else dev_allowed
+        if origin_base not in permitted and not (not settings.is_production and "*" in allowed_origins):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"error_code": "CSRF_ORIGIN_INVALID", "message": "Cross-origin request rejected"},
+            )
 
     raw_csrf_cookie = request.cookies.get(settings.CSRF_COOKIE_NAME)
     raw_csrf_header = request.headers.get(settings.CSRF_HEADER_NAME)
