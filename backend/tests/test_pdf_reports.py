@@ -9,6 +9,8 @@ from pypdf import PdfReader
 import pytest
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.artifacts.registry import ArtifactRegistry
+from app.artifacts.service import get_artifact_store
 from app.cli.create_operator import create_or_elevate_operator
 from app.core.config import Settings, get_settings
 from app.models.finding import EvidenceModel, FindingModel
@@ -57,6 +59,7 @@ def test_report_pipeline_is_deterministic_bounded_and_tenant_safe(
     monkeypatch,
 ):
     monkeypatch.setenv("REPORT_ARTIFACT_DIR", str(tmp_path / "report-artifacts"))
+    monkeypatch.setenv("ARTIFACT_ROOT_DIR", str(tmp_path / "canonical-artifacts"))
     monkeypatch.setenv("REPORT_MAX_FINDINGS", "2")
     monkeypatch.setenv("REPORT_MAX_DETAILED_FINDINGS", "1")
     monkeypatch.setenv("REPORT_MAX_EVIDENCE_REFERENCES", "2")
@@ -202,23 +205,42 @@ def test_report_pipeline_is_deterministic_bounded_and_tenant_safe(
             bind=db_session.connection(),
             join_transaction_mode="create_savepoint",
         )
-        ReportGenerationService.execute_report(
+        ReportGenerationService.execute_report_under_work_item(
             requested_report.id,
-            "test-worker",
             settings,
             session_factory=worker_sessions,
         )
         db_session.expire_all()
         report = db_session.query(ReportModel).filter(ReportModel.id == requested_report.id).one()
         assert report.status == ReportStatus.READY.value
-        assert report.payload_locator and report.pdf_digest
+        assert report.pdf_artifact_id and report.pdf_digest
+        assert report.document_artifact_id
+        assert report.payload_locator is None
+        assert report.document_locator is None
+        assert not (tmp_path / "report-artifacts" / "pdf").exists()
+        assert not list((tmp_path / "report-artifacts" / "documents").rglob("*.json"))
         assert report.payload_size_bytes and report.payload_size_bytes < settings.REPORT_MAX_PDF_BYTES
 
         storage = LocalReportArtifactStorage.from_settings(settings)
-        pdf_path = storage.resolve_pdf(report.payload_locator)
-        document_path = storage.resolve_document(report.document_locator)
-        assert storage.verify(report.payload_locator, report.pdf_digest, kind="pdf")
-        document = ReportDocument.model_validate_json(document_path.read_bytes())
+        artifact_store = get_artifact_store(settings)
+        registry = ArtifactRegistry(db_session, store=artifact_store)
+        pdf_artifact = registry.get(tenant_id=owner.id, artifact_id=report.pdf_artifact_id, include_tombstoned=False)
+        document_artifact = registry.get(
+            tenant_id=owner.id,
+            artifact_id=report.document_artifact_id,
+            include_tombstoned=False,
+        )
+        assert artifact_store.verify_digest(pdf_artifact.payload_locator, report.pdf_digest)
+        assert artifact_store.verify_digest(document_artifact.payload_locator, report.document_digest)
+        with artifact_store.get(pdf_artifact.payload_locator) as stream:
+            pdf_bytes = stream.read(settings.REPORT_MAX_PDF_BYTES + 1)
+        with artifact_store.get(document_artifact.payload_locator) as stream:
+            document_bytes = stream.read(settings.REPORT_MAX_PDF_BYTES + 1)
+        assert len(pdf_bytes) == report.payload_size_bytes
+        assert len(document_bytes) <= settings.REPORT_MAX_PDF_BYTES
+        document = ReportDocument.model_validate_json(document_bytes)
+        pdf_path = tmp_path / "canonical-report.pdf"
+        pdf_path.write_bytes(pdf_bytes)
         assert document.metadata.repository == scan.repository_url
         assert document.metadata.commit_sha == commit_sha
         assert document.coverage.status == "FULL"

@@ -1,6 +1,7 @@
 """Application settings and configuration using Pydantic Settings."""
 
 from functools import lru_cache
+import ipaddress
 import re
 from typing import Dict, List, Literal, Optional, Union
 from urllib.parse import urlparse
@@ -9,6 +10,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 _DEVELOPMENT_ONLY_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "testserver"})
+_KNOWN_PUBLIC_SUFFIXES = frozenset({
+    "com", "org", "net", "edu", "gov", "mil", "int", "io", "dev", "app",
+    "uk", "co.uk", "org.uk", "ac.uk", "gov.uk", "au", "com.au", "net.au",
+    "org.au", "edu.au", "nz", "co.nz", "org.nz", "jp", "co.jp", "br",
+    "com.br", "in", "co.in", "org.in", "ca", "de", "fr", "ch", "nl",
+})
 
 
 def _normalized_host(value: str) -> str:
@@ -16,6 +23,41 @@ def _normalized_host(value: str) -> str:
         return (urlparse(f"//{value.strip()}").hostname or value).rstrip(".").casefold()
     except ValueError:
         return value.casefold()
+
+
+def _validate_cookie_domain(value: str | None, *, field_name: str, production: bool) -> None:
+    if value is None or not value:
+        return
+    if value != value.strip() or any(character in value for character in "/:@?#*\\"):
+        raise ValueError(f"{field_name} must be a DNS cookie domain, not a URL or path.")
+    host = value[1:] if value.startswith(".") else value
+    if host.endswith(".") or host.startswith("."):
+        raise ValueError(f"{field_name} must not contain empty DNS labels.")
+    host = host.casefold()
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        raise ValueError(f"{field_name} must not be an IP address.")
+    try:
+        ascii_host = host.encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise ValueError(f"{field_name} is not a valid DNS domain.") from exc
+    labels = ascii_host.split(".")
+    if (
+        len(labels) < 2
+        or len(ascii_host) > 253
+        or any(
+            not label
+            or len(label) > 63
+            or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label)
+            for label in labels
+        )
+    ):
+        raise ValueError(f"{field_name} must be a valid multi-label DNS domain.")
+    if production and (host in _DEVELOPMENT_ONLY_HOSTS or ascii_host in _KNOWN_PUBLIC_SUFFIXES):
+        raise ValueError(f"{field_name} must be a registrable production domain, not a public suffix.")
 
 
 class Settings(BaseSettings):
@@ -224,6 +266,7 @@ class Settings(BaseSettings):
 
     # CSRF Protection Settings (Phase 8)
     CSRF_COOKIE_NAME: str = "repolens_csrf"
+    CSRF_COOKIE_DOMAIN: Optional[str] = None
     CSRF_HEADER_NAME: str = "X-CSRF-Token"
 
     # Daily Quota Limits Per User (Phase 8)
@@ -258,6 +301,7 @@ class Settings(BaseSettings):
 
     # Canonical artifact authority and lifecycle defaults
     ARTIFACT_STORAGE_BACKEND: Literal["local", "blob"] = "local"
+    ARTIFACT_DEPLOYMENT_MODE: Literal["single_persistent_local", "shared"] | None = None
     ARTIFACT_ROOT_DIR: str = "./artifacts/canonical"
     ARTIFACT_BLOB_NAMESPACE: str = "repolens"
     ARTIFACT_BLOB_CONTAINER: str = ""
@@ -353,6 +397,15 @@ class Settings(BaseSettings):
 
         if self.AUTH_COOKIE_SAMESITE == "none" and not self.AUTH_COOKIE_SECURE:
             raise ValueError("When AUTH_COOKIE_SAMESITE is 'none', AUTH_COOKIE_SECURE must be True.")
+
+        if self.CSRF_COOKIE_NAME != "repolens_csrf":
+            raise ValueError("CSRF_COOKIE_NAME is a fixed browser contract: repolens_csrf.")
+        _validate_cookie_domain(
+            self.AUTH_COOKIE_DOMAIN, field_name="AUTH_COOKIE_DOMAIN", production=self.is_production
+        )
+        _validate_cookie_domain(
+            self.CSRF_COOKIE_DOMAIN, field_name="CSRF_COOKIE_DOMAIN", production=self.is_production
+        )
 
         if self.GITHUB_APP_ENABLED:
             required_app_values = (
@@ -465,6 +518,42 @@ class Settings(BaseSettings):
             if checkpoint_scheme.partition("+")[0] not in {"postgres", "postgresql"}:
                 raise ValueError(
                     "Production checkpoint configuration must use PostgreSQL."
+                )
+
+            if self.ARTIFACT_DEPLOYMENT_MODE is None:
+                raise ValueError(
+                    "Production requires ARTIFACT_DEPLOYMENT_MODE=single_persistent_local or shared."
+                )
+            if (
+                self.ARTIFACT_DEPLOYMENT_MODE == "single_persistent_local"
+                and self.ARTIFACT_STORAGE_BACKEND != "local"
+            ) or (
+                self.ARTIFACT_DEPLOYMENT_MODE == "shared"
+                and self.ARTIFACT_STORAGE_BACKEND != "blob"
+            ):
+                raise ValueError("Production artifact backend does not match ARTIFACT_DEPLOYMENT_MODE.")
+
+            trusted_hosts = {
+                _normalized_host(urlparse(f"//{host}").hostname or host)
+                for host in (self.TRUSTED_HOSTS if isinstance(self.TRUSTED_HOSTS, list) else [self.TRUSTED_HOSTS])
+            }
+            def domain_covers(domain: str, hosts: set[str]) -> bool:
+                normalized_domain = domain[1:] if domain.startswith(".") else domain
+                normalized_domain = normalized_domain.casefold()
+                return all(
+                    host == normalized_domain or host.endswith("." + normalized_domain)
+                    for host in hosts
+                )
+
+            if self.AUTH_COOKIE_DOMAIN and not domain_covers(self.AUTH_COOKIE_DOMAIN, trusted_hosts):
+                raise ValueError("AUTH_COOKIE_DOMAIN must cover configured backend trusted hosts.")
+            if self.CSRF_COOKIE_DOMAIN:
+                cookie_hosts = trusted_hosts | cors_hosts
+                if not domain_covers(self.CSRF_COOKIE_DOMAIN, cookie_hosts):
+                    raise ValueError("CSRF_COOKIE_DOMAIN must cover configured frontend and backend hosts.")
+            elif cors_hosts - trusted_hosts:
+                raise ValueError(
+                    "Cross-host production frontends require CSRF_COOKIE_DOMAIN covering frontend and backend hosts."
                 )
 
         return self

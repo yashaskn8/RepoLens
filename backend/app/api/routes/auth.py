@@ -107,7 +107,7 @@ def login(
         httponly=False,
         secure=settings.AUTH_COOKIE_SECURE,
         samesite=settings.AUTH_COOKIE_SAMESITE,
-        domain=settings.AUTH_COOKIE_DOMAIN,
+        domain=settings.CSRF_COOKIE_DOMAIN,
         path="/",
     )
 
@@ -139,7 +139,7 @@ def logout(
     )
     response.delete_cookie(
         key=settings.CSRF_COOKIE_NAME,
-        domain=settings.AUTH_COOKIE_DOMAIN,
+        domain=settings.CSRF_COOKIE_DOMAIN,
         path="/",
     )
 

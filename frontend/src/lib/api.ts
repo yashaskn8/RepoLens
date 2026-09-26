@@ -42,6 +42,34 @@ import {
 
 export function getApiBaseUrl(): string {
   const configured = process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, '');
+  if (process.env.NODE_ENV === 'production') {
+    if (!configured) {
+      throw new Error('RepoLens production requires NEXT_PUBLIC_API_BASE_URL.');
+    }
+    let apiOrigin: URL;
+    try {
+      apiOrigin = new URL(configured);
+    } catch {
+      throw new Error('RepoLens production requires an absolute NEXT_PUBLIC_API_BASE_URL origin.');
+    }
+    const apiHost = apiOrigin.hostname.toLowerCase();
+    const isIpLiteral = /^\d{1,3}(?:\.\d{1,3}){3}$/.test(apiHost) || apiHost.startsWith('[');
+    const isDevelopmentHost =
+      apiHost === 'localhost' || apiHost.endsWith('.localhost') || apiHost === 'testserver';
+    if (
+      apiOrigin.protocol !== 'https:' ||
+      apiOrigin.username ||
+      apiOrigin.password ||
+      apiOrigin.search ||
+      apiOrigin.hash ||
+      (apiOrigin.pathname !== '/' && apiOrigin.pathname !== '') ||
+      isIpLiteral ||
+      isDevelopmentHost
+    ) {
+      throw new Error('RepoLens production API base must be a credential-free HTTPS origin.');
+    }
+    return apiOrigin.origin;
+  }
   if (configured) return configured;
   if (typeof window !== 'undefined') {
     // Keep localhost/127.0.0.1 consistent with the page host. Cookies are
@@ -138,7 +166,12 @@ export function getErrorMessage(error: unknown, fallback: string): string {
 export function getCsrfToken(): string | null {
   if (typeof document === 'undefined') return null;
   const match = document.cookie.match(/(?:^|;\s*)repolens_csrf=([^;]*)/);
-  return match ? decodeURIComponent(match[1]) : null;
+  if (!match) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
 }
 
 /**

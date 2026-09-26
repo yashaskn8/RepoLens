@@ -41,6 +41,7 @@ def _production_settings(**overrides: object) -> Settings:
         "CHECKPOINT_BACKEND": "POSTGRES",
         "CHECKPOINT_DATABASE_URL": "postgresql+psycopg://repolens:secret@db.example/repolens",
         "AUTH_COOKIE_SECURE": True,
+        "ARTIFACT_DEPLOYMENT_MODE": "single_persistent_local",
         "CORS_ORIGINS": ["https://app.example"],
         "TRUSTED_HOSTS": ["app.example"],
     }
@@ -305,6 +306,46 @@ def test_production_settings_allow_local_proxy_hosts_alongside_real_origins() ->
         TRUSTED_HOSTS=["app.example", "localhost"],
     )
     assert config.is_production
+
+
+def test_cross_host_production_csrf_cookie_requires_shared_parent_domain() -> None:
+    common = {
+        "CORS_ORIGINS": ["https://app.example.com"],
+        "TRUSTED_HOSTS": ["api.example.com"],
+    }
+    with pytest.raises(ValidationError, match="Cross-host production frontends"):
+        _production_settings(**common)
+    configured = _production_settings(**common, CSRF_COOKIE_DOMAIN=".example.com")
+    assert configured.CSRF_COOKIE_DOMAIN == ".example.com"
+    assert _production_settings(**common, AUTH_COOKIE_DOMAIN=".example.com", CSRF_COOKIE_DOMAIN=".example.com")
+
+
+@pytest.mark.parametrize("domain", [".com", "api.example.com/path", "https://example.com", "127.0.0.1"])
+def test_production_cookie_domain_rejects_public_suffix_or_non_domain_values(domain: str) -> None:
+    with pytest.raises(ValidationError):
+        _production_settings(CSRF_COOKIE_DOMAIN=domain)
+
+
+def test_shared_artifact_mode_is_allowed_by_config_but_fails_readiness_without_adapter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.artifacts import service as artifact_service
+
+    monkeypatch.setattr(artifact_service, "_configured_store", None)
+    settings = _production_settings(
+        ARTIFACT_STORAGE_BACKEND="blob",
+        ARTIFACT_DEPLOYMENT_MODE="shared",
+        ARTIFACT_BLOB_CONTAINER="reports",
+        REPORT_ARTIFACT_DIR=str(tmp_path / "staging"),
+    )
+    with pytest.raises(RuntimeError, match="ConditionalBlobClient adapter"):
+        validate_production_artifact_storage(settings)
+    from app.artifacts.store import LocalArtifactStore
+
+    monkeypatch.setattr(artifact_service, "_configured_store", LocalArtifactStore(tmp_path / "wrong-local-store"))
+    with pytest.raises(RuntimeError, match="conditional production blob adapter"):
+        validate_production_artifact_storage(settings)
 
 
 def test_production_validation_error_does_not_echo_database_credentials() -> None:

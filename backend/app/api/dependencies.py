@@ -150,17 +150,24 @@ def verify_csrf(
             detail={"error_code": "CSRF_MISMATCH", "message": "CSRF token mismatch"},
         )
 
-    # 2. Session binding verification: candidate hash must match active session's csrf_token_hash
+    # 2. Session binding verification. A double-submit pair is not authority by
+    # itself: it must belong to a currently valid, non-revoked session.
     raw_session_token = request.cookies.get(settings.AUTH_COOKIE_NAME)
-    if raw_session_token:
-        session_token_hash = _hash_token(raw_session_token)
-        session = db.query(UserSessionModel).filter(
-            UserSessionModel.token_hash == session_token_hash
-        ).first()
-        if session:
-            candidate_hash = _hash_token(raw_csrf_header)
-            if not hmac.compare_digest(candidate_hash, session.csrf_token_hash):
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail={"error_code": "CSRF_INVALID", "message": "CSRF token does not match active session"},
-                )
+    if not raw_session_token:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error_code": "CSRF_SESSION_INVALID", "message": "A valid authenticated session is required"},
+        )
+    try:
+        _, session = AuthService(db, settings).validate_session(raw_session_token)
+    except AuthError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error_code": "CSRF_SESSION_INVALID", "message": "A valid authenticated session is required"},
+        ) from None
+    candidate_hash = _hash_token(raw_csrf_header)
+    if not hmac.compare_digest(candidate_hash, session.csrf_token_hash):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error_code": "CSRF_INVALID", "message": "CSRF token does not match active session"},
+        )

@@ -12,10 +12,16 @@ Verifies:
 - Rejection of token forged for a different session (403).
 """
 
+import hashlib
+
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 from tests.request_helpers import cookie_headers
+from app.api.dependencies import verify_csrf
+from app.core.config import Settings
+from app.models.user import UserSessionModel
 
 
 @pytest.fixture
@@ -155,3 +161,71 @@ def test_csrf_token_bound_to_different_session_rejected(client: TestClient, db_s
     )
     assert resp.status_code == 403
     assert "CSRF" in str(resp.json()["detail"])
+
+
+def test_matching_double_submit_pair_without_a_valid_session_is_rejected(db_session: Session):
+    class RequestStub:
+        method = "POST"
+        headers = {"X-CSRF-Token": "syntactically-matching-csrf-token"}
+        cookies = {
+            "repolens_csrf": "syntactically-matching-csrf-token",
+            "repolens_session": "not-a-real-session",
+        }
+
+    with pytest.raises(HTTPException) as raised:
+        verify_csrf(
+            request=RequestStub(),  # type: ignore[arg-type]
+            db=db_session,
+            settings=Settings(_env_file=None),
+        )
+    assert raised.value.status_code == 403
+    assert raised.value.detail["error_code"] == "CSRF_SESSION_INVALID"
+
+
+def test_revoked_session_cannot_authorize_csrf_pair(client: TestClient, db_session: Session):
+    session_token = client.cookies.get("repolens_session")
+    assert session_token
+    token_hash = hashlib.sha256(session_token.encode("utf-8")).hexdigest()
+    session = db_session.query(UserSessionModel).filter(UserSessionModel.token_hash == token_hash).one_or_none()
+    assert session is not None
+    session.revoked_at = session.created_at
+    db_session.commit()
+    class RequestStub:
+        method = "POST"
+        headers = {"X-CSRF-Token": client.cookies.get("repolens_csrf")}
+        cookies = {
+            "repolens_csrf": client.cookies.get("repolens_csrf"),
+            "repolens_session": client.cookies.get("repolens_session"),
+        }
+
+    with pytest.raises(HTTPException) as raised:
+        verify_csrf(
+            request=RequestStub(),  # type: ignore[arg-type]
+            db=db_session,
+            settings=Settings(_env_file=None),
+        )
+    assert raised.value.status_code == 403
+    assert raised.value.detail["error_code"] == "CSRF_SESSION_INVALID"
+
+
+def test_login_cookie_scope_uses_independent_csrf_domain(client: TestClient, monkeypatch):
+    monkeypatch.setenv("CSRF_COOKIE_DOMAIN", ".example.test")
+    monkeypatch.setenv("AUTH_COOKIE_DOMAIN", "")
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        response = client.post(
+            "/api/v1/auth/login",
+            json={"email": "default_test_user@example.com", "password": "DefaultTestPass12345!"},
+        )
+        assert response.status_code == 200
+        cookies = response.headers.get_list("set-cookie")
+        session_cookie = next(value for value in cookies if value.startswith("repolens_session="))
+        csrf_cookie = next(value for value in cookies if value.startswith("repolens_csrf="))
+        assert "domain=.example.test" not in session_cookie.lower()
+        assert "domain=.example.test" in csrf_cookie.lower()
+        assert "httponly" in session_cookie.lower()
+        assert "httponly" not in csrf_cookie.lower()
+    finally:
+        get_settings.cache_clear()

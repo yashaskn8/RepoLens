@@ -1681,11 +1681,7 @@ class DurableWorkDispatcher:
                     "explanation": "The immutable report document was rendered and digest-verified.",
                 },
                 coverage_artifact_id=report.coverage_artifact_id,
-                output_artifact_id=(
-                    report.artifact_lineage.get("pdf_artifact_id")
-                    if isinstance(report.artifact_lineage, dict)
-                    else None
-                ),
+                output_artifact_id=report.pdf_artifact_id,
                 outcome_detail={
                     "report_id": report.id,
                     "pdf_digest": report.pdf_digest,

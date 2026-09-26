@@ -328,8 +328,17 @@ if settings.CORS_ORIGINS:
         CORSMiddleware,
         allow_origins=origins,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=[
+            "Accept",
+            "Authorization",
+            "Content-Type",
+            "Idempotency-Key",
+            "Last-Event-ID",
+            "Prefer",
+            "X-CSRF-Token",
+            "X-Request-ID",
+        ],
     )
 
 # Include health check directly at /health as well as under /api/v1/health

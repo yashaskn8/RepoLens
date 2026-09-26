@@ -1,7 +1,10 @@
 """Authenticated report-resource creation, status, recovery, and PDF download."""
 
+import re
+
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
+from starlette.background import BackgroundTask
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user, verify_csrf
@@ -15,11 +18,14 @@ from app.execution.types import RequestBudget, ResourceProfile, WorkKind
 from app.governance.events import AuditLedger
 from app.models.report import ReportModel
 from app.reporting.schemas import ReportResource, ReportStatus
-from app.reporting.storage import LocalReportArtifactStorage
 from app.schemas.auth import CurrentUser
 from app.services.authorization_service import get_owned_report_or_404, get_owned_scan_or_404
 from app.services.report_dispatcher import ReportDispatcher  # Backward-compatible import; shared dispatcher owns runtime execution.
-from app.services.report_generation import ReportGenerationService, report_to_resource
+from app.services.report_generation import (
+    ReportGenerationService,
+    report_to_resource,
+    spool_canonical_report_pdf,
+)
 
 
 router = APIRouter(tags=["Reports"])
@@ -86,14 +92,21 @@ async def request_scan_report(
                     status_code=status.HTTP_409_CONFLICT,
                     detail={"error_code": "IDEMPOTENCY_CONFLICT", "message": str(exc)},
                 ) from exc
-            service.register_document_artifact(
-                db,
-                existing_report,
-                policy_snapshot_id=submission.policy_snapshot_id,
-                actor_id=current_user.id,
-                request_id=getattr(request.state, "request_id", None),
-            )
-            db.commit()
+            staged_locator = existing_report.document_locator
+            try:
+                service.register_document_artifact(
+                    db,
+                    existing_report,
+                    policy_snapshot_id=submission.policy_snapshot_id,
+                    actor_id=current_user.id,
+                    request_id=getattr(request.state, "request_id", None),
+                )
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+            if staged_locator:
+                service.storage.discard_document(staged_locator, existing_report.document_digest)
             response.headers["Location"] = f"/api/v1/reports/{existing_report.id}"
             response.headers["X-Job-Location"] = f"/api/v1/jobs/{submission.result.work_item_id}"
             response.headers["Idempotency-Replayed"] = "true"
@@ -108,6 +121,7 @@ async def request_scan_report(
         tenant_id=current_user.id,
         auto_commit=False,
     )
+    staged_locator = result.staged_document_locator or result.report.document_locator
     try:
         submission = submission_service.submit(
             db,
@@ -138,20 +152,28 @@ async def request_scan_report(
         db.commit()
     except NewWorkPaused as exc:
         db.rollback()
-        if not result.reused:
-            service.storage.discard_document(result.report.document_locator, result.report.document_digest)
+        if staged_locator and not result.reused:
+            service.storage.discard_document(staged_locator, result.report.document_digest)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"error_code": "NEW_JOBS_PAUSED", "message": str(exc)},
         ) from exc
     except IdempotencyConflict as exc:
         db.rollback()
-        if not result.reused:
-            service.storage.discard_document(result.report.document_locator, result.report.document_digest)
+        if staged_locator and not result.reused:
+            service.storage.discard_document(staged_locator, result.report.document_digest)
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"error_code": "IDEMPOTENCY_CONFLICT", "message": str(exc)},
         ) from exc
+    except Exception:
+        db.rollback()
+        if staged_locator and not result.reused:
+            service.storage.discard_document(staged_locator, result.report.document_digest)
+        raise
+
+    if staged_locator:
+        service.storage.discard_document(staged_locator, result.report.document_digest)
 
     if result.should_dispatch:
         DurableWorkDispatcher.nudge()
@@ -203,36 +225,52 @@ def download_report(
     db: Session = Depends(get_db),
 ):
     report = get_owned_report_or_404(db, report_id, current_user)
-    if report.status != ReportStatus.READY.value or not report.payload_locator or not report.pdf_digest:
+    if report.status != ReportStatus.READY.value or not report.pdf_artifact_id or not report.pdf_digest:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"error_code": "REPORT_NOT_READY", "message": "The PDF report is not ready for download."},
         )
-    storage = LocalReportArtifactStorage.from_settings()
-    if not storage.verify(report.payload_locator, report.pdf_digest, kind="pdf"):
+    try:
+        spool = spool_canonical_report_pdf(db, report)
+    except RuntimeError:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"error_code": "REPORT_ARTIFACT_UNAVAILABLE", "message": "The PDF artifact failed availability verification."},
+        ) from None
+    try:
+        AuditLedger.append(
+            db,
+            tenant_id=current_user.id,
+            actor_id=current_user.id,
+            request_id=getattr(request.state, "request_id", None),
+            event_type="REPORT_DOWNLOADED",
+            resource_type="REPORT",
+            resource_id=report.id,
+            artifact_digest=report.pdf_digest,
+            payload={"scan_id": report.scan_id},
         )
-    path = storage.resolve_pdf(report.payload_locator)
-    AuditLedger.append(
-        db,
-        tenant_id=current_user.id,
-        actor_id=current_user.id,
-        request_id=getattr(request.state, "request_id", None),
-        event_type="REPORT_DOWNLOADED",
-        resource_type="REPORT",
-        resource_id=report.id,
-        artifact_digest=report.pdf_digest,
-        payload={"scan_id": report.scan_id},
-    )
-    db.commit()
-    return FileResponse(
-        path=path,
+        db.commit()
+    except Exception:
+        spool.close()
+        db.rollback()
+        raise
+
+    def body():
+        try:
+            while chunk := spool.read(64 * 1024):
+                yield chunk
+        finally:
+            spool.close()
+
+    filename_id = re.sub(r"[^A-Za-z0-9]", "", report.id)[:8] or "download"
+    return StreamingResponse(
+        body(),
         media_type="application/pdf",
-        filename=f"repolens-report-{report.id[:8]}.pdf",
         headers={
+            "Content-Disposition": f'attachment; filename="repolens-report-{filename_id}.pdf"',
+            "Content-Length": str(report.payload_size_bytes),
             "Cache-Control": "private, no-store",
             "X-Content-Type-Options": "nosniff",
         },
+        background=BackgroundTask(spool.close),
     )

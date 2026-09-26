@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
+import tempfile
 from time import monotonic as _monotonic
 from types import SimpleNamespace
 from typing import Callable, Optional
@@ -23,7 +24,9 @@ from app.artifacts.schemas import (
     LineageRelation,
     RetentionClass,
 )
-from app.artifacts.service import CanonicalArtifactService
+from app.artifacts.registry import ArtifactRegistry
+from app.artifacts.schemas import ArtifactType
+from app.artifacts.service import CanonicalArtifactService, get_artifact_store
 from app.core.config import Settings, get_settings
 from app.core.database import SessionLocal
 from app.models.report import ReportModel
@@ -45,6 +48,7 @@ class ReportRequestResult:
     report: ReportModel
     reused: bool
     should_dispatch: bool
+    staged_document_locator: str | None = None
 
 
 def _utc_now() -> datetime:
@@ -90,6 +94,162 @@ def _report_lineage_payload(value: object) -> dict:
     if isinstance(value, (list, tuple, set)):
         return {"upstream_artifact_ids": [str(item) for item in value if item]}
     return {}
+
+
+def _read_staged_report_bytes(path: Path, *, maximum_bytes: int) -> bytes:
+    """Read a staging file with a hard bound before canonical publication."""
+    if maximum_bytes < 0:
+        raise ValueError("maximum_bytes must be non-negative")
+    try:
+        with path.open("rb") as stream:
+            payload = stream.read(maximum_bytes + 1)
+    except OSError:
+        raise RuntimeError("REPORT_STAGING_UNAVAILABLE") from None
+    if len(payload) > maximum_bytes:
+        raise RuntimeError("REPORT_STAGING_TOO_LARGE")
+    return payload
+
+
+def _canonical_report_artifact(
+    db: Session,
+    report: ReportModel,
+    *,
+    artifact_id: str | None,
+    expected_type: ArtifactType,
+    expected_digest: str,
+    settings: Settings,
+):
+    """Resolve and verify report bytes only through the tenant-bound registry/store."""
+    if not artifact_id:
+        raise RuntimeError("REPORT_ARTIFACT_UNAVAILABLE")
+    store = get_artifact_store(settings)
+    try:
+        artifact = ArtifactRegistry(db, store=store).get(
+            tenant_id=report.owner_user_id,
+            artifact_id=artifact_id,
+            include_tombstoned=False,
+        )
+        metadata = store.metadata(artifact.payload_locator)
+        valid = (
+            artifact.tenant_id == report.owner_user_id
+            and artifact.artifact_type == expected_type
+            and artifact.content_digest == expected_digest
+            and artifact.payload_size_bytes == metadata.size_bytes
+            and artifact.content_digest == metadata.content_digest
+            and artifact.media_type == metadata.content_type
+            and store.verify_digest(artifact.payload_locator, expected_digest)
+        )
+    except Exception:
+        raise RuntimeError("REPORT_ARTIFACT_UNAVAILABLE") from None
+    if not valid:
+        raise RuntimeError("REPORT_ARTIFACT_INTEGRITY_FAILURE")
+    return artifact, store
+
+
+def read_canonical_report_document(
+    db: Session,
+    report: ReportModel,
+    *,
+    settings: Settings | None = None,
+) -> ReportDocument:
+    """Read a bounded immutable document from canonical authority and attest identity."""
+    active_settings = settings or get_settings()
+    if not report.document_digest:
+        raise RuntimeError("REPORT_DOCUMENT_UNAVAILABLE")
+    artifact, store = _canonical_report_artifact(
+        db,
+        report,
+        artifact_id=report.document_artifact_id,
+        expected_type=ArtifactType.REPORT_DOCUMENT,
+        expected_digest=report.document_digest,
+        settings=active_settings,
+    )
+    if artifact.media_type != "application/json" or artifact.payload_size_bytes > active_settings.REPORT_MAX_PDF_BYTES:
+        raise RuntimeError("REPORT_DOCUMENT_TOO_LARGE_OR_INVALID")
+    output = bytearray()
+    digest = hashlib.sha256()
+    try:
+        with store.get(artifact.payload_locator) as stream:
+            while True:
+                chunk = stream.read(min(64 * 1024, active_settings.REPORT_MAX_PDF_BYTES + 1 - len(output)))
+                if not chunk:
+                    break
+                output.extend(chunk)
+                digest.update(chunk)
+                if len(output) > active_settings.REPORT_MAX_PDF_BYTES:
+                    raise RuntimeError("REPORT_DOCUMENT_TOO_LARGE")
+    except Exception:
+        raise RuntimeError("REPORT_DOCUMENT_UNAVAILABLE") from None
+    if digest.hexdigest() != report.document_digest:
+        raise RuntimeError("REPORT_DOCUMENT_INTEGRITY_FAILURE")
+    try:
+        document = ReportDocument.model_validate_json(bytes(output))
+    except Exception:
+        raise RuntimeError("REPORT_DOCUMENT_INVALID") from None
+    metadata = document.metadata
+    if (
+        metadata.report_id != report.id
+        or metadata.tenant_id != report.owner_user_id
+        or metadata.scan_id != report.scan_id
+        or metadata.renderer_version != report.renderer_version
+        or metadata.report_schema_version != report.report_schema_version
+        or metadata.repository != report.repository_url
+        or metadata.commit_sha != report.commit_sha
+    ):
+        raise RuntimeError("REPORT_DOCUMENT_IDENTITY_MISMATCH")
+    return document
+
+
+def spool_canonical_report_pdf(
+    db: Session,
+    report: ReportModel,
+    *,
+    settings: Settings | None = None,
+):
+    """Return a bounded, digest-verified PDF spool from canonical authority."""
+    active_settings = settings or get_settings()
+    if not report.pdf_digest:
+        raise RuntimeError("REPORT_ARTIFACT_UNAVAILABLE")
+    artifact, store = _canonical_report_artifact(
+        db,
+        report,
+        artifact_id=report.pdf_artifact_id,
+        expected_type=ArtifactType.PDF_REPORT,
+        expected_digest=report.pdf_digest,
+        settings=active_settings,
+    )
+    if artifact.media_type != "application/pdf":
+        raise RuntimeError("REPORT_PDF_INVALID")
+    if (
+        artifact.payload_size_bytes != report.payload_size_bytes
+        or artifact.payload_size_bytes > active_settings.REPORT_MAX_PDF_BYTES
+    ):
+        raise RuntimeError("REPORT_PDF_SIZE_MISMATCH")
+
+    spool = tempfile.SpooledTemporaryFile(max_size=1024 * 1024, mode="w+b")
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with store.get(artifact.payload_locator) as source:
+            while True:
+                chunk = source.read(min(64 * 1024, active_settings.REPORT_MAX_PDF_BYTES + 1 - size))
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > active_settings.REPORT_MAX_PDF_BYTES:
+                    raise RuntimeError("REPORT_PDF_TOO_LARGE")
+                spool.write(chunk)
+                digest.update(chunk)
+        if size != artifact.payload_size_bytes or digest.hexdigest() != report.pdf_digest:
+            raise RuntimeError("REPORT_ARTIFACT_INTEGRITY_FAILURE")
+        spool.seek(0)
+        return spool
+    except RuntimeError:
+        spool.close()
+        raise
+    except Exception:
+        spool.close()
+        raise RuntimeError("REPORT_ARTIFACT_UNAVAILABLE") from None
 
 
 def report_to_resource(report: ReportModel, *, reused: bool = False) -> ReportResource:
@@ -155,19 +315,24 @@ class ReportGenerationService:
         )
         if existing is not None:
             if existing.status == ReportStatus.READY.value:
-                if existing.payload_locator and existing.pdf_digest and self.storage.verify(
-                    existing.payload_locator, existing.pdf_digest, kind="pdf"
-                ):
+                try:
+                    artifact, _ = _canonical_report_artifact(
+                        db,
+                        existing,
+                        artifact_id=existing.pdf_artifact_id,
+                        expected_type=ArtifactType.PDF_REPORT,
+                        expected_digest=existing.pdf_digest or "",
+                        settings=self.settings,
+                    )
+                    available = artifact.payload_size_bytes == existing.payload_size_bytes
+                except RuntimeError:
+                    available = False
+                if available:
                     return ReportRequestResult(existing, reused=True, should_dispatch=False)
-                existing.status = ReportStatus.REQUESTED.value
-                existing.pdf_digest = None
-                existing.payload_locator = None
-                existing.payload_size_bytes = None
-                existing.page_count = None
-                existing.generated_at = None
-                existing.failure_code = "ARTIFACT_MISSING"
-                existing.failure_message = None
-                existing.retryable = True
+                existing.status = ReportStatus.FAILED.value
+                existing.failure_code = "REPORT_ARTIFACT_UNAVAILABLE"
+                existing.failure_message = "The canonical PDF artifact is unavailable; operator reconciliation is required."
+                existing.retryable = False
                 existing.lease_owner = None
                 existing.lease_expires_at = None
                 if auto_commit:
@@ -175,9 +340,28 @@ class ReportGenerationService:
                 else:
                     db.flush()
                 db.refresh(existing)
-                return ReportRequestResult(existing, reused=False, should_dispatch=True)
+                return ReportRequestResult(existing, reused=False, should_dispatch=False)
+            if existing.status in {
+                ReportStatus.REQUESTED.value,
+                ReportStatus.ASSEMBLING.value,
+                ReportStatus.RENDERING.value,
+            } and not existing.document_artifact_id:
+                existing.status = ReportStatus.FAILED.value
+                existing.failure_code = "LEGACY_REPORT_DOCUMENT_UNAVAILABLE"
+                existing.failure_message = "The canonical report document is unavailable; operator reconciliation is required."
+                existing.retryable = False
+                if auto_commit:
+                    db.commit()
+                else:
+                    db.flush()
+                db.refresh(existing)
+                return ReportRequestResult(existing, reused=False, should_dispatch=False)
             if existing.status == ReportStatus.FAILED.value:
-                if not existing.retryable or existing.attempt_count >= self.settings.REPORT_MAX_ATTEMPTS:
+                if (
+                    not existing.retryable
+                    or existing.attempt_count >= self.settings.REPORT_MAX_ATTEMPTS
+                    or not existing.document_artifact_id
+                ):
                     return ReportRequestResult(existing, reused=False, should_dispatch=False)
                 existing.status = ReportStatus.REQUESTED.value
                 existing.failure_code = None
@@ -247,8 +431,18 @@ class ReportGenerationService:
             if winner is None:
                 raise
             return ReportRequestResult(winner, reused=True, should_dispatch=False)
+        except Exception:
+            if auto_commit:
+                db.rollback()
+            self.storage.discard_document(document_locator, document_digest)
+            raise
         db.refresh(report)
-        return ReportRequestResult(report, reused=False, should_dispatch=True)
+        return ReportRequestResult(
+            report,
+            reused=False,
+            should_dispatch=True,
+            staged_document_locator=document_locator,
+        )
 
     def register_document_artifact(
         self,
@@ -259,17 +453,38 @@ class ReportGenerationService:
         actor_id: str | None = None,
         request_id: str | None = None,
     ) -> str:
-        """Migrate the immutable assembled document into canonical artifact authority."""
+        """Publish the staged document and bind the report to canonical authority."""
         lineage_payload = _report_lineage_payload(report.artifact_lineage)
-        existing_id = lineage_payload.get("document_artifact_id")
+        existing_id = report.document_artifact_id or lineage_payload.get("document_artifact_id")
         if existing_id:
+            artifact, _ = _canonical_report_artifact(
+                db,
+                report,
+                artifact_id=str(existing_id),
+                expected_type=ArtifactType.REPORT_DOCUMENT,
+                expected_digest=report.document_digest,
+                settings=self.settings,
+            )
+            if artifact.media_type != "application/json":
+                raise RuntimeError("REPORT_DOCUMENT_INVALID")
+            report.document_artifact_id = str(existing_id)
+            lineage_payload["document_artifact_id"] = str(existing_id)
+            report.artifact_lineage = lineage_payload
+            report.document_locator = None
+            db.flush()
             return str(existing_id)
-        document_path = self.storage.resolve_document(report.document_locator)
-        if not self.storage.verify(report.document_locator, report.document_digest, kind="document"):
+        if not report.document_locator:
             raise RuntimeError("REPORT_DOCUMENT_UNAVAILABLE")
+        document_path = self.storage.resolve_document(report.document_locator)
+        payload = _read_staged_report_bytes(
+            document_path,
+            maximum_bytes=self.settings.REPORT_MAX_PDF_BYTES,
+        )
+        if hashlib.sha256(payload).hexdigest() != report.document_digest:
+            raise RuntimeError("REPORT_DOCUMENT_INTEGRITY_FAILURE")
         upstream_ids = _registered_lineage_ids(db, report.owner_user_id, lineage_payload)
-        registration = CanonicalArtifactService(db, settings=self.settings).publish_file(
-            path=document_path,
+        registration = CanonicalArtifactService(db, settings=self.settings).publish_bytes(
+            payload=payload,
             media_type="application/json",
             tenant_id=report.owner_user_id,
             repository_id=_repository_identity(report.repository_url),
@@ -290,8 +505,12 @@ class ReportGenerationService:
             actor_id=actor_id,
             request_id=request_id,
         )
+        if registration.artifact.content_digest != report.document_digest:
+            raise RuntimeError("REPORT_DOCUMENT_INTEGRITY_FAILURE")
+        report.document_artifact_id = registration.artifact.artifact_id
         lineage_payload["document_artifact_id"] = registration.artifact.artifact_id
         report.artifact_lineage = lineage_payload
+        report.document_locator = None
         db.flush()
         return registration.artifact.artifact_id
 
@@ -306,17 +525,38 @@ class ReportGenerationService:
         settings: Settings,
     ) -> str:
         lineage_payload = _report_lineage_payload(report.artifact_lineage)
-        existing_id = lineage_payload.get("pdf_artifact_id")
+        existing_id = report.pdf_artifact_id or lineage_payload.get("pdf_artifact_id")
         if existing_id:
+            artifact, _ = _canonical_report_artifact(
+                db,
+                report,
+                artifact_id=str(existing_id),
+                expected_type=ArtifactType.PDF_REPORT,
+                expected_digest=report.pdf_digest or "",
+                settings=settings,
+            )
+            if artifact.media_type != "application/pdf":
+                raise RuntimeError("REPORT_PDF_INVALID")
+            report.pdf_artifact_id = str(existing_id)
+            lineage_payload["pdf_artifact_id"] = str(existing_id)
+            report.artifact_lineage = lineage_payload
+            report.payload_locator = None
+            db.flush()
             return str(existing_id)
-        document_artifact_id = lineage_payload.get("document_artifact_id")
+        document_artifact_id = report.document_artifact_id or lineage_payload.get("document_artifact_id")
         lineage = (
             [(LineageRelation.DERIVED_FROM, str(document_artifact_id))]
             if document_artifact_id
             else []
         )
-        registration = CanonicalArtifactService(db, settings=settings).publish_file(
-            path=pdf_path,
+        payload = _read_staged_report_bytes(
+            pdf_path,
+            maximum_bytes=settings.REPORT_MAX_PDF_BYTES,
+        )
+        if hashlib.sha256(payload).hexdigest() != report.pdf_digest:
+            raise RuntimeError("REPORT_PDF_INTEGRITY_FAILURE")
+        registration = CanonicalArtifactService(db, settings=settings).publish_bytes(
+            payload=payload,
             media_type="application/pdf",
             tenant_id=report.owner_user_id,
             repository_id=_repository_identity(report.repository_url),
@@ -336,6 +576,12 @@ class ReportGenerationService:
             referrer=("REPORT", report.id),
             actor_id=report.owner_user_id,
         )
+        if (
+            registration.artifact.content_digest != report.pdf_digest
+            or registration.artifact.payload_size_bytes != report.payload_size_bytes
+        ):
+            raise RuntimeError("REPORT_PDF_INTEGRITY_FAILURE")
+        report.pdf_artifact_id = registration.artifact.artifact_id
         lineage_payload["pdf_artifact_id"] = registration.artifact.artifact_id
         report.artifact_lineage = lineage_payload
         db.flush()
@@ -363,11 +609,26 @@ class ReportGenerationService:
             if report is None:
                 raise RuntimeError("REPORT_NOT_FOUND")
             if report.status == ReportStatus.READY.value:
-                if report.payload_locator and report.pdf_digest and storage.verify(
-                    report.payload_locator, report.pdf_digest, kind="pdf"
-                ):
+                try:
+                    artifact, _ = _canonical_report_artifact(
+                        db,
+                        report,
+                        artifact_id=report.pdf_artifact_id,
+                        expected_type=ArtifactType.PDF_REPORT,
+                        expected_digest=report.pdf_digest or "",
+                        settings=effective_settings,
+                    )
+                    if artifact.payload_size_bytes != report.payload_size_bytes:
+                        raise RuntimeError("REPORT_ARTIFACT_INTEGRITY_FAILURE")
                     return
-                report.status = ReportStatus.REQUESTED.value
+                except RuntimeError:
+                    report.status = ReportStatus.FAILED.value
+                    report.failure_code = "REPORT_ARTIFACT_UNAVAILABLE"
+                    report.failure_message = "The canonical PDF artifact is unavailable."
+                    report.retryable = False
+                    report.updated_at = _utc_now()
+                    db.commit()
+                    return
             if report.attempt_count >= effective_settings.REPORT_MAX_ATTEMPTS:
                 report.status = ReportStatus.FAILED.value
                 report.retryable = False
@@ -385,39 +646,18 @@ class ReportGenerationService:
             report.updated_at = _utc_now()
             db.commit()
 
-            if not storage.verify(report.document_locator, report.document_digest, kind="document"):
-                raise RuntimeError("REPORT_DOCUMENT_UNAVAILABLE")
-            document_path = storage.resolve_document(report.document_locator)
-            if document_path.stat().st_size > effective_settings.REPORT_MAX_PDF_BYTES:
-                raise RuntimeError("REPORT_DOCUMENT_TOO_LARGE")
-            document = ReportDocument.model_validate_json(document_path.read_bytes())
-            if (
-                document.metadata.report_id != report.id
-                or document.metadata.tenant_id != report.owner_user_id
-                or document.metadata.scan_id != report.scan_id
-                or document.metadata.renderer_version != report.renderer_version
-            ):
-                raise RuntimeError("REPORT_DOCUMENT_IDENTITY_MISMATCH")
+            document = read_canonical_report_document(db, report, settings=effective_settings)
 
             report.status = ReportStatus.RENDERING.value
             report.updated_at = _utc_now()
             db.commit()
             temp_path = storage.create_pdf_temp(report.id)
             generated = ReportLabPdfRenderer(effective_settings).render(document, temp_path)
-            locator = storage.publish_pdf(report.id, generated.digest, temp_path)
-            temp_path = None
-            report.status = ReportStatus.READY.value
             report.pdf_digest = generated.digest
-            report.payload_locator = locator
+            report.payload_locator = None
             report.payload_size_bytes = generated.size_bytes
             report.page_count = generated.page_count
             report.generated_at = document.metadata.generated_at
-            report.failure_code = None
-            report.failure_message = None
-            report.retryable = False
-            report.lease_owner = None
-            report.lease_expires_at = None
-            report.updated_at = _utc_now()
 
             from app.models.execution import WorkItemModel
 
@@ -427,15 +667,23 @@ class ReportGenerationService:
             ).order_by(WorkItemModel.created_at.desc()).first()
             if work is None:
                 raise RuntimeError("REPORT_WORK_ITEM_MISSING")
-            published_pdf_path = storage.resolve_pdf(locator)
             cls._register_pdf_artifact(
                 db,
                 report,
-                pdf_path=published_pdf_path,
+                pdf_path=temp_path,
                 policy_snapshot_id=work.policy_snapshot_id,
                 settings=effective_settings,
             )
+            report.status = ReportStatus.READY.value
+            report.failure_code = None
+            report.failure_message = None
+            report.retryable = False
+            report.lease_owner = None
+            report.lease_expires_at = None
+            report.updated_at = _utc_now()
             db.commit()
+            temp_path.unlink(missing_ok=True)
+            temp_path = None
 
             from app.governance.telemetry import TelemetryRecorder
 
@@ -512,19 +760,9 @@ class ReportGenerationService:
                 return
 
             report = db.query(ReportModel).filter(ReportModel.id == report_id).first()
-            if report is None or not storage.verify(report.document_locator, report.document_digest, kind="document"):
+            if report is None:
                 raise RuntimeError("REPORT_DOCUMENT_UNAVAILABLE")
-            document_path = storage.resolve_document(report.document_locator)
-            if document_path.stat().st_size > effective_settings.REPORT_MAX_PDF_BYTES:
-                raise RuntimeError("REPORT_DOCUMENT_TOO_LARGE")
-            document = ReportDocument.model_validate_json(document_path.read_bytes())
-            if (
-                document.metadata.report_id != report.id
-                or document.metadata.tenant_id != report.owner_user_id
-                or document.metadata.scan_id != report.scan_id
-                or document.metadata.renderer_version != report.renderer_version
-            ):
-                raise RuntimeError("REPORT_DOCUMENT_IDENTITY_MISMATCH")
+            document = read_canonical_report_document(db, report, settings=effective_settings)
 
             report.status = ReportStatus.RENDERING.value
             report.lease_expires_at = _utc_now() + timedelta(seconds=effective_settings.REPORT_LEASE_SECONDS)
@@ -568,37 +806,48 @@ class ReportGenerationService:
                 temp_path,
                 progress_callback=renew_render_lease,
             )
-            locator = storage.publish_pdf(report.id, generated.digest, temp_path)
-            temp_path = None
+            from app.models.execution import WorkItemModel
 
-            finalized = (
+            work = db.query(WorkItemModel).filter(
+                WorkItemModel.work_kind == "REPORT_GENERATION",
+                WorkItemModel.resource_id == report.id,
+            ).order_by(WorkItemModel.created_at.desc()).first()
+            if work is None:
+                raise RuntimeError("REPORT_WORK_ITEM_MISSING")
+            owned_report = (
                 db.query(ReportModel)
                 .filter(
                     ReportModel.id == report.id,
                     ReportModel.status == ReportStatus.RENDERING.value,
                     ReportModel.lease_owner == worker_id,
                 )
-                .update(
-                    {
-                        ReportModel.status: ReportStatus.READY.value,
-                        ReportModel.pdf_digest: generated.digest,
-                        ReportModel.payload_locator: locator,
-                        ReportModel.payload_size_bytes: generated.size_bytes,
-                        ReportModel.page_count: generated.page_count,
-                        ReportModel.generated_at: document.metadata.generated_at,
-                        ReportModel.failure_code: None,
-                        ReportModel.failure_message: None,
-                        ReportModel.retryable: False,
-                        ReportModel.lease_owner: None,
-                        ReportModel.lease_expires_at: None,
-                        ReportModel.updated_at: _utc_now(),
-                    },
-                    synchronize_session=False,
-                )
+                .with_for_update()
+                .first()
             )
+            if owned_report is None:
+                raise RuntimeError("REPORT_LEASE_LOST")
+            report.pdf_digest = generated.digest
+            report.payload_locator = None
+            report.payload_size_bytes = generated.size_bytes
+            report.page_count = generated.page_count
+            report.generated_at = document.metadata.generated_at
+            cls._register_pdf_artifact(
+                db,
+                report,
+                pdf_path=temp_path,
+                policy_snapshot_id=work.policy_snapshot_id,
+                settings=effective_settings,
+            )
+            report.status = ReportStatus.READY.value
+            report.failure_code = None
+            report.failure_message = None
+            report.retryable = False
+            report.lease_owner = None
+            report.lease_expires_at = None
+            report.updated_at = _utc_now()
             db.commit()
-            if finalized != 1:
-                logger.warning("Report %s rendered but its execution lease was no longer current.", report_id)
+            temp_path.unlink(missing_ok=True)
+            temp_path = None
         except Exception as exc:
             db.rollback()
             logger.exception("Report generation failed for %s", report_id)

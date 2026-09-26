@@ -184,6 +184,7 @@ def test_production_and_dev_enable_api_docs_defaults():
         DATABASE_URL="postgresql+psycopg://test:test@db.example/repolens",
         CHECKPOINT_BACKEND="POSTGRES",
         AUTH_COOKIE_SECURE=True,
+        ARTIFACT_DEPLOYMENT_MODE="single_persistent_local",
         CORS_ORIGINS=["https://app.example.com"],
         TRUSTED_HOSTS=["app.example.com"],
     )
@@ -200,6 +201,7 @@ def test_production_and_dev_enable_api_docs_defaults():
         DATABASE_URL="postgresql+psycopg://test:test@db.example/repolens",
         CHECKPOINT_BACKEND="POSTGRES",
         AUTH_COOKIE_SECURE=True,
+        ARTIFACT_DEPLOYMENT_MODE="single_persistent_local",
         CORS_ORIGINS=["https://app.example.com"],
         TRUSTED_HOSTS=["app.example.com"],
         ENABLE_API_DOCS=True,
@@ -544,6 +546,7 @@ def test_production_csrf_rejects_localhost_and_arbitrary_origins():
         DATABASE_URL="postgresql+psycopg://test:test@db.example/repolens",
         CHECKPOINT_BACKEND="POSTGRES",
         AUTH_COOKIE_SECURE=True,
+        ARTIFACT_DEPLOYMENT_MODE="single_persistent_local",
         CORS_ORIGINS=["https://app.example.com"],
         TRUSTED_HOSTS=["app.example.com"],
     )

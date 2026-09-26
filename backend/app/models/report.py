@@ -25,7 +25,7 @@ class ReportModel(Base):
             name="ck_reports_status",
         ),
         CheckConstraint(
-            "status != 'READY' OR (pdf_digest IS NOT NULL AND payload_locator IS NOT NULL AND generated_at IS NOT NULL)",
+            "status != 'READY' OR (pdf_digest IS NOT NULL AND pdf_artifact_id IS NOT NULL AND generated_at IS NOT NULL)",
             name="ck_reports_ready_artifact",
         ),
     )
@@ -40,9 +40,13 @@ class ReportModel(Base):
     evidence_digest = Column(String(64), nullable=False)
     coverage_digest = Column(String(64), nullable=False)
     document_digest = Column(String(64), nullable=False)
-    document_locator = Column(String(1024), nullable=False)
+    # Legacy local locators remain nullable only for the explicit migration path;
+    # canonical artifact IDs are the serving and recovery authority.
+    document_locator = Column(String(1024), nullable=True)
+    document_artifact_id = Column(String(128), ForeignKey("artifacts.id", ondelete="RESTRICT"), nullable=True, index=True)
     pdf_digest = Column(String(64), nullable=True)
     payload_locator = Column(String(1024), nullable=True)
+    pdf_artifact_id = Column(String(128), ForeignKey("artifacts.id", ondelete="RESTRICT"), nullable=True, index=True)
     payload_size_bytes = Column(Integer, nullable=True)
     page_count = Column(Integer, nullable=True)
 
@@ -68,4 +72,3 @@ class ReportModel(Base):
     started_at = Column(DateTime(timezone=True), nullable=True)
     generated_at = Column(DateTime(timezone=True), nullable=True)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=_utc_now, onupdate=_utc_now)
-

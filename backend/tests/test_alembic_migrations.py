@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 
 from app.models.change_analysis import ChangeAnalysisModel, ChangeImpactModel
@@ -84,6 +84,7 @@ def test_alembic_upgrade_head_on_empty_db_creates_complete_schema():
                 "deliveries",
                 "change_analyses",
                 "change_impacts",
+                "reports",
                 "alembic_version",
             }
             assert expected_tables.issubset(table_names), f"Missing tables: {expected_tables - table_names}"
@@ -162,6 +163,15 @@ def test_alembic_upgrade_head_on_empty_db_creates_complete_schema():
             ci_fks = inspector.get_foreign_keys("change_impacts")
             ci_fk_targets = {fk["referred_table"] for fk in ci_fks}
             assert "change_analyses" in ci_fk_targets
+
+            # Canonical report document/PDF IDs are the durable authority.
+            report_cols = {col["name"]: col for col in inspector.get_columns("reports")}
+            assert {"document_artifact_id", "pdf_artifact_id", "document_locator", "payload_locator"}.issubset(
+                report_cols
+            )
+            assert report_cols["document_locator"]["nullable"] is True
+            report_fk_targets = {fk["referred_table"] for fk in inspector.get_foreign_keys("reports")}
+            assert "artifacts" in report_fk_targets
 
             # 11. Verify 'deliveries' foreign keys
             del_fks = inspector.get_foreign_keys("deliveries")
@@ -300,6 +310,71 @@ def test_alembic_upgrade_head_on_empty_db_creates_complete_schema():
             db.close()
         finally:
             engine.dispose()
+
+
+def test_report_artifact_migration_fails_legacy_ready_rows_closed(tmp_path):
+    """Old local-only READY rows become explicitly unavailable after canonicalization."""
+    db_path = tmp_path / "legacy_ready_report.db"
+    db_url = f"sqlite:///{db_path}"
+    config = _get_alembic_config(db_url)
+    command.upgrade(config, "20c1d4a7f922")
+
+    owner_id, scan_id, report_id = (str(uuid4()) for _ in range(3))
+    now = "2026-09-26 00:00:00"
+    engine = create_engine(db_url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO users (id,email,password_hash,role,is_active,failed_login_attempts,created_at,updated_at) "
+                    "VALUES (:id,:email,'not-a-login-hash','USER',1,0,:now,:now)"
+                ),
+                {"id": owner_id, "email": f"legacy-{owner_id}@example.test", "now": now},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO scans (id,owner_user_id,repository_url,status,created_at) "
+                    "VALUES (:id,:owner,'https://example.test/repo','COMPLETED',:now)"
+                ),
+                {"id": scan_id, "owner": owner_id, "now": now},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO reports (id,owner_user_id,scan_id,kind,status,input_digest,evidence_digest,coverage_digest,"
+                    "document_digest,document_locator,pdf_digest,payload_locator,payload_size_bytes,page_count,repository_url,"
+                    "report_schema_version,renderer_version,analysis_policy_version,application_version,finding_ids,artifact_lineage,"
+                    "attempt_count,retryable,requested_at,generated_at,updated_at) VALUES "
+                    "(:id,:owner,:scan,'SCAN_SECURITY','READY',:input,:evidence,:coverage,:document,'documents/legacy.json',"
+                    ":pdf,'pdf/legacy.pdf',64,1,'https://example.test/repo','1.0','renderer-1','policy-1','1.0.1','[]','[]',"
+                    "1,1,:now,:now,:now)"
+                ),
+                {
+                    "id": report_id,
+                    "owner": owner_id,
+                    "scan": scan_id,
+                    "input": "1" * 64,
+                    "evidence": "2" * 64,
+                    "coverage": "3" * 64,
+                    "document": "4" * 64,
+                    "pdf": "5" * 64,
+                    "now": now,
+                },
+            )
+
+        command.upgrade(config, "head")
+        with engine.connect() as connection:
+            row = connection.execute(
+                text("SELECT status, retryable, failure_code, document_locator, payload_locator, pdf_artifact_id FROM reports WHERE id=:id"),
+                {"id": report_id},
+            ).one()
+        assert row.status == "FAILED"
+        assert row.retryable in (False, 0)
+        assert row.failure_code == "LEGACY_ARTIFACT_NOT_CANONICALIZED"
+        assert row.document_locator == "documents/legacy.json"
+        assert row.payload_locator == "pdf/legacy.pdf"
+        assert row.pdf_artifact_id is None
+    finally:
+        engine.dispose()
 
 
 def test_alembic_migration_upgrade_downgrade_reupgrade_cycle():
