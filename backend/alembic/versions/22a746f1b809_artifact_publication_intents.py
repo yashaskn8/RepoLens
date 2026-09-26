@@ -77,6 +77,21 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # An unresolved intent may be the only durable record of an object written
+    # before its ArtifactModel transaction committed. Dropping it would turn a
+    # recoverable publication into a permanent untracked object. Require the
+    # reconciler to resolve those records before rolling back this authority.
+    unresolved = op.get_bind().execute(
+        sa.text(
+            "SELECT 1 FROM artifact_publication_intents "
+            "WHERE status IN ('PENDING', 'RETRYABLE_FAILURE') LIMIT 1"
+        )
+    ).first()
+    if unresolved is not None:
+        raise RuntimeError(
+            "Cannot downgrade while unresolved artifact publication intents exist."
+        )
+
     op.drop_index("ix_artifact_publication_intents_created_at", table_name="artifact_publication_intents")
     op.drop_index("ix_artifact_publication_intents_status", table_name="artifact_publication_intents")
     op.drop_index("ix_artifact_publication_intents_tenant_id", table_name="artifact_publication_intents")

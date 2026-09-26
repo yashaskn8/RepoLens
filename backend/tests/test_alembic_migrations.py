@@ -377,6 +377,129 @@ def test_report_artifact_migration_fails_legacy_ready_rows_closed(tmp_path):
         engine.dispose()
 
 
+@pytest.mark.parametrize(
+    "intent_statuses",
+    [
+        ("PENDING",),
+        ("RETRYABLE_FAILURE",),
+        ("REGISTERED", "CLEANED", "PENDING"),
+        ("REGISTERED", "CLEANED", "RETRYABLE_FAILURE"),
+    ],
+    ids=["pending", "retryable-failure", "terminal-plus-pending", "terminal-plus-retryable-failure"],
+)
+def test_publication_intent_migration_refuses_downgrade_with_unresolved_intents(
+    tmp_path,
+    intent_statuses,
+):
+    """Rollback must not erase the only recovery record for a possible orphan."""
+    case_name = "-".join(status.lower() for status in intent_statuses)
+    db_path = tmp_path / f"unresolved-{case_name}.db"
+    db_url = f"sqlite:///{db_path}"
+    config = _get_alembic_config(db_url)
+    command.upgrade(config, "head")
+    engine = create_engine(db_url)
+    try:
+        with engine.begin() as connection:
+            for index, intent_status in enumerate(intent_statuses):
+                connection.execute(
+                    text(
+                        "INSERT INTO artifact_publication_intents "
+                        "(artifact_id,tenant_id,payload_locator,content_digest,payload_size_bytes,"
+                        "media_type,artifact_type,status,created_at) "
+                        "VALUES (:id,'tenant-test','local/test',:digest,4,'application/pdf','PDF_REPORT',:status,:now)"
+                    ),
+                    {
+                        "id": f"intent-{index}-{intent_status.lower()}",
+                        "digest": "a" * 64,
+                        "status": intent_status,
+                        "now": "2026-09-26 00:00:00",
+                    },
+                )
+
+        with pytest.raises(RuntimeError, match="unresolved artifact publication intents"):
+            command.downgrade(config, "21d8a4f36c10")
+
+        with engine.connect() as connection:
+            revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+            retained_statuses = tuple(
+                connection.execute(
+                    text("SELECT status FROM artifact_publication_intents ORDER BY artifact_id")
+                ).scalars()
+            )
+        assert revision == "22a746f1b809"
+        assert retained_statuses == intent_statuses
+
+        # Terminal intents no longer represent an outstanding cleanup/recovery
+        # obligation and therefore do not block a controlled schema rollback.
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE artifact_publication_intents "
+                    "SET status='CLEANED', resolved_at=:now"
+                ),
+                {"now": "2026-09-26 00:01:00"},
+            )
+        command.downgrade(config, "21d8a4f36c10")
+        command.upgrade(config, "head")
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "intent_statuses",
+    [
+        ("REGISTERED",),
+        ("CLEANED",),
+        ("REGISTERED", "CLEANED"),
+        (),
+    ],
+    ids=["registered", "cleaned", "terminal-mix", "empty-table"],
+)
+def test_publication_intent_migration_allows_downgrade_without_unresolved_intents(
+    tmp_path,
+    intent_statuses,
+):
+    """Terminal or absent intents do not represent pending recovery work."""
+    case_name = "-".join(status.lower() for status in intent_statuses) or "empty"
+    db_path = tmp_path / f"terminal-{case_name}.db"
+    db_url = f"sqlite:///{db_path}"
+    config = _get_alembic_config(db_url)
+    command.upgrade(config, "head")
+    engine = create_engine(db_url)
+    try:
+        with engine.begin() as connection:
+            for index, intent_status in enumerate(intent_statuses):
+                connection.execute(
+                    text(
+                        "INSERT INTO artifact_publication_intents "
+                        "(artifact_id,tenant_id,payload_locator,content_digest,payload_size_bytes,"
+                        "media_type,artifact_type,status,created_at) "
+                        "VALUES (:id,'tenant-test','local/test',:digest,4,'application/pdf','PDF_REPORT',:status,:now)"
+                    ),
+                    {
+                        "id": f"intent-{index}-{intent_status.lower()}",
+                        "digest": "a" * 64,
+                        "status": intent_status,
+                        "now": "2026-09-26 00:00:00",
+                    },
+                )
+
+        command.downgrade(config, "21d8a4f36c10")
+        with engine.connect() as connection:
+            revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+            tables = inspect(connection).get_table_names()
+        assert revision == "21d8a4f36c10"
+        assert "artifact_publication_intents" not in tables
+
+        command.upgrade(config, "head")
+        with engine.connect() as connection:
+            revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+            assert "artifact_publication_intents" in inspect(connection).get_table_names()
+        assert revision == "22a746f1b809"
+    finally:
+        engine.dispose()
+
+
 def test_alembic_migration_upgrade_downgrade_reupgrade_cycle():
     """Verify upgrade -> downgrade revisions -> upgrade again works cleanly without errors."""
     with tempfile.TemporaryDirectory() as tmpdir:
