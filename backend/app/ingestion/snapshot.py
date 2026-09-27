@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.database import SessionLocal
-from app.ingestion.clone import InvalidRepositoryURLError, validate_github_url
+from app.ingestion.clone import InvalidRepositoryURLError, safe_git_environment, validate_github_url
 from app.models.scan import ScanModel
 
 logger = logging.getLogger(__name__)
@@ -75,21 +75,22 @@ class RepositorySnapshotService:
         base_cmd = [
             "git",
             "-c", "core.symlinks=false",
+            # Rehydrated source bytes must match the exact Git snapshot used by
+            # the manifest and source-evidence attestation on every platform.
+            "-c", "core.autocrlf=false",
             "-c", "submodule.recurse=false",
             "-c", "credential.helper=",
         ]
         full_cmd = base_cmd + args
 
-        env = {
-            **os.environ,
-            "GIT_TERMINAL_PROMPT": "0",
-            "GIT_ASKPASS": "",
+        env = safe_git_environment()
+        env.update({
             "GIT_TRACE": "",
             "GIT_TRACE_CURL": "",
             "GIT_CURL_VERBOSE": "",
             "GIT_TRACE_PACKET": "",
             "GIT_TRACE_SETUP": "",
-        }
+        })
         if askpass is not None:
             script_path, token = askpass
             env["GIT_ASKPASS"] = f'"{sys.executable}" "{script_path}"'

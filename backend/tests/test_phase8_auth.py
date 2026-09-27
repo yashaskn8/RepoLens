@@ -12,6 +12,7 @@ Verifies:
 """
 
 from datetime import datetime, timedelta, timezone
+import threading
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -26,6 +27,7 @@ from app.security.password import (
     verify_password,
 )
 from app.services.auth_service import AuthService
+from app.security import password as password_module
 from tests.request_helpers import cookie_headers
 
 
@@ -183,6 +185,37 @@ def test_login_failed_attempts_and_lockout(client: TestClient, db_session: Sessi
     )
     assert locked_resp.status_code == 401
     assert locked_resp.json()["detail"]["error_code"] == "INVALID_CREDENTIALS"
+
+
+def test_auth_row_lock_query_is_database_authoritative(db_session: Session):
+    """The serialized lockout transition must compile to a PostgreSQL row lock."""
+    from sqlalchemy.dialects import postgresql
+
+    user = UserModel(id="lock-query-user", email="lock-query@example.com", password_hash="unused", role="USER")
+    db_session.add(user)
+    db_session.flush()
+    query = AuthService(db_session)._locked_user_query(user.id)
+    sql = str(query.statement.compile(dialect=postgresql.dialect())).upper()
+    assert "FOR UPDATE" in sql
+
+
+def test_password_work_overload_fails_fast_and_login_does_not_query_identity(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A full process-local Argon2 gate rejects before account lookup and does no hash work."""
+    gate = threading.BoundedSemaphore(1)
+    assert gate.acquire(blocking=False)
+    monkeypatch.setattr(password_module, "_password_work_slots", gate)
+
+    response = client.post(
+        "/api/v1/auth/login",
+        json={"email": "unknown@example.com", "password": "not-a-real-password"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["error_code"] == "AUTH_CAPACITY_EXHAUSTED"
+    assert response.headers["retry-after"] == "1"
 
 
 def test_session_revocation_and_logout(client: TestClient, db_session: Session):

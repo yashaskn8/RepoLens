@@ -22,6 +22,46 @@ class ScannerOutputError(Exception):
         super().__init__(f"{tool}: {reason}")
 
 
+_SCANNER_ENV_ALLOWLIST = frozenset({
+    "PATH",
+    "SYSTEMROOT",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "CURL_CA_BUNDLE",
+})
+
+
+def safe_scanner_environment() -> dict[str, str]:
+    """Return the minimal process environment needed by scanner binaries.
+
+    Scanners inspect attacker-controlled repository trees. They do not need
+    RepoLens provider, GitHub App, database, Redis, or OTLP credentials. Do not
+    inherit those values into external analysis processes. Proxy variables are
+    deliberately excluded because authenticated proxy URLs are also secrets.
+    """
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key.upper() in _SCANNER_ENV_ALLOWLIST
+    }
+    env.update({
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_LFS_SKIP_SMUDGE": "1",
+        "NO_COLOR": "1",
+    })
+    return env
+
+
 def _bound_stderr(stderr: Optional[str]) -> Optional[str]:
     """Truncate stderr to bounded length, stripping trailing whitespace."""
     if not stderr or not stderr.strip():
@@ -102,6 +142,7 @@ class BaseScannerAdapter(ABC):
             res = subprocess.run(
                 cmd,
                 cwd=cwd,
+                env=safe_scanner_environment(),
                 shell=False,
                 capture_output=True,
                 text=True,

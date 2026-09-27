@@ -35,6 +35,36 @@ GITHUB_URL_PATTERN = re.compile(
     r"^https://github\.com/([a-zA-Z0-9_.-]+)/([a-zA-Z0-9_.-]+?)(?:\.git)?/?$"
 )
 
+_GIT_TRANSPORT_ENV = frozenset({
+    "PATH", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "SYSTEMROOT", "WINDIR",
+    "COMSPEC", "PATHEXT", "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE",
+})
+
+
+def safe_git_environment() -> dict[str, str]:
+    """Build a minimal Git transport environment without ambient Git config/secrets.
+
+    System/global Git configuration can register arbitrary clean/smudge filters;
+    repository-controlled ``.gitattributes`` can name those filters during
+    checkout. Disable that configuration and Git LFS smudging, while preserving
+    only platform, proxy, and CA settings needed for HTTPS transport.
+    """
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key.upper() in _GIT_TRANSPORT_ENV
+    }
+    env.update({
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_ASKPASS": "",
+        "GIT_LFS_SKIP_SMUDGE": "1",
+    })
+    return env
+
 
 def validate_github_url(url: str) -> str:
     """Validate that URL is strictly a public HTTPS github.com repository URL.
@@ -111,6 +141,10 @@ def clone_repository(
         "--no-recurse-submodules",
         "--config",
         "core.symlinks=false",
+        # Evidence manifests are bound to Git blob bytes. Prevent checkout-time
+        # newline conversion from making the worktree differ from that source.
+        "--config",
+        "core.autocrlf=false",
         "--config",
         "credential.helper=",
     ]
@@ -124,11 +158,7 @@ def clone_repository(
 
     cmd.extend(["--", normalized_url, dest_dir])
 
-    env = {
-        **os.environ,
-        "GIT_TERMINAL_PROMPT": "0",
-        "GIT_ASKPASS": "",
-    }
+    env = safe_git_environment()
 
     try:
         result = subprocess.run(
@@ -152,6 +182,7 @@ def clone_repository(
         rev_result = subprocess.run(
             rev_cmd,
             cwd=dest_dir,
+            env=safe_git_environment(),
             shell=False,
             capture_output=True,
             text=True,
@@ -198,6 +229,7 @@ def get_git_resolved_branch_or_ref(repo_dir: str) -> Optional[str]:
         res = subprocess.run(
             ["git", "symbolic-ref", "--short", "HEAD"],
             cwd=repo_dir,
+            env=safe_git_environment(),
             shell=False,
             capture_output=True,
             text=True,
@@ -214,6 +246,7 @@ def get_git_resolved_branch_or_ref(repo_dir: str) -> Optional[str]:
         res = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             cwd=repo_dir,
+            env=safe_git_environment(),
             shell=False,
             capture_output=True,
             text=True,
@@ -232,6 +265,7 @@ def get_git_resolved_branch_or_ref(repo_dir: str) -> Optional[str]:
         res = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             cwd=repo_dir,
+            env=safe_git_environment(),
             shell=False,
             capture_output=True,
             text=True,

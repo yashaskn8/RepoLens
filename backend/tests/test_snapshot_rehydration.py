@@ -89,11 +89,16 @@ def test_materialize_snapshot_scan_missing_commit_sha(db_session):
 # =========================================================================
 
 
-def test_exact_sha_rehydration_success():
+def test_exact_sha_rehydration_success(monkeypatch):
     """Verify exact SHA rehydration executes safe git commands and verifies HEAD SHA."""
     service = RepositorySnapshotService()
     target_sha = "e1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0"
     created_paths = []
+    monkeypatch.setenv("GITHUB_TOKEN", "red-team-ambient-secret")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "filter.poison.smudge")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "poison-command")
+    monkeypatch.setenv("GIT_DIR", "C:/foreign/.git")
 
     def mock_subprocess_run(cmd, *args, **kwargs):
         # Verify shell=False on all calls
@@ -101,7 +106,14 @@ def test_exact_sha_rehydration_success():
         cmd_str = " ".join(cmd)
         # Verify security flags
         assert "core.symlinks=false" in cmd_str
+        assert "core.autocrlf=false" in cmd_str
         assert "submodule.recurse=false" in cmd_str
+        assert kwargs["env"]["GIT_CONFIG_NOSYSTEM"] == "1"
+        assert kwargs["env"]["GIT_CONFIG_GLOBAL"] == os.devnull
+        assert kwargs["env"]["GIT_LFS_SKIP_SMUDGE"] == "1"
+        assert not {
+            "GITHUB_TOKEN", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_DIR"
+        }.intersection(kwargs["env"])
 
         # Mock git commands
         if "rev-parse HEAD" in cmd_str:

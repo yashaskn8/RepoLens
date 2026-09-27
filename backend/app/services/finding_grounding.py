@@ -15,6 +15,8 @@ from pathlib import Path
 import re
 from typing import Any, Iterable
 
+from app.core.config import get_settings
+from app.ingestion.schemas import RepositoryManifest
 from app.schemas.evidence import Evidence
 
 
@@ -58,6 +60,7 @@ def canonicalize_repository_evidences(
     *,
     repo_dir: str,
     commit_sha: str,
+    manifest: RepositoryManifest,
     evidences: Iterable[Any],
 ) -> list[Evidence]:
     """Rebuild proposed evidences from an exact repository snapshot.
@@ -66,15 +69,25 @@ def canonicalize_repository_evidences(
     discarded.  Returned snippets and locators are authoritative repository
     data; none of the model-authored snippet or explanatory text survives.
     """
+    if str(manifest.commit_sha or manifest.commit_hash) != str(commit_sha):
+        return []
+    max_file_bytes = int(get_settings().MAX_FILE_SIZE_BYTES)
+    admitted_files = {entry.path: entry for entry in manifest.files}
     root = Path(repo_dir).resolve(strict=True)
     canonical: list[Evidence] = []
     seen: set[tuple[str, int, int, str]] = set()
+    file_bytes_by_path: dict[str, bytes] = {}
 
     for proposed in evidences:
         raw_path = str(_field(proposed, "file_path", "") or "").strip()
         start_line = _field(proposed, "start_line")
         end_line = _field(proposed, "end_line")
         if not raw_path or not isinstance(start_line, int) or isinstance(start_line, bool):
+            continue
+        # Canonical manifest paths use forward-slash, repository-relative names.
+        # Reject alternate path spellings instead of normalizing model input into
+        # a different manifest-authorized file.
+        if "\\" in raw_path or raw_path.startswith("/") or any(part == ".." for part in raw_path.split("/")):
             continue
         if start_line < 1:
             continue
@@ -95,10 +108,30 @@ def canonicalize_repository_evidences(
         if not resolved.is_file():
             continue
 
-        try:
-            file_bytes = resolved.read_bytes()
-        except OSError:
+        manifest_entry = admitted_files.get(relative_path)
+        if (
+            manifest_entry is None
+            or manifest_entry.skipped_reason is not None
+            or manifest_entry.is_binary
+            or manifest_entry.size_bytes > max_file_bytes
+        ):
             continue
+
+        file_bytes = file_bytes_by_path.get(relative_path)
+        if file_bytes is None:
+            try:
+                if resolved.stat().st_size != manifest_entry.size_bytes:
+                    continue
+                with resolved.open("rb") as source:
+                    file_bytes = source.read(max_file_bytes + 1)
+                if (
+                    len(file_bytes) > max_file_bytes
+                    or len(file_bytes) != manifest_entry.size_bytes
+                ):
+                    continue
+            except OSError:
+                continue
+            file_bytes_by_path[relative_path] = file_bytes
         if b"\x00" in file_bytes:
             continue
 
@@ -215,11 +248,13 @@ def reattest_evidence(
     *,
     repo_dir: str,
     commit_sha: str,
+    manifest: RepositoryManifest,
 ) -> bool:
     """Re-read repository bytes and compare one evidence record exactly."""
     canonical = canonicalize_repository_evidences(
         repo_dir=repo_dir,
         commit_sha=commit_sha,
+        manifest=manifest,
         evidences=[evidence],
     )
     if not canonical:

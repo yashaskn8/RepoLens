@@ -151,5 +151,5 @@ def test_public_error_responses_do_not_leak_stack_traces(client: TestClient, db_
     resp = client.get(f"/api/v1/scans/{scan_id}/events", headers={"Last-Event-ID": "non-integer-offset"})
     assert resp.status_code == 400
     assert "Traceback" not in resp.text
-    assert "Invalid Last-Event-ID" in resp.json()["detail"]
-
+    assert resp.json()["detail"] == "Invalid event cursor."
+    assert "non-integer-offset" not in resp.text

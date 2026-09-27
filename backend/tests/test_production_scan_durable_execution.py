@@ -155,7 +155,7 @@ async def test_production_scan_interruption_resume_and_deduplication():
         # Create a mock repo directory that clone/snapshot can point to
         repo_workspace = os.path.join(shared_dir, "repo")
         os.makedirs(os.path.join(repo_workspace, "app"), exist_ok=True)
-        with open(os.path.join(repo_workspace, "app", "main.py"), "w", encoding="utf-8") as f:
+        with open(os.path.join(repo_workspace, "app", "main.py"), "w", encoding="utf-8", newline="\n") as f:
             f.write("def get_user(user_id):\n    cursor.execute(f'SELECT * FROM users WHERE id={user_id}')\n")
         commit_sha = _commit_fixture(repo_workspace)
         fixture_origin = os.path.join(shared_dir, "origin")

@@ -125,8 +125,18 @@ def _strict_serializer(profile: CheckpointStateProfile) -> JsonPlusSerializer:
     if profile == "analysis":
         from app.schemas.finding import Finding
         from app.schemas.metadata import ModelExecutionMetadata
+        from app.schemas.enums import FindingStatus, Severity, VerificationVerdict
 
-        models = (Finding, ModelExecutionMetadata)
+        # Finding carries these exact closed enums. LangGraph's msgpack
+        # serializer must allowlist them explicitly or a process-style resume
+        # silently drops checkpoint values containing canonical findings.
+        models = (
+            Finding,
+            ModelExecutionMetadata,
+            FindingStatus,
+            Severity,
+            VerificationVerdict,
+        )
     elif profile == "change_analysis":
         from app.schemas.change_analysis import (
             BlastRadiusReport,

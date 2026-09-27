@@ -11,7 +11,7 @@ import time
 import uuid
 from typing import Any, Callable
 
-from app.core.config import get_settings
+from app.core.config import get_settings, validate_production_cors_origin
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -33,9 +33,15 @@ def _validate_production_configuration(config: Any | None = None) -> None:
     if not active_settings.AUTH_COOKIE_SECURE:
         raise RuntimeError("Production AUTH_COOKIE_SECURE must be enabled.") from None
     cors = active_settings.CORS_ORIGINS
+    cors = cors if isinstance(cors, list) else [cors]
     hosts = active_settings.TRUSTED_HOSTS
-    if not cors or any("*" in origin for origin in cors):
+    if not cors:
         raise RuntimeError("Production CORS_ORIGINS must be explicit and non-wildcard.") from None
+    for origin in cors:
+        try:
+            validate_production_cors_origin(origin)
+        except ValueError:
+            raise RuntimeError("Production CORS_ORIGINS contains an invalid origin.") from None
     if not hosts or any("*" in host for host in hosts):
         raise RuntimeError("Production TRUSTED_HOSTS must be explicit and non-wildcard.") from None
 
@@ -61,6 +67,7 @@ from app.api.router import api_router
 from app.api.errors import http_exception_handler, validation_exception_handler
 from app.api.routes import health
 from app.core.database import engine
+from app.security.request_body import RequestBodyLimitMiddleware
 
 
 async def _run_startup_cleanup(actions: list[Callable[[], Any]]) -> None:
@@ -227,6 +234,17 @@ app = FastAPI(
     docs_url=docs_url,
     redoc_url=redoc_url,
     lifespan=lifespan,
+)
+
+# Bound unauthenticated and authenticated API mutation payloads before
+# Starlette/FastAPI can materialize an unbounded body. Keep the webhook's
+# separately configured streaming bound as its own limit.
+app.add_middleware(
+    RequestBodyLimitMiddleware,
+    api_prefix=settings.API_V1_STR,
+    max_json_bytes=settings.MAX_JSON_REQUEST_BYTES,
+    webhook_path=f"{settings.API_V1_STR.rstrip('/')}/github-app/webhook",
+    webhook_max_bytes=settings.GITHUB_APP_MAX_WEBHOOK_BYTES,
 )
 app.add_exception_handler(HTTPException, http_exception_handler)
 app.add_exception_handler(RequestValidationError, validation_exception_handler)

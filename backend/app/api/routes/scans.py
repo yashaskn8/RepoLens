@@ -26,6 +26,7 @@ from app.artifacts.scan_provenance import (
     scan_policy_snapshot_id,
 )
 from app.api.dependencies import get_current_user, verify_csrf
+from app.api.event_cursor import MAX_EVENT_CURSOR, parse_event_cursor
 from app.api.idempotency import idempotency_identity
 from app.context.runtime import ScanIntelligenceRuntime
 from app.core.config import get_settings
@@ -548,6 +549,7 @@ async def execute_background_scan(
                 canonical_evidences = canonicalize_repository_evidences(
                     repo_dir=workspace_dir,
                     commit_sha=commit_sha,
+                    manifest=evidence_store.manifest,
                     evidences=f.evidences,
                 )
             except (TypeError, ValueError, OSError):
@@ -1052,7 +1054,7 @@ async def stream_scan_events(
     request: Request,
     current_user: CurrentUser = Depends(get_current_user),
     last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
-    after_id: Optional[int] = Query(default=None),
+    after_id: Optional[int] = Query(default=None, ge=0, le=MAX_EVENT_CURSOR),
     db: Session = Depends(get_db),
 ):
     """Server-Sent Events (SSE) stream delivering durable workflow events in near real time."""
@@ -1063,18 +1065,14 @@ async def stream_scan_events(
     # 1. Verify scan exists and belongs to current user
     scan_model = get_owned_scan_or_404(db, str(scan_id), current_user)
 
-    # 2. Parse starting event offset
-    start_id = 0
-    if last_event_id is not None and last_event_id.strip():
-        try:
-            start_id = int(last_event_id.strip())
-        except ValueError:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid Last-Event-ID header value: '{last_event_id}'. Expected integer ID.",
-            )
-    elif after_id is not None:
-        start_id = max(0, after_id)
+    # 2. Parse a bounded event cursor without echoing untrusted header content.
+    try:
+        start_id = parse_event_cursor(last_event_id, after_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid event cursor.",
+        ) from None
 
     from sqlalchemy.orm import sessionmaker
 

@@ -82,6 +82,28 @@ def test_production_preflight_fails_closed_for_missing_mandatory_import_without_
     assert "db.example" not in str(raised.value)
 
 
+@pytest.mark.parametrize(
+    "setting_name,endpoint",
+    [
+        ("GROQ_BASE_URL", "http://api.groq.com/openai/v1"),
+        ("GROQ_BASE_URL", "https://169.254.169.254/latest"),
+        ("GROQ_BASE_URL", "https://attacker.example/api"),
+        ("CLOUDFLARE_BASE_URL", "https://user:pass@api.cloudflare.com/client/v4"),
+        ("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com:8443/v1beta"),
+        ("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1?target=attacker"),
+    ],
+)
+def test_production_provider_credentials_are_pinned_to_canonical_https_hosts(setting_name, endpoint):
+    with pytest.raises(ValueError, match="canonical HTTPS provider endpoint"):
+        _production_settings(**{setting_name: endpoint})
+
+
+def test_production_provider_defaults_and_loopback_ollama_remain_valid():
+    settings = _production_settings(OLLAMA_BASE_URL="http://127.0.0.1:11434")
+    assert settings.GROQ_BASE_URL == "https://api.groq.com/openai/v1"
+    assert settings.OLLAMA_BASE_URL == "http://127.0.0.1:11434"
+
+
 def test_optional_local_ml_and_exporter_imports_are_not_production_requirements() -> None:
     settings = _production_settings()
 
@@ -288,6 +310,7 @@ def test_production_settings_reject_unsafe_database_cookie_origins_and_hosts() -
         {"CORS_ORIGINS": ["*"]},
         {"CORS_ORIGINS": ["http://localhost:3000"]},
         {"CORS_ORIGINS": ["https://localhost.:8443"]},
+        {"CORS_ORIGINS": ["http://app.example.com"]},
         {"TRUSTED_HOSTS": []},
         {"TRUSTED_HOSTS": ["*"]},
         {"TRUSTED_HOSTS": ["localhost", "testserver"]},
@@ -298,6 +321,74 @@ def test_production_settings_reject_unsafe_database_cookie_origins_and_hosts() -
     ):
         with pytest.raises(ValidationError):
             _production_settings(**overrides)
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://user@app.example",
+        "https://user:pass@app.example",
+        "https://app.example:abc",
+        "https://app.example:0",
+        "https://app.example:65536",
+        "https://app.example:-1",
+        "https://app.example:",
+        "https://app.example/path",
+        "https://app.example?x=1",
+        "https://app.example?",
+        "https://app.example#fragment",
+        "https://app.example#",
+        "http://app.example",
+        "https://*.app.example",
+    ],
+)
+def test_production_cors_rejects_non_origin_urls(origin: str) -> None:
+    with pytest.raises(ValidationError, match="Invalid production CORS origin"):
+        _production_settings(CORS_ORIGINS=[origin], TRUSTED_HOSTS=["app.example"])
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://app.example",
+        "https://app.example/",
+        "https://app.example:443",
+        "https://app.example:8443",
+    ],
+)
+def test_production_cors_accepts_valid_https_origins(origin: str) -> None:
+    config = _production_settings(CORS_ORIGINS=[origin], TRUSTED_HOSTS=["app.example"])
+    assert config.CORS_ORIGINS == [origin]
+
+
+def test_production_cors_validation_error_does_not_echo_url_credentials() -> None:
+    credential_bearing_origin = "https://private-user:private-password@app.example.com"
+    with pytest.raises(ValidationError) as raised:
+        _production_settings(CORS_ORIGINS=[credential_bearing_origin])
+    assert "private-user" not in str(raised.value)
+    assert "private-password" not in str(raised.value)
+    assert credential_bearing_origin not in str(raised.value)
+
+
+def test_production_startup_revalidates_cors_without_echoing_credentials() -> None:
+    from app.main import _validate_production_configuration
+
+    valid = _production_settings(TRUSTED_HOSTS=["app.example"])
+    unchecked = valid.model_copy(
+        update={"CORS_ORIGINS": ["https://private-user:private-password@app.example"]}
+    )
+    with pytest.raises(RuntimeError, match="CORS_ORIGINS contains an invalid origin") as raised:
+        _validate_production_configuration(unchecked)
+    assert "private-user" not in str(raised.value)
+    assert "private-password" not in str(raised.value)
+
+
+def test_production_settings_allow_loopback_http_with_https_application_origin() -> None:
+    config = _production_settings(
+        CORS_ORIGINS=["https://app.example.com", "http://localhost:3000"],
+        TRUSTED_HOSTS=["app.example.com", "localhost"],
+    )
+    assert config.is_production
 
 
 def test_production_settings_allow_local_proxy_hosts_alongside_real_origins() -> None:

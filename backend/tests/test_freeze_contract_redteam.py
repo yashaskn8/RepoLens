@@ -34,11 +34,14 @@ BENCH_MANIFEST_PATH = _BACKEND_DIR / "evaluation_data" / "ground_truth" / "v1" /
 CASES_DIR = _BACKEND_DIR / "evaluation_data" / "ground_truth" / "v1" / "cases"
 
 
-def test_frozen_baseline_passes_verification():
-    """Verify that untampered production and benchmark manifests pass with zero mismatches."""
+def test_runtime_hardening_invalidates_stale_production_freeze_until_reviewed():
+    """A changed frozen analyzer must block holdout authorization pending a reviewed re-freeze."""
     prod_res = HoldoutAuthorizationContract.verify_production_freeze(PROD_MANIFEST_PATH, root_dir=_REPO_ROOT)
-    assert prod_res.valid is True
-    assert prod_res.mismatches == []
+    assert prod_res.valid is False
+    assert any(
+        "Component tampered: backend/app/ingestion/manifest.py" in mismatch
+        for mismatch in prod_res.mismatches
+    )
 
     bench_res = HoldoutAuthorizationContract.verify_benchmark_contract(
         BENCH_MANIFEST_PATH, cases_dir=CASES_DIR, root_dir=_REPO_ROOT

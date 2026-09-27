@@ -609,7 +609,8 @@ class PersistentIndex:
         return RepositoryManifest(repository_url=self.repository_url, commit_hash=self.commit_sha,
             commit_sha=self.commit_sha, branch=branch, files=files,
             total_files=self.stats["discovered_files"], total_size_bytes=self.stats["total_bytes"],
-            languages=languages, frameworks=detect_frameworks(self.repo_dir),
+            languages=languages,
+            frameworks=detect_frameworks(self.repo_dir, max_file_bytes=self.limits.max_file_bytes),
             analysis_scope=AnalysisScope(
                 # Truncation means inventory/manifest work stopped before its
                 # bounded target. Per-file fact extraction has its own explicit

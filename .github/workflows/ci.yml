@@ -119,6 +119,8 @@ jobs:
           npm run lint
 
       - name: Production Build
+        env:
+          NEXT_PUBLIC_API_BASE_URL: https://api.example.com
         run: |
           cd frontend
           npm run build

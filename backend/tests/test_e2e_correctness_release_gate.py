@@ -35,6 +35,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api.routes.scans import execute_background_scan
+from app.ingestion.clone import safe_git_environment
 from app.llm.types import LLMProvider, LLMResponse, ModelExecutionMetadata
 from app.models.finding import FindingModel
 from app.models.patch import PatchModel
@@ -186,13 +187,19 @@ async def test_repolens_end_to_end_correctness_acceptance_gate(e2e_client, e2e_f
     def mock_clone(repo_url, branch=None, target_dir=None, timeout_seconds=None):
         dest = target_dir or tempfile.mkdtemp(prefix="repolens_clone_test_")
         tracked_temp_dirs.append(dest)
-        subprocess.run(["git", "clone", "--depth=1", fixture_dir, dest], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-c", "core.autocrlf=false", "clone", "--depth=1", fixture_dir, dest],
+            env=safe_git_environment(), check=True, capture_output=True,
+        )
         return dest, original_commit_sha
 
     def mock_materialize(repository_url, commit_hash, branch=None):
         dest = tempfile.mkdtemp(prefix="repolens_snapshot_test_")
         tracked_temp_dirs.append(dest)
-        subprocess.run(["git", "clone", "--depth=1", fixture_dir, dest], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-c", "core.autocrlf=false", "clone", "--depth=1", fixture_dir, dest],
+            env=safe_git_environment(), check=True, capture_output=True,
+        )
         return dest
 
     # Realistic mock LLM responses for multi-agent scan & remediation

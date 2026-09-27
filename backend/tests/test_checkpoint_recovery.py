@@ -25,6 +25,7 @@ from app.agents.checkpointer import (
     setup_analysis_checkpointer,
 )
 from app.core.config import Settings
+from app.schemas.enums import FindingStatus, Severity, VerificationVerdict
 from app.schemas.metadata import ModelExecutionMetadata
 
 
@@ -91,6 +92,15 @@ def test_checkpoint_serializer_round_trips_only_allowlisted_model_types():
     unapproved = serializer.dumps_typed(_UnapprovedModel(value="must-not-load"))
     rejected = serializer.loads_typed(unapproved)
     assert not isinstance(rejected, _UnapprovedModel)
+
+
+def test_analysis_checkpoint_serializer_round_trips_finding_enums():
+    """Canonical finding enum fields remain intact across durable resume."""
+    serializer = _strict_serializer("analysis")
+
+    for value in (FindingStatus.OPEN, Severity.HIGH, VerificationVerdict.CONFIRMED):
+        restored = serializer.loads_typed(serializer.dumps_typed(value))
+        assert restored is value
 
 
 @pytest.mark.asyncio

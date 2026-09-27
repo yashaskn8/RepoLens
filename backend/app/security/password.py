@@ -5,6 +5,11 @@ Includes constant-time dummy verification to prevent email enumeration timing at
 """
 
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
+import threading
+from typing import Iterator
+
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 
@@ -12,6 +17,38 @@ logger = logging.getLogger(__name__)
 
 # Canonical Argon2id hasher — single instance, default secure parameters
 _hasher = PasswordHasher()
+
+# Argon2's default memory cost is intentionally high. Bound concurrent work per
+# worker so unauthenticated requests cannot allocate one hash's memory per
+# thread-pool request. This is resource admission, not a distributed rate limit.
+MAX_CONCURRENT_PASSWORD_OPERATIONS_PER_PROCESS = 2
+_password_work_slots = threading.BoundedSemaphore(MAX_CONCURRENT_PASSWORD_OPERATIONS_PER_PROCESS)
+_password_work_active: ContextVar[bool] = ContextVar("password_work_active", default=False)
+
+
+class PasswordWorkCapacityError(RuntimeError):
+    """Raised immediately when this worker has no Argon2 capacity available."""
+
+
+@contextmanager
+def password_work_slot() -> Iterator[None]:
+    """Reserve one bounded process-local Argon2 slot without queueing requests.
+
+    Nested calls made while authenticating reuse the outer reservation, keeping
+    unknown-email dummy verification and known-email verification under the same
+    admission boundary.
+    """
+    if _password_work_active.get():
+        yield
+        return
+    if not _password_work_slots.acquire(blocking=False):
+        raise PasswordWorkCapacityError("Password verification capacity is temporarily exhausted.")
+    token = _password_work_active.set(True)
+    try:
+        yield
+    finally:
+        _password_work_active.reset(token)
+        _password_work_slots.release()
 
 # Pre-computed dummy hash for constant-time unknown-email verification
 _DUMMY_HASH = _hasher.hash("repolens-dummy-password-for-timing-safety")
@@ -23,7 +60,8 @@ def hash_password(password: str) -> str:
     Returns the full Argon2id hash string including parameters and salt.
     Never logs or exposes the plaintext password.
     """
-    return _hasher.hash(password)
+    with password_work_slot():
+        return _hasher.hash(password)
 
 
 def verify_password(arg1: str, arg2: str) -> bool:
@@ -40,7 +78,8 @@ def verify_password(arg1: str, arg2: str) -> bool:
         return False
 
     try:
-        return _hasher.verify(hash_val, plain_val)
+        with password_work_slot():
+            return _hasher.verify(hash_val, plain_val)
     except (VerifyMismatchError, VerificationError, InvalidHashError):
         return False
 
@@ -52,7 +91,8 @@ def verify_dummy_password() -> bool:
     Always returns False.
     """
     try:
-        _hasher.verify(_DUMMY_HASH, "wrong-password-for-timing-safety")
+        with password_work_slot():
+            _hasher.verify(_DUMMY_HASH, "wrong-password-for-timing-safety")
     except (VerifyMismatchError, VerificationError, InvalidHashError):
         pass
     return False

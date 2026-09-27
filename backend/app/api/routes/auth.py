@@ -9,6 +9,7 @@ from app.core.config import Settings, get_settings
 from app.models.user import UserModel
 from app.schemas.auth import CurrentUser, UserLoginRequest, UserRegisterRequest, UserResponse
 from app.services.auth_service import (
+    AuthCapacityError,
     AccountDisabledError,
     AuthError,
     AuthService,
@@ -43,6 +44,12 @@ def register(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"error_code": "DUPLICATE_EMAIL", "message": "An account with this email already exists"},
+        )
+    except AuthCapacityError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error_code": "AUTH_CAPACITY_EXHAUSTED", "message": "Authentication is temporarily busy"},
+            headers={"Retry-After": "1"},
         )
     except Exception as exc:
         logger.error(f"Registration failed: {str(exc)}")
@@ -80,6 +87,12 @@ def login(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"error_code": "ACCOUNT_DISABLED", "message": "Account is disabled"},
+        )
+    except AuthCapacityError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error_code": "AUTH_CAPACITY_EXHAUSTED", "message": "Authentication is temporarily busy"},
+            headers={"Retry-After": "1"},
         )
     except AuthError as exc:
         raise HTTPException(

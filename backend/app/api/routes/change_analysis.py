@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.analysis.workflow import execute_background_change_analysis
 from app.api.dependencies import get_current_user, verify_csrf
+from app.api.event_cursor import MAX_EVENT_CURSOR, parse_event_cursor
 from app.api.idempotency import idempotency_identity
 from app.core.config import get_settings
 from app.core.database import get_db
@@ -635,39 +636,52 @@ async def get_change_analysis_events(
     request: Request,
     current_user: CurrentUser = Depends(get_current_user),
     last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
-    after_id: Optional[int] = Query(default=None),
+    after_id: Optional[int] = Query(default=None, ge=0, le=MAX_EVENT_CURSOR),
     accept: Optional[str] = Header(None),
     db: Session = Depends(get_db),
 ):
     """Retrieve durable workflow events or stream real-time updates via Server-Sent Events (SSE)."""
     model = get_owned_change_analysis_or_404(db, str(analysis_id), current_user)
 
-    # Parse and validate starting event offset
-    start_id = 0
-    if last_event_id is not None and str(last_event_id).strip():
-        try:
-            start_id = int(str(last_event_id).strip())
-        except ValueError:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid Last-Event-ID header value: '{last_event_id}'. Expected integer ID.",
-            )
-    elif after_id is not None:
-        start_id = max(0, after_id)
+    try:
+        start_id = parse_event_cursor(last_event_id, after_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid event cursor.",
+        ) from None
 
     # If client requests SSE stream
     if accept and "text/event-stream" in accept:
+        from sqlalchemy.orm import sessionmaker
+
+        poll_sessions = sessionmaker(autocommit=False, autoflush=False, bind=db.get_bind())
+
         async def event_generator() -> AsyncGenerator[str, None]:
             current_id = start_id
             while True:
                 if await request.is_disconnected():
                     break
-
-                events = WorkflowEventService.list_after_id_for_change_analysis(
-                    db=db,
-                    change_analysis_id=str(analysis_id),
-                    after_id=current_id,
-                )
+                poll_db = poll_sessions()
+                try:
+                    events = WorkflowEventService.list_after_id_for_change_analysis(
+                        db=poll_db,
+                        change_analysis_id=str(analysis_id),
+                        after_id=current_id,
+                        limit=100,
+                    )
+                    curr_model = poll_db.query(ChangeAnalysisModel).filter(
+                        ChangeAnalysisModel.id == str(analysis_id)
+                    ).first()
+                    is_terminal = bool(
+                        curr_model
+                        and curr_model.status in (
+                            ChangeAnalysisStatus.COMPLETED.value,
+                            ChangeAnalysisStatus.FAILED.value,
+                        )
+                    )
+                finally:
+                    poll_db.close()
 
                 for ev in events:
                     current_id = max(current_id, ev.id)
@@ -681,9 +695,7 @@ async def get_change_analysis_events(
                     }
                     yield f"event: workflow_event\ndata: {json.dumps(ev_data)}\n\n"
 
-                # Check if terminal state reached
-                curr_model = db.query(ChangeAnalysisModel).filter(ChangeAnalysisModel.id == str(analysis_id)).first()
-                if curr_model and curr_model.status in (ChangeAnalysisStatus.COMPLETED.value, ChangeAnalysisStatus.FAILED.value):
+                if is_terminal:
                     yield f"event: completed\ndata: {json.dumps({'status': curr_model.status})}\n\n"
                     break
 

@@ -10,6 +10,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 _DEVELOPMENT_ONLY_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "testserver"})
+_PROVIDER_API_HOSTS = {
+    "GEMINI_BASE_URL": "generativelanguage.googleapis.com",
+    "GROQ_BASE_URL": "api.groq.com",
+    "NVIDIA_BASE_URL": "integrate.api.nvidia.com",
+    "HUGGINGFACE_BASE_URL": "router.huggingface.co",
+    "CLOUDFLARE_BASE_URL": "api.cloudflare.com",
+    "MISTRAL_BASE_URL": "api.mistral.ai",
+    "COHERE_BASE_URL": "api.cohere.com",
+    "OPENROUTER_BASE_URL": "openrouter.ai",
+}
 _KNOWN_PUBLIC_SUFFIXES = frozenset({
     "com", "org", "net", "edu", "gov", "mil", "int", "io", "dev", "app",
     "uk", "co.uk", "org.uk", "ac.uk", "gov.uk", "au", "com.au", "net.au",
@@ -23,6 +33,49 @@ def _normalized_host(value: str) -> str:
         return (urlparse(f"//{value.strip()}").hostname or value).rstrip(".").casefold()
     except ValueError:
         return value.casefold()
+
+
+def validate_production_cors_origin(origin: str) -> str:
+    """Validate a production CORS origin and return its normalized hostname.
+
+    Error messages intentionally omit the supplied URL: malformed origins may
+    contain credentials, which must not be copied into startup diagnostics.
+    """
+    invalid_origin = "Invalid production CORS origin."
+    if not isinstance(origin, str) or origin != origin.strip() or any(
+        character.isspace() or ord(character) < 0x20 or ord(character) == 0x7F
+        for character in origin
+    ):
+        raise ValueError(invalid_origin)
+    try:
+        parsed = urlparse(origin)
+        hostname = parsed.hostname
+        port = parsed.port
+    except (TypeError, ValueError):
+        raise ValueError(invalid_origin) from None
+
+    authority = parsed.netloc.rsplit("@", 1)[-1]
+    if (
+        parsed.scheme.casefold() not in {"http", "https"}
+        or not parsed.netloc
+        or hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or "*" in hostname
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or "?" in origin
+        or "#" in origin
+        or authority.endswith(":")
+        or (port is not None and not 1 <= port <= 65_535)
+    ):
+        raise ValueError(invalid_origin)
+
+    normalized_host = _normalized_host(hostname)
+    if parsed.scheme.casefold() != "https" and normalized_host not in _DEVELOPMENT_ONLY_HOSTS:
+        raise ValueError(invalid_origin)
+    return normalized_host
 
 
 def _validate_cookie_domain(value: str | None, *, field_name: str, production: bool) -> None:
@@ -180,6 +233,7 @@ class Settings(BaseSettings):
     MAX_REPO_FILES: int = 5000
     MAX_FILE_SIZE_BYTES: int = 1_048_576  # 1 MB
     MAX_TOTAL_SOURCE_BYTES: int = 52_428_800  # 50 MB global source budget
+    MAX_JSON_REQUEST_BYTES: int = Field(default=1_048_576, ge=1024, le=5_242_880)
     # Repository indexing and evidence-verified reasoning share this hard wall-clock
     # budget. Five minutes was insufficient for ordinary mid-sized repositories and
     # caused valid scans to be cancelled after indexing had already succeeded.
@@ -464,6 +518,28 @@ class Settings(BaseSettings):
                 raise ValueError("GITHUB_APP_CALLBACK_URL contains an invalid port.") from exc
 
         if self.is_production:
+            # Provider adapters send credentials in request headers. Production
+            # endpoints are pinned to the canonical provider hosts so a typo or
+            # accidental private/custom URL cannot redirect those credentials.
+            for setting_name, expected_host in _PROVIDER_API_HOSTS.items():
+                value = getattr(self, setting_name)
+                try:
+                    parsed_provider_url = urlparse(value)
+                    provider_host = (parsed_provider_url.hostname or "").rstrip(".").casefold()
+                    provider_port = parsed_provider_url.port
+                except (TypeError, ValueError):
+                    raise ValueError(f"{setting_name} must use its canonical HTTPS provider endpoint.") from None
+                if (
+                    parsed_provider_url.scheme.casefold() != "https"
+                    or provider_host != expected_host
+                    or provider_port not in (None, 443)
+                    or parsed_provider_url.username is not None
+                    or parsed_provider_url.password is not None
+                    or parsed_provider_url.query
+                    or parsed_provider_url.fragment
+                ):
+                    raise ValueError(f"{setting_name} must use its canonical HTTPS provider endpoint.")
+
             if not self.AUTH_COOKIE_SECURE:
                 raise ValueError("CRITICAL CONFIGURATION ERROR: In production environment, AUTH_COOKIE_SECURE must be True.")
 
@@ -475,16 +551,7 @@ class Settings(BaseSettings):
                 raise ValueError("CRITICAL CONFIGURATION ERROR: Wildcard CORS origin ('*') is prohibited in production.")
             cors_hosts: set[str] = set()
             for origin in cors:
-                parsed = urlparse(origin)
-                if not parsed.scheme or not parsed.netloc or parsed.scheme not in ("http", "https"):
-                    raise ValueError(f"Invalid CORS origin '{origin}': must be formatted as scheme://host[:port]")
-                if parsed.path and parsed.path != "/":
-                    raise ValueError(f"Invalid CORS origin '{origin}': origin must not contain paths")
-                if parsed.query or parsed.fragment:
-                    raise ValueError(f"Invalid CORS origin '{origin}': origin must not contain query parameters or fragments")
-                if parsed.hostname is None or "*" in parsed.hostname:
-                    raise ValueError("CRITICAL CONFIGURATION ERROR: Wildcard CORS hosts are prohibited in production.")
-                cors_hosts.add(_normalized_host(parsed.hostname))
+                cors_hosts.add(validate_production_cors_origin(origin))
             if cors_hosts and cors_hosts.issubset(_DEVELOPMENT_ONLY_HOSTS):
                 raise ValueError(
                     "CRITICAL CONFIGURATION ERROR: Production CORS_ORIGINS cannot contain only development hosts."

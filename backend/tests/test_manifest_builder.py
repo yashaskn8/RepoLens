@@ -3,6 +3,8 @@
 import json
 import os
 import tempfile
+from types import SimpleNamespace
+import builtins
 import pytest
 from app.ingestion.manifest import build_manifest
 from app.ingestion.schemas import SymbolKind
@@ -107,3 +109,76 @@ def test_build_manifest_structure_and_frameworks(mock_repo_directory):
     assert png_entry is not None
     assert png_entry.is_binary is True
     assert len(png_entry.symbols) == 0
+
+
+@pytest.mark.parametrize(
+    ("filename", "content", "expected_framework"),
+    [
+        ("package.json", b'{"dependencies":{"react":"1"}}', "React"),
+        ("requirements.txt", b"fastapi==0.110.0\n", "FastAPI"),
+        ("pyproject.toml", b'[project]\ndependencies=["fastapi"]\n', "FastAPI"),
+    ],
+)
+@pytest.mark.parametrize("size_delta,detected", [(-1, True), (0, True), (1, False)])
+def test_framework_manifests_obey_shared_file_size_boundary(
+    tmp_path, monkeypatch, filename, content, expected_framework, size_delta, detected
+):
+    limit = 128
+    padding = b" " * max(0, limit + size_delta - len(content))
+    payload = (content + padding)[: limit + size_delta]
+    (tmp_path / filename).write_bytes(payload)
+    settings = SimpleNamespace(
+        MAX_REPO_FILES=100,
+        MAX_FILE_SIZE_BYTES=limit,
+        MAX_TOTAL_SOURCE_BYTES=4096,
+    )
+    monkeypatch.setattr("app.ingestion.manifest.get_settings", lambda: settings)
+
+    manifest = build_manifest(
+        repo_dir=str(tmp_path),
+        repository_url="https://github.com/org/bounded-manifest.git",
+        commit_hash="b" * 40,
+    )
+
+    frameworks = {item.name for item in manifest.frameworks}
+    assert (expected_framework in frameworks) is detected
+    file_entry = next(item for item in manifest.files if item.path == filename)
+    if size_delta > 0:
+        assert file_entry.skipped_reason == "exceeds_max_size"
+    else:
+        assert file_entry.skipped_reason is None
+
+
+def test_manifest_detector_does_not_reread_admitted_root_manifest(tmp_path, monkeypatch):
+    payload = b'{"dependencies":{"react":"1"}}'
+    target = tmp_path / "package.json"
+    target.write_bytes(payload)
+    original_open = builtins.open
+    reads = 0
+
+    def counted_open(file, *args, **kwargs):
+        nonlocal reads
+        if os.fspath(file) == os.fspath(target) and args and args[0] == "rb":
+            reads += 1
+        return original_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", counted_open)
+    manifest = build_manifest(
+        repo_dir=str(tmp_path),
+        repository_url="https://github.com/org/single-read.git",
+        commit_hash="c" * 40,
+    )
+
+    assert any(item.name == "React" for item in manifest.frameworks)
+    assert reads == 1
+
+
+@pytest.mark.parametrize("payload", [b"\xff\xfe", b"{not-json"])
+def test_framework_detector_malformed_metadata_degrades_safely(tmp_path, payload):
+    (tmp_path / "package.json").write_bytes(payload)
+    manifest = build_manifest(
+        repo_dir=str(tmp_path),
+        repository_url="https://github.com/org/malformed-manifest.git",
+        commit_hash="d" * 40,
+    )
+    assert manifest.frameworks == []

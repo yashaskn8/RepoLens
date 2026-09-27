@@ -14,7 +14,9 @@ Also tests:
 """
 
 import json
+import os
 import subprocess
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 import pytest
 
@@ -24,6 +26,55 @@ from app.analysis.schemas import ScannerResult, ToolStatus
 from app.analysis.service import RepositoryIntelligenceService
 from app.analysis.base import BaseScannerAdapter
 from app.schemas.enums import Severity
+
+
+@pytest.mark.asyncio
+async def test_scanner_subprocess_receives_minimal_environment(monkeypatch):
+    """External scanner processes must not inherit application credentials."""
+    monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
+    monkeypatch.setenv("TEMP", "C:/temp")
+    for key in (
+        "GITHUB_TOKEN",
+        "GITHUB_APP_PRIVATE_KEY_PEM",
+        "GROQ_API_KEY",
+        "DATABASE_URL",
+        "REDIS_URL",
+        "OTEL_EXPORTER_OTLP_HEADERS",
+        "HTTPS_PROXY",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0",
+    ):
+        monkeypatch.setenv(key, "must-not-reach-scanner")
+
+    captured = {}
+
+    def fake_run(*args, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    adapter = SemgrepAdapter()
+    result = await adapter._execute_command(["semgrep"], cwd=".", timeout_seconds=1)
+
+    assert result == (0, "{}", "")
+    child_env = captured["env"]
+    assert child_env["PATH"] == os.environ["PATH"]
+    assert child_env["TEMP"] == "C:/temp"
+    assert child_env["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert child_env["GIT_LFS_SKIP_SMUDGE"] == "1"
+    assert not set(child_env) & {
+        "GITHUB_TOKEN",
+        "GITHUB_APP_PRIVATE_KEY_PEM",
+        "GROQ_API_KEY",
+        "DATABASE_URL",
+        "REDIS_URL",
+        "OTEL_EXPORTER_OTLP_HEADERS",
+        "HTTPS_PROXY",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0",
+    }
 
 
 # ---------------------------------------------------------------------------

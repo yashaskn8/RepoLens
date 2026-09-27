@@ -70,6 +70,7 @@ def build_manifest(
 
     file_entries: List[FileEntry] = []
     language_counts: Dict[str, int] = {}
+    framework_manifest_contents: dict[str, bytes] = {}
 
     max_files = settings.MAX_REPO_FILES
     max_file_size = settings.MAX_FILE_SIZE_BYTES
@@ -128,7 +129,33 @@ def build_manifest(
 
                 # Read text and count lines
                 with open(abs_path, "rb") as f:
-                    content_bytes = f.read()
+                    content_bytes = f.read(max_file_size + 1)
+
+                # The stat check above is an early optimization, not the byte
+                # authority. Bound the read itself and fail closed on a
+                # concurrent file replacement/resize.
+                if len(content_bytes) > max_file_size:
+                    file_entries.append(
+                        FileEntry(
+                            path=rel_path,
+                            language=lang,
+                            size_bytes=file_size,
+                            lines_count=0,
+                            skipped_reason="exceeds_max_size",
+                        )
+                    )
+                    continue
+                if len(content_bytes) != file_size:
+                    file_entries.append(
+                        FileEntry(
+                            path=rel_path,
+                            language=lang,
+                            size_bytes=file_size,
+                            lines_count=0,
+                            skipped_reason="file_changed_during_read",
+                        )
+                    )
+                    continue
 
                 # Basic binary check
                 if b"\x00" in content_bytes:
@@ -143,6 +170,9 @@ def build_manifest(
                         )
                     )
                     continue
+
+                if rel_path in {"package.json", "requirements.txt", "pyproject.toml"}:
+                    framework_manifest_contents[rel_path] = content_bytes
 
                 lines_count = content_bytes.count(b"\n") + (1 if content_bytes and not content_bytes.endswith(b"\n") else 0)
 
@@ -163,7 +193,7 @@ def build_manifest(
                         is_binary=False,
                     )
                 )
-                processed_source_bytes += file_size
+                processed_source_bytes += len(content_bytes)
                 processed_files_count += 1
 
             except Exception as exc:
@@ -181,7 +211,11 @@ def build_manifest(
             break
 
     # 2. Detect frameworks from repository files
-    frameworks = detect_frameworks(repo_dir)
+    frameworks = detect_frameworks(
+        repo_dir,
+        max_file_bytes=max_file_size,
+        manifest_contents=framework_manifest_contents,
+    )
 
     # 3. Determine truthful Git branch and ref metadata if available
     from app.ingestion.clone import get_git_resolved_branch_or_ref

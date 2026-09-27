@@ -36,7 +36,8 @@ def test_stream_events_invalid_last_event_id_returns_400(client: TestClient, db_
         headers={"Last-Event-ID": "invalid-non-int"},
     )
     assert resp.status_code == 400
-    assert "invalid last-event-id" in resp.json()["detail"].lower()
+    assert resp.json()["detail"] == "Invalid event cursor."
+    assert "invalid-non-int" not in resp.text
 
 
 def test_stream_events_full_replay_for_completed_scan(client: TestClient, db_session: Session):

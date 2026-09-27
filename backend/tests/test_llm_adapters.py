@@ -115,6 +115,39 @@ async def test_groq_adapter_mock_generation():
 
 
 @pytest.mark.asyncio
+async def test_provider_client_does_not_forward_credentials_across_redirect(monkeypatch):
+    requests = []
+
+    def redirect_handler(request):
+        requests.append(request)
+        return httpx.Response(
+            302,
+            headers={"Location": "https://attacker.example/collect"},
+            request=request,
+        )
+
+    real_async_client = httpx.AsyncClient
+    transport = httpx.MockTransport(redirect_handler)
+
+    def make_client(*args, **kwargs):
+        return real_async_client(*args, transport=transport, **kwargs)
+
+    monkeypatch.setattr("app.llm.adapters.groq.httpx.AsyncClient", make_client)
+    adapter = GroqAdapter(api_key="test-only-credential", base_url="https://api.groq.com/openai/v1")
+    request = LLMRequest(
+        messages=[LLMMessage(role="user", content="test")],
+        model="openai/gpt-oss-120b",
+    )
+
+    with pytest.raises(LLMError):
+        await adapter.generate(request)
+
+    assert len(requests) == 1
+    assert requests[0].url.host == "api.groq.com"
+    assert requests[0].headers["Authorization"] == "Bearer test-only-credential"
+
+
+@pytest.mark.asyncio
 async def test_nvidia_adapter_mock_generation():
     """Verify NvidiaAdapter handles NIM completions and token metadata."""
     mock_response_data = {
