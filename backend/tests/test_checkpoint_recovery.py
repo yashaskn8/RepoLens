@@ -199,6 +199,8 @@ async def test_change_analysis_workspace_binding_is_invocation_local():
 
 @pytest.mark.asyncio
 async def test_postgres_open_does_not_run_schema_setup(monkeypatch):
+    from langgraph.checkpoint.base import BaseCheckpointSaver
+
     """Per-scan Postgres opening uses the official saver without implicit setup()."""
     connection_state = {"closed": False, "kwargs": None, "dsn": None}
 
@@ -245,6 +247,7 @@ async def test_postgres_open_does_not_run_schema_setup(monkeypatch):
     monkeypatch.setattr("app.agents.checkpointer.get_settings", lambda: settings)
 
     async with get_analysis_checkpointer(state_profile="plain") as saver:
+        assert isinstance(saver, BaseCheckpointSaver)
         assert isinstance(saver, LeaseFencedPostgresSaver)
         assert isinstance(saver._delegate, FakeSaver)
         assert saver.setup_calls == 0

@@ -7,6 +7,7 @@ from enum import Enum
 from typing import Any, AsyncIterator, Literal, Optional
 
 import aiosqlite
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from sqlalchemy.engine import URL, make_url
@@ -28,7 +29,7 @@ class CheckpointerConfigurationError(RuntimeError):
     """Raised when the configured durable graph store cannot be used safely."""
 
 
-class LeaseFencedPostgresSaver:
+class LeaseFencedPostgresSaver(BaseCheckpointSaver):
     """Fence durable checkpoint writes with the current execution lease.
 
     LangGraph's PostgreSQL saver owns its own async connection. Without this
@@ -39,6 +40,7 @@ class LeaseFencedPostgresSaver:
     """
 
     def __init__(self, delegate: object) -> None:
+        super().__init__(serde=getattr(delegate, "serde", None))
         self._delegate = delegate
 
     def __getattr__(self, name: str) -> Any:
@@ -49,6 +51,13 @@ class LeaseFencedPostgresSaver:
 
     async def aput_writes(self, *args: Any, **kwargs: Any) -> Any:
         return await self._fenced_write("aput_writes", *args, **kwargs)
+
+    async def aget_tuple(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._delegate.aget_tuple(*args, **kwargs)
+
+    async def alist(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        async for checkpoint in self._delegate.alist(*args, **kwargs):
+            yield checkpoint
 
     async def _fenced_write(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
         from app.execution.context import assert_current_claim, current_claim, new_execution_session
