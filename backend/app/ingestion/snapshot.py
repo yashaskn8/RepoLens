@@ -27,7 +27,13 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.database import SessionLocal
-from app.ingestion.clone import InvalidRepositoryURLError, safe_git_environment, validate_github_url
+from app.ingestion.clone import (
+    InvalidRepositoryURLError,
+    RepositoryResourceLimitError,
+    safe_git_environment,
+    validate_github_url,
+    validate_repository_tree_budget,
+)
 from app.models.scan import ScanModel
 
 logger = logging.getLogger(__name__)
@@ -183,30 +189,41 @@ class RepositorySnapshotService:
 
             # 5. Fetch specific commit SHA (shallow depth=1)
             fetch_code, fetch_out, fetch_err = run_git(
-                ["fetch", "--depth=1", "--no-recurse-submodules", "--tags", "origin", cleaned_sha],
+                ["fetch", "--filter=blob:none", "--depth=1", "--no-recurse-submodules", "origin", cleaned_sha],
                 cwd=workspace_path,
                 timeout=timeout,
             )
 
-            # If direct commit fetch failed (e.g. server restrictions), try fetching branch or full fetch
+            # If GitHub refuses a raw SHA fetch, try only the explicitly named
+            # branch at a fixed shallow depth. Never fetch tags or arbitrary
+            # origin history as a recovery fallback.
             if fetch_code != 0:
                 logger.warning(
                     f"Direct fetch of SHA {cleaned_sha} failed ({fetch_err[:256]}). Attempting fallback fetch..."
                 )
+                fallback_code = 1
                 if branch:
                     cleaned_branch = branch.strip()
                     if not re.search(r"[\s;&|`$\n\r\t<>\\*?]", cleaned_branch) and not cleaned_branch.startswith("-"):
-                        run_git(
-                            ["fetch", "--depth=50", "--no-recurse-submodules", "origin", cleaned_branch],
+                        fallback_code, _, _ = run_git(
+                            ["fetch", "--filter=blob:none", "--depth=50", "--no-recurse-submodules", "origin", cleaned_branch],
                             cwd=workspace_path,
                             timeout=timeout,
                         )
-                # If still not present, fallback to general fetch
-                run_git(
-                    ["fetch", "--depth=100", "--no-recurse-submodules", "origin"],
-                    cwd=workspace_path,
-                    timeout=timeout,
+                if fallback_code != 0:
+                    raise SnapshotRehydrationError("Could not fetch the exact requested commit within the bounded ref policy.")
+
+            try:
+                validate_repository_tree_budget(
+                    workspace_path,
+                    cleaned_sha,
+                    max_files=int(self.settings.MAX_REPO_FILES),
+                    max_file_bytes=int(self.settings.MAX_FILE_SIZE_BYTES),
+                    max_total_bytes=int(self.settings.MAX_TOTAL_SOURCE_BYTES),
+                    timeout_seconds=min(int(timeout), 60),
                 )
+            except RepositoryResourceLimitError as exc:
+                raise SnapshotRehydrationError(str(exc)) from exc
 
             # 6. Checkout exact commit SHA (detached HEAD)
             co_code, co_out, co_err = run_git(

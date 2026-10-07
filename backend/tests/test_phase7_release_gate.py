@@ -24,6 +24,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.analysis.report_generator import generate_change_analysis_report, generate_change_analysis_telemetry
+from app.core.config import Settings
 from app.delivery.diff_mapper import GitHubDiffFile
 from app.delivery.publication_provider import GitHubReviewPublicationProvider
 from app.models.base import Base
@@ -374,13 +375,14 @@ async def test_e2e_d_wrong_digest_rejected(fresh_db_engine):
 # ── E2E E: Crash-After-External-Success Reconciliation ────────────────
 
 @pytest.mark.asyncio
-async def test_e2e_e_crash_after_external_success_reconciliation(fresh_db_engine):
+async def test_e2e_e_crash_after_external_success_reconciliation(fresh_db_engine, monkeypatch):
     """Prove crash recovery: GitHub write succeeds, real SQLAlchemy flush fails, rollback first, fresh session reconciles with exactly 1 POST."""
     Session = sessionmaker(bind=fresh_db_engine)
     session1 = Session()
 
     analysis = _seed_completed_pr_analysis(session1)
     analysis_id = UUID(analysis.id)
+    expected_head_sha = analysis.head_commit_sha
 
     mock_provider = MagicMock()
     mock_provider.write_enabled = True
@@ -440,10 +442,17 @@ async def test_e2e_e_crash_after_external_success_reconciliation(fresh_db_engine
                 "id": 98765,
                 "body": f"## Verified Review\n\n<!-- repolens-review:{analysis_id}:{digest} -->",
                 "html_url": "https://github.com/octocat/RepoLens-Target/pull/42#pullrequestreview-98765",
+                "user": {"login": "repolens[bot]"},
+                "state": "COMMENTED",
+                "commit_id": expected_head_sha,
             }
         ]
     )
 
+    monkeypatch.setattr(
+        "app.services.review_publication_service.get_settings",
+        lambda: Settings(_env_file=None, GITHUB_REVIEW_PUBLISHER_LOGIN="repolens[bot]"),
+    )
     service2 = ReviewPublicationService(db=session2, provider=mock_provider)
 
     # Retry publish in fresh session
@@ -845,7 +854,7 @@ async def test_e2e_l_unresolved_publishing_retry_returns_uncertain(fresh_db_engi
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("invalid_id", [None, "abc", 0, -1])
-async def test_e2e_m_invalid_reconciliation_ids_rejected(fresh_db_engine, invalid_id):
+async def test_e2e_m_invalid_reconciliation_ids_rejected(fresh_db_engine, invalid_id, monkeypatch):
     """Verify reconciliation ignores marker-bearing reviews with non-positive or non-integer IDs."""
     Session = sessionmaker(bind=fresh_db_engine)
     session = Session()
@@ -878,10 +887,17 @@ async def test_e2e_m_invalid_reconciliation_ids_rejected(fresh_db_engine, invali
                 "id": invalid_id,
                 "body": f"<!-- repolens-review:{analysis_id}:{digest} -->",
                 "html_url": "https://github.com/octocat/RepoLens-Target/pull/42#pullrequestreview-invalid",
+                "user": {"login": "repolens[bot]"},
+                "state": "COMMENTED",
+                "commit_id": analysis.head_commit_sha,
             }
         ]
     )
 
+    monkeypatch.setattr(
+        "app.services.review_publication_service.get_settings",
+        lambda: Settings(_env_file=None, GITHUB_REVIEW_PUBLISHER_LOGIN="repolens[bot]"),
+    )
     service = ReviewPublicationService(db=session, provider=mock_provider)
 
     # Reconcile publication directly
@@ -898,7 +914,7 @@ async def test_e2e_m_invalid_reconciliation_ids_rejected(fresh_db_engine, invali
 # ── E2E N: Valid Reconciliation ID Succeeds ───────────────────────────
 
 @pytest.mark.asyncio
-async def test_e2e_n_valid_positive_reconciliation_id_succeeds(fresh_db_engine):
+async def test_e2e_n_valid_positive_reconciliation_id_succeeds(fresh_db_engine, monkeypatch):
     """Verify reconciliation adopts positive integer review ID and updates state to PUBLISHED."""
     Session = sessionmaker(bind=fresh_db_engine)
     session = Session()
@@ -931,10 +947,17 @@ async def test_e2e_n_valid_positive_reconciliation_id_succeeds(fresh_db_engine):
                 "id": valid_id,
                 "body": f"<!-- repolens-review:{analysis_id}:{digest} -->",
                 "html_url": f"https://github.com/octocat/RepoLens-Target/pull/42#pullrequestreview-{valid_id}",
+                "user": {"login": "repolens[bot]"},
+                "state": "COMMENTED",
+                "commit_id": analysis.head_commit_sha,
             }
         ]
     )
 
+    monkeypatch.setattr(
+        "app.services.review_publication_service.get_settings",
+        lambda: Settings(_env_file=None, GITHUB_REVIEW_PUBLISHER_LOGIN="repolens[bot]"),
+    )
     service = ReviewPublicationService(db=session, provider=mock_provider)
     reconciled = await service.reconcile_publication(pub)
 
@@ -943,6 +966,94 @@ async def test_e2e_n_valid_positive_reconciliation_id_succeeds(fresh_db_engine):
     assert reconciled.github_review_url == f"https://github.com/octocat/RepoLens-Target/pull/42#pullrequestreview-{valid_id}"
     assert reconciled.reconciliation_occurred is True
 
+    session.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "review_update",
+    [
+        {"user": {"login": "attacker"}},
+        {"state": "APPROVED"},
+        {"commit_id": "f" * 40},
+        {"user": None},
+    ],
+)
+async def test_reconciliation_marker_requires_expected_actor_comment_and_exact_head(
+    fresh_db_engine, monkeypatch, review_update
+):
+    Session = sessionmaker(bind=fresh_db_engine)
+    session = Session()
+    analysis = _seed_completed_pr_analysis(session)
+    analysis_id = UUID(analysis.id)
+    digest = "d" * 64
+    pub = PullRequestReviewPublicationModel(
+        id=str(uuid4()),
+        analysis_id=str(analysis_id),
+        repository_owner="octocat",
+        repository_name="RepoLens-Target",
+        pr_number=42,
+        base_commit_sha=analysis.base_commit_sha,
+        head_commit_sha=analysis.head_commit_sha,
+        status=ReviewPublicationStatus.PUBLISHING.value,
+        preview_body="## Review",
+        preview_digest=digest,
+        inline_comments_payload=[],
+    )
+    session.add(pub)
+    session.commit()
+    review = {
+        "id": 54322,
+        "body": f"<!-- repolens-review:{analysis_id}:{digest} -->",
+        "user": {"login": "repolens[bot]"},
+        "state": "COMMENTED",
+        "commit_id": analysis.head_commit_sha,
+    }
+    review.update(review_update)
+    provider = MagicMock()
+    provider.list_pull_request_reviews = AsyncMock(return_value=[review])
+    monkeypatch.setattr(
+        "app.services.review_publication_service.get_settings",
+        lambda: Settings(_env_file=None, GITHUB_REVIEW_PUBLISHER_LOGIN="repolens[bot]"),
+    )
+
+    reconciled = await ReviewPublicationService(db=session, provider=provider).reconcile_publication(pub)
+    assert reconciled.status == ReviewPublicationStatus.PUBLISHING.value
+    assert reconciled.github_review_id is None
+    assert reconciled.reconciliation_occurred is not True
+    session.close()
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_without_pinned_publisher_identity_fails_closed(fresh_db_engine, monkeypatch):
+    Session = sessionmaker(bind=fresh_db_engine)
+    session = Session()
+    analysis = _seed_completed_pr_analysis(session)
+    pub = PullRequestReviewPublicationModel(
+        id=str(uuid4()),
+        analysis_id=analysis.id,
+        repository_owner="octocat",
+        repository_name="RepoLens-Target",
+        pr_number=42,
+        base_commit_sha=analysis.base_commit_sha,
+        head_commit_sha=analysis.head_commit_sha,
+        status=ReviewPublicationStatus.PUBLISHING.value,
+        preview_body="## Review",
+        preview_digest="e" * 64,
+        inline_comments_payload=[],
+    )
+    session.add(pub)
+    session.commit()
+    provider = MagicMock()
+    provider.list_pull_request_reviews = AsyncMock()
+    monkeypatch.setattr(
+        "app.services.review_publication_service.get_settings",
+        lambda: Settings(_env_file=None),
+    )
+
+    result = await ReviewPublicationService(db=session, provider=provider).reconcile_publication(pub)
+    assert result.status == ReviewPublicationStatus.PUBLISHING.value
+    provider.list_pull_request_reviews.assert_not_awaited()
     session.close()
 
 

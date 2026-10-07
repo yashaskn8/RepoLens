@@ -1,6 +1,7 @@
 """Unit tests for building repository manifests, directory traversal, and framework detection."""
 
 import json
+import hashlib
 import os
 import tempfile
 from types import SimpleNamespace
@@ -81,6 +82,12 @@ def test_build_manifest_structure_and_frameworks(mock_repo_directory):
     assert manifest.repository_url == "https://github.com/org/sample-repo.git"
     assert manifest.commit_hash == "a1b2c3d4e5f67890123456789012345678901234"
     assert manifest.branch == "main"
+
+    for entry in manifest.files:
+        if not entry.is_binary and not entry.skipped_reason:
+            source_path = os.path.join(mock_repo_directory, *entry.path.split("/"))
+            with open(source_path, "rb") as source_file:
+                assert entry.content_sha256 == hashlib.sha256(source_file.read()).hexdigest()
 
     # node_modules must NOT be processed
     paths = [f.path for f in manifest.files]
@@ -171,6 +178,41 @@ def test_manifest_detector_does_not_reread_admitted_root_manifest(tmp_path, monk
 
     assert any(item.name == "React" for item in manifest.frameworks)
     assert reads == 1
+
+
+def test_manifest_skips_symlink_file_without_reading_external_target(tmp_path, monkeypatch):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    outside = tmp_path / "outside.py"
+    outside.write_text("SECRET_OUTSIDE_REPOSITORY = True\n", encoding="utf-8")
+    link = repository / "linked.py"
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        monkeypatch.setattr(
+            "app.ingestion.manifest._is_link_or_reparse_point",
+            lambda value: os.fspath(value) == os.fspath(link),
+        )
+    # Windows may omit file symlinks from os.walk's files list depending on
+    # privileges/filesystem. Present the directory entry deterministically so
+    # this test exercises the manifest's link policy on every platform.
+    monkeypatch.setattr(
+        "app.ingestion.manifest.os.walk",
+        lambda *args, **kwargs: iter([(str(repository), [], ["linked.py"])]),
+    )
+
+    manifest = build_manifest(
+        repo_dir=str(repository),
+        repository_url="https://github.com/org/symlink-fixture.git",
+        commit_hash="e" * 40,
+    )
+
+    entry = next((item for item in manifest.files if item.path == "linked.py"), None)
+    if entry is not None:
+        assert entry.skipped_reason == "unsafe_link_or_reparse_entry"
+        assert entry.content_sha256 is None
+    assert manifest.analysis_scope.truncated is True
+    assert manifest.analysis_scope.reason == "unsafe_link_or_reparse_entry"
 
 
 @pytest.mark.parametrize("payload", [b"\xff\xfe", b"{not-json"])

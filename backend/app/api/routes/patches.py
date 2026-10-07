@@ -12,7 +12,11 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.dependencies import get_current_user, verify_csrf
 from app.core.database import get_db
+from app.delivery.approval import compute_patch_approval_digest, patch_artifact_digest
+from app.models.delivery import DeliveryModel
 from app.models.patch import PatchModel
+from app.models.platform import OutboxEventModel
+from app.models.scan import ScanModel
 from app.governance.events import AuditLedger, DomainOutbox
 # Kept as a module-level compatibility seam for integrations that previously
 # patched the remediation graph while calling the review endpoints directly.
@@ -81,6 +85,7 @@ async def approve_patch(
 ):
     """Explicit human approval endpoint for a candidate patch."""
     patch_model = get_owned_patch_or_404(db, str(patch_id), current_user)
+    db.refresh(patch_model, with_for_update=True)
 
     # Transition validation
     if patch_model.status == PatchStatus.REJECTED.value:
@@ -95,9 +100,15 @@ async def approve_patch(
             detail="Patch proposal is already APPROVED.",
         )
 
+    scan_model = db.query(ScanModel).filter(
+        ScanModel.id == str(patch_model.scan_id),
+        ScanModel.owner_user_id == current_user.id,
+    ).with_for_update().first()
+    if scan_model is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resource not found.")
+
     thread_id = patch_model.thread_id or f"remediation-{patch_model.id}"
     approved_at = _utc_now()
-    approved_at_iso = approved_at.isoformat()
 
     patch_model.status = PatchStatus.APPROVED.value
     patch_model.approved_by = current_user.id
@@ -105,6 +116,13 @@ async def approve_patch(
     if payload.notes:
         patch_model.user_feedback = payload.notes
     patch_model.thread_id = thread_id
+    patch_model.approval_digest = compute_patch_approval_digest(
+        patch_model,
+        scan_model,
+        tenant_id=current_user.id,
+        actor_id=current_user.id,
+        approved_at=approved_at,
+    )
 
     # Emit durable human audit events with actor attribution
     WorkflowEventService.emit(
@@ -122,9 +140,6 @@ async def approve_patch(
         ),
         critical=True,
     )
-    state_digest = hashlib.sha256(
-        f"{patch_model.id}:{patch_model.status}:{patch_model.approved_by}:{approved_at_iso}".encode("utf-8")
-    ).hexdigest()
     AuditLedger.append(
         db,
         tenant_id=current_user.id,
@@ -133,7 +148,8 @@ async def approve_patch(
         event_type="HUMAN_PATCH_APPROVED",
         resource_type="PATCH",
         resource_id=str(patch_model.id),
-        state_digest=state_digest,
+        artifact_digest=patch_artifact_digest(patch_model),
+        state_digest=patch_model.approval_digest,
         payload={"scan_id": str(patch_model.scan_id), "finding_id": str(patch_model.finding_id)},
     )
     DomainOutbox.append(
@@ -177,12 +193,39 @@ async def reject_patch(
 ):
     """Explicit human rejection endpoint for a candidate patch."""
     patch_model = get_owned_patch_or_404(db, str(patch_id), current_user)
+    db.refresh(patch_model, with_for_update=True)
 
     # Transition validation
     if patch_model.status == PatchStatus.REJECTED.value:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Patch proposal is already REJECTED.",
+        )
+
+    blocking_delivery = db.query(DeliveryModel.id).filter(
+        DeliveryModel.patch_id == str(patch_model.id),
+        DeliveryModel.status.notin_(["FAILED", "BLOCKED"]),
+    ).first()
+    if blocking_delivery is None:
+        started_write = (
+            db.query(OutboxEventModel.id)
+            .join(
+                DeliveryModel,
+                (DeliveryModel.id == OutboxEventModel.aggregate_id)
+                & (OutboxEventModel.aggregate_type == "DELIVERY"),
+            )
+            .filter(
+                DeliveryModel.patch_id == str(patch_model.id),
+                OutboxEventModel.event_type == "GITHUB_DELIVERY_WRITE_STARTED",
+            )
+            .first()
+        )
+        if started_write is not None:
+            blocking_delivery = started_write
+    if blocking_delivery is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Patch rejection is unavailable after GitHub delivery has started; reconcile the delivery first.",
         )
 
     thread_id = patch_model.thread_id or f"remediation-{patch_model.id}"

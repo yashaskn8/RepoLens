@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import copy
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -276,25 +277,45 @@ class RepositorySnapshot:
             raise ValueError("capture_source_digests and source_digests are mutually exclusive")
         captured_digests: dict[str, str] = {}
         if source_digests is not None:
+            entries_by_path = {
+                _confined_relative(root, entry.path): entry
+                for entry in manifest.files
+            }
             for path, digest in sorted(source_digests.items()):
                 normalized = _confined_relative(root, path)
-                if normalized not in authorized_paths:
+                entry = entries_by_path.get(normalized)
+                if entry is None:
                     raise ValueError("source digest path is not authorized by the repository manifest")
                 if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
                     raise ValueError("source digest must be a lowercase SHA-256 value")
+                if not entry.content_sha256 or not hmac.compare_digest(digest, entry.content_sha256):
+                    raise ValueError("source digest does not match the immutable repository manifest")
                 captured_digests[normalized] = digest
         elif capture_source_digests:
             for entry in manifest.files:
                 if entry.is_binary or entry.skipped_reason:
                     continue
                 normalized = _confined_relative(root, entry.path)
+                if not entry.content_sha256:
+                    raise ValueError("manifest-authorized source file has no immutable content digest")
+                if entry.size_bytes > registration_limits.max_file_size_bytes:
+                    raise ValueError("manifest-authorized source file exceeds the configured byte limit")
+                candidate = root / normalized
+                if candidate.is_symlink() or (
+                    hasattr(candidate, "is_junction") and candidate.is_junction()
+                ):
+                    raise ValueError("manifest-authorized source file is a link or junction")
                 path = resolve_safe_path(root, normalized)
                 if not path.is_file():
                     raise ValueError("manifest-authorized source file is unavailable")
-                payload = path.read_bytes()
+                with path.open("rb") as source_file:
+                    payload = source_file.read(registration_limits.max_file_size_bytes + 1)
                 if len(payload) != entry.size_bytes:
                     raise ValueError("manifest-authorized source file changed before snapshot capture")
-                captured_digests[normalized] = hashlib.sha256(payload).hexdigest()
+                digest = hashlib.sha256(payload).hexdigest()
+                if not hmac.compare_digest(digest, entry.content_sha256):
+                    raise ValueError("manifest-authorized source file does not match the immutable manifest")
+                captured_digests[normalized] = entry.content_sha256
         scanner_results = {
             str(name): result.model_copy(deep=True)
             for name, result in sorted(evidence_store.scanner_results.items())

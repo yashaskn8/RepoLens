@@ -12,6 +12,8 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
+from app.execution.context import assert_current_claim
 from app.analysis.workflow_graph import (
     bind_change_workspaces,
     build_change_analysis_graph,
@@ -40,6 +42,18 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _assert_change_analysis_commit_authority(db: Session, analysis: ChangeAnalysisModel) -> None:
+    """Fence each change-analysis domain commit with its active worker lease."""
+    assert_current_claim(
+        work_kind="CHANGE_ANALYSIS",
+        resource_type="CHANGE_ANALYSIS",
+        resource_id=str(analysis.id),
+        tenant_id=analysis.owner_user_id,
+        required=get_settings().is_production,
+        db=db,
+    )
+
+
 async def execute_background_change_analysis(
     analysis_id: str,
     checkpoint_db_path: Optional[str] = None,
@@ -56,6 +70,7 @@ async def execute_background_change_analysis(
 
         # 1. Update status to ACQUIRING & emit CHANGE_REVISIONS_ACQUIRED stage started
         analysis_model.status = ChangeAnalysisStatus.ACQUIRING.value
+        _assert_change_analysis_commit_authority(db, analysis_model)
         db.commit()
 
         WorkflowEventService.emit(
@@ -107,6 +122,7 @@ async def execute_background_change_analysis(
 
             # Update status to DIFFING
             analysis_model.status = ChangeAnalysisStatus.DIFFING.value
+            _assert_change_analysis_commit_authority(db, analysis_model)
             db.commit()
 
             # Restore cached outputs from persisted metadata if resuming
@@ -168,6 +184,7 @@ async def execute_background_change_analysis(
             if diff_res:
                 analysis_model.changed_files_count = len(diff_res.changed_files)
                 analysis_model.changed_symbols_count = len(diff_res.changed_symbols)
+                _assert_change_analysis_commit_authority(db, analysis_model)
                 db.commit()
 
                 WorkflowEventService.emit(
@@ -208,6 +225,7 @@ async def execute_background_change_analysis(
                     )
                     db.add(imp_row)
 
+                _assert_change_analysis_commit_authority(db, analysis_model)
                 db.commit()
 
                 WorkflowEventService.emit(
@@ -242,6 +260,7 @@ async def execute_background_change_analysis(
             # 6. Mark COMPLETED
             analysis_model.status = ChangeAnalysisStatus.COMPLETED.value
             analysis_model.completed_at = _utc_now()
+            _assert_change_analysis_commit_authority(db, analysis_model)
             db.commit()
 
             WorkflowEventService.emit(
@@ -273,6 +292,7 @@ async def execute_background_change_analysis(
                 analysis_model.failure_code = failure.code.value
                 analysis_model.failure_message = failure.message
                 analysis_model.completed_at = _utc_now()
+                _assert_change_analysis_commit_authority(db, analysis_model)
                 db.commit()
 
                 WorkflowEventService.emit(

@@ -654,8 +654,13 @@ class ReviewPublicationService:
         return pub
 
     async def reconcile_publication(self, pub: PullRequestReviewPublicationModel) -> PullRequestReviewPublicationModel:
-        """Search GitHub for deterministic hidden marker and reconcile state if review exists."""
-        if not pub.preview_digest:
+        """Adopt only a matching review from the configured publisher on the exact head."""
+        expected_publisher = get_settings().GITHUB_REVIEW_PUBLISHER_LOGIN.strip()
+        if (
+            not pub.preview_digest
+            or pub.status != ReviewPublicationStatus.PUBLISHING.value
+            or not expected_publisher
+        ):
             return pub
 
         marker1 = f"<!-- repolens-review:{pub.analysis_id}:{pub.preview_digest} -->"
@@ -677,6 +682,17 @@ class ReviewPublicationService:
         for rev in reviews:
             body = rev.get("body") or ""
             if marker1 in body or marker2 in body:
+                actor = rev.get("user")
+                actor_login = actor.get("login") if isinstance(actor, dict) else None
+                if (
+                    not isinstance(actor_login, str)
+                    or actor_login.casefold() != expected_publisher.casefold()
+                    or rev.get("state") != "COMMENTED"
+                    or rev.get("commit_id") != pub.head_commit_sha
+                ):
+                    # The marker is public and can be copied into an unrelated
+                    # review. It is correlation data, never publication authority.
+                    continue
                 github_review_id = rev.get("id")
                 # FIX C: Validate review ID as a positive integer during reconciliation
                 if not isinstance(github_review_id, int) or github_review_id <= 0:

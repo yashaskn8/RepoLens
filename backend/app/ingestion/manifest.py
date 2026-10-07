@@ -1,6 +1,8 @@
 """Build comprehensive RepositoryManifest by inspecting files, detecting frameworks, and parsing AST symbols."""
 
+import hashlib
 import os
+import stat
 import time
 from typing import Dict, List, Set
 from app.core.config import get_settings
@@ -28,6 +30,29 @@ DEFAULT_IGNORE_DIRS: Set[str] = {
     ".turbo",
     ".cache",
 }
+
+_WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
+
+
+def _is_link_or_reparse_point(path: str) -> bool:
+    """Detect links/junctions without following them during hostile-tree walks."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISLNK(info.st_mode) or bool(
+        getattr(info, "st_file_attributes", 0) & _WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT
+    )
+
+
+def _is_confined_path(root: str, path: str) -> bool:
+    """Compare resolved paths using platform-aware path semantics."""
+    try:
+        resolved_root = os.path.normcase(os.path.realpath(root))
+        resolved_path = os.path.normcase(os.path.realpath(path))
+        return os.path.commonpath((resolved_root, resolved_path)) == resolved_root
+    except (OSError, ValueError):
+        return False
 
 # Binary file extensions that should not be parsed as text
 BINARY_EXTENSIONS: Set[str] = {
@@ -75,16 +100,47 @@ def build_manifest(
     max_files = settings.MAX_REPO_FILES
     max_file_size = settings.MAX_FILE_SIZE_BYTES
     max_total_source_bytes = getattr(settings, "MAX_TOTAL_SOURCE_BYTES", 52_428_800)
+    resolved_repo_root = os.path.realpath(os.path.abspath(repo_dir))
 
     # 1. Walk directory tree safely
-    for root, dirs, files in os.walk(repo_dir, topdown=True):
+    for root, dirs, files in os.walk(resolved_repo_root, topdown=True, followlinks=False):
         # Prune ignored directories in place
-        dirs[:] = [d for d in dirs if d not in DEFAULT_IGNORE_DIRS and not d.startswith(".")]
+        safe_dirs = []
+        for dirname in dirs:
+            directory_path = os.path.join(root, dirname)
+            if dirname in DEFAULT_IGNORE_DIRS or dirname.startswith("."):
+                continue
+            if _is_link_or_reparse_point(directory_path) or not _is_confined_path(
+                resolved_repo_root, directory_path
+            ):
+                is_truncated = True
+                truncation_reason = "unsafe_link_or_reparse_entry"
+                continue
+            safe_dirs.append(dirname)
+        dirs[:] = safe_dirs
 
         for filename in files:
             abs_path = os.path.join(root, filename)
-            rel_path = os.path.relpath(abs_path, repo_dir).replace("\\", "/")
+            rel_path = os.path.relpath(abs_path, resolved_repo_root).replace("\\", "/")
             total_observed_files += 1
+
+            # Never stat/open a repository-provided link. Even an in-root link
+            # can change what a manifest path means between ingestion and use.
+            if _is_link_or_reparse_point(abs_path) or not _is_confined_path(
+                resolved_repo_root, abs_path
+            ):
+                is_truncated = True
+                truncation_reason = "unsafe_link_or_reparse_entry"
+                file_entries.append(
+                    FileEntry(
+                        path=rel_path,
+                        language=detect_language(filename),
+                        size_bytes=0,
+                        lines_count=0,
+                        skipped_reason="unsafe_link_or_reparse_entry",
+                    )
+                )
+                continue
 
             try:
                 file_size = os.path.getsize(abs_path)
@@ -187,6 +243,7 @@ def build_manifest(
                         path=rel_path,
                         language=lang,
                         size_bytes=file_size,
+                        content_sha256=hashlib.sha256(content_bytes).hexdigest(),
                         lines_count=lines_count,
                         symbols=symbols,
                         calls=calls,

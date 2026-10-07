@@ -68,6 +68,22 @@ def _repository_identity(repository_url: str) -> str:
     return hashlib.sha256(repository_url.encode("utf-8")).hexdigest()[:32]
 
 
+def _assert_report_work_priority(db: Session, report_id: str, work_item_id: str) -> None:
+    """Prevent a later duplicate work item from mutating the shared report."""
+    from app.execution.errors import LeaseLost
+    from app.models.execution import WorkItemModel
+
+    active_states = ("QUEUED", "ADMITTED", "READY", "LEASED", "RUNNING", "RETRY_WAIT")
+    first_active_work = db.query(WorkItemModel).filter(
+        WorkItemModel.work_kind == "REPORT_GENERATION",
+        WorkItemModel.resource_type == "REPORT",
+        WorkItemModel.resource_id == report_id,
+        WorkItemModel.state.in_(active_states),
+    ).order_by(WorkItemModel.created_at.asc(), WorkItemModel.id.asc()).with_for_update().first()
+    if first_active_work is not None and first_active_work.id != work_item_id:
+        raise LeaseLost("another canonical report work item has priority for this report")
+
+
 def _registered_lineage_ids(db: Session, tenant_id: str, payload: dict) -> list[str]:
     from app.models.artifact import ArtifactModel
 
@@ -639,10 +655,50 @@ class ReportGenerationService:
         db = (session_factory or SessionLocal)()
         temp_path: Optional[Path] = None
         started = time.monotonic()
+        work = None
+
+        def assert_report_commit_authority() -> None:
+            from app.execution.context import assert_work_item_commit_authority
+
+            if work is None:
+                from app.execution.errors import LeaseLost
+
+                raise LeaseLost("durable report work item is missing")
+            assert_work_item_commit_authority(
+                db,
+                work,
+                required=effective_settings.is_production,
+            )
+            _assert_report_work_priority(db, report_id, work.id)
+
         try:
-            report = db.query(ReportModel).filter(ReportModel.id == report_id).first()
+            report = db.query(ReportModel).filter(ReportModel.id == report_id).with_for_update().first()
             if report is None:
                 raise RuntimeError("REPORT_NOT_FOUND")
+            from app.models.execution import WorkItemModel
+            from app.execution.context import current_claim
+
+            claim = current_claim()
+            work_query = db.query(WorkItemModel).filter(
+                WorkItemModel.work_kind == "REPORT_GENERATION",
+                WorkItemModel.resource_type == "REPORT",
+                WorkItemModel.resource_id == report.id,
+            )
+            if claim is not None:
+                work_query = work_query.filter(WorkItemModel.id == claim.work_item_id)
+                work = work_query.with_for_update().first()
+            else:
+                work = work_query.order_by(
+                    WorkItemModel.created_at.asc(), WorkItemModel.id.asc()
+                ).with_for_update().first()
+            if work is None:
+                raise RuntimeError("REPORT_WORK_ITEM_MISSING")
+
+            # Different HTTP idempotency keys can create multiple work items
+            # for the same canonical report. Serialize the shared report row
+            # and permit only the oldest active work item to mutate it. A later
+            # item can take over only after the earlier item becomes terminal.
+            _assert_report_work_priority(db, report.id, work.id)
             if report.status == ReportStatus.READY.value:
                 try:
                     verify_ready_report_artifacts(db, report, settings=effective_settings)
@@ -653,6 +709,7 @@ class ReportGenerationService:
                     report.failure_message = "The canonical PDF artifact is unavailable."
                     report.retryable = False
                     report.updated_at = _utc_now()
+                    assert_report_commit_authority()
                     db.commit()
                     return
             if report.attempt_count >= effective_settings.REPORT_MAX_ATTEMPTS:
@@ -661,6 +718,7 @@ class ReportGenerationService:
                 report.failure_code = "REPORT_ATTEMPTS_EXHAUSTED"
                 report.failure_message = "Report generation exhausted its bounded attempt budget."
                 report.updated_at = _utc_now()
+                assert_report_commit_authority()
                 db.commit()
                 return
 
@@ -670,12 +728,14 @@ class ReportGenerationService:
             report.lease_owner = None
             report.lease_expires_at = None
             report.updated_at = _utc_now()
+            assert_report_commit_authority()
             db.commit()
 
             document = read_canonical_report_document(db, report, settings=effective_settings)
 
             report.status = ReportStatus.RENDERING.value
             report.updated_at = _utc_now()
+            assert_report_commit_authority()
             db.commit()
             temp_path = storage.create_pdf_temp(report.id)
             generated = ReportLabPdfRenderer(effective_settings).render(document, temp_path)
@@ -685,12 +745,6 @@ class ReportGenerationService:
             report.page_count = generated.page_count
             report.generated_at = document.metadata.generated_at
 
-            from app.models.execution import WorkItemModel
-
-            work = db.query(WorkItemModel).filter(
-                WorkItemModel.work_kind == "REPORT_GENERATION",
-                WorkItemModel.resource_id == report.id,
-            ).order_by(WorkItemModel.created_at.desc()).first()
             if work is None:
                 raise RuntimeError("REPORT_WORK_ITEM_MISSING")
             cls._register_pdf_artifact(
@@ -707,6 +761,7 @@ class ReportGenerationService:
             report.lease_owner = None
             report.lease_expires_at = None
             report.updated_at = _utc_now()
+            assert_report_commit_authority()
             db.commit()
             temp_path.unlink(missing_ok=True)
             temp_path = None
@@ -721,20 +776,25 @@ class ReportGenerationService:
                 unit="seconds",
                 dimensions={"renderer_version": report.renderer_version},
             )
+            assert_report_commit_authority()
             db.commit()
         except Exception as exc:
             db.rollback()
             logger.exception("Shared report work item failed for %s", report_id)
-            report = db.query(ReportModel).filter(ReportModel.id == report_id).first()
+            report = db.query(ReportModel).filter(ReportModel.id == report_id).with_for_update().first()
             if report is not None and report.status != ReportStatus.READY.value:
-                report.status = ReportStatus.FAILED.value
-                report.failure_code = str(exc) if str(exc).startswith("REPORT_") else "REPORT_RENDER_FAILED"
-                report.failure_message = "Report generation failed safely. Retry is available when the attempt budget permits."
-                report.retryable = report.attempt_count < effective_settings.REPORT_MAX_ATTEMPTS
-                report.lease_owner = None
-                report.lease_expires_at = None
-                report.updated_at = _utc_now()
-                db.commit()
+                try:
+                    assert_report_commit_authority()
+                    report.status = ReportStatus.FAILED.value
+                    report.failure_code = str(exc) if str(exc).startswith("REPORT_") else "REPORT_RENDER_FAILED"
+                    report.failure_message = "Report generation failed safely. Retry is available when the attempt budget permits."
+                    report.retryable = report.attempt_count < effective_settings.REPORT_MAX_ATTEMPTS
+                    report.lease_owner = None
+                    report.lease_expires_at = None
+                    report.updated_at = _utc_now()
+                    db.commit()
+                except Exception as lease_exc:
+                    logger.warning("Stale report worker could not persist failure for %s (%s)", report_id, type(lease_exc).__name__)
         finally:
             if temp_path is not None:
                 temp_path.unlink(missing_ok=True)

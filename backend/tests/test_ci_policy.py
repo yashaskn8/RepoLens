@@ -68,3 +68,8 @@ def test_integration_service_environment_is_scoped_to_the_integration_step():
     gate = ci.split(marker, 1)[1]
     missing = [token for token in integration_keys if token not in gate]
     assert missing == [], "Integration gate is missing scoped environment: " + ", ".join(missing)
+
+
+def test_readme_does_not_publish_a_stale_backend_test_count():
+    readme = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert re.search(r"Current backend suite[\s*]*:\s*[\d,]+ tests collected", readme) is None

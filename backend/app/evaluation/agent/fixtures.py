@@ -90,6 +90,7 @@ def build_fixture_runtime(case: AgentEvalCase) -> AgentEvalFixtureRuntime:
                 path=relative_path,
                 language=language,
                 size_bytes=len(source_bytes),
+                content_sha256=hashlib.sha256(source_bytes).hexdigest(),
                 lines_count=max(1, len(content.splitlines())),
                 symbols=symbols,
                 calls=calls,

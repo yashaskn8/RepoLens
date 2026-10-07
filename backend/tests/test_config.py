@@ -1,6 +1,7 @@
 """Tests for application settings and configuration."""
 
 import os
+import pytest
 from app.core.config import Settings, get_settings
 
 
@@ -38,3 +39,10 @@ def test_cached_get_settings():
     s1 = get_settings()
     s2 = get_settings()
     assert s1 is s2
+
+
+def test_review_reconciliation_publisher_login_is_operator_pinned_and_validated():
+    settings = Settings(_env_file=None, GITHUB_REVIEW_PUBLISHER_LOGIN=" repolens[bot] ")
+    assert settings.GITHUB_REVIEW_PUBLISHER_LOGIN == "repolens[bot]"
+    with pytest.raises(ValueError, match="GitHub account login"):
+        Settings(_env_file=None, GITHUB_REVIEW_PUBLISHER_LOGIN="not a login")

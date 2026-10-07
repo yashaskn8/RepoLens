@@ -467,9 +467,16 @@ def read_source_slice(
             "SOURCE_DIGEST_UNAVAILABLE",
             "The authorized snapshot has no immutable source digest for this file.",
         )
+    if entry.size_bytes > context.limits.max_file_size_bytes:
+        raise ToolFailure(
+            ToolResultStatus.RESOURCE_LIMIT,
+            "SOURCE_FILE_BYTE_LIMIT",
+            "The authorized source file exceeds the configured byte limit.",
+        )
     try:
         source_path = resolve_safe_path(snapshot.repository_root, path)
-        payload = source_path.read_bytes()
+        with source_path.open("rb") as source_file:
+            payload = source_file.read(entry.size_bytes + 1)
     except (OSError, PathTraversalError, ValueError) as exc:
         raise ToolFailure(
             ToolResultStatus.INVALID_INPUT,
@@ -477,7 +484,7 @@ def read_source_slice(
             "The authorized source file could not be read within the repository boundary.",
         ) from exc
     file_digest = hashlib.sha256(payload).hexdigest()
-    if file_digest != expected_digest:
+    if len(payload) != entry.size_bytes or file_digest != expected_digest:
         raise ToolFailure(
             ToolResultStatus.INSUFFICIENT_EVIDENCE,
             "SOURCE_SNAPSHOT_DRIFT",

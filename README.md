@@ -204,7 +204,7 @@ Key configuration areas:
 cd backend
 python -m pytest
 ```
-> **Current backend suite**: 953 tests collected. PostgreSQL, pgvector, Redis, and live-provider tests skip unless their explicit integration environment variables are configured. The exact executed release result is recorded with each release commit/CI run.
+> Backend test counts are intentionally reported by the exact commit's CI run rather than duplicated here. PostgreSQL, pgvector, and Redis checks run in the required infrastructure integration job; live-provider checks require explicit credentials and authorization.
 
 ### Manual production and scale validation
 

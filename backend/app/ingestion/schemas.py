@@ -54,6 +54,7 @@ class FileEntry(BaseModel):
     path: str = Field(..., description="Normalized relative file path from repository root")
     language: Optional[str] = Field(default=None, description="Identified language (e.g. python, typescript, javascript, json)")
     size_bytes: int = Field(default=0, ge=0, description="File size in bytes")
+    content_sha256: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{64}$", description="SHA-256 of exact ingested text bytes")
     lines_count: int = Field(default=0, ge=0, description="Total line count")
     symbols: List[ParsedSymbol] = Field(default_factory=list, description="Extracted functions, classes, imports, and routes")
     calls: List[ParsedCall] = Field(default_factory=list, description="Extracted function and method call sites")

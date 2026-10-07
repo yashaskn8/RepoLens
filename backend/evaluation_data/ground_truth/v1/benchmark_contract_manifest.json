@@ -66,7 +66,7 @@
       "scoring_critical": false
     },
     "backend/app/evaluation/ground_truth/leakage.py": {
-      "sha256": "8d47ba04ffdaca892b2341942058940c7c95bc91413c7bab79cddf60a59c8940",
+      "sha256": "e4a5276a33c0cffe7a75219bbd8ca34ee0c12b001c6552e46a30633ccb2ff374",
       "role": "Hostile anti-leakage detector and sandbox hygiene enforcer",
       "scoring_critical": true
     },
@@ -76,5 +76,5 @@
       "scoring_critical": true
     }
   },
-  "benchmark_contract_id": "9685a5e2d0eff38659552a42c894e4f2db2c23031e77a376734b5a8fed2f76a8"
+  "benchmark_contract_id": "837f3794009793f8d337aaa3f3c7a97c27c036d161169eec460ef955c0154fe7"
 }

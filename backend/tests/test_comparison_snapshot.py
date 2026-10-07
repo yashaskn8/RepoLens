@@ -34,6 +34,15 @@ from app.schemas.workflow_event import WorkflowEventType
 from app.services.workflow_event_service import WorkflowEventService
 
 
+@pytest.fixture(autouse=True)
+def _mock_tree_admission_for_fake_git(monkeypatch):
+    """These tests fake Git subprocesses, so admit the empty synthetic trees too."""
+    monkeypatch.setattr(
+        "app.ingestion.snapshot.validate_repository_tree_budget",
+        lambda *_args, **_kwargs: (0, 0),
+    )
+
+
 
 BASE_SHA = "1111111111111111111111111111111111111111"
 HEAD_SHA = "2222222222222222222222222222222222222222"

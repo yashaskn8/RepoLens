@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from uuid import UUID, uuid4
 from app.delivery.provider import RepositoryDeliveryProvider
+from app.delivery.approval import patch_approval_binding_is_valid
 from app.delivery.schemas import DeliveryProviderError
 from app.ingestion.clone import GITHUB_URL_PATTERN, validate_github_url
 from app.ingestion.manifest import build_manifest
@@ -422,6 +423,37 @@ class DeliveryValidator:
                 eligible=False,
                 blocking_reason=f"Snapshot rehydration or verification failed: {snap_exc}",
                 failure_code="SNAPSHOT_REHYDRATION_FAILED",
+            )
+
+        # Reload and lock approval after asynchronous validation. The delivery
+        # service holds this transaction through the READY transition; rejection
+        # takes the same patch-row lock and refuses while a delivery is active.
+        current_patch = (
+            db.query(PatchModel)
+            .filter(PatchModel.id == str(patch.id))
+            .populate_existing()
+            .with_for_update()
+            .first()
+        )
+        current_scan = (
+            db.query(ScanModel)
+            .filter(ScanModel.id == str(scan.id))
+            .populate_existing()
+            .first()
+        )
+        if (
+            current_patch is None
+            or current_scan is None
+            or current_patch.status != PatchStatus.APPROVED.value
+            or not patch_approval_binding_is_valid(current_patch, current_scan)
+        ):
+            return DeliveryValidationResult(
+                eligible=False,
+                blocking_reason="Human approval is missing, revoked, or no longer matches the exact patch artifact and scanned base revision.",
+                failure_code="APPROVAL_BINDING_INVALID",
+                patch_status=PatchStatus.APPROVED,
+                machine_verdict=patch.machine_verdict,
+                human_approved=True,
             )
 
         return DeliveryValidationResult(

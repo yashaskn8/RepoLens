@@ -21,6 +21,7 @@ RepoLens treats all submitted codebases as untrusted data, enforcing strict cont
 3. **Cross-Layer Contract Parity**: Frontend HTTP client calls, backend API routes, Pydantic schemas, database models, and migration steps are cross-referenced across architectural boundaries to detect contract breaks.
 4. **Guarded GitHub Boundaries**: Public repository and PR analyses remain credential-free. Optional private-repository PR analysis uses a user-bound GitHub App installation and repository-scoped, short-lived credentials. Remote GitHub writes require `OPERATOR` privileges, resource ownership, human approval, explicit feature flags, and remote branch drift checks.
 5. **Human-in-the-Loop Authority**: Remediation patches pause at human approval boundaries (`VERIFIED` / `NEEDS_REVIEW`). Machine systems never mark patches as `APPROVED`.
+   GitHub delivery approval is content-bound to the exact patch diff, fix-plan snapshot, finding, tenant, scan revision/branch, reviewer, and approval time. Delivery revalidates that binding before remote writes; an active or already-started delivery cannot be revoked through the patch rejection endpoint. Existing approvals created before this binding are moved back to `NEEDS_REVIEW` by the migration and require explicit reapproval.
 6. **Optional Infrastructure**: The deterministic core operates in-process without Docker, Redis, Celery, or Kafka. Redis can improve cache reuse and loopback Ollama can handle eligible low-risk generation, but neither is required.
 
 ---

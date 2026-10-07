@@ -2,6 +2,7 @@
 
 import json
 import hashlib
+import hmac
 import os
 import re
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ from app.atomic_claims import (
     has_complete_atomic_contract,
 )
 from langgraph.runtime import Runtime
+from app.core.config import get_settings
 
 
 _DETERMINISTIC_DETECTOR_KINDS = frozenset({
@@ -33,6 +35,8 @@ _DETERMINISTIC_DETECTOR_KINDS = frozenset({
     "deterministic_secret",
     "contract_matcher",
 })
+MAX_VERIFIER_EVIDENCE_LINES = 120
+MAX_VERIFIER_EVIDENCE_BYTES = 12_000
 
 
 def _normalize_title_key(title: str) -> str:
@@ -241,10 +245,11 @@ def _attest_repository_evidence(
     start_line: Optional[int],
     end_line: Optional[int],
     commit_hash: str,
+    manifest: Any,
 ) -> Tuple[Optional[_SourceAttestation], str]:
     """Validate a locator and bind it to exact bytes from the checked repository."""
-    if not repo_dir or not rel_path:
-        return None, "Missing required repository workspace or file path."
+    if not repo_dir or not rel_path or manifest is None:
+        return None, "Missing required repository workspace, manifest, or file path."
 
     from app.core.path_confinement import PathTraversalError, resolve_safe_path
 
@@ -257,11 +262,42 @@ def _attest_repository_evidence(
     if not os.path.exists(abs_path) or not os.path.isfile(abs_path):
         return None, f"Fabricated file: '{rel_path}' does not exist in repository workspace."
 
+    root = Path(repo_dir).resolve()
+    canonical_path = abs_path_obj.relative_to(root).as_posix()
+    manifest_revision = str(getattr(manifest, "commit_sha", None) or getattr(manifest, "commit_hash", ""))
+    if not commit_hash or manifest_revision.casefold() != str(commit_hash).casefold():
+        return None, "Repository evidence manifest does not match the active snapshot revision."
+    file_entry = next(
+        (
+            entry for entry in getattr(manifest, "files", [])
+            if str(getattr(entry, "path", "")).replace("\\", "/") == canonical_path
+        ),
+        None,
+    )
+    if file_entry is None:
+        return None, f"Unauthorized evidence file: '{canonical_path}' is not present in the repository manifest."
+    if getattr(file_entry, "is_binary", False) or getattr(file_entry, "skipped_reason", None):
+        return None, f"Unsupported evidence file: '{canonical_path}' is binary or was skipped during ingestion."
+
+    expected_file_digest = getattr(file_entry, "content_sha256", None)
+    if not isinstance(expected_file_digest, str) or len(expected_file_digest) != 64:
+        return None, f"Repository evidence file '{canonical_path}' has no immutable content digest."
+
+    max_file_bytes = int(get_settings().MAX_FILE_SIZE_BYTES)
     try:
+        if file_entry.size_bytes > max_file_bytes or os.path.getsize(abs_path) > max_file_bytes:
+            return None, f"Evidence file exceeds the configured {max_file_bytes}-byte attestation limit."
         with open(abs_path, "rb") as source_file:
-            source_bytes = source_file.read()
+            source_bytes = source_file.read(max_file_bytes + 1)
     except OSError as exc:
         return None, f"Unreadable evidence file: '{rel_path}' ({exc.__class__.__name__})."
+    if len(source_bytes) > max_file_bytes:
+        return None, f"Evidence file exceeds the configured {max_file_bytes}-byte attestation limit."
+    if len(source_bytes) != file_entry.size_bytes:
+        return None, f"Evidence file '{canonical_path}' changed after the active manifest was created."
+    file_digest = hashlib.sha256(source_bytes).hexdigest()
+    if not hmac.compare_digest(file_digest, expected_file_digest):
+        return None, f"Evidence file '{canonical_path}' no longer matches the active repository snapshot."
 
     source_lines = source_bytes.splitlines(keepends=True)
     total_lines = len(source_lines)
@@ -285,10 +321,12 @@ def _attest_repository_evidence(
             f"Invalid line range: end_line {canonical_end} exceeds total file lines ({total_lines})."
         )
 
+    if canonical_end - canonical_start + 1 > MAX_VERIFIER_EVIDENCE_LINES:
+        return None, f"Evidence line range exceeds the {MAX_VERIFIER_EVIDENCE_LINES}-line attestation limit."
     selected_bytes = b"".join(source_lines[canonical_start - 1:canonical_end])
+    if len(selected_bytes) > MAX_VERIFIER_EVIDENCE_BYTES:
+        return None, f"Evidence line range exceeds the {MAX_VERIFIER_EVIDENCE_BYTES}-byte attestation limit."
     content_digest = hashlib.sha256(selected_bytes).hexdigest()
-    file_digest = hashlib.sha256(source_bytes).hexdigest()
-    canonical_path = abs_path_obj.relative_to(Path(repo_dir).resolve()).as_posix()
     commit_ref = str(commit_hash or "unknown")
     context_notes = (
         "attested_source=checked_repository; "
@@ -466,6 +504,14 @@ async def run_verifier_agent(
     if active_runtime is None:
         active_runtime = get_scan_runtime(str(scan_id))
 
+    active_manifest = getattr(getattr(active_runtime, "evidence_store", None), "manifest", None)
+    commit_hash = str(
+        state.get("commit_hash")
+        or getattr(active_manifest, "commit_sha", None)
+        or getattr(active_manifest, "commit_hash", "")
+        or ""
+    )
+
     repo_dir = (active_runtime.repo_dir if active_runtime and getattr(active_runtime, "repo_dir", None) else None) or state.get("repo_dir", "")
     context_engine = (active_runtime.context_engine if active_runtime else None) or get_scan_context_engine(str(scan_id))
 
@@ -512,6 +558,7 @@ async def run_verifier_agent(
             evidence.start_line,
             evidence.end_line,
             str(commit_hash),
+            active_manifest,
         )
         if attestation is None:
             rejected_findings.append(_rejection_record(

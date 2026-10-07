@@ -5,6 +5,7 @@ import asyncio
 import os
 import shutil
 import subprocess
+import threading
 import time
 from typing import FrozenSet, List, Optional, Tuple
 
@@ -37,6 +38,12 @@ _SCANNER_ENV_ALLOWLIST = frozenset({
     "SSL_CERT_DIR",
     "CURL_CA_BUNDLE",
 })
+
+# Scanner JSON can be substantial, but hostile repositories must not be able to
+# make RepoLens buffer unbounded child-process output in memory.
+MAX_SCANNER_STDOUT_BYTES = 20 * 1024 * 1024
+MAX_SCANNER_STDERR_BYTES = 1024 * 1024
+_SCANNER_PIPE_READ_BYTES = 64 * 1024
 
 
 def safe_scanner_environment() -> dict[str, str]:
@@ -139,17 +146,67 @@ class BaseScannerAdapter(ABC):
         timeout = timeout_seconds or settings.SCANNER_TIMEOUT_SECONDS
 
         def _run() -> Tuple[int, str, str]:
-            res = subprocess.run(
+            process = subprocess.Popen(
                 cmd,
                 cwd=cwd,
                 env=safe_scanner_environment(),
                 shell=False,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
-            return res.returncode, res.stdout, res.stderr
+            output_limit_hit = threading.Event()
+            captured: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
+
+            def drain(name: str, stream, limit: int) -> None:
+                try:
+                    while True:
+                        chunk = stream.read(_SCANNER_PIPE_READ_BYTES)
+                        if not chunk:
+                            return
+                        remaining = limit - len(captured[name])
+                        captured[name].extend(chunk[: max(remaining, 0)])
+                        if len(chunk) > remaining:
+                            output_limit_hit.set()
+                            try:
+                                process.kill()
+                            except OSError:
+                                pass
+                            return
+                finally:
+                    stream.close()
+
+            assert process.stdout is not None and process.stderr is not None
+            readers = (
+                threading.Thread(
+                    target=drain,
+                    args=("stdout", process.stdout, MAX_SCANNER_STDOUT_BYTES),
+                    daemon=True,
+                ),
+                threading.Thread(
+                    target=drain,
+                    args=("stderr", process.stderr, MAX_SCANNER_STDERR_BYTES),
+                    daemon=True,
+                ),
+            )
+            for reader in readers:
+                reader.start()
+            try:
+                process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+                raise
+            finally:
+                for reader in readers:
+                    reader.join(timeout=2)
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+            if output_limit_hit.is_set():
+                raise ScannerOutputError(self.tool_name, "child output exceeded the configured byte limit")
+            stdout = bytes(captured["stdout"]).decode("utf-8", errors="replace")
+            stderr = bytes(captured["stderr"]).decode("utf-8", errors="replace")
+            return process.returncode, stdout, stderr
 
         return await asyncio.to_thread(_run)
 

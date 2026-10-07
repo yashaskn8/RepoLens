@@ -14,8 +14,10 @@ Also tests:
 """
 
 import json
+import io
 import os
 import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 import pytest
@@ -49,11 +51,29 @@ async def test_scanner_subprocess_receives_minimal_environment(monkeypatch):
 
     captured = {}
 
-    def fake_run(*args, **kwargs):
-        captured.update(kwargs)
-        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+    class FakeProcess:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.stdout = io.BytesIO(b"{}")
+            self.stderr = io.BytesIO(b"")
+            self.returncode = 0
+            self.finished = False
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+        def wait(self, timeout=None):
+            self.finished = True
+            return self.returncode
+
+        def poll(self):
+            return self.returncode if self.finished else None
+
+        def kill(self):
+            self.finished = True
+
+    def fake_popen(*args, **kwargs):
+        captured.update(kwargs)
+        return FakeProcess(**kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
     adapter = SemgrepAdapter()
     result = await adapter._execute_command(["semgrep"], cwd=".", timeout_seconds=1)
 
@@ -75,6 +95,25 @@ async def test_scanner_subprocess_receives_minimal_environment(monkeypatch):
         "GIT_CONFIG_KEY_0",
         "GIT_CONFIG_VALUE_0",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stream_name", "limit_name", "sys_stream"),
+    [
+        ("stdout", "MAX_SCANNER_STDOUT_BYTES", "stdout"),
+        ("stderr", "MAX_SCANNER_STDERR_BYTES", "stderr"),
+    ],
+)
+async def test_scanner_subprocess_output_is_byte_bounded(monkeypatch, stream_name, limit_name, sys_stream):
+    import app.analysis.base as scanner_base
+
+    monkeypatch.setattr(scanner_base, limit_name, 1024)
+    output_code = "import sys; sys.%s.write('x' * 10000)" % sys_stream
+    adapter = SemgrepAdapter()
+
+    with pytest.raises(ScannerOutputError, match="output exceeded the configured byte limit"):
+        await adapter._execute_command([sys.executable, "-c", output_code], cwd=".", timeout_seconds=5)
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +285,26 @@ class TestSemgrepAdapter:
 
         assert result.status == ToolStatus.INVALID_OUTPUT
         assert "Invalid JSON" in result.error_message
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            '{"results":[null]}',
+            '{"results":[{}]}',
+            '{"results":[{"start":null,"extra":{}}]}',
+            '{"results":[{"start":{},"end":{},"extra":null}]}',
+        ],
+    )
+    async def test_malformed_finding_entry_is_not_silently_dropped(self, payload):
+        adapter = SemgrepAdapter()
+        with patch.object(adapter, "is_available", return_value=True), patch.object(
+            adapter, "_execute_command", _make_execute_mock(0, payload)
+        ):
+            result = await adapter.scan("/tmp/repo")
+
+        assert result.status == ToolStatus.INVALID_OUTPUT
+        assert "Malformed result entry" in result.error_message
 
     @pytest.mark.asyncio
     async def test_failure_exit_code(self):
@@ -564,6 +623,24 @@ class TestScannerOutputError:
         adapter = OSVScannerAdapter()
         with pytest.raises(ScannerOutputError, match="Expected JSON object"):
             adapter.parse_output(json.dumps([1, 2, 3]), "/tmp/repo")
+
+    @pytest.mark.parametrize(
+        ("adapter_type", "payload", "message"),
+        [
+            (SemgrepAdapter, {"version": "1"}, "Expected 'results'"),
+            (SemgrepAdapter, {"results": {}}, "Expected 'results'"),
+            (OSVScannerAdapter, {"results": None}, "Expected 'results'"),
+            (OSVScannerAdapter, {"source": {}}, "Expected 'results'"),
+            (TrivyAdapter, {"SchemaVersion": 2}, "Expected 'Results'"),
+            (TrivyAdapter, {"Results": {}}, "Expected 'Results'"),
+        ],
+    )
+    def test_parse_output_rejects_missing_or_malformed_finding_collection(
+        self, adapter_type, payload, message
+    ):
+        adapter = adapter_type()
+        with pytest.raises(ScannerOutputError, match=message):
+            adapter.parse_output(json.dumps(payload), "/tmp/repo")
 
     def test_trivy_accepts_list_format(self):
         """Trivy output may be a list of result objects (legacy format) — no error."""

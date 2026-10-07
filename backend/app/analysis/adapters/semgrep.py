@@ -65,16 +65,37 @@ class SemgrepAdapter(BaseScannerAdapter):
         if not isinstance(data, dict):
             raise ScannerOutputError(self.tool_name, f"Expected JSON object, got {type(data).__name__}")
 
-        results = data.get("results", [])
-        for item in results:
+        if "results" not in data or not isinstance(data["results"], list):
+            raise ScannerOutputError(self.tool_name, "Expected 'results' to be a JSON array")
+        results = data["results"]
+        for index, item in enumerate(results):
             try:
-                check_id = item.get("check_id", "unknown-rule")
-                raw_path = item.get("path", "")
+                if not isinstance(item, dict):
+                    raise TypeError("result entry must be an object")
+                check_id = item.get("check_id")
+                raw_path = item.get("path")
+                raw_start = item.get("start")
+                raw_end = item.get("end")
+                extra = item.get("extra")
+                if (
+                    not isinstance(check_id, str)
+                    or not check_id
+                    or not isinstance(raw_path, str)
+                    or not raw_path
+                    or not isinstance(raw_start, dict)
+                    or not isinstance(raw_end, dict)
+                    or not isinstance(extra, dict)
+                    or not isinstance(extra.get("message"), str)
+                    or not isinstance(raw_start.get("line"), int)
+                    or not isinstance(raw_end.get("line"), int)
+                    or raw_start["line"] < 1
+                    or raw_end["line"] < raw_start["line"]
+                ):
+                    raise TypeError("result entry is missing required fields")
                 rel_path = os.path.relpath(raw_path, repo_dir).replace("\\", "/") if os.path.isabs(raw_path) else raw_path.replace("\\", "/")
 
-                start_line = item.get("start", {}).get("line")
-                end_line = item.get("end", {}).get("line")
-                extra = item.get("extra", {})
+                start_line = raw_start["line"]
+                end_line = raw_end["line"]
 
                 message = extra.get("message", "Semgrep rule match")
                 raw_severity = extra.get("severity")
@@ -110,6 +131,11 @@ class SemgrepAdapter(BaseScannerAdapter):
                     )
                 )
             except Exception:
-                continue
+                # A malformed result must not be silently discarded: doing so
+                # could turn scanner errors into a false clean repository.
+                raise ScannerOutputError(
+                    self.tool_name,
+                    f"Malformed result entry at index {index}",
+                ) from None
 
         return findings

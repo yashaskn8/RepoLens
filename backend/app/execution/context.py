@@ -81,6 +81,42 @@ def assert_current_claim(
     return claim
 
 
+def assert_work_item_commit_authority(
+    db: "Session",
+    work_item: object,
+    *,
+    required: bool = False,
+) -> ClaimedWork | None:
+    """Fence a domain transaction with the exact durable work-item lease.
+
+    Call immediately before committing domain rows produced by a claimed work
+    item. The lease-row lock is retained by ``db`` through that commit, so
+    expiry/recovery cannot transfer authority between validation and persistence.
+    """
+    work_kind = getattr(work_item, "work_kind", None)
+    work_kind = getattr(work_kind, "value", work_kind)
+    resource_type = getattr(work_item, "resource_type", None)
+    resource_id = getattr(work_item, "resource_id", None)
+    tenant_id = getattr(work_item, "tenant_id", None)
+    if not all(isinstance(value, str) and value for value in (work_kind, resource_type, resource_id, tenant_id)):
+        from app.execution.errors import LeaseLost
+
+        raise LeaseLost("durable work-item identity is incomplete")
+    claim = assert_current_claim(
+        work_kind=work_kind,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        tenant_id=tenant_id,
+        required=required,
+        db=db,
+    )
+    if claim is not None and str(claim.work_item_id) != str(getattr(work_item, "id", "")):
+        from app.execution.errors import LeaseLost
+
+        raise LeaseLost("execution claim does not own the supplied work item")
+    return claim
+
+
 def bind_execution_session_factory(factory: Callable[[], "Session"] | None) -> Token:
     return _current_session_factory.set(factory)
 
@@ -189,6 +225,7 @@ __all__ = [
     "bind_claim",
     "bind_execution_session_factory",
     "assert_current_claim",
+    "assert_work_item_commit_authority",
     "consume_current_budget",
     "current_claim",
     "mark_current_side_effect_completed",

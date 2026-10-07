@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from enum import Enum
-from typing import AsyncIterator, Literal, Optional
+from typing import Any, AsyncIterator, Literal, Optional
 
 import aiosqlite
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
@@ -26,6 +26,66 @@ CheckpointStateProfile = Literal["analysis", "change_analysis", "plain"]
 
 class CheckpointerConfigurationError(RuntimeError):
     """Raised when the configured durable graph store cannot be used safely."""
+
+
+class LeaseFencedPostgresSaver:
+    """Fence durable checkpoint writes with the current execution lease.
+
+    LangGraph's PostgreSQL saver owns its own async connection. Without this
+    proxy, a worker can validate its lease, lose it, and then persist a stale
+    checkpoint after a recovery worker has taken over the same thread. Hold the
+    lease row lock in a separate RepoLens transaction across each saver write so
+    lease recovery cannot transfer ownership until that write is complete.
+    """
+
+    def __init__(self, delegate: object) -> None:
+        self._delegate = delegate
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._delegate, name)
+
+    async def aput(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._fenced_write("aput", *args, **kwargs)
+
+    async def aput_writes(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._fenced_write("aput_writes", *args, **kwargs)
+
+    async def _fenced_write(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
+        from app.execution.context import assert_current_claim, current_claim, new_execution_session
+        from app.execution.errors import LeaseLost
+
+        settings = get_settings()
+        claim = current_claim()
+        required = settings.is_production
+        if claim is None and not required:
+            return await getattr(self._delegate, method_name)(*args, **kwargs)
+
+        session = new_execution_session()
+        try:
+            validated_claim = assert_current_claim(required=required, db=session)
+            if validated_claim is not None and validated_claim.resource_type in {
+                "SCAN",
+                "CHANGE_ANALYSIS",
+            }:
+                config = args[0] if args else kwargs.get("config")
+                configurable = config.get("configurable") if isinstance(config, dict) else None
+                thread_id = configurable.get("thread_id") if isinstance(configurable, dict) else None
+                expected_thread_id = (
+                    validated_claim.resource_id
+                    if validated_claim.resource_type == "SCAN"
+                    else f"change-analysis:{validated_claim.resource_id}"
+                )
+                if thread_id != expected_thread_id:
+                    raise LeaseLost("checkpoint thread does not match the current execution resource")
+            result = await getattr(self._delegate, method_name)(*args, **kwargs)
+            # The SQL lease lock remains held while LangGraph durably writes.
+            session.commit()
+            return result
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
 
 
 def normalize_postgres_checkpoint_url(value: str) -> str:
@@ -227,7 +287,7 @@ async def get_analysis_checkpointer(
             "The PostgreSQL checkpoint connection could not be opened."
         ) from None
     async with connection:
-        yield AsyncPostgresSaver(connection, serde=serde)
+        yield LeaseFencedPostgresSaver(AsyncPostgresSaver(connection, serde=serde))
 
 
 @asynccontextmanager
@@ -288,6 +348,7 @@ async def validate_analysis_checkpointer_ready() -> None:
 __all__ = [
     "CheckpointBackend",
     "CheckpointerConfigurationError",
+    "LeaseFencedPostgresSaver",
     "get_analysis_checkpointer",
     "get_sqlite_checkpointer",
     "normalize_postgres_checkpoint_url",

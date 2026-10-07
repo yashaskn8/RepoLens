@@ -18,6 +18,15 @@ from app.models.scan import ScanModel
 from app.schemas.enums import ScanStatus
 
 
+@pytest.fixture(autouse=True)
+def mocked_snapshot_tests_skip_git_tree_subprocess(monkeypatch):
+    """These mocked lifecycle tests have no Git objects for the real tree preflight."""
+    monkeypatch.setattr(
+        "app.ingestion.snapshot.validate_repository_tree_budget",
+        lambda *_args, **_kwargs: (0, 0),
+    )
+
+
 # =========================================================================
 # 1. URL & Metadata Validation Tests
 # =========================================================================
@@ -99,6 +108,12 @@ def test_exact_sha_rehydration_success(monkeypatch):
     monkeypatch.setenv("GIT_CONFIG_KEY_0", "filter.poison.smudge")
     monkeypatch.setenv("GIT_CONFIG_VALUE_0", "poison-command")
     monkeypatch.setenv("GIT_DIR", "C:/foreign/.git")
+    command_order = []
+
+    monkeypatch.setattr(
+        "app.ingestion.snapshot.validate_repository_tree_budget",
+        lambda *_args, **_kwargs: command_order.append("preflight") or (0, 0),
+    )
 
     def mock_subprocess_run(cmd, *args, **kwargs):
         # Verify shell=False on all calls
@@ -116,7 +131,14 @@ def test_exact_sha_rehydration_success(monkeypatch):
         }.intersection(kwargs["env"])
 
         # Mock git commands
+        if "fetch" in cmd:
+            command_order.append("fetch")
+            assert "--filter=blob:none" in cmd
+            assert "--tags" not in cmd
+        elif "checkout --detach" in cmd_str:
+            command_order.append("checkout")
         if "rev-parse HEAD" in cmd_str:
+            command_order.append("rev-parse")
             return MagicMock(returncode=0, stdout=target_sha, stderr="")
         return MagicMock(returncode=0, stdout="", stderr="")
 
@@ -134,6 +156,7 @@ def test_exact_sha_rehydration_success(monkeypatch):
         # Cleanup
         service.release_snapshot(workspace)
         assert not os.path.exists(workspace)
+        assert command_order == ["fetch", "preflight", "checkout", "rev-parse"]
 
 
 def test_mismatched_sha_rejection_and_cleanup():

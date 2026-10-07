@@ -35,6 +35,14 @@ Analysis remains asynchronous. Review publication remains a separate operation: 
 
 When `GITHUB_APP_ENABLED=false`, these routes are unavailable and existing public-repository behavior is unchanged. The integration does not provide a general private-repository browser, arbitrary GitHub API proxy, write-capable analysis tool, default-branch write, or unattended review publication.
 
+For crash recovery of an explicitly approved COMMENT review, set
+`GITHUB_REVIEW_PUBLISHER_LOGIN` to the exact GitHub login that is authorized to
+publish reviews for this deployment (including the `[bot]` suffix for a GitHub
+App bot). If it is unset, RepoLens deliberately leaves an uncertain publication
+in `PUBLISHING`: a public marker alone is not sufficient proof of authorship.
+Reconciliation also requires GitHub to report `COMMENTED` on the approved head
+commit.
+
 ## Operational verification
 
 Before deployment, configure the GitHub App callback and webhook URL, set the secrets using the deployment secret manager, apply migrations, and verify delivery/retry behavior in a non-production App installation. Automated tests use mocked GitHub HTTP responses and do not require a live App or provider credentials. No live GitHub App validation is implied by passing the test suite.

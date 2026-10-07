@@ -293,6 +293,9 @@ class Settings(BaseSettings):
 
     # Safe GitHub PR Review Publication Settings (Phase 7)
     GITHUB_PR_REVIEW_WRITE_ENABLED: bool = False
+    # Exact GitHub login whose COMMENT review may be adopted after an uncertain
+    # write. Without this operator-pinned identity reconciliation stays pending.
+    GITHUB_REVIEW_PUBLISHER_LOGIN: str = Field(default="", max_length=46)
     MAX_REVIEW_INLINE_COMMENTS: int = 20
     MAX_REVIEW_BODY_CHARS: int = 50_000
 
@@ -400,6 +403,17 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return value.strip().upper()
         return value
+
+    @field_validator("GITHUB_REVIEW_PUBLISHER_LOGIN")
+    @classmethod
+    def validate_github_review_publisher_login(cls, value: str) -> str:
+        login = value.strip()
+        if login and not re.fullmatch(
+            r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?(?:\[bot\])?",
+            login,
+        ):
+            raise ValueError("GITHUB_REVIEW_PUBLISHER_LOGIN must be a GitHub account login.")
+        return login
 
     @model_validator(mode="after")
     def validate_production_and_cookie_invariants(self) -> "Settings":

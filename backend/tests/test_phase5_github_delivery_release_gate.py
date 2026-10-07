@@ -5,6 +5,7 @@ real patch reapplication, timeline auditing, fresh-session restart, and telemetr
 """
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import json
 import os
 import shutil
@@ -18,6 +19,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.delivery.approval import compute_patch_approval_digest
 from app.delivery.github_provider import GitHubDeliveryProvider
 from app.delivery.provider import RepositoryDeliveryProvider
 from app.delivery.schemas import GitCommitInfo, GitPullRequestInfo, GitTreeEntry
@@ -191,6 +193,7 @@ async def test_phase5_e2e_canonical_delivery_flow(client: TestClient, db_session
         commit_hash=commit_sha,
     )
     db_session.add(scan)
+    db_session.flush()
 
     finding_id = str(uuid4())
     finding = FindingModel(
@@ -388,6 +391,7 @@ async def test_phase5_e2e_base_drift_protection_gate(client: TestClient, db_sess
         commit_hash=commit_sha,
     )
     db_session.add(scan)
+    db_session.flush()
 
     finding_id = str(uuid4())
     finding = FindingModel(
@@ -438,6 +442,14 @@ async def test_phase5_e2e_base_drift_protection_gate(client: TestClient, db_sess
         explanation="Use secrets module for cryptographic randomness",
         expected_behavior_change="Cryptographically strong keys",
         approved_by="sec-lead",
+    )
+    patch.approved_at = datetime.now(timezone.utc)
+    patch.approval_digest = compute_patch_approval_digest(
+        patch,
+        scan,
+        tenant_id=scan.owner_user_id,
+        actor_id=patch.approved_by,
+        approved_at=patch.approved_at,
     )
     db_session.add(patch)
     db_session.commit()
@@ -512,6 +524,7 @@ async def test_phase5_e2e_partial_failure_and_resume_reconciliation(db_session: 
         status=ScanStatus.COMPLETED.value,
         branch="main",
         commit_hash=commit_sha,
+        owner_user_id=str(uuid4()),
     )
     db_session.add(scan)
 
@@ -563,6 +576,14 @@ async def test_phase5_e2e_partial_failure_and_resume_reconciliation(db_session: 
         explanation="Added safe comment",
         expected_behavior_change="None",
         approved_by="sec-lead",
+    )
+    patch.approved_at = datetime.now(timezone.utc)
+    patch.approval_digest = compute_patch_approval_digest(
+        patch,
+        scan,
+        tenant_id=scan.owner_user_id,
+        actor_id=patch.approved_by,
+        approved_at=patch.approved_at,
     )
     db_session.add(patch)
     db_session.commit()

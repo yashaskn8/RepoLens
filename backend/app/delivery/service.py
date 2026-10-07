@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
+from app.delivery.approval import patch_approval_binding_is_valid
 from app.delivery.github_provider import GitHubDeliveryProvider
 from app.delivery.pr_body import generate_pr_body, generate_pr_title
 from app.delivery.provider import RepositoryDeliveryProvider
@@ -125,7 +126,7 @@ class DeliveryService:
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="GitHub delivery is not configured or is administratively disabled for this RepoLens instance.",
             )
-        patch = db.query(PatchModel).filter(PatchModel.id == str(patch_id)).first()
+        patch = db.query(PatchModel).filter(PatchModel.id == str(patch_id)).with_for_update().first()
         if patch is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Patch proposal not found.")
         if patch.status != PatchStatus.APPROVED.value:
@@ -139,9 +140,14 @@ class DeliveryService:
                 detail="A machine-rejected patch cannot be delivered.",
             )
         finding = db.query(FindingModel).filter(FindingModel.id == str(patch.finding_id)).first()
-        scan = db.query(ScanModel).filter(ScanModel.id == str(patch.scan_id)).first()
+        scan = db.query(ScanModel).filter(ScanModel.id == str(patch.scan_id)).with_for_update().first()
         if finding is None or scan is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Associated finding or scan not found.")
+        if not patch_approval_binding_is_valid(patch, scan):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Human approval is missing or no longer matches the exact patch artifact and scanned base revision.",
+            )
         if scan.status != "COMPLETED" or not scan.branch or not scan.commit_hash:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -199,7 +205,12 @@ class DeliveryService:
             )
 
         # 1. Inspect patch and domain constraints
-        patch: Optional[PatchModel] = db.query(PatchModel).filter(PatchModel.id == str(patch_id)).first()
+        patch: Optional[PatchModel] = (
+            db.query(PatchModel)
+            .filter(PatchModel.id == str(patch_id))
+            .with_for_update()
+            .first()
+        )
         if not patch:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -219,7 +230,7 @@ class DeliveryService:
             )
 
         finding: Optional[FindingModel] = db.query(FindingModel).filter(FindingModel.id == str(patch.finding_id)).first()
-        scan: Optional[ScanModel] = db.query(ScanModel).filter(ScanModel.id == str(patch.scan_id)).first()
+        scan: Optional[ScanModel] = db.query(ScanModel).filter(ScanModel.id == str(patch.scan_id)).with_for_update().first()
         if not finding or not scan:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -230,6 +241,11 @@ class DeliveryService:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Cannot deliver patch: Associated scan status is '{scan.status}'. Only COMPLETED scans may be delivered.",
+            )
+        if not patch_approval_binding_is_valid(patch, scan):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Human approval is missing or no longer matches the exact patch artifact and scanned base revision.",
             )
 
         if not scan.branch or not scan.branch.strip():
@@ -437,6 +453,30 @@ class DeliveryService:
             nonlocal external_write_started
             if external_write_started:
                 return
+            current_patch = (
+                db.query(PatchModel)
+                .filter(PatchModel.id == patch_id_str)
+                .populate_existing()
+                .with_for_update()
+                .first()
+            )
+            current_scan = (
+                db.query(ScanModel)
+                .filter(ScanModel.id == scan_id_str)
+                .populate_existing()
+                .with_for_update()
+                .first()
+            )
+            if (
+                current_patch is None
+                or current_scan is None
+                or current_patch.status != PatchStatus.APPROVED.value
+                or not patch_approval_binding_is_valid(current_patch, current_scan)
+            ):
+                raise DeliveryProviderError(
+                    "Patch approval was revoked or no longer matches the authorized artifact before GitHub delivery.",
+                    safe_code="PATCH_APPROVAL_INVALID",
+                )
             operation_id = f"github-delivery:{delivery.id}:{delivery.idempotency_key}"
             mark_current_side_effect_started(
                 db=db,

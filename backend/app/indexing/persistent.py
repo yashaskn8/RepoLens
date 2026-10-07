@@ -412,9 +412,10 @@ class PersistentIndex:
             symbols, calls = parse_file_with_calls(path, language, source) if language in {"python", "javascript", "typescript", "tsx"} else ([], [])
         except RecursionError:
             return None, disposition.classification.value, "parser_depth_budget", len(source)
-        file = FileEntry(path=path, language=language, size_bytes=len(source),
-                         lines_count=len(source.splitlines()), symbols=symbols, calls=calls)
         digest = hashlib.sha256(source).hexdigest()
+        file = FileEntry(path=path, language=language, size_bytes=len(source),
+                         content_sha256=digest, lines_count=len(source.splitlines()),
+                         symbols=symbols, calls=calls)
         redactor = ProjectionRedactionMemo()
         payload = {"file": redact_projection(file.model_dump(mode="json"), redactor), "source_sha256": digest, "component": component}
         payload_size = len(json.dumps(payload, ensure_ascii=False).encode())
@@ -583,7 +584,12 @@ class PersistentIndex:
                 if active_bytes + projection.payload_bytes > self.limits.manifest_bytes:
                     break
                 active_bytes += projection.payload_bytes
-                file = FileEntry.model_validate(projection.payload["file"])
+                file_payload = dict(projection.payload["file"])
+                # Older projections stored the source digest beside the file
+                # payload. Restore it for verifier/MCP consumers even when the
+                # projection predates the FileEntry field.
+                file_payload.setdefault("content_sha256", projection.payload.get("source_sha256"))
+                file = FileEntry.model_validate(file_payload)
                 files.append(file)
                 if file.language:
                     languages[file.language] = languages.get(file.language, 0) + 1

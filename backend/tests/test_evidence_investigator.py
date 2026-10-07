@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -116,6 +117,7 @@ def _registry(tmp_path: Path):
             path="app.py",
             language=detect_language("app.py"),
             size_bytes=len(content.encode()),
+            content_sha256=hashlib.sha256(content.encode()).hexdigest(),
             lines_count=6,
             symbols=symbols,
             calls=calls,

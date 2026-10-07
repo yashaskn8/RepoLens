@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.core.config import Settings
 from app.models.base import Base
 from app.models.change_analysis import ChangeAnalysisModel
 from app.models.review_publication import PullRequestReviewPublicationModel
@@ -211,7 +212,7 @@ async def test_publish_review_happy_path(db_session):
 
 
 @pytest.mark.asyncio
-async def test_publish_reconciliation_on_crash_recovery(db_session):
+async def test_publish_reconciliation_on_crash_recovery(db_session, monkeypatch):
     """Verify that if review creation succeeded on GitHub but local persistence failed, retry reconciles without second write."""
     analysis = _create_mock_pr_analysis(db_session)
     mock_provider = MagicMock()
@@ -248,10 +249,17 @@ async def test_publish_reconciliation_on_crash_recovery(db_session):
                 "id": 88888,
                 "body": f"# Review\n\n<!-- repolens-review:{analysis.id}:{digest} -->",
                 "html_url": "https://github.com/octocat/Hello-World/pull/42#pullrequestreview-88888",
+                "user": {"login": "repolens[bot]"},
+                "state": "COMMENTED",
+                "commit_id": "b" * 40,
             }
         ]
     )
 
+    monkeypatch.setattr(
+        "app.services.review_publication_service.get_settings",
+        lambda: Settings(_env_file=None, GITHUB_REVIEW_PUBLISHER_LOGIN="repolens[bot]"),
+    )
     # Calling publish_review on PUBLISHING state triggers reconciliation
     reconciled = await service.publish_review(UUID(analysis.id), expected_preview_digest=digest)
     assert reconciled.status == "PUBLISHED"

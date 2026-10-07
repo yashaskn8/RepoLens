@@ -210,6 +210,7 @@ class FullAnalysisFixture:
                     path=normalized,
                     language=language or None,
                     size_bytes=len(source_bytes),
+                    content_sha256=hashlib.sha256(source_bytes).hexdigest(),
                     lines_count=max(1, len(content.splitlines())),
                     symbols=symbols,
                     calls=calls,

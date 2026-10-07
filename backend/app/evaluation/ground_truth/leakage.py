@@ -62,17 +62,14 @@ class LeakageDetector:
                 )
 
         # 2. URL decode inspection
-        try:
-            unquoted = urllib.parse.unquote(norm_text)
-            upper_unquoted = unquoted.upper()
-            if upper_unquoted != upper_text:
-                for marker in FORBIDDEN_LEAKAGE_MARKERS:
-                    if marker in upper_unquoted:
-                        raise EvaluationLeakageError(
-                            f"Forbidden benchmark marker (URL-encoded) detected in {source_context}: '{marker}'"
-                        )
-        except Exception:
-            pass
+        unquoted = urllib.parse.unquote(norm_text)
+        upper_unquoted = unquoted.upper()
+        if upper_unquoted != upper_text:
+            for marker in FORBIDDEN_LEAKAGE_MARKERS:
+                if marker in upper_unquoted:
+                    raise EvaluationLeakageError(
+                        f"Forbidden benchmark marker (URL-encoded) detected in {source_context}: '{marker}'"
+                    )
 
         # 3. Bounded Base64 detection (chunks 8 to 512 chars)
         b64_candidates = re.findall(r"[A-Za-z0-9+/_-]{8,512}={0,2}", norm_text)

@@ -60,7 +60,9 @@ class TrivyAdapter(BaseScannerAdapter):
 
         # Trivy output may be a dict with "Results" or a list of result objects
         if isinstance(data, dict):
-            results = data.get("Results", [])
+            if "Results" not in data or not isinstance(data["Results"], list):
+                raise ScannerOutputError(self.tool_name, "Expected 'Results' to be a JSON array")
+            results = data["Results"]
         elif isinstance(data, list):
             results = data
         else:

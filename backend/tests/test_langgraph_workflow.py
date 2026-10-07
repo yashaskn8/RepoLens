@@ -1,8 +1,10 @@
 """Unit and integration tests for LangGraph multi-agent analysis workflow and evidence grounding."""
 
 import json
+import hashlib
 import os
 import tempfile
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 import pytest
@@ -59,18 +61,21 @@ def sample_analysis_environment():
                 "    return open(path).read()\n"
             )
 
+        app_file_bytes = open(app_file_path, "rb").read()
+
         manifest = RepositoryManifest(
             repository_url="https://github.com/org/repo-workflow-test.git",
             commit_hash="abcdef1234567890",
             total_files=1,
-            total_size_bytes=100,
+            total_size_bytes=len(app_file_bytes),
             languages={"python": 1},
             frameworks=[],
             files=[
                 FileEntry(
                     path="server.py",
                     language="python",
-                    size_bytes=100,
+                    size_bytes=len(app_file_bytes),
+                    content_sha256=hashlib.sha256(app_file_bytes).hexdigest(),
                     lines_count=6,
                     symbols=[
                         ParsedSymbol(
@@ -797,7 +802,7 @@ async def test_deterministic_second_pass_merging(sample_analysis_environment):
     from app.schemas.enums import FindingStatus
 
     scan_id = str(uuid4())
-    _, repo_dir = sample_analysis_environment
+    store, repo_dir = sample_analysis_environment
 
     pass1_finding = Finding(
         id=uuid4(),
@@ -850,7 +855,12 @@ async def test_deterministic_second_pass_merging(sample_analysis_environment):
         "revision_target_ids": [str(revised_det_finding.id)],
     }
 
-    result = await run_verifier_agent(state)
+    runtime = SimpleNamespace(context=SimpleNamespace(scan_runtime=SimpleNamespace(
+        repo_dir=repo_dir,
+        context_engine=None,
+        evidence_store=store,
+    )))
+    result = await run_verifier_agent(state, runtime=runtime)
 
     assert result["verification_decision"] == "verified"
     assert result["revision_target_ids"] == []

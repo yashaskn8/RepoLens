@@ -55,6 +55,7 @@ def _manifest(root: Path, snapshot_id: str, contents: dict[str, str | bytes], *,
             path=relative,
             language=language,
             size_bytes=len(raw),
+            content_sha256=hashlib.sha256(raw).hexdigest(),
             lines_count=raw.count(b"\n") + (1 if raw and not raw.endswith(b"\n") else 0),
             symbols=symbols,
             calls=calls,
@@ -273,6 +274,45 @@ def test_read_source_slice_redacts_secrets_and_detects_snapshot_drift(tmp_path: 
     })
     assert foreign.status == ToolResultStatus.NOT_FOUND
     assert foreign.errors[0].code == "SNAPSHOT_NOT_FOUND"
+
+
+def test_snapshot_capture_rejects_same_size_manifest_drift(tmp_path: Path):
+    root = tmp_path / "pre-capture-drift"
+    root.mkdir()
+    original = b"value = 1\n"
+    _write_files(root, {"app.py": original})
+    manifest, _ = _manifest(root, SNAPSHOT, {"app.py": original})
+    (root / "app.py").write_bytes(b"value = 2\n")
+    store = EvidenceStore(manifest)
+
+    with pytest.raises(ValueError, match="does not match the immutable manifest"):
+        RepositorySnapshot.create(
+            snapshot_id=SNAPSHOT,
+            repository_root=root,
+            evidence_store=store,
+            capture_source_digests=True,
+        )
+
+
+def test_read_source_slice_bounds_growth_after_snapshot(tmp_path: Path):
+    original = b"value = 1\n"
+    root = tmp_path / "source-growth"
+    snapshot = _snapshot(root, SNAPSHOT, {"app.py": original})
+    registry = create_agent_tool_registry(AgentToolContext.from_snapshot(
+        snapshot,
+        limits=ToolResourceLimits(max_file_size_bytes=1024),
+    ))
+    (root / "app.py").write_bytes(original + b"x" * 500_000)
+
+    result = registry.invoke("read_source_slice", {
+        "snapshot_id": SNAPSHOT,
+        "file_path": "app.py",
+        "start_line": 1,
+        "end_line": 1,
+    })
+
+    assert result.status == ToolResultStatus.INSUFFICIENT_EVIDENCE
+    assert result.errors[0].code == "SOURCE_SNAPSHOT_DRIFT"
 
 
 def test_read_source_slice_rejects_post_snapshot_symlink_escape(tmp_path: Path, monkeypatch):

@@ -7,6 +7,7 @@ from mcp.server.lowlevel import Server
 import mcp.types as mcp_types
 
 from app.mcp.server import MCPRepositoryServer
+from app.mcp.constants import MAX_MCP_CLIENT_RESULT_BYTES
 from app.mcp.types import MCPToolCallResponse
 from app.mcp.agent_bridge import MCPAgentToolBridge
 
@@ -72,9 +73,63 @@ class MCPProtocolAdapter:
 
             # Serialize output content deterministically
             if isinstance(tool_resp.content, (dict, list)):
-                serialized_content = json.dumps(tool_resp.content, indent=2, default=str)
+                output_content = tool_resp.content
+                serialized_content = json.dumps(output_content, indent=2, default=str)
+                if (
+                    name == "repo_read_file"
+                    and isinstance(output_content, dict)
+                    and isinstance(output_content.get("content"), str)
+                    and len(serialized_content.encode("utf-8")) > MAX_MCP_CLIENT_RESULT_BYTES
+                ):
+                    bounded = dict(output_content)
+                    source = output_content["content"]
+                    low, high = 0, len(source)
+                    best = ""
+                    while low <= high:
+                        middle = (low + high) // 2
+                        bounded["content"] = source[:middle]
+                        bounded["truncated"] = True
+                        start_line = int(bounded.get("start_line", 1) or 1)
+                        content_lines = bounded["content"].count("\n") + (
+                            1 if bounded["content"] and not bounded["content"].endswith("\n") else 0
+                        )
+                        bounded["end_line"] = start_line + max(0, content_lines - 1)
+                        candidate = json.dumps(bounded, indent=2, default=str)
+                        if len(candidate.encode("utf-8")) <= MAX_MCP_CLIENT_RESULT_BYTES:
+                            best = candidate
+                            low = middle + 1
+                        else:
+                            high = middle - 1
+                    serialized_content = best or json.dumps({
+                        "file_path": output_content.get("file_path"),
+                        "total_lines": output_content.get("total_lines"),
+                        "start_line": output_content.get("start_line"),
+                        "end_line": output_content.get("start_line", 1),
+                        "content": "",
+                        "truncated": True,
+                    }, indent=2, default=str)
+                if len(serialized_content.encode("utf-8")) > MAX_MCP_CLIENT_RESULT_BYTES:
+                    return mcp_types.CallToolResult(
+                        isError=True,
+                        content=[
+                            mcp_types.TextContent(
+                                type="text",
+                                text="MCP_RESULT_RESOURCE_LIMIT: Tool result exceeded the configured response size limit.",
+                            )
+                        ],
+                    )
             else:
                 serialized_content = str(tool_resp.content) if tool_resp.content is not None else ""
+                if len(serialized_content.encode("utf-8")) > MAX_MCP_CLIENT_RESULT_BYTES:
+                    return mcp_types.CallToolResult(
+                        isError=True,
+                        content=[
+                            mcp_types.TextContent(
+                                type="text",
+                                text="MCP_RESULT_RESOURCE_LIMIT: Tool result exceeded the configured response size limit.",
+                            )
+                        ],
+                    )
 
             return mcp_types.CallToolResult(
                 isError=False,

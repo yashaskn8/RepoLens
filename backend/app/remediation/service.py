@@ -21,7 +21,11 @@ from app.artifacts.schemas import (
 )
 from app.artifacts.service import CanonicalArtifactService, get_artifact_store
 from app.context.runtime import ScanIntelligenceRuntime
-from app.execution.context import new_execution_session as SessionLocal
+from app.core.config import get_settings
+from app.execution.context import (
+    assert_work_item_commit_authority,
+    new_execution_session as SessionLocal,
+)
 from app.execution.types import WorkKind
 from app.governance.events import AuditLedger, DomainOutbox
 from app.ingestion.snapshot import get_snapshot_service
@@ -156,6 +160,11 @@ class RemediationExecutionService:
                     result_artifact_id=artifact.artifact.artifact_id,
                     parent=parent_patch,
                 )
+            assert_work_item_commit_authority(
+                db,
+                work,
+                required=get_settings().is_production,
+            )
             db.commit()
             return RemediationExecutionResult(
                 artifact_id=artifact.artifact.artifact_id,

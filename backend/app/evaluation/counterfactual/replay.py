@@ -261,6 +261,7 @@ def _all_attested_candidate_ids(values: Mapping[str, Any], runtime_context: Any)
             _get(evidence, "start_line"),
             _get(evidence, "end_line"),
             commit_hash,
+            runtime_context.scan_runtime.evidence_store.manifest,
         )
         if attestation is not None:
             attested.add(candidate_id)

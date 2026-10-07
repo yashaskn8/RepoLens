@@ -40,6 +40,7 @@ class PatchModel(Base):
     user_feedback = Column(Text, nullable=True)
     approved_by = Column(String(128), nullable=True)
     approved_at = Column(DateTime(timezone=True), nullable=True)
+    approval_digest = Column(String(64), nullable=True)
     rejected_reason = Column(Text, nullable=True)
     model_metadata = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), default=_utc_now, nullable=False)

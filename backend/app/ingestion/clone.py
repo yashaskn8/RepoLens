@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 from typing import Optional, Tuple
 from urllib.parse import urlparse
 from app.core.config import get_settings
@@ -27,6 +28,11 @@ class CloneTimeoutError(IngestionError):
 
 class CloneFailedError(IngestionError):
     """Raised when git clone terminates with a non-zero exit code."""
+    pass
+
+
+class RepositoryResourceLimitError(IngestionError):
+    """Raised when Git tree metadata or source blob sizes exceed admission limits."""
     pass
 
 
@@ -64,6 +70,115 @@ def safe_git_environment() -> dict[str, str]:
         "GIT_LFS_SKIP_SMUDGE": "1",
     })
     return env
+
+
+_MAX_GIT_PATH_BYTES = 4096
+_GIT_PIPE_READ_BYTES = 64 * 1024
+
+
+def validate_repository_tree_budget(
+    repository_dir: str,
+    commit_ref: str,
+    *,
+    max_files: int,
+    max_file_bytes: int,
+    max_total_bytes: int,
+    timeout_seconds: int = 30,
+) -> tuple[int, int]:
+    """Inspect a commit tree before checkout and reject over-budget blob sets.
+
+    Partial clone leaves source blobs unmaterialized until checkout. This
+    bounded `ls-tree` pass admits the exact tree only when file-count, per-blob,
+    aggregate bytes, and metadata output fit ingestion policy.
+    """
+    metadata_limit = max(64 * 1024, max_files * (_MAX_GIT_PATH_BYTES + 128))
+    command = ["git", "-c", "core.symlinks=false", "-c", "core.autocrlf=false", "ls-tree", "-r", "-l", "-z", commit_ref]
+    process = subprocess.Popen(
+        command,
+        cwd=repository_dir,
+        env=safe_git_environment(),
+        shell=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    overflow = threading.Event()
+    captured = {"stdout": bytearray(), "stderr": bytearray()}
+
+    def drain(name: str, stream, limit: int) -> None:
+        try:
+            while True:
+                chunk = stream.read(_GIT_PIPE_READ_BYTES)
+                if not chunk:
+                    return
+                remaining = limit - len(captured[name])
+                captured[name].extend(chunk[:max(remaining, 0)])
+                if len(chunk) > remaining:
+                    overflow.set()
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+                    return
+        finally:
+            stream.close()
+
+    assert process.stdout is not None and process.stderr is not None
+    readers = (
+        threading.Thread(target=drain, args=("stdout", process.stdout, metadata_limit), daemon=True),
+        threading.Thread(target=drain, args=("stderr", process.stderr, 64 * 1024), daemon=True),
+    )
+    for reader in readers:
+        reader.start()
+    try:
+        process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        process.kill()
+        process.wait()
+        raise RepositoryResourceLimitError("Git tree inspection exceeded its time limit") from exc
+    finally:
+        for reader in readers:
+            reader.join(timeout=2)
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+    if overflow.is_set():
+        raise RepositoryResourceLimitError("Git tree metadata exceeded its configured byte limit")
+    if process.returncode != 0:
+        raise CloneFailedError("Git tree inspection failed for the requested commit")
+
+    output = bytes(captured["stdout"])
+    if output and not output.endswith(b"\0"):
+        raise CloneFailedError("Git tree inspection returned malformed output")
+    file_count = 0
+    total_bytes = 0
+    for record in output.split(b"\0"):
+        if not record:
+            continue
+        try:
+            metadata, path = record.split(b"\t", 1)
+            mode, object_type, _object_id, size_raw = metadata.split(b" ", 3)
+        except ValueError as exc:
+            raise CloneFailedError("Git tree inspection returned malformed output") from exc
+        if len(path) > _MAX_GIT_PATH_BYTES:
+            raise RepositoryResourceLimitError("Repository path exceeds the acquisition path limit")
+        if object_type == b"commit":
+            continue  # submodule gitlinks are not recursively materialized
+        if object_type != b"blob":
+            raise CloneFailedError("Git tree inspection returned an unexpected object type")
+        try:
+            blob_size = int(size_raw)
+        except ValueError as exc:
+            raise CloneFailedError("Git tree inspection omitted a blob size") from exc
+        file_count += 1
+        total_bytes += blob_size
+        if file_count > max_files:
+            raise RepositoryResourceLimitError("Repository exceeds the configured file-count limit")
+        if blob_size > max_file_bytes:
+            raise RepositoryResourceLimitError("Repository contains a blob exceeding the configured per-file limit")
+        if total_bytes > max_total_bytes:
+            raise RepositoryResourceLimitError("Repository exceeds the configured aggregate source-byte limit")
+    return file_count, total_bytes
 
 
 def validate_github_url(url: str) -> str:
@@ -136,8 +251,11 @@ def clone_repository(
     cmd = [
         "git",
         "clone",
+        "--quiet",
         "--depth",
         "1",
+        "--filter=blob:none",
+        "--no-checkout",
         "--no-recurse-submodules",
         "--config",
         "core.symlinks=false",
@@ -176,6 +294,30 @@ def clone_repository(
             if target_dir is None and os.path.exists(dest_dir):
                 shutil.rmtree(dest_dir, ignore_errors=True)
             raise CloneFailedError(f"git clone failed with exit code {result.returncode}: {result.stderr.strip()}")
+
+        validate_repository_tree_budget(
+            dest_dir,
+            "HEAD",
+            max_files=int(settings.MAX_REPO_FILES),
+            max_file_bytes=int(settings.MAX_FILE_SIZE_BYTES),
+            max_total_bytes=int(settings.MAX_TOTAL_SOURCE_BYTES),
+            timeout_seconds=min(timeout, 60),
+        )
+
+        checkout_result = subprocess.run(
+            ["git", "checkout", "--detach", "HEAD"],
+            cwd=dest_dir,
+            env=safe_git_environment(),
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        if checkout_result.returncode != 0:
+            if target_dir is None and os.path.exists(dest_dir):
+                shutil.rmtree(dest_dir, ignore_errors=True)
+            raise CloneFailedError("git checkout failed after repository admission.")
 
         # Record exact commit SHA
         rev_cmd = ["git", "rev-parse", "HEAD"]

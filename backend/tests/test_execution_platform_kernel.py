@@ -24,7 +24,7 @@ from app.execution import (
     SideEffectClass,
     WorkKind,
 )
-from app.models.execution import FailureRecordModel, RequestBudgetModel, ResourcePoolModel, WorkItemModel
+from app.models.execution import FailureRecordModel, RequestBudgetModel, ResourcePoolModel, WorkItemModel, WorkLeaseModel
 from app.models.scan import ScanModel
 from app.models.user import UserModel
 from app.execution.dispatcher import DurableWorkDispatcher
@@ -186,6 +186,46 @@ def test_expiry_retries_safe_work_but_requires_external_reconciliation(execution
     assert external_row.state == ExecutionState.FAILED.value
     assert external_row.reconciliation_required is True
     assert engine.claim_next("worker-d") is None
+
+
+def test_domain_commit_authority_rejects_expired_work_lease(execution_db):
+    from app.execution.context import assert_work_item_commit_authority, bind_claim, reset_claim
+    from app.execution.errors import LeaseLost
+
+    engine = DurableExecutionEngine(execution_db, lease_seconds=60)
+    enqueued = engine.enqueue(_request("commit-fence"))
+    claim = engine.claim_next("worker-a")
+    engine.start(claim.work_item_id, claim.lease_token)
+    lease = execution_db.query(WorkLeaseModel).filter_by(work_item_id=claim.work_item_id).one()
+    lease.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    execution_db.commit()
+    work = execution_db.get(WorkItemModel, enqueued.work_item_id)
+
+    token = bind_claim(claim)
+    try:
+        with pytest.raises(LeaseLost, match="lease expired"):
+            assert_work_item_commit_authority(execution_db, work, required=True)
+    finally:
+        reset_claim(token)
+
+
+def test_domain_commit_authority_requires_exact_claimed_work_item(execution_db):
+    from app.execution.context import assert_work_item_commit_authority, bind_claim, reset_claim
+    from app.execution.errors import LeaseLost
+
+    engine = DurableExecutionEngine(execution_db, lease_seconds=60)
+    first = engine.enqueue(_request("first-report-like-work", resource_id="shared-resource"))
+    second = engine.enqueue(_request("second-report-like-work", resource_id="shared-resource"))
+    claim = engine.claim_next("worker-a")
+    engine.start(claim.work_item_id, claim.lease_token)
+    other_work = execution_db.get(WorkItemModel, second.work_item_id)
+
+    token = bind_claim(claim)
+    try:
+        with pytest.raises(LeaseLost, match="does not own the supplied work item"):
+            assert_work_item_commit_authority(execution_db, other_work, required=True)
+    finally:
+        reset_claim(token)
 
 
 def test_orphan_reconciliation_trusts_existing_domain_row_over_process_memory(execution_db):

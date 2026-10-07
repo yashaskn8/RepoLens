@@ -351,7 +351,9 @@ def test_attack_obfuscated_leakage_detection_catches_encoded_markers():
         LeakageDetector.check_text(f"hex_data = '{hex_marker}'", source_context="hex test")
 
     # 3. URL-encoded marker
-    url_marker = urllib.parse.quote("EXPECTED_FINDING")
+    # Encode every character: urllib.parse.quote leaves unreserved ASCII letters
+    # unchanged by default, which made the prior test pass via plaintext matching.
+    url_marker = "".join(f"%{ord(char):02X}" for char in "EXPECTED_FINDING")
     with pytest.raises(ValueError, match="Forbidden benchmark marker"):
         LeakageDetector.check_text(f"url = 'https://example.com/?q={url_marker}'", source_context="url test")
 

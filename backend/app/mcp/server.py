@@ -1,4 +1,7 @@
 import logging
+import hashlib
+import hmac
+import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -14,11 +17,20 @@ from app.mcp.types import (
     MCPToolCallResponse,
     MCPToolDefinition,
 )
-from app.mcp.constants import MAX_MCP_SERVER_COLLECTION_ITEMS
+from app.mcp.constants import (
+    MAX_LINE_SPAN_READ,
+    MAX_MCP_SERVER_COLLECTION_ITEMS,
+    MAX_MCP_SERVER_SEARCH_BYTES,
+    MAX_MCP_SERVER_SOURCE_READ_BYTES,
+    MAX_MCP_RESULT_BYTES,
+    MAX_MCP_SNIPPET_CHARS,
+)
+from app.core.config import get_settings
 from app.schemas.enums import Severity
 from app.security.redaction import redact_secrets
 
 logger = logging.getLogger(__name__)
+_MAX_MCP_ERROR_CHARS = 512
 
 
 class MCPRepositoryServer:
@@ -54,6 +66,37 @@ class MCPRepositoryServer:
         except (PathTraversalError, ValueError) as err:
             logger.warning("Access denied in path resolution: %s", redact_secrets(str(err))[:256])
             raise PermissionError("Access denied: repository path is not permitted.")
+
+    def _read_manifest_source(self, file_entry) -> tuple[bytes | None, str | None]:
+        """Read bounded source only when bytes still match the immutable manifest."""
+        if file_entry.is_binary or file_entry.skipped_reason:
+            return None, "MCP_FILE_UNSUPPORTED: File is binary or was skipped during repository ingestion."
+        if not file_entry.content_sha256:
+            return None, "MCP_SOURCE_DIGEST_UNAVAILABLE: The authorized snapshot has no immutable source digest."
+
+        max_file_bytes = int(get_settings().MAX_FILE_SIZE_BYTES)
+        try:
+            abs_path = self._resolve_safe_path(file_entry.path)
+            if (
+                not os.path.isfile(abs_path)
+                or file_entry.size_bytes > max_file_bytes
+                or os.path.getsize(abs_path) != file_entry.size_bytes
+                or os.path.getsize(abs_path) > max_file_bytes
+            ):
+                return None, "MCP_SOURCE_RESOURCE_LIMIT: File is unavailable, changed, or exceeds the manifest byte limit."
+            with open(abs_path, "rb") as source_file:
+                source_bytes = source_file.read(max_file_bytes + 1)
+        except Exception:
+            # Repository-controlled paths and filesystem failures are both
+            # reported as a bounded read error. Do not expose OS-specific
+            # details, host paths, or token-like text from exception messages.
+            return None, "MCP_FILE_READ_FAILED: Could not read repository file."
+
+        if len(source_bytes) > max_file_bytes or len(source_bytes) != file_entry.size_bytes:
+            return None, "MCP_SOURCE_RESOURCE_LIMIT: File is unavailable, changed, or exceeds the manifest byte limit."
+        if not hmac.compare_digest(hashlib.sha256(source_bytes).hexdigest(), file_entry.content_sha256):
+            return None, "MCP_SOURCE_SNAPSHOT_DRIFT: Source no longer matches the authorized repository snapshot."
+        return source_bytes, None
 
     def list_tools(self) -> List[MCPToolDefinition]:
         """Return the definitions of all available MCP tools."""
@@ -186,7 +229,65 @@ class MCPRepositoryServer:
         ]
 
     async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> MCPToolCallResponse:
-        """Dispatch tool invocation with error containment."""
+        """Dispatch one tool and enforce a final serialized response bound."""
+        response = await self._call_tool_unbounded(tool_name, arguments)
+        if response.is_error:
+            message = response.error_message or "MCP tool execution failed."
+            if len(message) > _MAX_MCP_ERROR_CHARS:
+                message = message[:_MAX_MCP_ERROR_CHARS] + "... [truncated]"
+            return MCPToolCallResponse(
+                tool_name=tool_name,
+                is_error=True,
+                error_message=message,
+            )
+        try:
+            content = response.content
+            if hasattr(content, "model_dump"):
+                content = content.model_dump(mode="json")
+            def encode_content(value: object) -> bytes:
+                return json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode("utf-8")
+
+            encoded = encode_content(content)
+        except (TypeError, ValueError, OverflowError):
+            return MCPToolCallResponse(
+                tool_name=tool_name,
+                is_error=True,
+                error_message="MCP_RESULT_INVALID: Tool result could not be safely serialized.",
+            )
+        if len(encoded) > MAX_MCP_RESULT_BYTES:
+            if isinstance(content, dict) and isinstance(content.get("content"), str):
+                source_text = content["content"]
+                low, high = 0, len(source_text)
+                best: dict[str, Any] | None = None
+                while low <= high:
+                    middle = (low + high) // 2
+                    candidate = {**content, "content": source_text[:middle], "truncated": True}
+                    try:
+                        candidate_size = len(encode_content(candidate))
+                    except (TypeError, ValueError, OverflowError):
+                        candidate_size = MAX_MCP_RESULT_BYTES + 1
+                    if candidate_size <= MAX_MCP_RESULT_BYTES:
+                        best = candidate
+                        low = middle + 1
+                    else:
+                        high = middle - 1
+                if best is not None:
+                    return response.model_copy(update={"content": best})
+            return MCPToolCallResponse(
+                tool_name=tool_name,
+                is_error=True,
+                error_message="MCP_RESULT_RESOURCE_LIMIT: Tool result exceeded the configured response size limit.",
+            )
+        return response
+
+    async def _call_tool_unbounded(self, tool_name: str, arguments: Dict[str, Any]) -> MCPToolCallResponse:
+        """Dispatch tool invocation with error containment; public wrapper bounds output."""
         try:
             if tool_name == "repo_get_manifest":
                 return MCPToolCallResponse(
@@ -196,12 +297,17 @@ class MCPRepositoryServer:
 
             elif tool_name == "repo_search_code":
                 query = arguments.get("query", "")
-                if not query or not isinstance(query, str):
+                if not query or not isinstance(query, str) or len(query) > 512:
                     return MCPToolCallResponse(tool_name=tool_name, is_error=True, error_message="Parameter 'query' must be a non-empty string.")
 
-                max_results = min(int(arguments.get("max_results", 20)), 100)
+                requested_max_results = arguments.get("max_results", 20)
+                if isinstance(requested_max_results, bool) or not isinstance(requested_max_results, int):
+                    return MCPToolCallResponse(tool_name=tool_name, is_error=True, error_message="Parameter 'max_results' must be an integer.")
+                max_results = min(max(requested_max_results, 1), MAX_MCP_SERVER_COLLECTION_ITEMS)
                 lang_filter = arguments.get("language")
                 matches = []
+                scanned_bytes = 0
+                truncated = False
 
                 for file_entry in self.evidence_store.manifest.files:
                     if file_entry.is_binary or file_entry.skipped_reason:
@@ -209,79 +315,135 @@ class MCPRepositoryServer:
                     if lang_filter and file_entry.language != lang_filter.lower():
                         continue
 
-                    abs_path = self._resolve_safe_path(file_entry.path)
-                    if not os.path.exists(abs_path):
-                        continue
-
-                    try:
-                        with open(abs_path, "r", encoding="utf-8", errors="ignore") as f:
-                            for idx, line in enumerate(f, start=1):
-                                if query.lower() in line.lower():
-                                    matches.append({
-                                        "file_path": file_entry.path,
-                                        "line_number": idx,
-                                        "line_content": line.rstrip("\r\n"),
-                                    })
-                                    if len(matches) >= max_results:
-                                        break
-                    except Exception:
-                        continue
-                    if len(matches) >= max_results:
+                    source_bytes, source_error = self._read_manifest_source(file_entry)
+                    if source_error is not None:
+                        return MCPToolCallResponse(tool_name=tool_name, is_error=True, error_message=source_error)
+                    assert source_bytes is not None
+                    if scanned_bytes + len(source_bytes) > MAX_MCP_SERVER_SEARCH_BYTES:
+                        truncated = True
+                        break
+                    scanned_bytes += len(source_bytes)
+                    for idx, line_bytes in enumerate(source_bytes.splitlines(), start=1):
+                        line = line_bytes.decode("utf-8", errors="replace")
+                        if query.casefold() not in line.casefold():
+                            continue
+                        redacted_line = redact_secrets(line)
+                        line_content = redacted_line[:MAX_MCP_SNIPPET_CHARS]
+                        if len(redacted_line) > MAX_MCP_SNIPPET_CHARS:
+                            truncated = True
+                        candidate = {
+                            "file_path": file_entry.path,
+                            "line_number": idx,
+                            "line_content": line_content,
+                        }
+                        proposed = matches + [candidate]
+                        proposed_content = {
+                            "matches": proposed,
+                            "count": len(proposed),
+                            "truncated": False,
+                        }
+                        if len(json.dumps(proposed_content, ensure_ascii=False).encode("utf-8")) > MAX_MCP_RESULT_BYTES:
+                            truncated = True
+                            break
+                        matches.append(candidate)
+                        if len(matches) >= max_results:
+                            truncated = True
+                            break
+                    if truncated or len(matches) >= max_results:
                         break
 
-                return MCPToolCallResponse(tool_name=tool_name, content={"matches": matches, "count": len(matches)})
+                return MCPToolCallResponse(
+                    tool_name=tool_name,
+                    content={"matches": matches, "count": len(matches), "truncated": truncated},
+                )
 
             elif tool_name == "repo_read_file":
                 file_path = str(arguments.get("file_path", "")).strip()
                 if not file_path:
                     return MCPToolCallResponse(tool_name=tool_name, is_error=True, error_message="Parameter 'file_path' must be a non-empty string.")
 
-                abs_path = self._resolve_safe_path(file_path)
-
-                if not os.path.exists(abs_path) or os.path.isdir(abs_path):
-                    return MCPToolCallResponse(tool_name=tool_name, is_error=True, error_message=f"File not found: '{file_path}'")
-
-                start_line = max(int(arguments.get("start_line", 1)), 1) if arguments.get("start_line") else 1
-                requested_end = int(arguments["end_line"]) if arguments.get("end_line") is not None else None
-
-                file_entry = next((fe for fe in self.evidence_store.manifest.files if fe.path == file_path.replace("\\", "/")), None)
-                known_total = file_entry.lines_count if file_entry and getattr(file_entry, "lines_count", None) is not None else None
-
-                lines_collected = []
-                current_line = 0
-                try:
-                    with open(abs_path, "r", encoding="utf-8", errors="ignore") as f:
-                        for line in f:
-                            current_line += 1
-                            if current_line >= start_line and (requested_end is None or current_line <= requested_end):
-                                lines_collected.append(line)
-                            if requested_end is not None and current_line >= requested_end and known_total is not None:
-                                break
-                except Exception as exc:
-                    safe_msg = redact_secrets(str(exc))[:256]
-                    logger.warning("Failed to read repository file %s: %s", redact_secrets(file_path)[:256], safe_msg)
+                normalized_path = file_path.replace("\\", "/")
+                # Preserve the established path-confinement error for traversal
+                # attempts before checking whether a path is manifest-authorized.
+                abs_path = self._resolve_safe_path(normalized_path)
+                file_entry = self.evidence_store.get_file_entry(normalized_path)
+                if file_entry is None:
                     return MCPToolCallResponse(
                         tool_name=tool_name,
                         is_error=True,
-                        error_message="MCP_FILE_READ_FAILED: Could not read repository file.",
+                        error_message="MCP_FILE_NOT_AUTHORIZED: File is not present in the repository manifest.",
+                    )
+                if file_entry.is_binary or file_entry.skipped_reason:
+                    return MCPToolCallResponse(
+                        tool_name=tool_name,
+                        is_error=True,
+                        error_message="MCP_FILE_UNSUPPORTED: File is binary or was skipped during repository ingestion.",
+                    )
+                try:
+                    start_raw = arguments.get("start_line", 1)
+                    end_raw = arguments.get("end_line")
+                    if isinstance(start_raw, bool) or not isinstance(start_raw, int):
+                        raise ValueError("start_line must be an integer")
+                    if end_raw is not None and (isinstance(end_raw, bool) or not isinstance(end_raw, int)):
+                        raise ValueError("end_line must be an integer")
+                    start_line = max(start_raw, 1)
+                    requested_end = end_raw if end_raw is not None else start_line + MAX_LINE_SPAN_READ - 1
+                    if requested_end < start_line:
+                        requested_end = start_line
+                except (TypeError, ValueError):
+                    return MCPToolCallResponse(
+                        tool_name=tool_name,
+                        is_error=True,
+                        error_message="MCP_ARGUMENT_INVALID: Line bounds must be integers.",
+                    )
+                total_lines = int(file_entry.lines_count)
+                if start_line > total_lines:
+                    return MCPToolCallResponse(
+                        tool_name=tool_name,
+                        is_error=True,
+                        error_message="MCP_LINE_NOT_FOUND: The requested start line is outside the manifest-authorized file.",
                     )
 
-                total_lines = known_total if known_total is not None else current_line
-                end_line = requested_end if requested_end is not None else total_lines
-
-                if start_line > total_lines:
-                    slice_content = ""
-                else:
-                    slice_content = "".join(lines_collected)
+                try:
+                    source_bytes, source_error = self._read_manifest_source(file_entry)
+                except PermissionError:
+                    return MCPToolCallResponse(
+                        tool_name=tool_name,
+                        is_error=True,
+                        error_message="Access denied: repository path is not permitted.",
+                    )
+                if source_error is not None:
+                    return MCPToolCallResponse(tool_name=tool_name, is_error=True, error_message=source_error)
+                assert source_bytes is not None
+                line_limit_end = start_line + MAX_LINE_SPAN_READ - 1
+                selected_end = min(requested_end, line_limit_end, total_lines)
+                collected = bytearray()
+                truncated = total_lines > line_limit_end and (
+                    end_raw is None or requested_end >= line_limit_end
+                )
+                actual_end_line = start_line - 1
+                source_lines = source_bytes.splitlines(keepends=True)
+                for line_number in range(start_line, selected_end + 1):
+                    line = source_lines[line_number - 1]
+                    remaining_output = MAX_MCP_SERVER_SOURCE_READ_BYTES - len(collected)
+                    if len(line) > remaining_output:
+                        collected.extend(line[:remaining_output])
+                        actual_end_line = line_number
+                        truncated = True
+                        break
+                    collected.extend(line)
+                    actual_end_line = line_number
+                slice_content = bytes(collected).decode("utf-8", errors="replace")
 
                 return MCPToolCallResponse(
                     tool_name=tool_name,
                     content={
-                        "file_path": file_path,
+                        "file_path": normalized_path,
                         "total_lines": total_lines,
                         "start_line": start_line,
-                        "end_line": end_line,
+                        "end_line": actual_end_line,
                         "content": slice_content,
+                        "truncated": truncated,
                     },
                 )
 
@@ -291,23 +453,41 @@ class MCPRepositoryServer:
                 kind = SymbolKind(kind_str) if kind_str else None
 
                 symbols = self.evidence_store.get_symbols(file_path=file_path, kind=kind)
+                bounded_symbols = symbols[:MAX_MCP_SERVER_COLLECTION_ITEMS]
                 return MCPToolCallResponse(
                     tool_name=tool_name,
-                    content={"symbols": [s.model_dump() for s in symbols], "count": len(symbols)},
+                    content={
+                        "symbols": [s.model_dump() for s in bounded_symbols],
+                        "count": len(symbols),
+                        "returned_count": len(bounded_symbols),
+                        "truncated": len(symbols) > len(bounded_symbols),
+                    },
                 )
 
             elif tool_name == "repo_get_routes":
                 routes = self.evidence_store.get_routes()
+                bounded_routes = routes[:MAX_MCP_SERVER_COLLECTION_ITEMS]
                 return MCPToolCallResponse(
                     tool_name=tool_name,
-                    content={"routes": [r.model_dump() for r in routes], "count": len(routes)},
+                    content={
+                        "routes": [r.model_dump() for r in bounded_routes],
+                        "count": len(routes),
+                        "returned_count": len(bounded_routes),
+                        "truncated": len(routes) > len(bounded_routes),
+                    },
                 )
 
             elif tool_name == "repo_get_frontend_requests":
                 calls = self.evidence_store.get_http_calls()
+                bounded_calls = calls[:MAX_MCP_SERVER_COLLECTION_ITEMS]
                 return MCPToolCallResponse(
                     tool_name=tool_name,
-                    content={"http_calls": [c.model_dump() for c in calls], "count": len(calls)},
+                    content={
+                        "http_calls": [c.model_dump() for c in bounded_calls],
+                        "count": len(calls),
+                        "returned_count": len(bounded_calls),
+                        "truncated": len(calls) > len(bounded_calls),
+                    },
                 )
 
             elif tool_name == "repo_get_static_findings":

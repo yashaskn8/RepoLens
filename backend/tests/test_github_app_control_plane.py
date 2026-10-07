@@ -397,6 +397,10 @@ def test_private_snapshot_uses_ephemeral_askpass_without_token_in_command_or_con
         return subprocess.CompletedProcess(command, 0, output, "")
 
     monkeypatch.setattr("app.ingestion.snapshot.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "app.ingestion.snapshot.validate_repository_tree_budget",
+        lambda *_args, **_kwargs: (0, 0),
+    )
     workspace = service.materialize_snapshot_from_metadata(
         repository_url="https://github.com/sample-org/private-repo",
         commit_hash=sha,

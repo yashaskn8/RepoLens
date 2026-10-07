@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from app.agents.checkpointer import (
     CheckpointBackend,
     CheckpointerConfigurationError,
+    LeaseFencedPostgresSaver,
     _strict_serializer,
     get_analysis_checkpointer,
     get_sqlite_checkpointer,
@@ -244,13 +245,170 @@ async def test_postgres_open_does_not_run_schema_setup(monkeypatch):
     monkeypatch.setattr("app.agents.checkpointer.get_settings", lambda: settings)
 
     async with get_analysis_checkpointer(state_profile="plain") as saver:
-        assert isinstance(saver, FakeSaver)
+        assert isinstance(saver, LeaseFencedPostgresSaver)
+        assert isinstance(saver._delegate, FakeSaver)
         assert saver.setup_calls == 0
 
     assert connection_state["closed"]
     assert connection_state["kwargs"]["autocommit"] is True
     assert connection_state["kwargs"]["prepare_threshold"] == 0
     assert "sslmode=require" in connection_state["dsn"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method_name", ["aput", "aput_writes"])
+async def test_postgres_checkpoint_writes_hold_current_lease_until_durable_write(
+    monkeypatch, method_name
+):
+    from types import SimpleNamespace
+
+    from app.execution import context as execution_context
+
+    events = []
+    claim = SimpleNamespace(
+        work_item_id="work-1",
+        lease_token="lease-1",
+        resource_type="SCAN",
+        resource_id="scan-1",
+    )
+
+    class FakeSession:
+        def commit(self):
+            events.append("commit")
+
+        def rollback(self):
+            events.append("rollback")
+
+        def close(self):
+            events.append("close")
+
+    class FakeSaver:
+        async def aput(self, *args, **kwargs):
+            events.append("write")
+            return "checkpoint"
+
+        async def aput_writes(self, *args, **kwargs):
+            events.append("write")
+            return "pending-writes"
+
+    session = FakeSession()
+    monkeypatch.setattr(execution_context, "current_claim", lambda: claim)
+    monkeypatch.setattr(execution_context, "new_execution_session", lambda: session)
+    monkeypatch.setattr(
+        execution_context,
+        "assert_current_claim",
+        lambda **kwargs: events.append("lease-lock") if kwargs["db"] is session else None,
+    )
+    monkeypatch.setattr("app.agents.checkpointer.get_settings", lambda: _settings())
+
+    saver = LeaseFencedPostgresSaver(FakeSaver())
+    result = await getattr(saver, method_name)({"configurable": {"thread_id": "scan-1"}})
+
+    assert result in {"checkpoint", "pending-writes"}
+    assert events == ["lease-lock", "write", "commit", "close"]
+
+
+@pytest.mark.asyncio
+async def test_postgres_checkpoint_write_rolls_back_lease_lock_on_saver_error(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.execution import context as execution_context
+
+    events = []
+
+    class FakeSession:
+        def commit(self):
+            events.append("commit")
+
+        def rollback(self):
+            events.append("rollback")
+
+        def close(self):
+            events.append("close")
+
+    class FakeSaver:
+        async def aput(self, *_args, **_kwargs):
+            events.append("write")
+            raise OSError("db unavailable")
+
+    session = FakeSession()
+    monkeypatch.setattr(execution_context, "current_claim", lambda: SimpleNamespace())
+    monkeypatch.setattr(execution_context, "new_execution_session", lambda: session)
+    monkeypatch.setattr(
+        execution_context,
+        "assert_current_claim",
+        lambda **_kwargs: events.append("lease-lock"),
+    )
+    monkeypatch.setattr("app.agents.checkpointer.get_settings", lambda: _settings())
+
+    with pytest.raises(OSError, match="db unavailable"):
+        await LeaseFencedPostgresSaver(FakeSaver()).aput({})
+    assert events == ["lease-lock", "write", "rollback", "close"]
+
+
+@pytest.mark.asyncio
+async def test_postgres_checkpoint_write_rejects_thread_not_bound_to_claim(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.execution import context as execution_context
+    from app.execution.errors import LeaseLost
+
+    class FakeSession:
+        def rollback(self):
+            self.rolled_back = True
+
+        def close(self):
+            self.closed = True
+
+    class FakeSaver:
+        async def aput(self, *_args, **_kwargs):
+            pytest.fail("cross-resource checkpoint must not be written")
+
+    session = FakeSession()
+    claim = SimpleNamespace(
+        work_item_id="work-1",
+        lease_token="lease-1",
+        resource_type="SCAN",
+        resource_id="scan-1",
+    )
+    monkeypatch.setattr(execution_context, "current_claim", lambda: claim)
+    monkeypatch.setattr(execution_context, "new_execution_session", lambda: session)
+    monkeypatch.setattr(execution_context, "assert_current_claim", lambda **_kwargs: claim)
+    monkeypatch.setattr("app.agents.checkpointer.get_settings", lambda: _settings())
+
+    with pytest.raises(LeaseLost, match="checkpoint thread does not match"):
+        await LeaseFencedPostgresSaver(FakeSaver()).aput(
+            {"configurable": {"thread_id": "foreign-scan"}}
+        )
+    assert session.rolled_back and session.closed
+
+
+@pytest.mark.asyncio
+async def test_postgres_checkpoint_write_without_claim_fails_closed_in_production(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.execution import context as execution_context
+    from app.execution.errors import LeaseLost
+
+    class FakeSession:
+        def rollback(self):
+            self.rolled_back = True
+
+        def close(self):
+            self.closed = True
+
+    class FakeSaver:
+        async def aput(self, *_args, **_kwargs):
+            pytest.fail("stale checkpoint must not be written")
+
+    session = FakeSession()
+    monkeypatch.setattr(execution_context, "current_claim", lambda: None)
+    monkeypatch.setattr(execution_context, "new_execution_session", lambda: session)
+    monkeypatch.setattr("app.agents.checkpointer.get_settings", lambda: SimpleNamespace(is_production=True))
+
+    with pytest.raises(LeaseLost, match="canonical execution claim required"):
+        await LeaseFencedPostgresSaver(FakeSaver()).aput({})
+    assert session.rolled_back and session.closed
 
 
 @pytest.mark.asyncio

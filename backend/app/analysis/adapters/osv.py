@@ -59,7 +59,9 @@ class OSVScannerAdapter(BaseScannerAdapter):
         if not isinstance(data, dict):
             raise ScannerOutputError(self.tool_name, f"Expected JSON object, got {type(data).__name__}")
 
-        results = data.get("results", [])
+        if "results" not in data or not isinstance(data["results"], list):
+            raise ScannerOutputError(self.tool_name, "Expected 'results' to be a JSON array")
+        results = data["results"]
         for entry in results:
             source_info = entry.get("source", {})
             raw_path = source_info.get("path", "")

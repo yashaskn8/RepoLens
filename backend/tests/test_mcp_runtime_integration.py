@@ -17,10 +17,12 @@ Validates:
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import tempfile
 import uuid
+from types import SimpleNamespace
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, patch
 
@@ -88,16 +90,16 @@ def temp_repo(tmp_path):
 def evidence_store_fixture(temp_repo):
     """Create an EvidenceStore populated with manifest entries."""
     files = [
-        FileEntry(path="main.py", size_bytes=150, language="python", lines_count=9),
-        FileEntry(path="large.py", size_bytes=10000, language="python", lines_count=599),
-        FileEntry(path="secret.env", size_bytes=40, language="env", lines_count=1),
+        FileEntry(path="main.py", size_bytes=os.path.getsize(os.path.join(temp_repo, "main.py")), content_sha256=hashlib.sha256(open(os.path.join(temp_repo, "main.py"), "rb").read()).hexdigest(), language="python", lines_count=8),
+        FileEntry(path="large.py", size_bytes=os.path.getsize(os.path.join(temp_repo, "large.py")), content_sha256=hashlib.sha256(open(os.path.join(temp_repo, "large.py"), "rb").read()).hexdigest(), language="python", lines_count=599),
+        FileEntry(path="secret.env", size_bytes=os.path.getsize(os.path.join(temp_repo, "secret.env")), content_sha256=hashlib.sha256(open(os.path.join(temp_repo, "secret.env"), "rb").read()).hexdigest(), language="env", lines_count=1),
     ]
     manifest = RepositoryManifest(
         repository_url="https://github.com/example/repo",
         commit_hash="abcdef1234567890abcdef1234567890abcdef12",
         branch="main",
         total_files=3,
-        total_size_bytes=10190,
+        total_size_bytes=sum(entry.size_bytes for entry in files),
         files=files,
         languages={"python": 2, "env": 1},
         frameworks=[],
@@ -106,8 +108,9 @@ def evidence_store_fixture(temp_repo):
 
 
 @pytest.fixture
-def mcp_server_fixture(evidence_store_fixture, temp_repo):
+def mcp_server_fixture(evidence_store_fixture, temp_repo, monkeypatch):
     """Create a canonical MCPRepositoryServer instance."""
+    monkeypatch.setattr("app.mcp.server.get_settings", lambda: SimpleNamespace(MAX_FILE_SIZE_BYTES=1_048_576))
     return MCPRepositoryServer(
         evidence_store=evidence_store_fixture,
         repo_dir=temp_repo,
@@ -231,6 +234,35 @@ async def test_repo_read_file_streaming_memory_safety(mcp_server_fixture):
     assert "Line 10" in res.content["content"]
     assert "Line 15" in res.content["content"]
     assert "Line 16" not in res.content["content"]
+
+
+@pytest.mark.asyncio
+async def test_repo_read_file_explicit_range_reports_clamp_and_truncation(mcp_server_fixture):
+    res = await mcp_server_fixture.call_tool(
+        "repo_read_file",
+        {"file_path": "large.py", "start_line": 1, "end_line": 500},
+    )
+    assert res.is_error is False
+    assert res.content["end_line"] == MAX_LINE_SPAN_READ
+    assert res.content["truncated"] is True
+
+    eof = await mcp_server_fixture.call_tool(
+        "repo_read_file",
+        {"file_path": "large.py", "start_line": 590, "end_line": 1_000},
+    )
+    assert eof.is_error is False
+    assert eof.content["end_line"] == 599
+    assert eof.content["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_repo_read_file_start_beyond_eof_is_bounded_failure(mcp_server_fixture):
+    res = await mcp_server_fixture.call_tool(
+        "repo_read_file",
+        {"file_path": "large.py", "start_line": 1_000_000},
+    )
+    assert res.is_error is True
+    assert res.error_message.startswith("MCP_LINE_NOT_FOUND:")
 
 
 # =============================================================================

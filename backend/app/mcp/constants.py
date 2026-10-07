@@ -10,6 +10,8 @@ MAX_MCP_CLIENT_RESULT_BYTES: int = MAX_MCP_RESULT_BYTES
 
 # Server collection cardinality bounds
 MAX_MCP_SERVER_COLLECTION_ITEMS: int = 50
+MAX_MCP_SERVER_SOURCE_READ_BYTES: int = 50_000
+MAX_MCP_SERVER_SEARCH_BYTES: int = 5 * 1024 * 1024
 
 # Executor and prompt limits
 MAX_MCP_TEXT_CHARS: int = 20_000

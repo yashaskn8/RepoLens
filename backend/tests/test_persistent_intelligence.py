@@ -369,12 +369,20 @@ def test_warm_projection_reuse_does_not_parse_or_read_source(indexed_repository)
     index = factory()
     first = index.build_manifest()
     assert len(first.files) == 2
+    for entry in first.files:
+        projection = index.file_projection(entry.path)
+        assert entry.content_sha256 == projection.payload["source_sha256"]
+        assert entry.content_sha256 == projection.content_hash
     assert index.stats["excluded_subtrees"] == {"vendored_directory": 1}
     assert index.stats["inventory_complete"]
     count = db.scalar(select(func.count()).select_from(IndexProjectionModel))
     warm = factory()
     with patch("app.indexing.persistent.parse_file_with_calls", side_effect=AssertionError("warm parse")), patch.object(warm.inventory, "read_object", side_effect=AssertionError("warm blob read")):
-        assert len(warm.build_manifest().files) == 2
+        warm_manifest = warm.build_manifest()
+        assert len(warm_manifest.files) == 2
+        assert {entry.path: entry.content_sha256 for entry in warm_manifest.files} == {
+            entry.path: entry.content_sha256 for entry in first.files
+        }
     assert warm.stats["parsed_files"] == 0
     assert warm.stats["reused_files"] == 2
     assert db.scalar(select(func.count()).select_from(IndexProjectionModel)) == count

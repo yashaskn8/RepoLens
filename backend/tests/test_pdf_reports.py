@@ -64,6 +64,127 @@ def _finding(
     )
 
 
+def test_lower_priority_report_worker_cannot_fail_shared_report(
+    db_session: Session, tmp_path: Path, monkeypatch
+):
+    """A denied duplicate job must not turn the canonical report into FAILED."""
+    from app.execution.context import bind_claim, reset_claim
+    from app.execution.types import ClaimedWork, ResourceProfile, WorkKind
+    from app.models.execution import WorkItemModel
+
+    owner = create_or_elevate_operator(
+        db_session,
+        email="report-priority@example.com",
+        password="ReportPriorityPass12345!",
+    )
+    scan = ScanModel(
+        id=str(uuid4()),
+        owner_user_id=owner.id,
+        repository_url="https://github.com/example/report-priority",
+        branch="main",
+        commit_hash="a" * 40,
+        status=ScanStatus.COMPLETED.value,
+        model_metadata={},
+    )
+    db_session.add(scan)
+    report = ReportModel(
+        id=str(uuid4()),
+        owner_user_id=owner.id,
+        scan_id=scan.id,
+        kind="SCAN_REPORT",
+        status=ReportStatus.REQUESTED.value,
+        input_digest="1" * 64,
+        evidence_digest="2" * 64,
+        coverage_digest="3" * 64,
+        document_digest="4" * 64,
+        document_locator="staging-placeholder",
+        repository_url=scan.repository_url,
+        branch="main",
+        commit_sha=scan.commit_hash,
+        report_schema_version="1.0",
+        renderer_version="test",
+        analysis_policy_version="test",
+        application_version="test",
+        finding_ids=[],
+        artifact_lineage={},
+        attempt_count=0,
+        retryable=True,
+    )
+    now = datetime.now(timezone.utc)
+    older_id, newer_id = str(uuid4()), str(uuid4())
+
+    def make_work(work_id: str, key: str, created_at: datetime, state: str) -> WorkItemModel:
+        return WorkItemModel(
+            id=work_id,
+            tenant_id=owner.id,
+            request_id=key,
+            requested_by=owner.id,
+            policy_snapshot_id="policy-test",
+            work_kind=WorkKind.REPORT_GENERATION.value,
+            resource_type="REPORT",
+            resource_id=report.id,
+            state=state,
+            idempotency_key=key,
+            request_digest=hashlib.sha256(key.encode("utf-8")).hexdigest(),
+            request_payload={"report_id": report.id},
+            resource_profile=ResourceProfile.REPORT_RENDER.value,
+            deadline_at=now + timedelta(minutes=5),
+            created_at=created_at,
+            updated_at=created_at,
+        )
+
+    older = make_work(older_id, "older", now - timedelta(seconds=1), "QUEUED")
+    newer = make_work(newer_id, "newer", now, "RUNNING")
+    db_session.add_all([report, older, newer])
+    db_session.commit()
+
+    # Isolate the shared-resource priority invariant from lease plumbing. The
+    # test models a valid claim for the younger job; its own lease is not the
+    # authority to mutate the shared report while the older job is active.
+    monkeypatch.setattr(
+        "app.execution.context.assert_work_item_commit_authority",
+        lambda *_args, **_kwargs: None,
+    )
+    claim = ClaimedWork(
+        work_item_id=newer_id,
+        attempt_id=str(uuid4()),
+        attempt_number=1,
+        lease_token="lease-token",
+        lease_expires_at=now + timedelta(minutes=1),
+        tenant_id=owner.id,
+        work_kind=WorkKind.REPORT_GENERATION,
+        resource_type="REPORT",
+        resource_id=report.id,
+        policy_snapshot_id="policy-test",
+        input_artifact_id=None,
+    )
+    token = bind_claim(claim)
+    settings = get_settings().model_copy(update={
+        "REPORT_ARTIFACT_DIR": str(tmp_path / "report-artifacts"),
+        "ARTIFACT_ROOT_DIR": str(tmp_path / "canonical-artifacts"),
+    })
+    worker_sessions = sessionmaker(
+        autocommit=False,
+        autoflush=False,
+        bind=db_session.connection(),
+        join_transaction_mode="create_savepoint",
+    )
+    try:
+        ReportGenerationService.execute_report_under_work_item(
+            report.id,
+            settings,
+            session_factory=worker_sessions,
+        )
+    finally:
+        reset_claim(token)
+
+    db_session.expire_all()
+    persisted = db_session.query(ReportModel).filter(ReportModel.id == report.id).one()
+    assert persisted.status == ReportStatus.REQUESTED.value
+    assert persisted.attempt_count == 0
+    assert persisted.failure_code is None
+
+
 def test_report_pipeline_is_deterministic_bounded_and_tenant_safe(
     client: TestClient,
     db_session: Session,

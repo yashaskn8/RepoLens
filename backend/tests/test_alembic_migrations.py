@@ -1,11 +1,14 @@
 """Tests for Phase 3.5K: Database Schema Correctness and Alembic Migrations Authority."""
 
 import os
+import importlib
 import tempfile
 from uuid import UUID, uuid4
 import pytest
 from alembic import command
 from alembic.config import Config
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 
@@ -48,6 +51,37 @@ def test_alembic_config_accepts_percent_encoded_database_url():
     cfg = _get_alembic_config(db_url)
 
     assert cfg.get_main_option("sqlalchemy.url") == db_url
+
+
+def test_patch_approval_digest_downgrade_demotes_new_approvals_before_drop():
+    migration_path = os.path.join(
+        os.path.dirname(__file__), "..", "alembic", "versions",
+        "24b9e0a8c1d2_patch_approval_content_binding.py",
+    )
+    spec = importlib.util.spec_from_file_location("patch_approval_binding_migration", migration_path)
+    assert spec is not None and spec.loader is not None
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    engine = create_engine("sqlite:///:memory:")
+    try:
+        with engine.begin() as connection:
+            connection.execute(text(
+                "CREATE TABLE patches (status TEXT, approved_by TEXT, approved_at TEXT, approval_digest TEXT)"
+            ))
+            connection.execute(text(
+                "INSERT INTO patches(status, approved_by, approved_at, approval_digest) "
+                "VALUES ('APPROVED', 'reviewer', '2026-10-07T00:00:00Z', 'a' || printf('%063d', 0))"
+            ))
+            with Operations.context(MigrationContext.configure(connection)):
+                migration.downgrade()
+
+            row = connection.execute(text(
+                "SELECT status, approved_by, approved_at FROM patches"
+            )).one()
+            assert tuple(row) == ("NEEDS_REVIEW", None, None)
+            assert "approval_digest" not in {column["name"] for column in inspect(connection).get_columns("patches")}
+    finally:
+        engine.dispose()
 
 
 def test_alembic_upgrade_head_on_empty_db_creates_complete_schema():
@@ -95,7 +129,7 @@ def test_alembic_upgrade_head_on_empty_db_creates_complete_schema():
                 "id", "finding_id", "plan_id", "scan_id", "parent_patch_id", "revision_number", "thread_id", "status",
                 "machine_verdict", "unified_diff", "files_modified", "explanation", "expected_behavior_change",
                 "generated_tests_or_test_plan", "verification_report", "critic_report",
-                "user_feedback", "approved_by", "approved_at", "rejected_reason",
+                "user_feedback", "approved_by", "approved_at", "approval_digest", "rejected_reason",
                 "model_metadata", "created_at", "updated_at", "fix_plan_snapshot",
             }
             assert expected_patch_cols.issubset(set(patch_cols.keys())), f"Missing patch columns: {expected_patch_cols - set(patch_cols.keys())}"
@@ -495,7 +529,7 @@ def test_publication_intent_migration_allows_downgrade_without_unresolved_intent
         with engine.connect() as connection:
             revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
             assert "artifact_publication_intents" in inspect(connection).get_table_names()
-        assert revision == "22a746f1b809"
+        assert revision == "24b9e0a8c1d2"
     finally:
         engine.dispose()
 

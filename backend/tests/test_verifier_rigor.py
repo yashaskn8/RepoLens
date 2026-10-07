@@ -10,6 +10,8 @@ from uuid import uuid4
 import pytest
 
 from app.agents.verifier import _apply_atomic_claim_constraints, _select_verifier_policy, run_verifier_agent
+from app.analysis.store import EvidenceStore
+from app.ingestion.manifest import build_manifest
 from app.atomic_claims import AtomicClaimType, claims_from_model_item
 from app.llm.types import LLMProvider, LLMResponse, ModelExecutionMetadata, TaskPolicy
 from app.schemas.enums import Severity, VerificationVerdict
@@ -80,15 +82,30 @@ def _verifier_response():
     )
 
 
-def _verifier_runtime(workspace, context_engine):
+def _verifier_runtime(workspace, context_engine, commit_hash="test-snapshot"):
+    manifest = build_manifest(
+        workspace,
+        repository_url="https://github.com/test/verifier-fixture",
+        commit_hash=commit_hash,
+    )
     return SimpleNamespace(
         context=SimpleNamespace(
             scan_runtime=SimpleNamespace(
                 repo_dir=workspace,
                 context_engine=context_engine,
+                evidence_store=EvidenceStore(manifest),
             ),
         ),
     )
+
+
+async def _run_verifier(state, workspace):
+    """Exercise verifier policy with a trusted test snapshot manifest."""
+    normalized_state = dict(state)
+    commit_hash = str(normalized_state.get("commit_hash") or "test-snapshot")
+    runtime = _verifier_runtime(workspace, None, commit_hash=commit_hash)
+    normalized_state["commit_hash"] = commit_hash
+    return await run_verifier_agent(normalized_state, runtime=runtime)
 
 
 @pytest.mark.asyncio
@@ -176,7 +193,7 @@ async def test_verifier_without_investigator_evidence_preserves_compatibility(wo
     }
 
     with patch("app.agents.verifier.get_llm_router", return_value=router):
-        await run_verifier_agent(state)
+        await _run_verifier(state, workspace_with_code)
 
     item = _verifier_request_item(router.generate.await_args.args[0])
     assert item["investigation_context"] == "None"
@@ -293,7 +310,7 @@ async def test_verifier_rejects_fabricated_files(workspace_with_code):
         "candidate_findings": [fake_finding],
     }
 
-    result = await run_verifier_agent(state)
+    result = await _run_verifier(state, workspace_with_code)
 
     # Must NOT be in verified_findings
     assert len(result["verified_findings"]) == 0
@@ -327,7 +344,7 @@ async def test_verifier_rejects_out_of_bounds_lines(workspace_with_code):
         "candidate_findings": [invalid_line_finding],
     }
 
-    result = await run_verifier_agent(state)
+    result = await _run_verifier(state, workspace_with_code)
 
     assert len(result["verified_findings"]) == 0
     assert len(result["rejected_findings"]) == 1
@@ -378,7 +395,7 @@ async def test_verifier_deduplicates_identical_findings(workspace_with_code):
     mock_router.generate.return_value = mock_response
 
     with patch("app.agents.verifier.get_llm_router", return_value=mock_router):
-        result = await run_verifier_agent(state)
+        result = await _run_verifier(state, workspace_with_code)
 
     # Exactly 1 verified finding
     assert len(result["verified_findings"]) == 1
@@ -429,7 +446,7 @@ async def test_verifier_rejects_contradictory_claims(workspace_with_code):
     mock_router.generate.return_value = mock_response
 
     with patch("app.agents.verifier.get_llm_router", return_value=mock_router):
-        result = await run_verifier_agent(state)
+        result = await _run_verifier(state, workspace_with_code)
 
     assert len(result["verified_findings"]) == 0
     assert len(result["rejected_findings"]) == 1
@@ -484,7 +501,7 @@ async def test_verifier_adjusts_severity_and_confirms(workspace_with_code):
     mock_router.generate.return_value = mock_response
 
     with patch("app.agents.verifier.get_llm_router", return_value=mock_router):
-        result = await run_verifier_agent(state)
+        result = await _run_verifier(state, workspace_with_code)
 
     assert len(result["verified_findings"]) == 1
     vf = result["verified_findings"][0]
@@ -587,7 +604,7 @@ async def test_verifier_no_variable_leakage_across_candidates_multiverdict(works
     mock_router.generate.return_value = mock_response
 
     with patch("app.agents.verifier.get_llm_router", return_value=mock_router):
-        result = await run_verifier_agent(state)
+        result = await _run_verifier(state, workspace_with_code)
 
     # 1. Only independently CONFIRMED findings cross the publication boundary.
     assert len(result["verified_findings"]) == 1
@@ -643,12 +660,12 @@ async def test_verifier_missing_evaluation_fails_closed(workspace_with_code):
     )
 
     with patch("app.agents.verifier.get_llm_router", return_value=mock_router):
-        result = await run_verifier_agent({
+        result = await _run_verifier({
             "scan_id": scan_id,
             "commit_hash": "deadbeef",
             "repo_dir": workspace_with_code,
             "candidate_findings": [candidate],
-        })
+        }, workspace_with_code)
 
     assert result["verified_findings"] == []
     assert len(result["rejected_findings"]) == 1
@@ -674,11 +691,11 @@ async def test_verifier_provider_failure_fails_closed(workspace_with_code):
     mock_router.generate.side_effect = RuntimeError("quota exhausted")
 
     with patch("app.agents.verifier.get_llm_router", return_value=mock_router):
-        result = await run_verifier_agent({
+        result = await _run_verifier({
             "scan_id": scan_id,
             "repo_dir": workspace_with_code,
             "candidate_findings": [candidate],
-        })
+        }, workspace_with_code)
 
     assert result["verified_findings"] == []
     assert result["rejected_findings"][0]["verdict"] == VerificationVerdict.POSSIBLE.value
@@ -720,12 +737,12 @@ async def test_attested_deterministic_detectors_do_not_depend_on_an_llm(workspac
     mock_router = AsyncMock()
     mock_router.generate.side_effect = AssertionError("deterministic facts must not call an LLM")
     with patch("app.agents.verifier.get_llm_router", return_value=mock_router):
-        result = await run_verifier_agent({
+        result = await _run_verifier({
             "scan_id": scan_id,
             "commit_hash": "feedface",
             "repo_dir": workspace_with_code,
             "candidate_findings": [scanner_finding, contract_finding],
-        })
+        }, workspace_with_code)
 
     assert len(result["verified_findings"]) == 2
     assert result["rejected_findings"] == []

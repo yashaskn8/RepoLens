@@ -1,6 +1,7 @@
 """Contract and protocol tests for the Model Context Protocol (MCP) server integration."""
 
 import json
+import hashlib
 import os
 import tempfile
 import pytest
@@ -50,7 +51,8 @@ def mcp_protocol_fixture():
                 FileEntry(
                     path="main.py",
                     language="python",
-                    size_bytes=130,
+                    size_bytes=os.path.getsize(main_py),
+                    content_sha256=hashlib.sha256(open(main_py, "rb").read()).hexdigest(),
                     lines_count=8,
                     symbols=[
                         ParsedSymbol(
@@ -71,7 +73,8 @@ def mcp_protocol_fixture():
                 FileEntry(
                     path="client.ts",
                     language="typescript",
-                    size_bytes=130,
+                    size_bytes=os.path.getsize(client_ts),
+                    content_sha256=hashlib.sha256(open(client_ts, "rb").read()).hexdigest(),
                     lines_count=3,
                     symbols=[
                         ParsedSymbol(
@@ -191,6 +194,35 @@ async def test_protocol_valid_tool_calls(mcp_protocol_fixture):
         assert trace_res.isError is False
         trace_data = json.loads(trace_res.content[0].text)
         assert trace_data["is_matched"] is True
+
+
+@pytest.mark.asyncio
+async def test_protocol_source_response_stays_within_serialized_transport_bound(mcp_protocol_fixture):
+    from app.mcp.constants import MAX_MCP_CLIENT_RESULT_BYTES
+
+    repo_server, protocol_server, repo_dir = mcp_protocol_fixture
+    payload = (b"\x01" * 10_000) + b"\n"
+    source_path = os.path.join(repo_dir, "control.txt")
+    with open(source_path, "wb") as source_file:
+        source_file.write(payload)
+    entry = FileEntry(
+        path="control.txt",
+        size_bytes=len(payload),
+        content_sha256=hashlib.sha256(payload).hexdigest(),
+        lines_count=1,
+    )
+    repo_server.evidence_store.manifest.files.append(entry)
+    repo_server.evidence_store._files_by_path[entry.path] = entry
+
+    async with create_connected_server_and_client_session(protocol_server) as session:
+        await session.initialize()
+        result = await session.call_tool("repo_read_file", {"file_path": "control.txt"})
+
+    assert result.isError is False
+    text = result.content[0].text
+    assert len(text.encode("utf-8")) <= MAX_MCP_CLIENT_RESULT_BYTES
+    payload = json.loads(text)
+    assert payload["truncated"] is True
 
 
 # =============================================================================

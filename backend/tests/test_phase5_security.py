@@ -2,6 +2,7 @@ import hashlib
 import os
 import shutil
 import tempfile
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch as mock_patch
 from uuid import UUID, uuid4
@@ -12,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.delivery.github_provider import GitHubDeliveryProvider
+from app.delivery.approval import compute_patch_approval_digest, patch_approval_binding_is_valid
 from app.delivery.pr_body import generate_pr_body, generate_pr_title
 from app.delivery.provider import RepositoryDeliveryProvider
 from app.delivery.schemas import (
@@ -194,10 +196,148 @@ def base_entities(db_session: Session):
         expected_behavior_change="Rejects traversals outside storage directory",
         approved_by="sec-lead",
     )
+    patch.approved_at = datetime.now(timezone.utc)
+    patch.approval_digest = compute_patch_approval_digest(
+        patch,
+        scan,
+        tenant_id=scan.owner_user_id,
+        actor_id=patch.approved_by,
+        approved_at=patch.approved_at,
+    )
     db_session.add(patch)
     db_session.commit()
 
     return scan, finding, patch
+
+
+def _rebind_test_approval(patch: PatchModel, scan: ScanModel) -> None:
+    """Bind a deliberately constructed test artifact as if a reviewer approved it."""
+    patch.approval_digest = compute_patch_approval_digest(
+        patch,
+        scan,
+        tenant_id=scan.owner_user_id,
+        actor_id=patch.approved_by,
+        approved_at=patch.approved_at,
+    )
+
+
+def test_patch_approval_binding_includes_repository_target(base_entities):
+    scan, _finding, patch = base_entities
+    assert patch_approval_binding_is_valid(patch, scan)
+
+    scan.repository_url = "https://github.com/attacker/other-repository"
+
+    assert patch_approval_binding_is_valid(patch, scan) is False
+
+
+@pytest.mark.parametrize(
+    ("field_name", "replacement"),
+    [
+        ("generated_tests_or_test_plan", ["reviewed test plan changed"]),
+        ("verification_report", {"status": "changed"}),
+        ("critic_report", {"verdict": "changed"}),
+        ("user_feedback", "changed after approval"),
+    ],
+)
+def test_patch_approval_binds_review_visible_validation_material(
+    base_entities, field_name, replacement
+):
+    scan, _finding, patch = base_entities
+    assert patch_approval_binding_is_valid(patch, scan)
+
+    setattr(patch, field_name, replacement)
+
+    assert patch_approval_binding_is_valid(patch, scan) is False
+
+
+@pytest.mark.asyncio
+async def test_delivery_rejects_patch_content_changed_after_human_approval(db_session: Session, base_entities):
+    scan, _finding, patch = base_entities
+    from app.api.routes.patches import approve_patch
+    from app.schemas.auth import CurrentUser
+    from app.schemas.patch import PatchReviewRequest
+
+    patch.status = PatchStatus.VERIFIED.value
+    patch.approved_by = None
+    patch.approved_at = None
+    db_session.commit()
+    reviewer = CurrentUser(
+        id=scan.owner_user_id,
+        email="reviewer@example.test",
+        role="USER",
+        is_active=True,
+        session_id="approval-binding-test",
+    )
+    await approve_patch(
+        patch_id=patch.id,
+        payload=PatchReviewRequest(notes="reviewed exact diff"),
+        current_user=reviewer,
+        _csrf=None,
+        db=db_session,
+    )
+
+    patch.unified_diff += "\n# changed after approval\n"
+    db_session.commit()
+    provider = MockDeliveryProvider()
+    with pytest.raises(HTTPException) as exc_info:
+        await DeliveryService(provider=provider).deliver_patch(
+            db=db_session,
+            patch_id=patch.id,
+            payload=DeliveryRequest(),
+        )
+    assert exc_info.value.status_code == 409
+    assert len(provider.blobs_created) == 0
+
+
+@pytest.mark.asyncio
+async def test_patch_rejection_is_blocked_once_delivery_is_active(db_session: Session, base_entities):
+    scan, _finding, patch = base_entities
+    from app.api.routes.patches import reject_patch
+    from app.schemas.auth import CurrentUser
+    from app.schemas.patch import PatchRejectRequest
+
+    db_session.add(DeliveryModel(
+        scan_id=scan.id,
+        finding_id=patch.finding_id,
+        patch_id=patch.id,
+        provider="github",
+        repository_url=scan.repository_url,
+        repository_owner="example-org",
+        repository_name="secure-app",
+        base_branch="main",
+        scanned_base_sha=scan.commit_hash,
+        status=DeliveryStatus.PENDING.value,
+        idempotency_key=compute_idempotency_key(
+            owner="example-org",
+            repo="secure-app",
+            patch_id=patch.id,
+            base_branch="main",
+            scanned_base_sha=scan.commit_hash,
+        ),
+        requested_by="reviewer",
+        attempt_count=1,
+    ))
+    db_session.commit()
+    reviewer = CurrentUser(
+        id=scan.owner_user_id,
+        email="reviewer@example.test",
+        role="USER",
+        is_active=True,
+        session_id="delivery-revocation-test",
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await reject_patch(
+            patch_id=patch.id,
+            payload=PatchRejectRequest(reason="revoke during delivery"),
+            current_user=reviewer,
+            _csrf=None,
+            db=db_session,
+        )
+
+    assert exc_info.value.status_code == 409
+    db_session.refresh(patch)
+    assert patch.status == PatchStatus.APPROVED.value
 
 
 # 1. Unauthorized / non-approved patch delivery rejected with 409
@@ -1585,6 +1725,7 @@ async def test_revision_patch_proposal_plan_id_mismatch_blocks_persistence(db_se
 async def test_missing_fix_plan_snapshot_blocks_delivery_with_typed_error(db_session: Session, base_entities):
     scan, finding, patch = base_entities
     patch.fix_plan_snapshot = None
+    _rebind_test_approval(patch, scan)
     db_session.commit()
 
     mock_provider = MockDeliveryProvider()
@@ -1601,6 +1742,7 @@ async def test_missing_fix_plan_snapshot_blocks_delivery_with_typed_error(db_ses
 async def test_malformed_fix_plan_snapshot_blocks_delivery_with_typed_error(db_session: Session, base_entities):
     scan, finding, patch = base_entities
     patch.fix_plan_snapshot = {"not_a_valid_field": 123}
+    _rebind_test_approval(patch, scan)
     db_session.commit()
 
     mock_provider = MockDeliveryProvider()
@@ -1617,6 +1759,7 @@ async def test_plan_id_or_finding_id_mismatch_blocks_delivery(db_session: Sessio
     scan, finding, patch = base_entities
     # Tamper with plan_id
     patch.plan_id = str(uuid4())
+    _rebind_test_approval(patch, scan)
     db_session.commit()
 
     mock_provider = MockDeliveryProvider()
@@ -1633,6 +1776,7 @@ async def test_tampered_patch_files_modified_against_fix_plan_blocks_delivery(db
     scan, finding, patch = base_entities
     # Tamper with files_modified to touch an unauthorized file
     patch.files_modified = ["app/storage.py", "app/unauthorized.py"]
+    _rebind_test_approval(patch, scan)
     db_session.commit()
 
     mock_provider = MockDeliveryProvider()
