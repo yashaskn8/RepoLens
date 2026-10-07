@@ -18,18 +18,50 @@ jobs:
   backend-test:
     name: Backend Quality, Migrations & Tests (Python 3.12)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
+    # Repository-controlled integration services are mandatory in required CI.
+    # Images are pinned by registry digest so upstream tag movement cannot alter
+    # the tested persistence/cache substrate.
+    services:
+      postgres:
+        image: pgvector/pgvector@sha256:33198da2828a14c30348d2ccb4750833d5ed9a44c88d840a0e523d7417120337
+        env:
+          POSTGRES_USER: repolens
+          POSTGRES_PASSWORD: repolens
+          POSTGRES_DB: repolens_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U repolens -d repolens_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis@sha256:becdda6c7f4b3fb42e42fd7f120bbf5c54c4caaaf16f26da24e4563d2c1f0576
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     env:
       TESTING: "true"
       ENVIRONMENT: "development"
       GITHUB_DELIVERY_ENABLED: "false"
       GITHUB_PR_REVIEW_WRITE_ENABLED: "false"
+      REPOLENS_POSTGRES_TEST_URL: postgresql://repolens:repolens@localhost:5432/repolens_ci
+      TEST_POSTGRES_URL: postgresql://repolens:repolens@localhost:5432/repolens_ci
+      PGVECTOR_TEST_URL: postgresql://repolens:repolens@localhost:5432/repolens_ci
+      REPOLENS_POSTGRES_TEST_ALLOW_SCHEMA_RESET: "1"
+      ENABLE_PGVECTOR: "true"
+      REDIS_URL: redis://localhost:6379/0
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
           cache: "pip"
@@ -39,7 +71,7 @@ jobs:
         run: |
           cd backend
           python -m pip install --upgrade pip
-          pip install -e ".[dev,observability]"
+          pip install -e ".[dev,observability,production]"
 
       - name: Verify Dependencies & Python Bytecode
         run: |
@@ -67,6 +99,11 @@ jobs:
           cd backend
           alembic upgrade head
 
+      - name: Run required PostgreSQL, pgvector and Redis integration gate
+        run: |
+          cd backend
+          python -m pytest             tests/test_postgres_integration.py             tests/test_pgvector_index.py             tests/test_checkpoint_recovery.py             tests/test_redis_service.py             -m integration -q
+
       - name: Run Pytest Suite
         run: |
           cd backend
@@ -82,7 +119,7 @@ jobs:
 
       - name: Upload scripted agent evaluation report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: repolens-agent-eval-scripted
           path: backend/agent-eval-scripted.json
@@ -94,10 +131,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
           cache: "npm"
