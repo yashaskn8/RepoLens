@@ -50,12 +50,6 @@ jobs:
       ENVIRONMENT: "development"
       GITHUB_DELIVERY_ENABLED: "false"
       GITHUB_PR_REVIEW_WRITE_ENABLED: "false"
-      REPOLENS_POSTGRES_TEST_URL: postgresql://repolens:repolens@localhost:5432/repolens_ci
-      TEST_POSTGRES_URL: postgresql://repolens:repolens@localhost:5432/repolens_ci
-      PGVECTOR_TEST_URL: postgresql://repolens:repolens@localhost:5432/repolens_ci
-      REPOLENS_POSTGRES_TEST_ALLOW_SCHEMA_RESET: "1"
-      ENABLE_PGVECTOR: "true"
-      REDIS_URL: redis://localhost:6379/0
     steps:
       - name: Checkout Code
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -71,7 +65,7 @@ jobs:
         run: |
           cd backend
           python -m pip install --upgrade pip
-          pip install -e ".[dev,observability,production]"
+          pip install -e ".[dev,observability]"
 
       - name: Verify Dependencies & Python Bytecode
         run: |
@@ -99,15 +93,32 @@ jobs:
           cd backend
           alembic upgrade head
 
-      - name: Run required PostgreSQL, pgvector and Redis integration gate
-        run: |
-          cd backend
-          python -m pytest             tests/test_postgres_integration.py             tests/test_pgvector_index.py             tests/test_checkpoint_recovery.py             tests/test_redis_service.py             -m integration -q
-
       - name: Run Pytest Suite
         run: |
           cd backend
           python -m pytest tests -v
+
+      - name: Install production integration dependencies
+        run: |
+          cd backend
+          pip install -e ".[production]"
+
+      - name: Run required PostgreSQL, pgvector and Redis integration gate
+        env:
+          REPOLENS_POSTGRES_TEST_URL: postgresql://repolens:repolens@localhost:5432/repolens_ci
+          TEST_POSTGRES_URL: postgresql://repolens:repolens@localhost:5432/repolens_ci
+          PGVECTOR_TEST_URL: postgresql://repolens:repolens@localhost:5432/repolens_ci
+          REPOLENS_POSTGRES_TEST_ALLOW_SCHEMA_RESET: "1"
+          ENABLE_PGVECTOR: "true"
+          REDIS_URL: redis://localhost:6379/0
+        run: |
+          cd backend
+          python -m pytest \
+            tests/test_postgres_integration.py \
+            tests/test_pgvector_index.py \
+            tests/test_checkpoint_recovery.py \
+            tests/test_redis_service.py \
+            -m integration -q
 
       - name: Run zero-key scripted Evidence Investigator regression gate
         run: |

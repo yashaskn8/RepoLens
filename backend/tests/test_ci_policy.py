@@ -37,7 +37,8 @@ def test_required_ci_executes_real_repository_controlled_infrastructure_gates():
         'REPOLENS_POSTGRES_TEST_ALLOW_SCHEMA_RESET: "1"',
         'ENABLE_PGVECTOR: "true"',
         "REDIS_URL:",
-        'pip install -e ".[dev,observability,production]"',
+        'pip install -e ".[dev,observability]"',
+        'pip install -e ".[production]"',
         "tests/test_postgres_integration.py",
         "tests/test_pgvector_index.py",
         "tests/test_checkpoint_recovery.py",
@@ -46,3 +47,24 @@ def test_required_ci_executes_real_repository_controlled_infrastructure_gates():
     )
     missing = [token for token in required_tokens if token not in ci]
     assert missing == [], "Required CI infrastructure gate drifted: " + ", ".join(missing)
+
+
+def test_integration_service_environment_is_scoped_to_the_integration_step():
+    ci = (_WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+    before_steps = ci.split("    steps:", 1)[0]
+    integration_keys = (
+        "REPOLENS_POSTGRES_TEST_URL:",
+        "TEST_POSTGRES_URL:",
+        "PGVECTOR_TEST_URL:",
+        "REPOLENS_POSTGRES_TEST_ALLOW_SCHEMA_RESET:",
+        "ENABLE_PGVECTOR:",
+        "REDIS_URL:",
+    )
+    leaked = [token for token in integration_keys if token in before_steps]
+    assert leaked == [], "Integration-only environment leaked into baseline suite: " + ", ".join(leaked)
+
+    marker = "- name: Run required PostgreSQL, pgvector and Redis integration gate"
+    assert marker in ci
+    gate = ci.split(marker, 1)[1]
+    missing = [token for token in integration_keys if token not in gate]
+    assert missing == [], "Integration gate is missing scoped environment: " + ", ".join(missing)
