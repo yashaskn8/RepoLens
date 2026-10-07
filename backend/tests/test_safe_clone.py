@@ -40,6 +40,7 @@ def test_clone_repository_invokes_git_safely():
             assert "--depth" in cmd
             assert "1" in cmd
             assert "--filter=blob:none" in cmd
+            assert "--no-tags" in cmd
             assert "--no-checkout" in cmd
             assert "--no-recurse-submodules" in cmd
             assert "core.symlinks=false" in cmd

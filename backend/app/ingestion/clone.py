@@ -254,6 +254,7 @@ def clone_repository(
         "--quiet",
         "--depth",
         "1",
+        "--no-tags",
         "--filter=blob:none",
         "--no-checkout",
         "--no-recurse-submodules",
