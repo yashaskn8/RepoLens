@@ -20,11 +20,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     # Repository-controlled integration services are mandatory in required CI.
-    # Images are pinned by registry digest so upstream tag movement cannot alter
-    # the tested persistence/cache substrate.
+    # Service images use explicit release tags. GitHub Action code is SHA-pinned;
+    # container manifest digest pinning remains a separate supply-chain gap.
     services:
       postgres:
-        image: pgvector/pgvector@sha256:33198da2828a14c30348d2ccb4750833d5ed9a44c88d840a0e523d7417120337
+        image: pgvector/pgvector:0.8.6-pg16
         env:
           POSTGRES_USER: repolens
           POSTGRES_PASSWORD: repolens
@@ -37,7 +37,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       redis:
-        image: redis@sha256:becdda6c7f4b3fb42e42fd7f120bbf5c54c4caaaf16f26da24e4563d2c1f0576
+        image: redis:7.2.16-alpine
         ports:
           - 6379:6379
         options: >-

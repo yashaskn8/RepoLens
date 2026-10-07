@@ -29,8 +29,8 @@ def test_third_party_github_actions_are_immutably_pinned():
 def test_required_ci_executes_real_repository_controlled_infrastructure_gates():
     ci = (_WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
     required_tokens = (
-        "pgvector/pgvector@sha256:",
-        "redis@sha256:",
+        "pgvector/pgvector:0.8.6-pg16",
+        "redis:7.2.16-alpine",
         "REPOLENS_POSTGRES_TEST_URL:",
         "TEST_POSTGRES_URL:",
         "PGVECTOR_TEST_URL:",
