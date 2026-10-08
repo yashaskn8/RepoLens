@@ -3,6 +3,8 @@
 import subprocess
 import os
 import io
+import sys
+import time
 from unittest.mock import MagicMock, patch
 import pytest
 
@@ -30,8 +32,9 @@ def test_clone_repository_invokes_git_safely():
     command_order = []
 
     class CompletedGitProcess:
-        returncode = 0
-        stderr = io.BytesIO()
+        def __init__(self):
+            self.returncode = 0
+            self.stderr = io.BytesIO()
 
         def poll(self):
             return self.returncode
@@ -49,29 +52,36 @@ def test_clone_repository_invokes_git_safely():
         assert env["GIT_CONFIG_GLOBAL"] == os.devnull
         assert env["GIT_LFS_SKIP_SMUDGE"] == "1"
         assert not set(monkeypatch_env).intersection(env)
-        assert "clone" in cmd
-        command_order.append("clone")
-        assert "--depth" in cmd
-        assert "1" in cmd
-        assert "--filter=blob:none" in cmd
-        assert "--no-tags" in cmd
-        assert "--no-checkout" in cmd
-        assert "--no-recurse-submodules" in cmd
-        assert "core.symlinks=false" in cmd
-        assert "core.autocrlf=false" in cmd
+        if "clone" in cmd:
+            command_order.append("clone")
+            assert "--depth" in cmd
+            assert "1" in cmd
+            assert "--filter=blob:none" in cmd
+            assert "--no-tags" in cmd
+            assert "--no-checkout" in cmd
+            assert "--no-recurse-submodules" in cmd
+            assert "core.symlinks=false" in cmd
+            assert "core.autocrlf=false" in cmd
+        else:
+            assert "checkout" in cmd
+            assert kwargs["cwd"] == "/tmp/test_dir"
+            command_order.append("checkout")
         return CompletedGitProcess()
 
     def mock_subprocess_run(cmd, *args, **kwargs):
         assert kwargs.get("shell") is False
-        if "checkout" in cmd:
-            command_order.append("checkout")
-            return MagicMock(returncode=0, stdout="", stderr="")
-        elif "rev-parse" in cmd:
+        if "rev-parse" in cmd:
             command_order.append("rev-parse")
             return mock_rev_res
         return MagicMock(returncode=0)
 
-    with patch.dict(os.environ, monkeypatch_env), patch("subprocess.Popen", side_effect=mock_popen), patch(
+    def start_guarded_process(tree, cmd, **kwargs):
+        tree.process = mock_popen(cmd, **kwargs)
+        return tree.process
+
+    with patch.dict(os.environ, monkeypatch_env), patch(
+        "app.ingestion.clone._GitProcessTreeGuard.start", autospec=True, side_effect=start_guarded_process
+    ), patch(
         "subprocess.run", side_effect=mock_subprocess_run
     ), patch(
         "app.ingestion.clone.validate_repository_tree_budget",
@@ -157,8 +167,14 @@ def test_clone_process_is_killed_when_object_store_budget_is_exceeded(tmp_path):
             return self.returncode
 
     process = RunningProcess()
+    def start_fake_process(tree, *_args, **_kwargs):
+        tree.process = process
+        return process
+
     with patch("app.ingestion.clone._git_object_store_bytes", side_effect=[0, 5]), patch(
-        "subprocess.Popen", return_value=process
+        "app.ingestion.clone._GitProcessTreeGuard.start", autospec=True, side_effect=start_fake_process
+    ), patch(
+        "app.ingestion.clone._GitProcessTreeGuard.terminate", autospec=True, side_effect=lambda tree: tree.process.kill()
     ):
         with pytest.raises(RepositoryResourceLimitError, match="object-store byte limit"):
             from app.ingestion.clone import _run_clone_with_object_budget
@@ -189,7 +205,12 @@ def test_completed_clone_is_checked_against_object_budget():
         def kill(self):
             self.returncode = -9
 
-    with patch("subprocess.Popen", return_value=CompletedGitProcess()), patch(
+    def start_completed_process(tree, *_args, **_kwargs):
+        process = CompletedGitProcess()
+        tree.process = process
+        return process
+
+    with patch("app.ingestion.clone._GitProcessTreeGuard.start", autospec=True, side_effect=start_completed_process), patch(
         "app.ingestion.clone._git_object_store_bytes", return_value=5
     ):
         with pytest.raises(RepositoryResourceLimitError, match="object-store byte limit"):
@@ -200,6 +221,100 @@ def test_completed_clone_is_checked_against_object_budget():
                 timeout_seconds=10,
                 max_git_object_bytes=4,
             )
+
+
+def test_checkout_uses_object_budget_runner_and_cleans_rejected_clone(tmp_path):
+    from types import SimpleNamespace
+
+    from app.ingestion.clone import RepositoryResourceLimitError
+
+    clone_dir = tmp_path / "temporary-clone"
+    calls = []
+
+    def create_clone_dir(*_args, **_kwargs):
+        clone_dir.mkdir()
+        return str(clone_dir)
+
+    def run_git(command, **_kwargs):
+        calls.append(command)
+        if "clone" in command:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        assert "checkout" in command
+        raise RepositoryResourceLimitError("object budget exceeded during checkout")
+
+    settings = SimpleNamespace(
+        CLONE_TIMEOUT_SECONDS=10,
+        MAX_GIT_OBJECT_BYTES=4,
+        MAX_REPO_FILES=10,
+        MAX_FILE_SIZE_BYTES=4096,
+        MAX_TOTAL_SOURCE_BYTES=4096,
+    )
+    with patch("app.ingestion.clone.get_settings", return_value=settings), patch(
+        "app.ingestion.clone.tempfile.mkdtemp", side_effect=create_clone_dir
+    ), patch("app.ingestion.clone._run_clone_with_object_budget", side_effect=run_git), patch(
+        "app.ingestion.clone.validate_repository_tree_budget"
+    ):
+        with pytest.raises(RepositoryResourceLimitError, match="during checkout"):
+            clone_repository("https://github.com/org/repo")
+
+    assert ["clone" in call for call in calls] == [True, False]
+    assert not clone_dir.exists()
+
+
+@pytest.mark.parametrize("parent_exit_before_cleanup", [False, True])
+def test_git_process_tree_guard_stops_descendants(tmp_path, parent_exit_before_cleanup):
+    from app.ingestion.clone import _GitProcessTreeGuard
+
+    marker = tmp_path / "child-writes.bin"
+    child_script = tmp_path / "bounded_child.py"
+    child_script.write_text(
+        "import pathlib,sys,time\n"
+        "p=pathlib.Path(sys.argv[1])\n"
+        "f=p.open('ab', buffering=0)\n"
+        "for _ in range(150):\n"
+        "    f.write(b'x' * 1024)\n"
+        "    time.sleep(0.01)\n",
+        encoding="utf-8",
+    )
+    parent_script = tmp_path / "bounded_parent.py"
+    parent_script.write_text(
+        "import subprocess,sys,time\n"
+        "child=subprocess.Popen([sys.executable,sys.argv[1],sys.argv[2]])\n"
+        "print(child.pid, flush=True)\n"
+        "time.sleep(float(sys.argv[3]))\n",
+        encoding="utf-8",
+    )
+    parent_duration = "0.15" if parent_exit_before_cleanup else "60"
+    process_tree = _GitProcessTreeGuard()
+    process = process_tree.start(
+        [sys.executable, str(parent_script), str(child_script), str(marker), parent_duration],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert process.stdout is not None
+        child_pid = process.stdout.readline().strip()
+        assert child_pid.isdigit(), process.stderr.read() if process.stderr is not None else ""
+        assert process.poll() is None
+        deadline = time.monotonic() + 5
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert marker.exists()
+
+        if parent_exit_before_cleanup:
+            process.wait(timeout=5)
+            assert process.poll() is not None
+        else:
+            process_tree.terminate()
+            process.wait(timeout=5)
+        stopped_size = marker.stat().st_size
+        process_tree.close()
+        time.sleep(0.1)
+        assert marker.stat().st_size == stopped_size
+    finally:
+        process_tree.close()
 
 
 def test_rejected_temporary_clone_is_removed(tmp_path):
@@ -276,7 +391,14 @@ def test_clone_repository_timeout_handling():
         def wait(self):
             return self.returncode
 
-    with patch("subprocess.Popen", return_value=RunningProcess()), patch(
+    def start_running_process(tree, *_args, **_kwargs):
+        process = RunningProcess()
+        tree.process = process
+        return process
+
+    with patch("app.ingestion.clone._GitProcessTreeGuard.start", autospec=True, side_effect=start_running_process), patch(
+        "app.ingestion.clone._GitProcessTreeGuard.terminate", autospec=True, side_effect=lambda tree: tree.process.kill()
+    ), patch(
         "app.ingestion.clone._git_object_store_bytes", return_value=0
     ), patch("app.ingestion.clone.time.monotonic", side_effect=[0.0, 11.0]):
         with pytest.raises(CloneTimeoutError):
@@ -302,7 +424,15 @@ def test_clone_repository_non_zero_exit_handling():
         def kill(self):
             self.returncode = -9
 
-    with patch("subprocess.Popen", return_value=FailedGitProcess()):
+    def start_failed_process(tree, *_args, **_kwargs):
+        tree.process = FailedGitProcess()
+        return tree.process
+
+    with patch(
+        "app.ingestion.clone._GitProcessTreeGuard.start",
+        autospec=True,
+        side_effect=start_failed_process,
+    ):
         with pytest.raises(CloneFailedError) as exc_info:
             clone_repository(
                 repo_url="https://github.com/nonexistent/repo",

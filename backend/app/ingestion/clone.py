@@ -2,6 +2,7 @@
 
 import os
 import re
+import signal
 import shutil
 import subprocess
 import tempfile
@@ -79,6 +80,283 @@ _MAX_GIT_DIAGNOSTIC_BYTES = 64 * 1024
 _GIT_OBJECT_MONITOR_INTERVAL_SECONDS = 0.02
 
 
+def _resume_windows_suspended_process(process_id: int) -> None:
+    """Resume a CREATE_SUSPENDED process after it has been assigned to its job."""
+    import ctypes
+    from ctypes import wintypes
+
+    class ThreadEntry32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ThreadID", wintypes.DWORD),
+            ("th32OwnerProcessID", wintypes.DWORD),
+            ("tpBasePri", wintypes.LONG),
+            ("tpDeltaPri", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.Thread32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(ThreadEntry32)]
+    kernel32.Thread32First.restype = wintypes.BOOL
+    kernel32.Thread32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(ThreadEntry32)]
+    kernel32.Thread32Next.restype = wintypes.BOOL
+    kernel32.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenThread.restype = wintypes.HANDLE
+    kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
+    kernel32.ResumeThread.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000004, 0)  # TH32CS_SNAPTHREAD
+    if not snapshot or int(snapshot) == -1:
+        raise RepositoryResourceLimitError("Suspended Git process thread could not be located")
+    resumed = 0
+    entry = ThreadEntry32()
+    entry.dwSize = ctypes.sizeof(entry)
+    try:
+        found = kernel32.Thread32First(snapshot, ctypes.byref(entry))
+        while found:
+            if int(entry.th32OwnerProcessID) == process_id:
+                thread = kernel32.OpenThread(0x0002, False, entry.th32ThreadID)  # THREAD_SUSPEND_RESUME
+                if not thread:
+                    raise RepositoryResourceLimitError("Suspended Git process thread could not be opened")
+                try:
+                    previous_suspend_count = kernel32.ResumeThread(thread)
+                    if previous_suspend_count != 1:
+                        raise RepositoryResourceLimitError("Suspended Git process state was unexpected")
+                    resumed += 1
+                finally:
+                    kernel32.CloseHandle(thread)
+            entry.dwSize = ctypes.sizeof(entry)
+            found = kernel32.Thread32Next(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+    if resumed != 1:
+        raise RepositoryResourceLimitError("Git process did not have exactly one suspended startup thread")
+
+
+class _GitProcessTreeGuard:
+    """Own Git and all descendants so cancellation cannot orphan transport helpers."""
+
+    def __init__(self) -> None:
+        self.process: Optional[subprocess.Popen] = None
+        self._kernel32 = None
+        self._job_handle = None
+
+    def start(self, command: list[str], **kwargs) -> subprocess.Popen:
+        if self.process is not None:
+            raise RuntimeError("Git process guard can only start one process")
+        if os.name != "nt":
+            self.process = subprocess.Popen(command, start_new_session=True, **kwargs)
+            return self.process
+
+        import ctypes
+        from ctypes import wintypes
+
+        class BasicLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class IoCounters(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_ulonglong) for name in (
+                "ReadOperationCount",
+                "WriteOperationCount",
+                "OtherOperationCount",
+                "ReadTransferCount",
+                "WriteTransferCount",
+                "OtherTransferCount",
+            )]
+
+        class ExtendedLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", BasicLimitInformation),
+                ("IoInfo", IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            wintypes.INT,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+        ]
+        kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateJobObject.restype = wintypes.BOOL
+        kernel32.QueryInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            wintypes.INT,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.LPDWORD,
+        ]
+        kernel32.QueryInformationJobObject.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        job_handle = kernel32.CreateJobObjectW(None, None)
+        if not job_handle:
+            raise RepositoryResourceLimitError("Git process resource boundary could not be established")
+        self._kernel32 = kernel32
+        self._job_handle = job_handle
+
+        limits = ExtendedLimitInformation()
+        limits.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not kernel32.SetInformationJobObject(
+            job_handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)
+        ):  # JobObjectExtendedLimitInformation
+            self.close()
+            raise RepositoryResourceLimitError("Git process resource boundary could not be established")
+
+        flags = int(kwargs.pop("creationflags", 0))
+        kwargs["creationflags"] = flags | 0x00000004 | 0x00000200  # suspended + new process group
+        try:
+            process = subprocess.Popen(command, **kwargs)
+        except Exception:
+            self.close()
+            raise
+        self.process = process
+
+        assigned = kernel32.AssignProcessToJobObject(job_handle, wintypes.HANDLE(int(process._handle)))
+        if not assigned:
+            try:
+                process.kill()
+                process.wait(timeout=10)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                self.close()
+                raise RepositoryResourceLimitError(
+                    "Suspended Git process could not be safely terminated"
+                ) from exc
+            self.close()
+            raise RepositoryResourceLimitError("Git process could not be assigned to its resource boundary")
+        try:
+            _resume_windows_suspended_process(process.pid)
+        except BaseException:
+            try:
+                self.terminate()
+            finally:
+                self.close()
+            raise
+        return process
+
+    def _active_windows_processes(self) -> int:
+        import ctypes
+        from ctypes import wintypes
+
+        class BasicAccountingInformation(ctypes.Structure):
+            _fields_ = [
+                ("TotalUserTime", ctypes.c_longlong),
+                ("TotalKernelTime", ctypes.c_longlong),
+                ("ThisPeriodTotalUserTime", ctypes.c_longlong),
+                ("ThisPeriodTotalKernelTime", ctypes.c_longlong),
+                ("TotalPageFaultCount", wintypes.DWORD),
+                ("TotalProcesses", wintypes.DWORD),
+                ("ActiveProcesses", wintypes.DWORD),
+                ("TotalTerminatedProcesses", wintypes.DWORD),
+            ]
+
+        if self._job_handle is None or self._kernel32 is None:
+            return 0
+        info = BasicAccountingInformation()
+        if not self._kernel32.QueryInformationJobObject(
+            self._job_handle,
+            1,  # JobObjectBasicAccountingInformation
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+            None,
+        ):
+            raise RepositoryResourceLimitError("Git process boundary state could not be verified")
+        return int(info.ActiveProcesses)
+
+    def terminate(self) -> None:
+        if self.process is None:
+            return
+        if os.name == "nt":
+            if self._job_handle is None or self._kernel32 is None:
+                raise RepositoryResourceLimitError("Git process tree is not protected by a resource boundary")
+            if not self._kernel32.TerminateJobObject(self._job_handle, 1):
+                raise RepositoryResourceLimitError("Git process tree could not be safely terminated")
+            try:
+                self.process.wait(timeout=10)
+            except subprocess.TimeoutExpired as exc:
+                raise RepositoryResourceLimitError("Git process tree termination timed out") from exc
+            deadline = time.monotonic() + 5
+            while self._active_windows_processes() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if self._active_windows_processes():
+                raise RepositoryResourceLimitError("Git process tree termination could not be confirmed")
+            return
+
+        try:
+            os.killpg(self.process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError as exc:
+            if self.process.poll() is None:
+                self.process.kill()
+            try:
+                self.process.wait(timeout=10)
+            except subprocess.TimeoutExpired as wait_exc:
+                raise RepositoryResourceLimitError(
+                    "Git process tree termination timed out"
+                ) from wait_exc
+            raise RepositoryResourceLimitError("Git process tree could not be safely terminated") from exc
+        try:
+            self.process.wait(timeout=10)
+        except subprocess.TimeoutExpired as exc:
+            raise RepositoryResourceLimitError("Git process tree termination timed out") from exc
+
+    def close(self) -> None:
+        process = self.process
+        if process is None:
+            if self._job_handle is not None and self._kernel32 is not None:
+                self._kernel32.CloseHandle(self._job_handle)
+                self._job_handle = None
+            return
+
+        try:
+            if os.name == "nt":
+                if self._job_handle is not None and self._active_windows_processes():
+                    self.terminate()
+            else:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                if process.poll() is None:
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired as exc:
+                        raise RepositoryResourceLimitError(
+                            "Git process tree termination timed out"
+                        ) from exc
+        finally:
+            if self._job_handle is not None and self._kernel32 is not None:
+                self._kernel32.CloseHandle(self._job_handle)
+                self._job_handle = None
+            self.process = None
+
+
 def _git_object_store_bytes(repository_dir: str) -> int:
     """Return bounded local Git object-store size without following links."""
     object_dir = os.path.join(repository_dir, ".git", "objects")
@@ -112,12 +390,15 @@ def _run_clone_with_object_budget(
     *,
     environment: dict[str, str],
     repository_dir: str,
+    cwd: Optional[str] = None,
     timeout_seconds: int,
     max_git_object_bytes: int,
 ) -> subprocess.CompletedProcess:
     """Run Git while bounding its on-disk object footprint and captured diagnostics."""
-    process = subprocess.Popen(
+    process_tree = _GitProcessTreeGuard()
+    process = process_tree.start(
         command,
+        cwd=cwd,
         env=environment,
         shell=False,
         stdin=subprocess.DEVNULL,
@@ -126,6 +407,8 @@ def _run_clone_with_object_budget(
         bufsize=0,
     )
     stderr = bytearray()
+    reader: Optional[threading.Thread] = None
+    reader_started = False
 
     def drain_stderr() -> None:
         assert process.stderr is not None
@@ -141,26 +424,32 @@ def _run_clone_with_object_budget(
             process.stderr.close()
 
     reader = threading.Thread(target=drain_stderr, daemon=True)
-    reader.start()
     deadline = time.monotonic() + timeout_seconds
     try:
+        reader.start()
+        reader_started = True
         while process.poll() is None:
             if _git_object_store_bytes(repository_dir) > max_git_object_bytes:
-                process.kill()
-                process.wait()
+                process_tree.terminate()
                 raise RepositoryResourceLimitError(
                     "Git acquisition exceeded the configured object-store byte limit"
                 )
             if time.monotonic() >= deadline:
-                process.kill()
-                process.wait()
+                process_tree.terminate()
                 raise CloneTimeoutError(f"git clone timed out after {timeout_seconds} seconds.")
             time.sleep(_GIT_OBJECT_MONITOR_INTERVAL_SECONDS)
     finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
-        reader.join(timeout=2)
+        try:
+            if process.poll() is None:
+                process_tree.terminate()
+        finally:
+            try:
+                process_tree.close()
+            finally:
+                if reader_started:
+                    reader.join(timeout=2)
+                elif process.stderr is not None:
+                    process.stderr.close()
 
     # Catch a final packfile write that completed between monitor intervals.
     # The monitor is reactive; this post-exit check closes the fast-process gap.
@@ -199,7 +488,8 @@ def validate_repository_tree_budget(
     if _git_object_store_bytes(repository_dir) > max_git_object_bytes:
         raise RepositoryResourceLimitError("Git object-store exceeds its configured byte limit")
     command = ["git", "-c", "core.symlinks=false", "-c", "core.autocrlf=false", "ls-tree", "-r", "-l", "-z", commit_ref]
-    process = subprocess.Popen(
+    process_tree = _GitProcessTreeGuard()
+    process = process_tree.start(
         command,
         cwd=repository_dir,
         env=safe_git_environment(),
@@ -220,10 +510,6 @@ def validate_repository_tree_budget(
                 captured[name].extend(chunk[:max(remaining, 0)])
                 if len(chunk) > remaining:
                     overflow.set()
-                    try:
-                        process.kill()
-                    except OSError:
-                        pass
                     return
         finally:
             stream.close()
@@ -233,33 +519,46 @@ def validate_repository_tree_budget(
         threading.Thread(target=drain, args=("stdout", process.stdout, metadata_limit), daemon=True),
         threading.Thread(target=drain, args=("stderr", process.stderr, 64 * 1024), daemon=True),
     )
-    for reader in readers:
-        reader.start()
+    started_readers: list[threading.Thread] = []
     deadline = time.monotonic() + timeout_seconds
     limit_error: Optional[str] = None
     try:
+        for reader in readers:
+            reader.start()
+            started_readers.append(reader)
         while process.poll() is None:
+            if overflow.is_set():
+                limit_error = "Git tree metadata exceeded its configured byte limit"
+                process_tree.terminate()
+                break
             try:
                 if _git_object_store_bytes(repository_dir) > max_git_object_bytes:
                     limit_error = "Git tree inspection exceeded the configured object-store byte limit"
-                    process.kill()
+                    process_tree.terminate()
                     break
             except RepositoryResourceLimitError:
                 limit_error = "Git tree inspection could not safely inspect the object store"
-                process.kill()
+                process_tree.terminate()
                 break
             if time.monotonic() >= deadline:
                 limit_error = "Git tree inspection exceeded its time limit"
-                process.kill()
+                process_tree.terminate()
                 break
             time.sleep(_GIT_OBJECT_MONITOR_INTERVAL_SECONDS)
         process.wait()
     finally:
-        for reader in readers:
-            reader.join(timeout=2)
-        if process.poll() is None:
-            process.kill()
-            process.wait()
+        try:
+            if process.poll() is None:
+                process_tree.terminate()
+        finally:
+            try:
+                process_tree.close()
+            finally:
+                for reader in started_readers:
+                    reader.join(timeout=2)
+                for stream in (process.stdout, process.stderr)[len(started_readers):]:
+                    if stream is not None:
+                        stream.close()
 
     try:
         if _git_object_store_bytes(repository_dir) > max_git_object_bytes:
@@ -431,15 +730,13 @@ def clone_repository(
             timeout_seconds=min(timeout, 60),
         )
 
-        checkout_result = subprocess.run(
+        checkout_result = _run_clone_with_object_budget(
             ["git", "checkout", "--detach", "HEAD"],
+            environment=env,
+            repository_dir=dest_dir,
             cwd=dest_dir,
-            env=safe_git_environment(),
-            shell=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
+            timeout_seconds=timeout,
+            max_git_object_bytes=int(settings.MAX_GIT_OBJECT_BYTES),
         )
         if checkout_result.returncode != 0:
             if target_dir is None and os.path.exists(dest_dir):
