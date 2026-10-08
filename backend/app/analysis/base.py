@@ -144,9 +144,18 @@ class BaseScannerAdapter(ABC):
         """
         settings = get_settings()
         timeout = timeout_seconds or settings.SCANNER_TIMEOUT_SECONDS
+        cancellation_requested = threading.Event()
 
         def _run() -> Tuple[int, str, str]:
-            process = subprocess.Popen(
+            # Reuse the repository's established cross-platform process-tree
+            # boundary (POSIX session / Windows Job Object). Scanners inspect
+            # hostile trees and may themselves start helper processes.
+            from app.ingestion.clone import _GitProcessTreeGuard
+
+            if cancellation_requested.is_set():
+                raise RuntimeError("Scanner command was cancelled before process start")
+            process_tree = _GitProcessTreeGuard()
+            process = process_tree.start(
                 cmd,
                 cwd=cwd,
                 env=safe_scanner_environment(),
@@ -156,6 +165,27 @@ class BaseScannerAdapter(ABC):
             )
             output_limit_hit = threading.Event()
             captured: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
+            termination_lock = threading.Lock()
+            termination_succeeded = threading.Event()
+
+            def terminate_process_tree() -> None:
+                with termination_lock:
+                    if termination_succeeded.is_set():
+                        return
+                    if process.poll() is not None:
+                        # The root may exit between writing the bounded output
+                        # and the drain thread observing it. close() below still
+                        # kills any surviving descendants in the owned boundary.
+                        termination_succeeded.set()
+                        return
+                    try:
+                        process_tree.terminate()
+                    except Exception:
+                        # The main thread performs a serialized cleanup retry
+                        # before any scanner result can be accepted.
+                        return
+                    else:
+                        termination_succeeded.set()
 
             def drain(name: str, stream, limit: int) -> None:
                 try:
@@ -167,10 +197,7 @@ class BaseScannerAdapter(ABC):
                         captured[name].extend(chunk[: max(remaining, 0)])
                         if len(chunk) > remaining:
                             output_limit_hit.set()
-                            try:
-                                process.kill()
-                            except OSError:
-                                pass
+                            terminate_process_tree()
                             return
                 finally:
                     stream.close()
@@ -190,25 +217,63 @@ class BaseScannerAdapter(ABC):
             )
             for reader in readers:
                 reader.start()
+            timed_out = False
+            cancelled = False
+            deadline = time.monotonic() + timeout
             try:
-                process.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-                raise
+                while process.poll() is None:
+                    if cancellation_requested.is_set():
+                        cancelled = True
+                        terminate_process_tree()
+                        break
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        timed_out = True
+                        terminate_process_tree()
+                        break
+                    try:
+                        process.wait(timeout=min(remaining, 0.05))
+                    except subprocess.TimeoutExpired:
+                        continue
             finally:
+                cleanup_error: Exception | None = None
+                with termination_lock:
+                    try:
+                        if process.poll() is None and not termination_succeeded.is_set():
+                            process_tree.terminate()
+                        process_tree.close()
+                    except Exception as exc:
+                        cleanup_error = exc
+                    finally:
+                        # Prevent a drain thread that just observed output
+                        # overflow from racing against a closed Job Object.
+                        termination_succeeded.set()
                 for reader in readers:
                     reader.join(timeout=2)
                 if process.poll() is None:
-                    process.kill()
-                    process.wait()
+                    raise RuntimeError("Scanner process termination could not be confirmed") from cleanup_error
+                if cleanup_error is not None:
+                    raise RuntimeError("Scanner process-tree cleanup could not be confirmed") from cleanup_error
             if output_limit_hit.is_set():
                 raise ScannerOutputError(self.tool_name, "child output exceeded the configured byte limit")
+            if timed_out:
+                raise subprocess.TimeoutExpired(cmd, timeout)
+            if cancelled:
+                return process.returncode, "", ""
             stdout = bytes(captured["stdout"]).decode("utf-8", errors="replace")
             stderr = bytes(captured["stderr"]).decode("utf-8", errors="replace")
             return process.returncode, stdout, stderr
 
-        return await asyncio.to_thread(_run)
+        worker = asyncio.create_task(asyncio.to_thread(_run))
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError as cancellation_error:
+            cancellation_requested.set()
+            try:
+                await asyncio.shield(worker)
+            except Exception as cleanup_error:
+                raise RuntimeError("Scanner process-tree cleanup failed during cancellation") from cleanup_error
+            raise cancellation_error
 
     @abstractmethod
     def parse_output(self, raw_json_str: str, repo_dir: str) -> List[StaticFinding]:

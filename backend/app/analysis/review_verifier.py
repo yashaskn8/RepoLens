@@ -335,6 +335,12 @@ class ChangeReviewVerifier:
                             f"Invalid line range: start_line {start_l} exceeds total file lines ({total_l}) in '{f_path}'.",
                             None,
                         )
+                    if end_l > total_l:
+                        return (
+                            ChangeReviewVerdict.REJECTED,
+                            f"Invalid line range: end_line {end_l} exceeds total file lines ({total_l}) in '{f_path}'.",
+                            None,
+                        )
                 elif read_attempted:
                     # Workspace was present but file was oversized or unreadable
                     return (

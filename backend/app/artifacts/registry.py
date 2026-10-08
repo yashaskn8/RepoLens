@@ -439,6 +439,7 @@ class ArtifactRegistry:
                 select(ArtifactReferenceModel.id)
                 .outerjoin(released, released.reference_id == ArtifactReferenceModel.id)
                 .where(
+                    ArtifactReferenceModel.tenant_id == tenant_id,
                     ArtifactReferenceModel.artifact_id == artifact_id,
                     released.id.is_(None),
                 )
@@ -452,8 +453,16 @@ class ArtifactRegistry:
             self.session.execute(
                 select(ArtifactLineageModel.artifact_id)
                 .join(ArtifactModel, ArtifactModel.id == ArtifactLineageModel.artifact_id)
-                .outerjoin(tombstone, tombstone.artifact_id == ArtifactLineageModel.artifact_id)
+                .outerjoin(
+                    tombstone,
+                    and_(
+                        tombstone.tenant_id == tenant_id,
+                        tombstone.artifact_id == ArtifactLineageModel.artifact_id,
+                    ),
+                )
                 .where(
+                    ArtifactLineageModel.tenant_id == tenant_id,
+                    ArtifactModel.tenant_id == tenant_id,
                     ArtifactLineageModel.related_artifact_id == artifact_id,
                     tombstone.id.is_(None),
                 )

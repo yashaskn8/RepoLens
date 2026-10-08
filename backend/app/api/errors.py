@@ -8,6 +8,11 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from app.ingestion.acquisition_boundary import (
+    AcquisitionEnforcementUnavailable,
+    require_acquisition_boundary,
+)
+
 
 _CODE_PREFIX = re.compile(r"^([A-Z][A-Z0-9_]{2,63}):\s*(.*)$", re.DOTALL)
 
@@ -56,3 +61,14 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
             },
         }),
     )
+
+
+def require_acquisition_available(settings: Any) -> None:
+    """Map unavailable production acquisition to the stable API capability error."""
+    try:
+        require_acquisition_boundary(settings)
+    except AcquisitionEnforcementUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"error_code": exc.failure_code, "message": str(exc)},
+        ) from exc

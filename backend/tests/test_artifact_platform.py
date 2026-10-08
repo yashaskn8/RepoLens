@@ -64,9 +64,15 @@ def _put(store, artifact_id: str, payload: bytes, *, tenant_id: str = "tenant-a"
     return store.put(request, io.BytesIO(payload))
 
 
-def _edge(artifact_id: str, relation: LineageRelation, target_id: str) -> ArtifactLineageEdge:
+def _edge(
+    artifact_id: str,
+    relation: LineageRelation,
+    target_id: str,
+    *,
+    tenant_id: str = "tenant-a",
+) -> ArtifactLineageEdge:
     return ArtifactLineageEdge(
-        tenant_id="tenant-a",
+        tenant_id=tenant_id,
         artifact_id=artifact_id,
         relation=relation,
         related_artifact_id=target_id,
@@ -74,12 +80,12 @@ def _edge(artifact_id: str, relation: LineageRelation, target_id: str) -> Artifa
     )
 
 
-def _record(cls, store, artifact_id: str, *, lineage=()):
+def _record(cls, store, artifact_id: str, *, lineage=(), tenant_id: str = "tenant-a"):
     payload = ("payload:" + artifact_id).encode("utf-8")
-    metadata = _put(store, artifact_id, payload)
+    metadata = _put(store, artifact_id, payload, tenant_id=tenant_id)
     return cls(
         artifact_id=artifact_id,
-        tenant_id="tenant-a",
+        tenant_id=tenant_id,
         repository_id="repository-a",
         revision_id="revision-a",
         schema_version="1.0",
@@ -278,6 +284,43 @@ def test_registry_enforces_traceability_and_reference_safe_reconciliation(db_ses
         not store.exists(artifact.payload_locator, include_tombstoned=True)
         for artifact in (revision, analyzer, evidence, claim, finding)
     )
+
+
+def test_artifact_lifecycle_queries_are_tenant_scoped(db_session, tmp_path: Path):
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    registry = ArtifactRegistry(db_session, store=store)
+    revision = _record(RepositoryRevisionArtifact, store, "tenant-b-revision", tenant_id="tenant-b")
+    dependent = _record(
+        AnalyzerRunArtifact,
+        store,
+        "tenant-b-dependent",
+        tenant_id="tenant-b",
+        lineage=(
+            _edge(
+                "tenant-b-dependent",
+                LineageRelation.DERIVED_FROM,
+                revision.artifact_id,
+                tenant_id="tenant-b",
+            ),
+        ),
+    )
+    registry.register(revision)
+    registry.register(dependent)
+    reference = registry.acquire_reference(
+        tenant_id="tenant-b",
+        artifact_id=revision.artifact_id,
+        referrer_kind="REPORT",
+        referrer_id="tenant-b-report",
+    )
+
+    assert registry.active_reference_ids(tenant_id="tenant-b", artifact_id=revision.artifact_id) == [
+        reference.reference_id
+    ]
+    assert registry.active_reference_ids(tenant_id="tenant-a", artifact_id=revision.artifact_id) == []
+    assert registry.active_dependent_ids(tenant_id="tenant-b", artifact_id=revision.artifact_id) == [
+        dependent.artifact_id
+    ]
+    assert registry.active_dependent_ids(tenant_id="tenant-a", artifact_id=revision.artifact_id) == []
 
 
 def test_artifact_records_are_frozen_and_reject_ambiguous_coverage(tmp_path: Path):

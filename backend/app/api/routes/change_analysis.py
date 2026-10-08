@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.analysis.workflow import execute_background_change_analysis
 from app.api.dependencies import get_current_user, verify_csrf
+from app.api.errors import require_acquisition_available
 from app.api.event_cursor import MAX_EVENT_CURSOR, parse_event_cursor
 from app.api.idempotency import idempotency_identity
 from app.core.config import get_settings
@@ -207,6 +208,7 @@ async def create_change_analysis(
             response.headers["Idempotency-Replayed"] = "true"
             return _serialize_analysis(existing)
 
+    require_acquisition_available(get_settings())
     check_and_increment_quota(db, current_user.id, UsageOperation.CHANGE_ANALYSIS_CREATE.value)
 
     analysis_model = ChangeAnalysisModel(
@@ -326,6 +328,7 @@ async def create_change_analysis_from_pr(
             response.headers["Idempotency-Replayed"] = "true"
             return _serialize_analysis(existing)
 
+    require_acquisition_available(get_settings())
     check_and_increment_quota(db, current_user.id, UsageOperation.CHANGE_ANALYSIS_CREATE.value)
 
     resolver = get_github_pr_resolver()

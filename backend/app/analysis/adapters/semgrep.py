@@ -67,6 +67,17 @@ class SemgrepAdapter(BaseScannerAdapter):
 
         if "results" not in data or not isinstance(data["results"], list):
             raise ScannerOutputError(self.tool_name, "Expected 'results' to be a JSON array")
+        errors = data.get("errors", [])
+        if not isinstance(errors, list):
+            raise ScannerOutputError(self.tool_name, "Expected 'errors' to be a JSON array")
+        if errors:
+            # Semgrep can return usable matches alongside parse/config failures.
+            # Treat any diagnostic as incomplete coverage rather than publishing
+            # an authoritative clean result from only the successfully scanned files.
+            raise ScannerOutputError(
+                self.tool_name,
+                f"Semgrep reported {len(errors)} scan error(s); results may be incomplete",
+            )
         results = data["results"]
         for index, item in enumerate(results):
             try:

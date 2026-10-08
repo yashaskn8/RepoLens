@@ -26,6 +26,7 @@ from app.artifacts.scan_provenance import (
     scan_policy_snapshot_id,
 )
 from app.api.dependencies import get_current_user, verify_csrf
+from app.api.errors import require_acquisition_available
 from app.api.event_cursor import MAX_EVENT_CURSOR, parse_event_cursor
 from app.api.idempotency import idempotency_identity
 from app.context.runtime import ScanIntelligenceRuntime
@@ -883,6 +884,11 @@ async def create_scan(
             response.headers["Location"] = f"/api/v1/jobs/{submission.result.work_item_id}"
             response.headers["Idempotency-Replayed"] = "true"
             return _scan_resource(db, existing_scan)
+
+    # Idempotent replays above remain available, but new acquisition work must
+    # fail before quota accounting or durable admission when production isolation
+    # is unavailable.
+    require_acquisition_available(get_settings())
 
     check_and_increment_quota(db, current_user.id, UsageOperation.SCAN_CREATE.value)
     scan_model = ScanModel(

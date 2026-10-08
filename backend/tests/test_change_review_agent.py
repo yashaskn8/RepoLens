@@ -355,6 +355,39 @@ def test_invalid_line_rejected(base_sample_diff, base_sample_blast_radius, base_
     assert "Invalid line range" in reason or "exceeds total file lines" in reason
 
 
+def test_line_evidence_end_cannot_exceed_workspace_file(
+    base_sample_diff, base_sample_blast_radius, base_sample_graph, tmp_path
+):
+    """A valid start line does not attest a range extending beyond the source bytes."""
+    verifier = ChangeReviewVerifier()
+    test_file = tmp_path / "app" / "services" / "auth.py"
+    test_file.parent.mkdir(parents=True, exist_ok=True)
+    test_file.write_text("\n".join(f"# line {i}" for i in range(1, 51)), encoding="utf-8")
+
+    finding = ChangeReviewFinding(
+        title="Out of bounds line range",
+        risk_type="REGRESSION_RISK",
+        severity=Severity.MEDIUM,
+        reasoning_summary="The claimed evidence extends past the end of the file.",
+        evidence_refs=["line:app/services/auth.py:10-100"],
+        affected_files=["app/services/auth.py"],
+        affected_symbols=[],
+        confidence=0.9,
+        assumptions=[],
+    )
+
+    verdict, reason, _ = verifier.verify_finding(
+        finding=finding,
+        diff_result=base_sample_diff,
+        blast_radius=base_sample_blast_radius,
+        base_graph=base_sample_graph,
+        head_workspace=str(tmp_path),
+    )
+
+    assert verdict == ChangeReviewVerdict.REJECTED
+    assert "end_line 100 exceeds total file lines (50)" in reason
+
+
 # =========================================================================
 # 5. Fake CALLS Edge Test
 # =========================================================================

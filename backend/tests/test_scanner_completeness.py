@@ -68,3 +68,21 @@ async def test_semgrep_valid_empty_results_json_returns_completed_zero_findings(
             result = await adapter.scan(tmpdir)
             assert result.status == ToolStatus.COMPLETED
             assert len(result.findings) == 0
+
+
+@pytest.mark.asyncio
+async def test_semgrep_error_diagnostic_cannot_be_reported_as_clean_scan():
+    """A parse/config error with no findings is incomplete, not a clean result."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        adapter = SemgrepAdapter()
+        with patch.object(adapter, "is_available", return_value=True), \
+             patch.object(adapter, "_execute_command", new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = (
+                0,
+                '{"results": [], "errors": [{"code": 2, "level": "error", "message": "parse error"}]}',
+                "",
+            )
+            result = await adapter.scan(tmpdir)
+
+    assert result.status == ToolStatus.INVALID_OUTPUT
+    assert result.findings == []

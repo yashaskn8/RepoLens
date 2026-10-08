@@ -26,5 +26,12 @@ class AcquisitionEnforcementUnavailable(RuntimeError):
 
 def require_acquisition_boundary(settings: Any) -> None:
     """Prevent production Git acquisition from silently using reactive controls."""
-    if bool(getattr(settings, "is_production", False)):
+    if not acquisition_boundary_available(settings):
         raise AcquisitionEnforcementUnavailable()
+
+
+def acquisition_boundary_available(settings: Any) -> bool:
+    """Report whether this runtime may admit new repository acquisition work."""
+    # No trusted quota/egress provider is integrated yet. Development uses the
+    # documented weaker process/object monitoring, but production must fail closed.
+    return not bool(getattr(settings, "is_production", False))

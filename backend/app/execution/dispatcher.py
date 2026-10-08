@@ -1702,10 +1702,27 @@ class DurableWorkDispatcher:
                 return 0
             service = WorkSubmissionService()
             settings = get_settings()
-
+            from app.ingestion.acquisition_boundary import acquisition_boundary_available
             from app.models.scan import ScanModel
+            from app.models.change_analysis import ChangeAnalysisModel
 
-            scans = db.query(ScanModel).filter(ScanModel.status.in_(["PENDING", "RUNNING"])).all()
+            if acquisition_boundary_available(settings):
+                scans = db.query(ScanModel).filter(
+                    ScanModel.status.in_(["PENDING", "RUNNING"])
+                ).all()
+                changes = db.query(ChangeAnalysisModel).filter(
+                    ChangeAnalysisModel.status.notin_(["COMPLETED", "FAILED"])
+                ).all()
+            else:
+                # Keep unrelated report recovery available without repeatedly
+                # attempting legacy repository acquisitions that cannot run.
+                logger.warning(
+                    "Skipping orphan scan/change recovery because the production "
+                    "acquisition boundary is unavailable."
+                )
+                scans = []
+                changes = []
+
             for scan in scans:
                 if not scan.owner_user_id or cls._has_work(db, WorkKind.SCAN, scan.id):
                     continue
@@ -1737,11 +1754,6 @@ class DurableWorkDispatcher:
                 )
                 created += 1
 
-            from app.models.change_analysis import ChangeAnalysisModel
-
-            changes = db.query(ChangeAnalysisModel).filter(
-                ChangeAnalysisModel.status.notin_(["COMPLETED", "FAILED"])
-            ).all()
             for model in changes:
                 if not model.owner_user_id or cls._has_work(db, WorkKind.CHANGE_ANALYSIS, model.id):
                     continue

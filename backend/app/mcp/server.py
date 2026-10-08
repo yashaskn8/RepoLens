@@ -6,6 +6,9 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
+
 from app.analysis.store import EvidenceStore
 from app.context.engine import ContextEngine
 from app.graph.matcher import match_route_contract, normalize_route_path
@@ -116,7 +119,7 @@ class MCPRepositoryServer:
                 parameters={
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string", "description": "Text substring to search for"},
+                        "query": {"type": "string", "maxLength": 512, "description": "Text substring to search for"},
                         "max_results": {"type": "integer", "description": "Maximum matching lines to return (default: 20)", "default": 20},
                         "language": {"type": "string", "description": "Optional language filter (e.g. python, typescript)"},
                     },
@@ -230,6 +233,42 @@ class MCPRepositoryServer:
 
     async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> MCPToolCallResponse:
         """Dispatch one tool and enforce a final serialized response bound."""
+        if not isinstance(arguments, dict):
+            return MCPToolCallResponse(
+                tool_name=tool_name,
+                is_error=True,
+                error_message="MCP_TOOL_ARGUMENT_INVALID: Tool arguments must be a JSON object.",
+            )
+        definition = next((tool for tool in self.list_tools() if tool.name == tool_name), None)
+        if definition is not None:
+            schema = definition.parameters
+            try:
+                validator = Draft202012Validator(schema)
+                validator.check_schema(schema)
+                validation_error = next(validator.iter_errors(arguments), None)
+            except SchemaError:
+                return MCPToolCallResponse(
+                    tool_name=tool_name,
+                    is_error=True,
+                    error_message="MCP_TOOL_SCHEMA_INVALID: The declared tool input schema is invalid.",
+                )
+            if validation_error is not None:
+                if validation_error.validator == "required" and isinstance(validation_error.instance, dict):
+                    required = validation_error.validator_value
+                    missing = sorted(name for name in required if name not in validation_error.instance)
+                    message = (
+                        "MCP_TOOL_ARGUMENT_INVALID: Required tool argument(s) "
+                        f"{', '.join(missing)} are missing."
+                    )
+                else:
+                    # Do not echo invalid argument values: they may contain source
+                    # snippets, credentials, or attacker-controlled payloads.
+                    message = "MCP_TOOL_ARGUMENT_INVALID: Tool arguments do not match the declared input schema."
+                return MCPToolCallResponse(
+                    tool_name=tool_name,
+                    is_error=True,
+                    error_message=message,
+                )
         response = await self._call_tool_unbounded(tool_name, arguments)
         if response.is_error:
             message = response.error_message or "MCP tool execution failed."

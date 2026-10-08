@@ -8,6 +8,7 @@ import json
 from typing import Any, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
@@ -25,6 +26,7 @@ from app.governance.events import AuditLedger, DomainOutbox
 from app.governance.policies import OperationalPolicy, OperationalPolicyService
 from app.governance.telemetry import TelemetryRecorder
 from app.models.execution import WorkItemModel
+from app.ingestion.acquisition_boundary import require_acquisition_boundary
 from app.observability import current_trace_headers
 
 
@@ -82,6 +84,28 @@ class WorkSubmissionService:
         traceparent: str | None = None,
         tracestate: str | None = None,
     ) -> WorkSubmission:
+        normalized_kind = work_kind if isinstance(work_kind, WorkKind) else WorkKind(work_kind)
+        if normalized_kind in {WorkKind.SCAN, WorkKind.CHANGE_ANALYSIS}:
+            existing_identity = db.query(WorkItemModel.id).filter(
+                WorkItemModel.tenant_id == tenant_id,
+                WorkItemModel.work_kind == normalized_kind.value,
+            )
+            if external_idempotency_key is None:
+                existing_identity = existing_identity.filter(
+                    WorkItemModel.idempotency_key == idempotency_key
+                )
+            else:
+                existing_identity = existing_identity.filter(
+                    or_(
+                        WorkItemModel.idempotency_key == idempotency_key,
+                        WorkItemModel.external_idempotency_key == external_idempotency_key,
+                    )
+                )
+            if existing_identity.first() is None:
+                # Preserve legitimate idempotency replay, but do not allow
+                # internal callers or recovery paths to create doomed work.
+                require_acquisition_boundary(self.settings)
+
         policy_model = OperationalPolicyService.active(db, tenant_id)
         if policy_model is None:
             policy_model = OperationalPolicyService.ensure_active(db)

@@ -218,7 +218,7 @@ RepoLens cleanly separates unauthenticated public reads from privileged operator
 
 | Action | Authentication Required | Privileged Token Used | Safety Checks |
 |---|---|---|---|
-| Public Repository Scan | None / Normal User Session | None (Public Git Clone) | Development: shallow clone, tree/file admission budgets, reactive object-store monitor, process-tree termination, symlink confinement. Production Git acquisition is disabled until a quota-enforced workspace and controlled-egress boundary are integrated. |
+| Public Repository Scan | None / Normal User Session | None (Public Git Clone) | Development: shallow clone, tree/file admission budgets, reactive object-store monitor, process-tree termination, symlink confinement. Production Git acquisition is disabled until a quota-enforced workspace and controlled-egress boundary are integrated; new scan/change-analysis requests receive a stable 503 before quota or work admission, while existing idempotency replays remain stable. |
 | Public PR Resolution | None / Normal User Session | None (Public GitHub REST) | Validates GitHub URL, parses base/head SHAs |
 | Safe PR Delivery (Phase 5) | `OPERATOR` Session | Server `GITHUB_TOKEN` | `GITHUB_DELIVERY_ENABLED=True`, Human Approved, Base Drift Check, Git Data API only |
 | PR Review Publish (Phase 7) | `OPERATOR` Session | Server `GITHUB_TOKEN` | `GITHUB_PR_REVIEW_WRITE_ENABLED=True`, Base Drift Check, `COMMENT` event only |

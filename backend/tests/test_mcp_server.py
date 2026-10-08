@@ -139,6 +139,37 @@ async def test_mcp_tool_repo_get_manifest(mcp_server_fixture):
 
 
 @pytest.mark.asyncio
+async def test_mcp_tool_rejects_arguments_outside_advertised_closed_schema(mcp_server_fixture):
+    server, _ = mcp_server_fixture
+
+    result = await server.call_tool("repo_get_manifest", {"snapshot_id": "foreign-snapshot"})
+
+    assert result.is_error is True
+    assert result.error_message.startswith("MCP_TOOL_ARGUMENT_INVALID:")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        ("repo_search_code", {"query": 17}),
+        ("repo_read_file", {"file_path": "main.py", "start_line": True}),
+        ("repo_get_symbols", {"kind": "NOT_A_SYMBOL_KIND"}),
+        ("repo_trace_contract", {"route_or_url": ["/api/health"]}),
+    ],
+)
+async def test_mcp_tool_rejects_declared_schema_type_and_enum_violations(
+    mcp_server_fixture, tool_name, arguments
+):
+    server, _ = mcp_server_fixture
+
+    result = await server.call_tool(tool_name, arguments)
+
+    assert result.is_error is True
+    assert result.error_message.startswith("MCP_TOOL_ARGUMENT_INVALID:")
+
+
+@pytest.mark.asyncio
 async def test_mcp_tool_repo_search_code(mcp_server_fixture):
     """Verify repo_search_code matches substrings across files safely."""
     server, _ = mcp_server_fixture

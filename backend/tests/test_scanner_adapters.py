@@ -74,6 +74,14 @@ async def test_scanner_subprocess_receives_minimal_environment(monkeypatch):
         return FakeProcess(**kwargs)
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    def fake_process_tree_start(tree, command, **kwargs):
+        tree.process = subprocess.Popen(command, **kwargs)
+        return tree.process
+
+    monkeypatch.setattr(
+        "app.ingestion.clone._GitProcessTreeGuard.start",
+        fake_process_tree_start,
+    )
     adapter = SemgrepAdapter()
     result = await adapter._execute_command(["semgrep"], cwd=".", timeout_seconds=1)
 
