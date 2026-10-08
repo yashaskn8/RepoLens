@@ -116,6 +116,7 @@ def test_windows_path_security_lane_runs_the_platform_sensitive_test():
     assert "test_manifest_skips_symlink_file_without_reading_external_target" in lane
     assert "test_corpus_loader_rejects_linked_case_file" in lane
     assert "test_post_registration_symlink_swap_fails_closed" in lane
+    assert "test_directory_junction_escape_fails_closed" in lane
 
 
 def test_secret_backed_manual_jobs_are_main_only_and_secrets_are_step_scoped():

@@ -203,4 +203,5 @@ jobs:
           tests/test_manifest_builder.py::test_manifest_skips_symlink_file_without_reading_external_target
           tests/test_agent_security_harness.py::test_corpus_loader_rejects_linked_case_file
           tests/test_agent_tool_remediation.py::test_post_registration_symlink_swap_fails_closed
+          tests/test_agent_tool_remediation.py::test_directory_junction_escape_fails_closed
           -q
