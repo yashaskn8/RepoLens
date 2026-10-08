@@ -1,8 +1,8 @@
-# RepoLens v1.0.0 Release Evidence Pack
+# Historical RepoLens v1.0.0 Release Evidence Pack — NOT CURRENT ATTESTATION
 
-> **CORRECTION NOTICE**: This document was updated in v1.0.1 to correct factual inaccuracies. See [V1.0.0_CORRECTION_NOTICE.md](V1.0.0_CORRECTION_NOTICE.md) for details.
+> **Historical status:** This file preserves a prior release-evidence draft. Its assertions have not been revalidated against current `main` and must not be treated as production approval. The `v1.0.0` and `v1.0.1` Git tags exist, but no published GitHub Release object was present when checked on 2026-10-08; the manual production-validation workflow had no runs. See [V1.0.0_CORRECTION_NOTICE.md](V1.0.0_CORRECTION_NOTICE.md) for the historical documentation corrections.
 
-**Authoritative Production Readiness and Verification Attestation**
+**Archived document only — not an authoritative current production-readiness or verification attestation.**
 
 ---
 
@@ -23,9 +23,9 @@
 
 ## 2. Executive Summary
 
-RepoLens v1.0.0 represents the initial production-ready release of the AI-powered repository intelligence, security scanning, and pull request change analysis platform. 
+The following sections preserve claims made in the historical v1.0.0 evidence draft. They were not verified by this campaign and do not establish that v1.0.0 was a production-ready or publicly released product.
 
-This release evidence pack provides deterministic, machine-verified evidence that all functional, security, architectural, and quality invariants are satisfied. No claims are unverified; all statements are grounded in exact machine execution records.
+The counts and assertions below are historical, not current exact-SHA evidence. Current validation and release status are described in the repository README.
 
 - **Backend Pytest Suite**: 650 collected, 645 passed, 5 skipped (valid environment guards), 0 failed.
 - **Phase 5–8 Regression Suite**: 167 collected, 167 passed, 0 skipped, 0 failed.
@@ -263,6 +263,6 @@ Per the Phase 9 Batch 4 verification protocol:
 
 ## 20. Sign-Off & Verification Attestation
 
-The undersigned automated release process hereby certifies that RepoLens v1.0.0 meets all production release requirements, passes all automated regression gates, exhibits zero unverified completion claims, and is ready for tag publication.
+The following text is retained as historical sign-off wording from this archival document. It is not a current certification, and it does not demonstrate that a GitHub Release was published or that production validation passed.
 
-**Release Status**: `RELEASE READY — PENDING FINAL GREEN CI COMMIT SHA & TAGGING`
+**Historical status claim (not current approval):** `RELEASE READY — PENDING FINAL GREEN CI COMMIT SHA & TAGGING`

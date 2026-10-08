@@ -1,6 +1,6 @@
 # RepoLens v1.0.0 Release Notes
 
-> **SUPERSEDED**: This release has been superseded by [v1.0.1](RELEASE_NOTES_v1.0.1.md). See [V1.0.0_CORRECTION_NOTICE.md](V1.0.0_CORRECTION_NOTICE.md) for details of corrections.
+> **Historical tag notes, not a published release:** The `v1.0.0` Git tag exists, but no corresponding GitHub Release object was present when checked on 2026-10-08. The later `v1.0.1` tag is also not a published GitHub Release. See [V1.0.0_CORRECTION_NOTICE.md](V1.0.0_CORRECTION_NOTICE.md) for the historical documentation corrections and the README for current release status.
 
 **Release Date:** August 31, 2026  
 **Version:** `1.0.0`  

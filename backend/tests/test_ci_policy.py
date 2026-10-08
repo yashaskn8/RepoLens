@@ -75,6 +75,20 @@ def test_readme_does_not_publish_a_stale_backend_test_count():
     assert re.search(r"Current backend suite[\s*]*:\s*[\d,]+ tests collected", readme) is None
 
 
+def test_release_documentation_does_not_claim_unverified_production_readiness():
+    readme = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    architecture = (_REPO_ROOT / "docs" / "architecture.md").read_text(encoding="utf-8")
+    threat_model = (_REPO_ROOT / "docs" / "threat-model.md").read_text(encoding="utf-8")
+    evidence_pack = (_REPO_ROOT / "docs" / "phase9" / "RELEASE_EVIDENCE_PACK.md").read_text(encoding="utf-8")
+
+    assert "no published GitHub Release object" in readme
+    assert "manual production-validation workflow has not been executed" in readme
+    assert "not a current release-readiness claim" in architecture
+    assert "not a current release-readiness claim" in threat_model
+    assert "NOT CURRENT ATTESTATION" in evidence_pack
+    assert "not a current certification" in evidence_pack
+
+
 def test_ci_uses_locked_python_resolution_and_rejects_floating_installs():
     backend = _REPO_ROOT / "backend"
     pyproject = (backend / "pyproject.toml").read_text(encoding="utf-8")

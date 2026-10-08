@@ -1,5 +1,7 @@
 # RepoLens v1.0.1 Release Notes
 
+> **Historical tag notes, not a published release:** The `v1.0.1` Git tag exists, but no corresponding GitHub Release object was present when checked on 2026-10-08. This file does not assert current production readiness; see the README for current status.
+
 **Release Date:** August 31, 2026
 **Version:** `1.0.1`
 **Target Tag:** `v1.0.1`

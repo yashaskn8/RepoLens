@@ -277,4 +277,4 @@ RepoLens enforces strict controls around external GitHub writes:
 
 ## Release Status
 
-RepoLens release version: **v1.0.1** (Phase 9 verification complete, corrective release superseding v1.0.0 with documentation fixes).
+The repository contains Git tags `v1.0.0` and `v1.0.1`, but no published GitHub Release object was present when checked on 2026-10-08. The current `main` branch is not declared production-ready: the manual production-validation workflow has not been executed. A green CI run validates the tested commit and CI gates; it is not deployment, live-provider, or production-readiness evidence. See the archived [release evidence pack](docs/phase9/RELEASE_EVIDENCE_PACK.md) for a warning about its historical claims.
