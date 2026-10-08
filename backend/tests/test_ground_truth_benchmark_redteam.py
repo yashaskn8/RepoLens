@@ -15,7 +15,9 @@ Simulates 11 active cheating strategies and adversarial attacks:
 """
 
 import base64
+import sys
 import urllib.parse
+from unittest.mock import patch
 import pytest
 
 from app.evaluation.ground_truth.catalog import load_capability_catalog
@@ -45,6 +47,25 @@ from app.evaluation.ground_truth.schemas import (
     RepositoryFixture,
     TargetPipeline,
 )
+
+
+def test_legacy_benchmark_cli_has_no_custom_case_root_option(monkeypatch, tmp_path):
+    from app.cli.run_benchmark import main
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["run_benchmark", "--cases-dir", str(tmp_path)])
+    with patch.object(
+        BenchmarkRunner,
+        "run_benchmark",
+        side_effect=AssertionError("runner reached"),
+    ) as run_benchmark:
+        try:
+            main()
+        except SystemExit as exc_info:
+            assert exc_info.code == 2
+        else:
+            pytest.fail("benchmark CLI accepted a caller-selected case directory")
+    run_benchmark.assert_not_called()
 
 
 @pytest.fixture

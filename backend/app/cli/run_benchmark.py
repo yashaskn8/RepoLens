@@ -26,13 +26,6 @@ def main() -> int:
         default="ALL",
         help="Evaluation split to execute (default: ALL)",
     )
-    parser.add_argument(
-        "--cases-dir",
-        type=str,
-        default=None,
-        help="Custom path to benchmark cases directory",
-    )
-
     args = parser.parse_args()
     split = None if args.split == "ALL" else BenchmarkSplit(args.split)
 
@@ -42,7 +35,7 @@ def main() -> int:
 
     runner = BenchmarkRunner()
     try:
-        report = runner.run_benchmark(split=split, cases_dir=args.cases_dir)
+        report = runner.run_benchmark(split=split)
     except Exception as exc:
         print(f"FATAL: Benchmark run failed: {exc}", file=sys.stderr)
         return 1

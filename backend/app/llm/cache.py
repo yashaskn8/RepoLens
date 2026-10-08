@@ -62,7 +62,7 @@ class CacheLookup:
 class AIResponseCache:
     """Small Redis-backed cache whose keys include authority and evidence identity."""
 
-    VERSION = "ai-response-cache/1.0"
+    VERSION = "ai-response-cache/1.1"
 
     def __init__(
         self,
@@ -317,6 +317,7 @@ class AIResponseCache:
             "confidence_threshold": request.confidence_threshold,
             "allow_escalation": request.allow_escalation,
             "timeout_seconds": request.timeout_seconds,
+            "request_budget": request.budget.model_dump(mode="json"),
             "extra_params": request.extra_params,
             "context_metrics": (
                 request.context_metrics.model_dump(mode="json")

@@ -11,9 +11,11 @@ from app.indexing.schemas import EmbeddingRequest, EmbeddingResponse, EmbeddingR
 from app.llm.base import BaseLLMAdapter
 from app.llm.cache import AIResponseCache, SingleFlight
 from app.llm.classifier import TaskCategory, TaskClassifier
+from app.llm.exceptions import LLMContextLimitError
 from app.llm.router import LLMRouter
 from app.llm.types import (
     AIExecutionLineage,
+    AIRequestBudget,
     LLMMessage,
     LLMProvider,
     LLMRequest,
@@ -265,6 +267,42 @@ def test_semantic_cache_denies_security_reasoning() -> None:
     request.cache_task = "summary"
 
     assert cache.semantic_cache_allowed(request) is False
+
+
+def test_cache_identity_includes_request_budget() -> None:
+    cache = AIResponseCache(store=MemoryCacheStore())
+    baseline = _request()
+    baseline.capability = ModelCapability.STRUCTURED_EXTRACTION
+    baseline.budget = AIRequestBudget(max_output_tokens=500, max_context_tokens=2_000)
+    stricter = baseline.model_copy(deep=True)
+    stricter.budget = AIRequestBudget(max_output_tokens=100, max_context_tokens=2_000)
+
+    assert cache.request_key(baseline, "route/v1") != cache.request_key(stricter, "route/v1")
+
+
+@pytest.mark.asyncio
+async def test_cache_hit_cannot_bypass_current_context_budget() -> None:
+    store = MemoryCacheStore()
+    cache = AIResponseCache(store=store)
+    router = LLMRouter(
+        adapters={LLMProvider.GROQ: CountingAdapter()}, response_cache=cache
+    )
+    request = _request("A detailed repository analysis request that exceeds a tiny input budget.")
+    request.capability = ModelCapability.STRUCTURED_EXTRACTION
+    request.budget = AIRequestBudget(max_input_tokens=10, max_context_tokens=2_000)
+    await cache.store_response(
+        request,
+        router._routing_identity(request),
+        LLMResponse(
+            content="cached response",
+            model="test-model",
+            provider=LLMProvider.GROQ,
+            metadata=ModelExecutionMetadata(model_name="test-model", provider="groq"),
+        ),
+    )
+
+    with pytest.raises(LLMContextLimitError, match="input-token budget"):
+        await router.generate(request)
 
 
 @pytest.mark.asyncio

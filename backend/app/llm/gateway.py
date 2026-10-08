@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from app.llm.base import BaseLLMAdapter
 from app.llm.capabilities import ModelCapabilityRegistry, RoutingPolicy
-from app.llm.context import ContextEstimator
+from app.llm.context import ContextEstimate, ContextEstimator
 from app.llm.exceptions import (
     LLMAllFallbacksFailedError,
     LLMContextLimitError,
@@ -86,7 +86,8 @@ class CapabilityAIGateway:
         """Release durable provider reservations abandoned by crashed workers."""
         return self.quota.reconcile_expired(limit=limit)
 
-    async def generate(self, request: LLMRequest) -> LLMResponse:
+    def validate_request_context(self, request: LLMRequest) -> ContextEstimate:
+        """Enforce request context budgets before either cache reuse or execution."""
         if request.capability is None:
             raise ValueError("CapabilityAIGateway requires request.capability")
         estimate = self.context_estimator.estimate(request)
@@ -94,6 +95,10 @@ class CapabilityAIGateway:
             raise LLMContextLimitError("Estimated input exceeds the request input-token budget.")
         if estimate.total_tokens > request.budget.max_context_tokens:
             raise LLMContextLimitError("Estimated request exceeds the configured context budget.")
+        return estimate
+
+    async def generate(self, request: LLMRequest) -> LLMResponse:
+        estimate = self.validate_request_context(request)
 
         runtime_limits = (
             await asyncio.to_thread(self.policy_resolver, request.lineage.policy_snapshot_id)

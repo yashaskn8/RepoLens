@@ -5,11 +5,21 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
+import time
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
+from uuid import uuid4
+
 from pydantic import BaseModel, Field
 
 from app.evaluation.ground_truth.loader import compute_canonical_benchmark_hash, load_benchmark_dataset
+
+
+_LEDGER_LOCK_TIMEOUT_SECONDS = 10.0
+_LEDGER_LOCK_POLL_SECONDS = 0.025
 
 
 def canonical_hash(obj: Dict[str, Any]) -> str:
@@ -248,12 +258,38 @@ class HoldoutAuthorizationContract:
                 f"Private holdout {holdout_metadata.holdout_id} has already been consumed in the single-use ledger."
             )
 
+        # The read above is only an early rejection. Atomically consume the
+        # holdout before returning authorization so concurrent checks cannot
+        # both receive permission. A crash after this point is fail-closed.
+        if not reasons:
+            try:
+                ledger.claim_execution(
+                    authorization_id=uuid4().hex,
+                    production_freeze_id=prod_val.manifest_id,
+                    benchmark_contract_id=bench_val.manifest_id,
+                    holdout_id=holdout_metadata.holdout_id,
+                    execution_timestamp=datetime.now(timezone.utc).isoformat(),
+                )
+            except ValueError:
+                reasons.append(
+                    f"Private holdout {holdout_metadata.holdout_id} has already been claimed."
+                )
+            except (OSError, TimeoutError):
+                reasons.append("The single-use authorization ledger is unavailable.")
+
         is_authorized = len(reasons) == 0
         return is_authorized, reasons
 
 
 class SingleUseLedger:
-    """Ledger preventing repeated evaluation or iterative tuning against sealed holdouts."""
+    """Single-host, cross-process ledger preventing repeated holdout use.
+
+    Claims are serialized with an OS file lock and committed by atomic replace.
+    This is suitable only when all claimants share a local filesystem with
+    working advisory/byte-range locks; it is not a distributed multi-host
+    authorization service. The application currently has no official holdout
+    execution path wired to this utility.
+    """
 
     def __init__(self, ledger_file: str | Path) -> None:
         self.ledger_file = Path(ledger_file)
@@ -261,27 +297,119 @@ class SingleUseLedger:
         self._load()
 
     def _load(self) -> None:
+        with self._exclusive_lock():
+            self._load_unlocked()
+
+    def _load_unlocked(self) -> None:
         if self.ledger_file.is_file():
             with open(self.ledger_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 self.entries = [SingleUseLedgerEntry.model_validate(e) for e in data.get("entries", [])]
 
-    def _save(self) -> None:
+    @contextmanager
+    def _exclusive_lock(self) -> Iterator[None]:
+        """Serialize local process claims; fail closed if a bounded lock wait expires."""
         self.ledger_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.ledger_file, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "schema_version": "1.0.0",
-                    "ledger_type": "SINGLE_USE_EVALUATION_LEDGER",
-                    "entries": [e.model_dump() for e in self.entries],
-                },
-                f,
-                indent=2,
+        lock_path = self.ledger_file.with_name(self.ledger_file.name + ".lock")
+        with open(lock_path, "a+b") as lock_file:
+            if os.name == "nt":
+                import msvcrt
+
+                lock_file.seek(0, os.SEEK_END)
+                if lock_file.tell() == 0:
+                    lock_file.write(b"\0")
+                    lock_file.flush()
+                deadline = time.monotonic() + _LEDGER_LOCK_TIMEOUT_SECONDS
+                while True:
+                    try:
+                        lock_file.seek(0)
+                        msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError as exc:
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError("single-use ledger lock timed out") from exc
+                        time.sleep(_LEDGER_LOCK_POLL_SECONDS)
+                try:
+                    yield
+                finally:
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                deadline = time.monotonic() + _LEDGER_LOCK_TIMEOUT_SECONDS
+                while True:
+                    try:
+                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError as exc:
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError("single-use ledger lock timed out") from exc
+                        time.sleep(_LEDGER_LOCK_POLL_SECONDS)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    def _save_unlocked(self) -> None:
+        payload = {
+            "schema_version": "1.0.0",
+            "ledger_type": "SINGLE_USE_EVALUATION_LEDGER",
+            "entries": [entry.model_dump() for entry in self.entries],
+        }
+        temp_path: Path | None = None
+        try:
+            fd, temp_name = tempfile.mkstemp(
+                prefix=f".{self.ledger_file.name}.",
+                suffix=".tmp",
+                dir=self.ledger_file.parent,
             )
+            temp_path = Path(temp_name)
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+                json.dump(payload, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, self.ledger_file)
+            if os.name != "nt":
+                directory_fd = os.open(self.ledger_file.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+        finally:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
 
     def is_consumed(self, holdout_id: str) -> bool:
         """Return True if holdout_id has already been executed and consumed."""
-        return any(e.holdout_id == holdout_id and e.consumed for e in self.entries)
+        with self._exclusive_lock():
+            self._load_unlocked()
+            return any(e.holdout_id == holdout_id and e.consumed for e in self.entries)
+
+    def claim_execution(
+        self,
+        authorization_id: str,
+        production_freeze_id: str,
+        benchmark_contract_id: str,
+        holdout_id: str,
+        execution_timestamp: str,
+        execution_status: str = "CLAIMED",
+    ) -> None:
+        """Atomically consume a holdout before its one authorized execution."""
+        with self._exclusive_lock():
+            self._load_unlocked()
+            if any(e.holdout_id == holdout_id and e.consumed for e in self.entries):
+                raise ValueError(f"Holdout {holdout_id} is already consumed; re-execution forbidden.")
+            self.entries.append(SingleUseLedgerEntry(
+                authorization_id=authorization_id,
+                production_freeze_id=production_freeze_id,
+                benchmark_contract_id=benchmark_contract_id,
+                holdout_id=holdout_id,
+                execution_timestamp=execution_timestamp,
+                execution_status=execution_status,
+                consumed=True,
+            ))
+            self._save_unlocked()
 
     def record_execution(
         self,
@@ -292,17 +420,12 @@ class SingleUseLedger:
         execution_timestamp: str,
         execution_status: str,
     ) -> None:
-        """Record an execution and seal the holdout against subsequent use."""
-        if self.is_consumed(holdout_id):
-            raise ValueError(f"Holdout {holdout_id} is already consumed; re-execution forbidden.")
-        entry = SingleUseLedgerEntry(
+        """Backward-compatible alias; new callers should claim before execution."""
+        self.claim_execution(
             authorization_id=authorization_id,
             production_freeze_id=production_freeze_id,
             benchmark_contract_id=benchmark_contract_id,
             holdout_id=holdout_id,
             execution_timestamp=execution_timestamp,
             execution_status=execution_status,
-            consumed=True,
         )
-        self.entries.append(entry)
-        self._save()

@@ -320,6 +320,10 @@ class LLMRouter:
             raise ValueError(
                 "Embedding and reranking requests must use the canonical EmbeddingProvider/retrieval boundary."
             )
+        if request.capability is not None:
+            # Cache reuse must not bypass context admission for this request.
+            # The same validation method is used again by the gateway on misses.
+            self._capability_gateway.validate_request_context(request)
         routing_identity = self._routing_identity(request)
         cached = await self._response_cache.lookup(request, routing_identity)
         if cached is not None:
