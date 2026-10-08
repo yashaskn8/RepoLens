@@ -106,6 +106,8 @@ def _evaluate_claim_support(
         has_contract_impact = any(
             d.evidence_type == "IMPACT"
             and d.impact_type == ChangeImpactType.API_CONTRACT_CHANGE
+            and str(d.details.get("change_type", "")).upper()
+            in ("REMOVED", "PATH_CHANGED", "METHOD_CHANGED", "TARGET_CHANGED", "METHOD_AND_PATH_CHANGED")
             for d in resolved_descriptors
         )
         if has_route_break or has_contract_impact:
@@ -125,6 +127,8 @@ def _evaluate_claim_support(
         has_schema_impact = any(
             d.evidence_type == "IMPACT"
             and d.impact_type == ChangeImpactType.SCHEMA_CHANGE
+            and str(d.details.get("change_type", "")).upper()
+            in ("REMOVED_FIELD", "MODIFIED_TYPE")
             for d in resolved_descriptors
         )
         if has_schema_break or has_schema_impact:

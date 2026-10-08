@@ -230,6 +230,7 @@ class Settings(BaseSettings):
 
     # Repository Ingestion Limits
     CLONE_TIMEOUT_SECONDS: int = 120
+    MAX_GIT_OBJECT_BYTES: int = Field(default=67_108_864, ge=1_048_576, le=536_870_912)
     MAX_REPO_FILES: int = 5000
     MAX_FILE_SIZE_BYTES: int = 1_048_576  # 1 MB
     MAX_TOTAL_SOURCE_BYTES: int = 52_428_800  # 50 MB global source budget

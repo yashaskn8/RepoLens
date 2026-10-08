@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from typing import Optional, Tuple
 from urllib.parse import urlparse
 from app.core.config import get_settings
@@ -74,6 +75,106 @@ def safe_git_environment() -> dict[str, str]:
 
 _MAX_GIT_PATH_BYTES = 4096
 _GIT_PIPE_READ_BYTES = 64 * 1024
+_MAX_GIT_DIAGNOSTIC_BYTES = 64 * 1024
+_GIT_OBJECT_MONITOR_INTERVAL_SECONDS = 0.02
+
+
+def _git_object_store_bytes(repository_dir: str) -> int:
+    """Return bounded local Git object-store size without following links."""
+    object_dir = os.path.join(repository_dir, ".git", "objects")
+    if os.path.islink(object_dir):
+        raise RepositoryResourceLimitError("Git object store must not be a symbolic link")
+    if not os.path.isdir(object_dir):
+        return 0
+
+    total = 0
+    pending = [object_dir]
+    while pending:
+        current = pending.pop()
+        try:
+            entries = os.scandir(current)
+        except OSError as exc:
+            raise RepositoryResourceLimitError("Git object-store metadata could not be inspected safely") from exc
+        with entries:
+            for entry in entries:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(entry.path)
+                    elif entry.is_file(follow_symlinks=False):
+                        total += entry.stat(follow_symlinks=False).st_size
+                except OSError as exc:
+                    raise RepositoryResourceLimitError("Git object-store metadata could not be inspected safely") from exc
+    return total
+
+
+def _run_clone_with_object_budget(
+    command: list[str],
+    *,
+    environment: dict[str, str],
+    repository_dir: str,
+    timeout_seconds: int,
+    max_git_object_bytes: int,
+) -> subprocess.CompletedProcess:
+    """Run Git while bounding its on-disk object footprint and captured diagnostics."""
+    process = subprocess.Popen(
+        command,
+        env=environment,
+        shell=False,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        bufsize=0,
+    )
+    stderr = bytearray()
+
+    def drain_stderr() -> None:
+        assert process.stderr is not None
+        try:
+            while True:
+                chunk = process.stderr.read(_GIT_PIPE_READ_BYTES)
+                if not chunk:
+                    return
+                remaining = _MAX_GIT_DIAGNOSTIC_BYTES - len(stderr)
+                if remaining > 0:
+                    stderr.extend(chunk[:remaining])
+        finally:
+            process.stderr.close()
+
+    reader = threading.Thread(target=drain_stderr, daemon=True)
+    reader.start()
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        while process.poll() is None:
+            if _git_object_store_bytes(repository_dir) > max_git_object_bytes:
+                process.kill()
+                process.wait()
+                raise RepositoryResourceLimitError(
+                    "Git acquisition exceeded the configured object-store byte limit"
+                )
+            if time.monotonic() >= deadline:
+                process.kill()
+                process.wait()
+                raise CloneTimeoutError(f"git clone timed out after {timeout_seconds} seconds.")
+            time.sleep(_GIT_OBJECT_MONITOR_INTERVAL_SECONDS)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        reader.join(timeout=2)
+
+    # Catch a final packfile write that completed between monitor intervals.
+    # The monitor is reactive; this post-exit check closes the fast-process gap.
+    if _git_object_store_bytes(repository_dir) > max_git_object_bytes:
+        raise RepositoryResourceLimitError(
+            "Git acquisition exceeded the configured object-store byte limit"
+        )
+
+    return subprocess.CompletedProcess(
+        command,
+        process.returncode,
+        stdout="",
+        stderr=bytes(stderr).decode("utf-8", errors="replace"),
+    )
 
 
 def validate_repository_tree_budget(
@@ -83,6 +184,7 @@ def validate_repository_tree_budget(
     max_files: int,
     max_file_bytes: int,
     max_total_bytes: int,
+    max_git_object_bytes: Optional[int] = None,
     timeout_seconds: int = 30,
 ) -> tuple[int, int]:
     """Inspect a commit tree before checkout and reject over-budget blob sets.
@@ -92,6 +194,10 @@ def validate_repository_tree_budget(
     aggregate bytes, and metadata output fit ingestion policy.
     """
     metadata_limit = max(64 * 1024, max_files * (_MAX_GIT_PATH_BYTES + 128))
+    if max_git_object_bytes is None:
+        max_git_object_bytes = int(get_settings().MAX_GIT_OBJECT_BYTES)
+    if _git_object_store_bytes(repository_dir) > max_git_object_bytes:
+        raise RepositoryResourceLimitError("Git object-store exceeds its configured byte limit")
     command = ["git", "-c", "core.symlinks=false", "-c", "core.autocrlf=false", "ls-tree", "-r", "-l", "-z", commit_ref]
     process = subprocess.Popen(
         command,
@@ -129,12 +235,25 @@ def validate_repository_tree_budget(
     )
     for reader in readers:
         reader.start()
+    deadline = time.monotonic() + timeout_seconds
+    limit_error: Optional[str] = None
     try:
-        process.wait(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired as exc:
-        process.kill()
+        while process.poll() is None:
+            try:
+                if _git_object_store_bytes(repository_dir) > max_git_object_bytes:
+                    limit_error = "Git tree inspection exceeded the configured object-store byte limit"
+                    process.kill()
+                    break
+            except RepositoryResourceLimitError:
+                limit_error = "Git tree inspection could not safely inspect the object store"
+                process.kill()
+                break
+            if time.monotonic() >= deadline:
+                limit_error = "Git tree inspection exceeded its time limit"
+                process.kill()
+                break
+            time.sleep(_GIT_OBJECT_MONITOR_INTERVAL_SECONDS)
         process.wait()
-        raise RepositoryResourceLimitError("Git tree inspection exceeded its time limit") from exc
     finally:
         for reader in readers:
             reader.join(timeout=2)
@@ -142,8 +261,16 @@ def validate_repository_tree_budget(
             process.kill()
             process.wait()
 
+    try:
+        if _git_object_store_bytes(repository_dir) > max_git_object_bytes:
+            limit_error = limit_error or "Git tree inspection exceeded the configured object-store byte limit"
+    except RepositoryResourceLimitError:
+        limit_error = limit_error or "Git tree inspection could not safely inspect the object store"
+
     if overflow.is_set():
         raise RepositoryResourceLimitError("Git tree metadata exceeded its configured byte limit")
+    if limit_error:
+        raise RepositoryResourceLimitError(limit_error)
     if process.returncode != 0:
         raise CloneFailedError("Git tree inspection failed for the requested commit")
 
@@ -280,14 +407,12 @@ def clone_repository(
     env = safe_git_environment()
 
     try:
-        result = subprocess.run(
+        result = _run_clone_with_object_budget(
             cmd,
-            env=env,
-            shell=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
+            environment=env,
+            repository_dir=dest_dir,
+            timeout_seconds=timeout,
+            max_git_object_bytes=int(settings.MAX_GIT_OBJECT_BYTES),
         )
 
         if result.returncode != 0:
@@ -302,6 +427,7 @@ def clone_repository(
             max_files=int(settings.MAX_REPO_FILES),
             max_file_bytes=int(settings.MAX_FILE_SIZE_BYTES),
             max_total_bytes=int(settings.MAX_TOTAL_SOURCE_BYTES),
+            max_git_object_bytes=int(settings.MAX_GIT_OBJECT_BYTES),
             timeout_seconds=min(timeout, 60),
         )
 
@@ -351,11 +477,11 @@ def clone_repository(
             shutil.rmtree(dest_dir, ignore_errors=True)
         raise CloneTimeoutError(f"git clone timed out after {timeout} seconds.")
     except Exception as exc:
-        if not isinstance(exc, IngestionError):
-            if target_dir is None and os.path.exists(dest_dir):
-                shutil.rmtree(dest_dir, ignore_errors=True)
-            raise CloneFailedError(f"Unexpected clone error: {str(exc)}")
-        raise
+        if target_dir is None and os.path.exists(dest_dir):
+            shutil.rmtree(dest_dir, ignore_errors=True)
+        if isinstance(exc, IngestionError):
+            raise
+        raise CloneFailedError(f"Unexpected clone error: {str(exc)}")
 
 
 def get_git_resolved_branch_or_ref(repo_dir: str) -> Optional[str]:

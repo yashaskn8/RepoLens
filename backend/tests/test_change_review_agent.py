@@ -8,7 +8,8 @@ import pytest
 
 from app.analysis.diff_engine import ChangeDiffEngine
 from app.analysis.impact_engine import ChangeImpactEngine
-from app.analysis.review_verifier import ChangeReviewVerifier, get_review_verifier
+from app.analysis.evidence_registry import EvidenceDescriptor
+from app.analysis.review_verifier import ChangeReviewVerifier, _evaluate_claim_support, get_review_verifier
 from app.analysis.reviewer import ChangeReviewAgent, get_change_reviewer
 from app.graph.repository_graph import RepositoryGraph
 from app.graph.schemas import EdgeKind, NodeKind
@@ -33,6 +34,33 @@ from app.schemas.change_analysis import (
 )
 from app.schemas.enums import ChangeImpactType, ChangeRiskLevel, ImpactVerificationStatus, Severity
 from app.schemas.metadata import ModelExecutionMetadata
+
+
+@pytest.mark.parametrize(
+    ("risk_type", "impact_type", "change_type"),
+    [
+        ("API_CONTRACT_BREAK", ChangeImpactType.API_CONTRACT_CHANGE, "ADDED"),
+        ("API_CONTRACT_BREAK", ChangeImpactType.API_CONTRACT_CHANGE, "ADDED_ROUTE"),
+        ("SCHEMA_INCOMPATIBILITY", ChangeImpactType.SCHEMA_CHANGE, "ADDED_FIELD"),
+        ("SCHEMA_INCOMPATIBILITY", ChangeImpactType.SCHEMA_CHANGE, "ADDED"),
+    ],
+)
+def test_additive_contract_and_schema_impacts_do_not_directly_prove_breakage(
+    risk_type, impact_type, change_type
+):
+    finding = ChangeReviewFinding(
+        title="Potential incompatible change",
+        risk_type=risk_type,
+        reasoning_summary="The model claims an existing consumer is broken.",
+    )
+    impact = EvidenceDescriptor(
+        evidence_id="impact:additive",
+        evidence_type="IMPACT",
+        impact_type=impact_type,
+        details={"change_type": change_type},
+    )
+
+    assert _evaluate_claim_support(finding, [impact]) == "UNSUPPORTED"
 
 
 class MockLLMAdapter(BaseLLMAdapter):
@@ -195,6 +223,35 @@ def test_valid_grounded_finding(base_sample_diff, base_sample_blast_radius, base
 
     assert verdict in (ChangeReviewVerdict.CONFIRMED, ChangeReviewVerdict.SUPPORTED_INFERENCE)
     assert sev == Severity.HIGH
+
+
+@pytest.mark.parametrize(
+    ("risk_type", "impact_type", "change_type", "expected"),
+    [
+        ("API_CONTRACT_BREAK", ChangeImpactType.API_CONTRACT_CHANGE, "ADDED", "UNSUPPORTED"),
+        ("API_CONTRACT_BREAK", ChangeImpactType.API_CONTRACT_CHANGE, "ADDED_ROUTE", "UNSUPPORTED"),
+        ("API_CONTRACT_BREAK", ChangeImpactType.API_CONTRACT_CHANGE, "METHOD_CHANGED", "DIRECT_FACT"),
+        ("SCHEMA_INCOMPATIBILITY", ChangeImpactType.SCHEMA_CHANGE, "ADDED_FIELD", "UNSUPPORTED"),
+        ("SCHEMA_INCOMPATIBILITY", ChangeImpactType.SCHEMA_CHANGE, "CONSTRAINT_CHANGED", "UNSUPPORTED"),
+        ("SCHEMA_INCOMPATIBILITY", ChangeImpactType.SCHEMA_CHANGE, "MODIFIED_TYPE", "DIRECT_FACT"),
+    ],
+)
+def test_contract_impact_classification_requires_breaking_change(
+    risk_type, impact_type, change_type, expected
+):
+    finding = ChangeReviewFinding(
+        title="Potential incompatible change",
+        risk_type=risk_type,
+        reasoning_summary="The model claims an existing consumer is broken.",
+    )
+    impact = EvidenceDescriptor(
+        evidence_id="impact:change",
+        evidence_type="IMPACT",
+        impact_type=impact_type,
+        details={"change_type": change_type},
+    )
+
+    assert _evaluate_claim_support(finding, [impact]) == expected
 
 
 # =========================================================================

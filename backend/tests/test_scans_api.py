@@ -227,7 +227,8 @@ def test_get_scan_findings(client, db_session):
         verification_verdict=VerificationVerdict.CONFIRMED.value,
         verification_reason="Code evidence confirms verify=False.",
     )
-    snippet = "jwt.decode(token, verify=False)"
+    canary = "ghp_" + "A" * 36
+    snippet = f"token = '{canary}'\njwt.decode(token, verify=False)"
     evidence = EvidenceModel(
         id=str(uuid4()),
         finding_id=finding_id,
@@ -258,3 +259,5 @@ def test_get_scan_findings(client, db_session):
     assert data[0]["verification_verdict"] == "CONFIRMED"
     assert len(data[0]["evidences"]) == 1
     assert data[0]["evidences"][0]["file_path"] == "src/auth.py"
+    assert canary not in response.text
+    assert "[REDACTED_GITHUB_TOKEN]" in data[0]["evidences"][0]["code_snippet"]

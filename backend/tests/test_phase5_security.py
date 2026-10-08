@@ -1817,14 +1817,15 @@ def test_finding_provenance_preserved_in_domain_mapping(db_session: Session):
     )
     db_session.add(fm)
 
+    canary = "ghp_" + "B" * 36
     em = EvidenceModel(
         id=evidence_id,
         finding_id=finding_id,
         file_path="app/auth.py",
         start_line=25,
         end_line=30,
-        code_snippet='db.execute(f"SELECT * FROM users WHERE id = {user_id}")',
-        context_notes="User parameter unescaped in auth query",
+        code_snippet=f"db.execute(f\"SELECT * FROM users WHERE id = {{user_id}}\")  # {canary}",
+        context_notes=f"User parameter unescaped in auth query; {canary}",
     )
     db_session.add(em)
     db_session.commit()
@@ -1851,7 +1852,9 @@ def test_finding_provenance_preserved_in_domain_mapping(db_session: Session):
     assert schema.evidences[0].start_line == 25
     assert schema.evidences[0].end_line == 30
     assert "db.execute" in schema.evidences[0].code_snippet
-    assert schema.evidences[0].context_notes == "User parameter unescaped in auth query"
+    assert canary not in schema.evidences[0].code_snippet
+    assert canary not in schema.evidences[0].context_notes
+    assert "[REDACTED_GITHUB_TOKEN]" in schema.evidences[0].code_snippet
 
 
 def test_route_contract_and_secret_detector_provenance_preserved(db_session: Session):

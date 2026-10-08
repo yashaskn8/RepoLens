@@ -28,6 +28,11 @@ if (process.env.NODE_ENV === 'production') {
 
 const nextConfig = {
   reactStrictMode: true,
+  // The project runs its version-pinned flat-config lint as a separate CI gate.
+  // Next 15's build-time legacy ESLint adapter is not compatible with the flat config.
+  eslint: {
+    ignoreDuringBuilds: true,
+  },
 };
 
 export default nextConfig;
