@@ -32,6 +32,8 @@ def test_clone_repository_invokes_git_safely():
     command_order = []
 
     class CompletedGitProcess:
+        pid = 2**31 - 1
+
         def __init__(self):
             self.returncode = 0
             self.stderr = io.BytesIO()
@@ -152,6 +154,7 @@ def test_git_tree_budget_rejects_object_store_over_limit_before_listing(tmp_path
 
 def test_clone_process_is_killed_when_object_store_budget_is_exceeded(tmp_path):
     class RunningProcess:
+        pid = 2**31 - 1
         returncode = None
         stderr = io.BytesIO()
         killed = False
@@ -193,6 +196,7 @@ def test_completed_clone_is_checked_against_object_budget():
     from app.ingestion.clone import _run_clone_with_object_budget
 
     class CompletedGitProcess:
+        pid = 2**31 - 1
         returncode = 0
         stderr = io.BytesIO()
 
@@ -379,6 +383,7 @@ def test_clone_repository_rejects_malicious_branch():
 def test_clone_repository_timeout_handling():
     """Verify that subprocess timeout raises CloneTimeoutError."""
     class RunningProcess:
+        pid = 2**31 - 1
         returncode = None
         stderr = io.BytesIO()
 
@@ -412,6 +417,7 @@ def test_clone_repository_timeout_handling():
 def test_clone_repository_non_zero_exit_handling():
     """Verify that non-zero git exit raises CloneFailedError."""
     class FailedGitProcess:
+        pid = 2**31 - 1
         returncode = 128
         stderr = io.BytesIO(b"fatal: repository not found")
 
