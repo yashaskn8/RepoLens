@@ -82,6 +82,16 @@ async def test_scanner_subprocess_receives_minimal_environment(monkeypatch):
         "app.ingestion.clone._GitProcessTreeGuard.start",
         fake_process_tree_start,
     )
+
+    def fake_process_tree_close(tree):
+        # This fixture has no OS process or process group; cleanup semantics are
+        # covered by the real-process-tree tests in test_scanner_process_isolation.
+        tree.process = None
+
+    monkeypatch.setattr(
+        "app.ingestion.clone._GitProcessTreeGuard.close",
+        fake_process_tree_close,
+    )
     adapter = SemgrepAdapter()
     result = await adapter._execute_command(["semgrep"], cwd=".", timeout_seconds=1)
 
