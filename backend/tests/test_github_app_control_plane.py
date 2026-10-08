@@ -389,14 +389,35 @@ def test_private_snapshot_uses_ephemeral_askpass_without_token_in_command_or_con
 
     def fake_run(command, *, cwd, env, shell, capture_output, text, timeout, check):
         calls.append((command, cwd, dict(env)))
-        if "fetch" in command:
+        if "fetch" in command or "checkout" in command:
             match = re.search(r'"([^"]+askpass\.py)"', env["GIT_ASKPASS"])
             with open(match.group(1), encoding="utf-8") as handle:
                 scripts.append(handle.read())
         output = sha if command[-2:] == ["rev-parse", "HEAD"] else ""
         return subprocess.CompletedProcess(command, 0, output, "")
 
+    def fake_bounded_git(
+        command,
+        *,
+        environment,
+        repository_dir,
+        cwd=None,
+        timeout_seconds,
+        max_git_object_bytes,
+    ):
+        return fake_run(
+            command,
+            cwd=cwd,
+            env=environment,
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+
     monkeypatch.setattr("app.ingestion.snapshot.subprocess.run", fake_run)
+    monkeypatch.setattr("app.ingestion.snapshot._run_clone_with_object_budget", fake_bounded_git)
     monkeypatch.setattr(
         "app.ingestion.snapshot.validate_repository_tree_budget",
         lambda *_args, **_kwargs: (0, 0),
@@ -412,18 +433,22 @@ def test_private_snapshot_uses_ephemeral_askpass_without_token_in_command_or_con
         assert all(
             env.get("REPOLENS_GITHUB_APP_TOKEN") != token
             for command, _, env in calls
-            if "fetch" not in command
+            if "fetch" not in command and "checkout" not in command
         )
-        fetches = [env for command, _, env in calls if "fetch" in command]
-        assert len(fetches) == 1
-        assert fetches[0]["REPOLENS_GITHUB_APP_TOKEN"] == token
-        askpass_command = fetches[0]["GIT_ASKPASS"]
+        transport = [
+            env
+            for command, _, env in calls
+            if "fetch" in command or "checkout" in command
+        ]
+        assert len(transport) == 2
+        assert all(env["REPOLENS_GITHUB_APP_TOKEN"] == token for env in transport)
+        askpass_command = transport[0]["GIT_ASKPASS"]
         assert token not in askpass_command
         match = re.search(r'"([^"]+askpass\.py)"', askpass_command)
         assert match
         askpass_path = match.group(1)
         assert not os.path.exists(askpass_path)
-        assert len(scripts) == 1 and token not in scripts[0]
+        assert len(scripts) == 2 and all(token not in script for script in scripts)
         remote_command = next(command for command, _, _ in calls if "remote" in command)
         assert remote_command[-1] == "https://github.com/sample-org/private-repo.git"
     finally:

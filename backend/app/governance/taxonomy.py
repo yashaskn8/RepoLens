@@ -12,6 +12,7 @@ class FailureCode(str, Enum):
     USER_INPUT_ERROR = "USER_INPUT_ERROR"
     REPOSITORY_UNAVAILABLE = "REPOSITORY_UNAVAILABLE"
     REPOSITORY_LIMIT_EXCEEDED = "REPOSITORY_LIMIT_EXCEEDED"
+    ACQUISITION_ENFORCEMENT_UNAVAILABLE = "ACQUISITION_ENFORCEMENT_UNAVAILABLE"
     SNAPSHOT_POLICY_VIOLATION = "SNAPSHOT_POLICY_VIOLATION"
     ANALYZER_UNAVAILABLE = "ANALYZER_UNAVAILABLE"
     ANALYZER_TIMEOUT = "ANALYZER_TIMEOUT"
@@ -146,6 +147,12 @@ def safe_failure(
     """Map internal exceptions to a stable external failure without persisting raw traces."""
     name = type(exc).__name__.upper()
     text = redact_secrets(str(exc))[:512]
+    if getattr(exc, "failure_code", None) == FailureCode.ACQUISITION_ENFORCEMENT_UNAVAILABLE.value:
+        return CanonicalFailure(
+            code=FailureCode.ACQUISITION_ENFORCEMENT_UNAVAILABLE,
+            message="Repository acquisition is disabled until its hard resource boundary is available.",
+            retryable=False,
+        )
     if "TIMEOUT" in name:
         return CanonicalFailure(code=FailureCode.WORKFLOW_TIMEOUT, message="The operation exceeded its time budget.", retryable=True)
     if "RATE" in name and "LIMIT" in name:

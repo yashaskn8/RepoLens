@@ -100,6 +100,29 @@ def test_clone_repository_invokes_git_safely():
     assert command_order == ["clone", "preflight", "checkout", "rev-parse"]
 
 
+def test_production_clone_fails_closed_before_workspace_or_git(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.ingestion.acquisition_boundary import AcquisitionEnforcementUnavailable
+
+    monkeypatch.setattr(
+        "app.ingestion.clone.get_settings",
+        lambda: SimpleNamespace(is_production=True, CLONE_TIMEOUT_SECONDS=120),
+    )
+    monkeypatch.setattr(
+        "app.ingestion.clone.tempfile.mkdtemp",
+        lambda **_kwargs: pytest.fail("production must fail before allocating a workspace"),
+    )
+    monkeypatch.setattr(
+        "app.ingestion.clone._run_clone_with_object_budget",
+        lambda *_args, **_kwargs: pytest.fail("production must fail before Git starts"),
+    )
+
+    with pytest.raises(AcquisitionEnforcementUnavailable) as exc_info:
+        clone_repository("https://github.com/owner/repo")
+    assert exc_info.value.failure_code == "ACQUISITION_ENFORCEMENT_UNAVAILABLE"
+
+
 @pytest.mark.parametrize(
     ("max_files", "max_file_bytes", "max_total_bytes", "expected"),
     [

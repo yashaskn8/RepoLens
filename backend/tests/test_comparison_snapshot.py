@@ -37,6 +37,29 @@ from app.services.workflow_event_service import WorkflowEventService
 @pytest.fixture(autouse=True)
 def _mock_tree_admission_for_fake_git(monkeypatch):
     """These tests fake Git subprocesses, so admit the empty synthetic trees too."""
+    def mocked_bounded_git(
+        command,
+        *,
+        environment,
+        repository_dir,
+        cwd=None,
+        timeout_seconds,
+        max_git_object_bytes,
+    ):
+        return subprocess.run(
+            command,
+            cwd=cwd,
+            env=environment,
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+
+    monkeypatch.setattr(
+        "app.ingestion.snapshot._run_clone_with_object_budget", mocked_bounded_git
+    )
     monkeypatch.setattr(
         "app.ingestion.snapshot.validate_repository_tree_budget",
         lambda *_args, **_kwargs: (0, 0),
@@ -52,6 +75,26 @@ REPO_URL = "https://github.com/fastapi/fastapi"
 # =========================================================================
 # 1. Exact Revision Reconstruction & Verification Tests
 # =========================================================================
+
+
+def test_production_comparison_fails_before_allocating_either_workspace(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.ingestion.acquisition_boundary import AcquisitionEnforcementUnavailable
+
+    snapshot_service = RepositorySnapshotService(settings=SimpleNamespace(is_production=True))
+    service = ComparisonSnapshotService(snapshot_service=snapshot_service, settings=Settings(_env_file=None))
+    monkeypatch.setattr(
+        "app.ingestion.snapshot.tempfile.mkdtemp",
+        lambda **_kwargs: pytest.fail("production must fail before allocating either workspace"),
+    )
+
+    with pytest.raises(AcquisitionEnforcementUnavailable):
+        service.acquire_comparison_workspaces_from_metadata(
+            repository_url=REPO_URL,
+            base_commit_sha=BASE_SHA,
+            head_commit_sha=HEAD_SHA,
+        )
 
 
 def test_exact_dual_revision_reconstruction_success():

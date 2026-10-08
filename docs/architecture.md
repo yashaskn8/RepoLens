@@ -102,7 +102,7 @@ The scan pipeline ingests a public GitHub repository, enforces resource budgets,
 ```mermaid
 flowchart TD
     A[User Request: POST /api/v1/scans] --> B[Validate URL, Branch & Quota]
-    B --> C[Safe Ephemeral Git Clone<br/>Timeout: 120s, Tree Admission: 5000 files / 50MB; object-store monitor is reactive]
+    B --> C[Development-only Safe Git Acquisition<br/>Timeout/tree admission/object-store monitor; production acquisition fails closed pending hard boundary]
     C --> D[Tree-sitter AST Parsing<br/>Python, JS, TS, TSX, JSX]
     C --> E[Deterministic Scanners<br/>Semgrep, Trivy, OSV-Scanner]
     D --> F[Construct RepositoryGraph<br/>Nodes: Files, Symbols, Routes<br/>Edges: CALLS, IMPORTS, EXPOSES_API, CONSUMES_API]
@@ -218,7 +218,7 @@ RepoLens cleanly separates unauthenticated public reads from privileged operator
 
 | Action | Authentication Required | Privileged Token Used | Safety Checks |
 |---|---|---|---|
-| Public Repository Scan | None / Normal User Session | None (Public Git Clone) | Shallow clone, tree/file admission budgets, reactive object-store monitor, process-tree termination, symlink confinement; no hard per-scan disk/network quota |
+| Public Repository Scan | None / Normal User Session | None (Public Git Clone) | Development: shallow clone, tree/file admission budgets, reactive object-store monitor, process-tree termination, symlink confinement. Production Git acquisition is disabled until a quota-enforced workspace and controlled-egress boundary are integrated. |
 | Public PR Resolution | None / Normal User Session | None (Public GitHub REST) | Validates GitHub URL, parses base/head SHAs |
 | Safe PR Delivery (Phase 5) | `OPERATOR` Session | Server `GITHUB_TOKEN` | `GITHUB_DELIVERY_ENABLED=True`, Human Approved, Base Drift Check, Git Data API only |
 | PR Review Publish (Phase 7) | `OPERATOR` Session | Server `GITHUB_TOKEN` | `GITHUB_PR_REVIEW_WRITE_ENABLED=True`, Base Drift Check, `COMMENT` event only |
@@ -265,7 +265,7 @@ The core technical differentiator of RepoLens is its ability to reason across ar
 | Ollama unavailable | Stops repeated loopback attempts for a bounded cooldown and continues through the router's eligible configured path. |
 | Redis/cache unavailable | Cache reads/writes fail open; the underlying model request remains available. |
 | LLM Provider Outage / 429 | Retries with backoff; switches to configured fallback provider; if all fail, records LLM stage failure while preserving deterministic scan artifacts. |
-| Ingestion Limit Exceeded | Clones fail closed when tree/file limits, the observed object-store threshold, or the 120s timeout is exceeded. Object-store monitoring is reactive and may overshoot between polls; it is not a hard per-scan disk/network quota. |
+| Ingestion Limit Exceeded | Development clones fail closed when tree/file limits, the observed object-store threshold, or timeout is exceeded. Object-store monitoring is reactive and may overshoot between polls; it is not a hard per-scan disk/network quota. Production clone and snapshot acquisition fail before workspace allocation until a hard boundary is integrated. |
 | Server Crash Mid-Scan | On restart, `ScanRecoveryService` detects unfinished scans in database and marks them as failed/cancelled without corrupting state. |
 | GitHub Remote Branch Drift | Aborts delivery or publication immediately; records drift event in audit trail. |
 

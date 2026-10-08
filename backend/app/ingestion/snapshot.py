@@ -27,9 +27,12 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.database import SessionLocal
+from app.ingestion.acquisition_boundary import require_acquisition_boundary
 from app.ingestion.clone import (
+    CloneTimeoutError,
     InvalidRepositoryURLError,
     RepositoryResourceLimitError,
+    _run_clone_with_object_budget,
     safe_git_environment,
     validate_github_url,
     validate_repository_tree_budget,
@@ -76,6 +79,8 @@ class RepositorySnapshotService:
         cwd: Optional[str] = None,
         timeout: int = 60,
         askpass: tuple[str, str] | None = None,
+        object_budgeted: bool = False,
+        repository_dir: Optional[str] = None,
     ) -> Tuple[int, str, str]:
         """Execute a git command with shell=False and strict security flags."""
         base_cmd = [
@@ -102,16 +107,31 @@ class RepositorySnapshotService:
             env["GIT_ASKPASS"] = f'"{sys.executable}" "{script_path}"'
             env["REPOLENS_GITHUB_APP_TOKEN"] = token
 
-        res = subprocess.run(
-            full_cmd,
-            cwd=cwd,
-            env=env,
-            shell=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
+        if object_budgeted:
+            try:
+                res = _run_clone_with_object_budget(
+                    full_cmd,
+                    environment=env,
+                    repository_dir=repository_dir or cwd or os.getcwd(),
+                    cwd=cwd,
+                    timeout_seconds=timeout,
+                    max_git_object_bytes=int(self.settings.MAX_GIT_OBJECT_BYTES),
+                )
+            except (CloneTimeoutError, RepositoryResourceLimitError) as exc:
+                raise SnapshotRehydrationError(
+                    "Bounded Git acquisition failed its configured resource guard."
+                ) from exc
+        else:
+            res = subprocess.run(
+                full_cmd,
+                cwd=cwd,
+                env=env,
+                shell=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
         from app.security.redaction import redact_secrets
         if askpass is not None:
             return res.returncode, "", "[authenticated Git operation failed]" if res.returncode else ""
@@ -144,6 +164,10 @@ class RepositorySnapshotService:
         if not re.match(r"^[0-9a-fA-F]{40}$", cleaned_sha):
             raise SnapshotMetadataError(f"Invalid or non-40-character commit SHA for snapshot: '{commit_hash}'")
 
+        # Snapshot rehydration is also remote Git acquisition. Do not allow it
+        # to bypass the production gate used by initial scans.
+        require_acquisition_boundary(self.settings)
+
         # 2. Create isolated temporary workspace directory
         workspace_path = tempfile.mkdtemp(prefix="repolens_snapshot_")
 
@@ -170,10 +194,20 @@ class RepositorySnapshotService:
                     )
                 askpass = (askpass_script, installation_token)
 
-            def run_git(args: list[str], *, cwd: str, timeout: int) -> Tuple[int, str, str]:
-                if askpass is None or not args or args[0] != "fetch":
-                    return self._run_git_cmd(args, cwd=cwd, timeout=timeout)
-                return self._run_git_cmd(args, cwd=cwd, timeout=timeout, askpass=askpass)
+            def run_git(
+                args: list[str], *, cwd: str, timeout: int, object_budgeted: bool = False
+            ) -> Tuple[int, str, str]:
+                # Checkout can trigger lazy blob retrieval in a partial clone;
+                # preserve GitHub App askpass for that transport as well.
+                uses_transport = bool(args and args[0] in {"fetch", "checkout"})
+                return self._run_git_cmd(
+                    args,
+                    cwd=cwd,
+                    timeout=timeout,
+                    askpass=askpass if askpass is not None and uses_transport else None,
+                    object_budgeted=object_budgeted,
+                    repository_dir=workspace_path,
+                )
 
             timeout = getattr(self.settings, "CLONE_TIMEOUT_SECONDS", 120)
 
@@ -192,6 +226,7 @@ class RepositorySnapshotService:
                 ["fetch", "--filter=blob:none", "--depth=1", "--no-recurse-submodules", "origin", cleaned_sha],
                 cwd=workspace_path,
                 timeout=timeout,
+                object_budgeted=True,
             )
 
             # If GitHub refuses a raw SHA fetch, try only the explicitly named
@@ -209,6 +244,7 @@ class RepositorySnapshotService:
                             ["fetch", "--filter=blob:none", "--depth=50", "--no-recurse-submodules", "origin", cleaned_branch],
                             cwd=workspace_path,
                             timeout=timeout,
+                            object_budgeted=True,
                         )
                 if fallback_code != 0:
                     raise SnapshotRehydrationError("Could not fetch the exact requested commit within the bounded ref policy.")
@@ -220,6 +256,7 @@ class RepositorySnapshotService:
                     max_files=int(self.settings.MAX_REPO_FILES),
                     max_file_bytes=int(self.settings.MAX_FILE_SIZE_BYTES),
                     max_total_bytes=int(self.settings.MAX_TOTAL_SOURCE_BYTES),
+                    max_git_object_bytes=int(self.settings.MAX_GIT_OBJECT_BYTES),
                     timeout_seconds=min(int(timeout), 60),
                 )
             except RepositoryResourceLimitError as exc:
@@ -230,6 +267,7 @@ class RepositorySnapshotService:
                 ["checkout", "--detach", cleaned_sha],
                 cwd=workspace_path,
                 timeout=30,
+                object_budgeted=True,
             )
             if co_code != 0:
                 raise SnapshotRehydrationError(

@@ -1,6 +1,7 @@
 """Tests for Phase 3.5A: Durable exact-commit repository snapshot rehydration service."""
 
 import os
+import subprocess
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 import pytest
@@ -20,10 +21,36 @@ from app.schemas.enums import ScanStatus
 
 @pytest.fixture(autouse=True)
 def mocked_snapshot_tests_skip_git_tree_subprocess(monkeypatch):
-    """These mocked lifecycle tests have no Git objects for the real tree preflight."""
+    """Keep snapshot lifecycle tests hermetic while retaining command assertions."""
     monkeypatch.setattr(
         "app.ingestion.snapshot.validate_repository_tree_budget",
         lambda *_args, **_kwargs: (0, 0),
+    )
+
+    def mocked_bounded_git(
+        command,
+        *,
+        environment,
+        repository_dir,
+        cwd=None,
+        timeout_seconds,
+        max_git_object_bytes,
+    ):
+        # Route the mocked executor back through subprocess.run so existing
+        # command-specific doubles still verify fetch/checkout behavior.
+        return subprocess.run(
+            command,
+            cwd=cwd,
+            env=environment,
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+
+    monkeypatch.setattr(
+        "app.ingestion.snapshot._run_clone_with_object_budget", mocked_bounded_git
     )
 
 
@@ -64,6 +91,83 @@ def test_materialize_snapshot_rejects_missing_or_malformed_sha():
             repository_url="https://github.com/owner/repo",
             commit_hash="not-a-valid-sha-xyz",
         )
+
+
+def test_production_snapshot_fails_closed_before_workspace_or_git(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.ingestion.acquisition_boundary import AcquisitionEnforcementUnavailable
+
+    service = RepositorySnapshotService(settings=SimpleNamespace(is_production=True))
+    monkeypatch.setattr(
+        "app.ingestion.snapshot.tempfile.mkdtemp",
+        lambda **_kwargs: pytest.fail("production must fail before allocating a workspace"),
+    )
+    monkeypatch.setattr(
+        "app.ingestion.snapshot._run_clone_with_object_budget",
+        lambda *_args, **_kwargs: pytest.fail("production must fail before Git starts"),
+    )
+    monkeypatch.setattr(
+        "app.ingestion.snapshot.subprocess.run",
+        lambda *_args, **_kwargs: pytest.fail("production must fail before Git starts"),
+    )
+
+    with pytest.raises(AcquisitionEnforcementUnavailable) as exc_info:
+        service.materialize_snapshot_from_metadata(
+            repository_url="https://github.com/owner/repo",
+            commit_hash="a" * 40,
+        )
+    assert exc_info.value.failure_code == "ACQUISITION_ENFORCEMENT_UNAVAILABLE"
+    from app.governance.taxonomy import FailureCode, safe_failure
+
+    assert safe_failure(exc_info.value).code == FailureCode.ACQUISITION_ENFORCEMENT_UNAVAILABLE
+
+
+def test_snapshot_fetch_and_checkout_use_shared_bounded_git_executor(monkeypatch):
+    from types import SimpleNamespace
+
+    target_sha = "e1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0"
+    settings = SimpleNamespace(
+        is_production=False,
+        GITHUB_APP_ENABLED=False,
+        CLONE_TIMEOUT_SECONDS=45,
+        MAX_GIT_OBJECT_BYTES=987_654,
+        MAX_REPO_FILES=5_000,
+        MAX_FILE_SIZE_BYTES=1_048_576,
+        MAX_TOTAL_SOURCE_BYTES=52_428_800,
+    )
+    service = RepositorySnapshotService(settings=settings)
+    bounded_calls = []
+    tree_checks = []
+
+    def bounded_git(command, **kwargs):
+        bounded_calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def local_git(command, **kwargs):
+        output = target_sha if command[-2:] == ["rev-parse", "HEAD"] else ""
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    monkeypatch.setattr("app.ingestion.snapshot._run_clone_with_object_budget", bounded_git)
+    monkeypatch.setattr("app.ingestion.snapshot.subprocess.run", local_git)
+    monkeypatch.setattr(
+        "app.ingestion.snapshot.validate_repository_tree_budget",
+        lambda *args, **kwargs: tree_checks.append(kwargs) or (1, 10),
+    )
+
+    workspace = service.materialize_snapshot_from_metadata(
+        repository_url="https://github.com/owner/repo",
+        commit_hash=target_sha,
+    )
+    try:
+        assert [
+            "fetch" if "fetch" in call[0] else "checkout" for call in bounded_calls
+        ] == ["fetch", "checkout"]
+        assert all(call[1]["repository_dir"] == workspace for call in bounded_calls)
+        assert all(call[1]["max_git_object_bytes"] == 987_654 for call in bounded_calls)
+        assert tree_checks[0]["max_git_object_bytes"] == 987_654
+    finally:
+        service.release_snapshot(workspace)
 
 
 def test_materialize_snapshot_nonexistent_scan_id(db_session):

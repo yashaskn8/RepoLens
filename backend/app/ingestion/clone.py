@@ -11,6 +11,10 @@ import time
 from typing import Optional, Tuple
 from urllib.parse import urlparse
 from app.core.config import get_settings
+from app.ingestion.acquisition_boundary import (
+    AcquisitionEnforcementUnavailable,
+    require_acquisition_boundary,
+)
 
 
 class IngestionError(Exception):
@@ -676,6 +680,9 @@ def clone_repository(
     settings = get_settings()
     timeout = timeout_seconds or settings.CLONE_TIMEOUT_SECONDS
     normalized_url = validate_github_url(repo_url)
+    # The local object-store monitor is reactive, not a hard disk/network
+    # quota. Never silently use it for production repository acquisition.
+    require_acquisition_boundary(settings)
 
     dest_dir = target_dir or tempfile.mkdtemp(prefix="repolens_repo_")
 
@@ -781,7 +788,7 @@ def clone_repository(
     except Exception as exc:
         if target_dir is None and os.path.exists(dest_dir):
             shutil.rmtree(dest_dir, ignore_errors=True)
-        if isinstance(exc, IngestionError):
+        if isinstance(exc, (IngestionError, AcquisitionEnforcementUnavailable)):
             raise
         raise CloneFailedError(f"Unexpected clone error: {str(exc)}")
 

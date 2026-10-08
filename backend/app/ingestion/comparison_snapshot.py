@@ -39,6 +39,7 @@ from app.ingestion.snapshot import (
     SnapshotVerificationError,
     get_snapshot_service,
 )
+from app.ingestion.acquisition_boundary import AcquisitionEnforcementUnavailable
 from app.models.change_analysis import ChangeAnalysisModel
 from app.schemas.enums import ChangeAnalysisStatus
 from app.schemas.workflow_event import WorkflowEventCreate, WorkflowEventType
@@ -265,7 +266,15 @@ class ComparisonSnapshotService:
         except Exception as exc:
             # Guaranteed cleanup on failure of either workspace
             self.release_comparison_workspaces(base_workspace, head_workspace)
-            if not isinstance(exc, (ComparisonSnapshotError, SnapshotError, InvalidRepositoryURLError)):
+            if not isinstance(
+                exc,
+                (
+                    ComparisonSnapshotError,
+                    SnapshotError,
+                    InvalidRepositoryURLError,
+                    AcquisitionEnforcementUnavailable,
+                ),
+            ):
                 raise ComparisonSnapshotError(f"Comparison acquisition failed: {str(exc)}") from exc
             raise
 
