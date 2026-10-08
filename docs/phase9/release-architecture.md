@@ -138,7 +138,7 @@ User submits URL
 Validate GitHub URL & check daily quota (SCAN_CREATE)
   │
   ▼
-Ephemeral Git shallow clone (depth=1, timeout=120s, budget=50MB)
+Ephemeral shallow clone (120s timeout; bounded tree/file admission; reactive object-store monitor, not a hard disk/network quota)
   │
   ▼
 Tree-sitter AST parsing & Static Scanner execution (Semgrep / Trivy / OSV)

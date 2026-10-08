@@ -61,7 +61,7 @@ RepoLens protects the following primary assets:
 
 | Threat Vector | Evaluated Scenario | Status | Source Mitigation / Control |
 |---|---|---|---|
-| **Malicious Submitted Repository** | Attacker crafts a repo with thousands of huge files or decompression bombs. | **MITIGATED** | Ingestion limits: 120s timeout, max 5,000 files, max 1MB per file, max 50MB total source size. |
+| **Malicious Submitted Repository** | Attacker crafts a repo with thousands of huge files, an oversized Git object transfer, or decompression bombs. | **PARTIALLY MITIGATED** | A 120s timeout, bounded Git tree metadata, pre-checkout limits (5,000 files, 1MB per file, 50MB aggregate source), reactive object-store monitoring, and Git process-tree termination limit exposure. Object-store monitoring can overshoot between polls and is not a hard pre-write disk/network quota; deployments requiring a strict per-scan ceiling need a quota-enforced acquisition filesystem/transport. |
 | **Path Traversal / Escape** | Repo contains files named `../../etc/passwd` or `..\Windows\System32`. | **MITIGATED** | `_validate_safe_path` resolves canonical paths against the temporary repository root and rejects escapes. |
 | **Symlink Sandbox Escape** | Repo contains symlinks pointing to `/etc` or host system files. | **MITIGATED** | Symlink resolution strictly checks real path destination; out-of-boundary links are skipped. |
 | **Repository Script Execution** | Repo includes malicious Makefiles, setup scripts, or poisoned test suites. | **BLOCKED BY CONTROL** | RepoLens never executes code, never runs tests, and never imports untrusted Python modules. |
@@ -86,7 +86,7 @@ RepoLens protects the following primary assets:
 
 ## 5. Defense-in-Depth Mitigations
 
-1. **Passive Ingestion Sandbox**: Git shallow clones are placed in ephemeral OS temporary directories, bounded by strict file count, file size, and total byte budgets.
+1. **Passive Ingestion Controls**: Git shallow clones use ephemeral OS temporary directories, bounded tree/file admission, timeouts, reactive object-store monitoring, and process-tree termination. These controls do not provide an OS-enforced per-scan disk or network quota; that remains a release hardening gap.
 2. **Deterministic-First Pipeline**: Static AST and scanner evidence are captured before LLM engagement, preventing models from fabricating structural facts.
 3. **Strict Human Approval Gate**: Patches remain in `VERIFIED` or `NEEDS_REVIEW` until a human explicitly reviews the diff and approves it. The API ignores machine-generated approval flags.
 4. **Fail-Closed Production Security**: In `ENVIRONMENT=production`, the application raises a startup error if `AUTH_COOKIE_SECURE=False`, if `CORS_ORIGINS` contains wildcards or is empty, or if `TRUSTED_HOSTS` contains wildcards.

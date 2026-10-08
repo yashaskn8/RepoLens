@@ -394,7 +394,12 @@ def _run_clone_with_object_budget(
     timeout_seconds: int,
     max_git_object_bytes: int,
 ) -> subprocess.CompletedProcess:
-    """Run Git while bounding its on-disk object footprint and captured diagnostics."""
+    """Run Git with reactive object-store monitoring and bounded diagnostics.
+
+    The byte check is not an OS-enforced pre-write quota: a fast write can
+    exceed the configured threshold between polls. Callers must not describe
+    this monitor as a hard disk or network quota.
+    """
     process_tree = _GitProcessTreeGuard()
     process = process_tree.start(
         command,
