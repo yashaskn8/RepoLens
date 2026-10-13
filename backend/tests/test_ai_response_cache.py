@@ -11,6 +11,9 @@ from app.indexing.schemas import EmbeddingRequest, EmbeddingResponse, EmbeddingR
 from app.llm.base import BaseLLMAdapter
 from app.llm.cache import AIResponseCache, SingleFlight
 from app.llm.classifier import TaskCategory, TaskClassifier
+from app.llm.capabilities import ModelCapabilityRegistry, ModelCapabilitySpec, RoutingPolicy
+from app.llm.gateway import AIRoutingLimits, CapabilityAIGateway
+from app.llm.quota import LocalProviderQuotaLedger
 from app.llm.exceptions import LLMContextLimitError
 from app.llm.router import LLMRouter
 from app.llm.types import (
@@ -21,6 +24,8 @@ from app.llm.types import (
     LLMRequest,
     LLMResponse,
     ModelCapability,
+    ModelCostTier,
+    TaskPolicy,
 )
 from app.schemas.metadata import ModelExecutionMetadata
 
@@ -110,6 +115,39 @@ def _request(content: str = "classify this") -> LLMRequest:
             prompt_template_version="test-prompt/v1",
             evidence_digest="a" * 64,
         ),
+    )
+
+
+def _capability_gateway(
+    adapter: CountingAdapter,
+    *,
+    policy_resolver=None,
+    quota: LocalProviderQuotaLedger | None = None,
+) -> CapabilityAIGateway:
+    registry = ModelCapabilityRegistry(
+        [
+            ModelCapabilitySpec(
+                provider=LLMProvider.GROQ,
+                model="test-model",
+                capabilities=frozenset(
+                    {
+                        ModelCapability.REPOSITORY_ANALYSIS,
+                        ModelCapability.STRUCTURED_EXTRACTION,
+                    }
+                ),
+                cost_tier=ModelCostTier.FREE,
+                quality_rank=1,
+                context_window_tokens=32_768,
+                max_output_tokens=8_192,
+            )
+        ]
+    )
+    return CapabilityAIGateway(
+        {LLMProvider.GROQ: adapter},
+        registry=registry,
+        routing_policy=RoutingPolicy(registry),
+        policy_resolver=policy_resolver,
+        quota=quota,
     )
 
 
@@ -257,6 +295,21 @@ def test_cache_identity_is_tenant_evidence_and_version_scoped() -> None:
     assert len(keys) == 4
 
 
+def test_exact_cache_identity_preserves_semantic_message_whitespace() -> None:
+    cache = AIResponseCache(store=MemoryCacheStore())
+    baseline = _request("if cond:\n    work()\n    deny()")
+    different_scope = baseline.model_copy(deep=True)
+    different_scope.messages[0].content = "if cond:\n    work()\ndeny()"
+
+    assert cache.exact_cache_allowed(baseline)
+    assert cache.exact_cache_allowed(different_scope)
+    assert cache.request_key(baseline, "route/v1") != cache.request_key(
+        different_scope,
+        "route/v1",
+    )
+    assert cache.VERSION == "ai-response-cache/1.2"
+
+
 def test_semantic_cache_denies_security_reasoning() -> None:
     cache = AIResponseCache(
         store=MemoryCacheStore(), embedding_provider=StableEmbeddingProvider()
@@ -280,15 +333,19 @@ def test_cache_identity_includes_request_budget() -> None:
     assert cache.request_key(baseline, "route/v1") != cache.request_key(stricter, "route/v1")
 
 
+@pytest.mark.parametrize(
+    "capability",
+    [ModelCapability.STRUCTURED_EXTRACTION, None],
+)
 @pytest.mark.asyncio
-async def test_cache_hit_cannot_bypass_current_context_budget() -> None:
+async def test_cache_hit_cannot_bypass_current_context_budget(capability) -> None:
     store = MemoryCacheStore()
     cache = AIResponseCache(store=store)
     router = LLMRouter(
         adapters={LLMProvider.GROQ: CountingAdapter()}, response_cache=cache
     )
     request = _request("A detailed repository analysis request that exceeds a tiny input budget.")
-    request.capability = ModelCapability.STRUCTURED_EXTRACTION
+    request.capability = capability
     request.budget = AIRequestBudget(max_input_tokens=10, max_context_tokens=2_000)
     await cache.store_response(
         request,
@@ -303,6 +360,97 @@ async def test_cache_hit_cannot_bypass_current_context_budget() -> None:
 
     with pytest.raises(LLMContextLimitError, match="input-token budget"):
         await router.generate(request)
+
+
+@pytest.mark.asyncio
+async def test_capability_cache_hit_revalidates_active_provider_policy_without_snapshot(
+    monkeypatch,
+) -> None:
+    import asyncio
+
+    store = MemoryCacheStore()
+    cache = AIResponseCache(store=store)
+    adapter = CountingAdapter()
+    resolved_policy_ids: list[str | None] = []
+
+    def resolve_active_policy(policy_snapshot_id: str | None) -> AIRoutingLimits:
+        resolved_policy_ids.append(policy_snapshot_id)
+        return AIRoutingLimits(
+            max_cost_tier=ModelCostTier.FREE,
+            disabled_providers=frozenset({LLMProvider.GROQ}),
+        )
+
+    async def direct_to_thread(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", direct_to_thread)
+    gateway = _capability_gateway(adapter, policy_resolver=resolve_active_policy)
+    router = LLMRouter(
+        adapters={LLMProvider.GROQ: adapter},
+        capability_gateway=gateway,
+        response_cache=cache,
+    )
+    request = _request("analyze this evidence")
+    request.capability = ModelCapability.REPOSITORY_ANALYSIS
+    request.task_policy = TaskPolicy.ARCHITECTURE
+    request.provider = None
+    request.model = None
+    request.lineage = request.lineage.model_copy(
+        update={"policy_snapshot_id": None}
+    )
+    await cache.store_response(
+        request,
+        router._routing_identity(request),
+        LLMResponse(
+            content="stale cached response",
+            model="test-model",
+            provider=LLMProvider.GROQ,
+            metadata=ModelExecutionMetadata(model_name="test-model", provider="groq"),
+        ),
+    )
+
+    with pytest.raises(LLMContextLimitError, match="No enabled model"):
+        await router.generate(request)
+
+    assert resolved_policy_ids == [None, None]
+    assert adapter.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_eligible_capability_cache_hit_does_not_consume_provider_quota() -> None:
+    store = MemoryCacheStore()
+    cache = AIResponseCache(store=store)
+    adapter = CountingAdapter()
+    quota = LocalProviderQuotaLedger()
+    gateway = _capability_gateway(adapter, quota=quota)
+    router = LLMRouter(
+        adapters={LLMProvider.GROQ: adapter},
+        capability_gateway=gateway,
+        response_cache=cache,
+    )
+    request = _request("analyze this evidence")
+    request.capability = ModelCapability.REPOSITORY_ANALYSIS
+    request.task_policy = TaskPolicy.ARCHITECTURE
+    request.provider = None
+    request.model = None
+    await cache.store_response(
+        request,
+        router._routing_identity(request),
+        LLMResponse(
+            content="eligible cached response",
+            model="test-model",
+            provider=LLMProvider.GROQ,
+            metadata=ModelExecutionMetadata(model_name="test-model", provider="groq"),
+        ),
+    )
+
+    response = await router.generate(request)
+
+    assert response.content == "eligible cached response"
+    assert response.metadata.extra_metadata["cache_hit"] is True
+    assert adapter.calls == 0
+    assert quota.usage(LLMProvider.GROQ, "test-model")["consumed_calls"] == 0
+    assert quota.usage(LLMProvider.GROQ, "test-model")["reserved_calls"] == 0
 
 
 @pytest.mark.asyncio

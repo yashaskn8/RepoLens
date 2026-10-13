@@ -31,6 +31,7 @@ from app.github_app.webhooks import (
     validate_delivery_identity,
     verify_webhook_signature,
 )
+from app.ingestion.acquisition_boundary import AcquisitionEnforcementUnavailable
 from app.models.github_app import (
     GitHubAppBindingGrantModel,
     GitHubAppInstallationModel,
@@ -431,6 +432,12 @@ async def github_app_webhook(
     except WebhookValidationError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except AcquisitionEnforcementUnavailable as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail={"error_code": exc.failure_code, "message": str(exc)},
+        ) from exc
     except IntegrityError:
         db.rollback()
         row = db.query(GitHubAppWebhookDeliveryModel).filter_by(delivery_id=delivery_id).first()

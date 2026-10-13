@@ -2,19 +2,37 @@
 
 from __future__ import annotations
 
+import json
+import hashlib
 import os
 import platform
 import subprocess
 import sys
 import time
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 from uuid import uuid4
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.analysis.core import analyze_core_repository
 from app.analysis.diff_engine import ChangeDiffEngine
 from app.analysis.impact_engine import ChangeImpactEngine
+from app.evaluation.ground_truth.authority import (
+    BENCHMARK_CASES_DIR,
+    BENCHMARK_MANIFEST_PATH,
+    REPO_ROOT,
+    TRUSTED_BENCHMARK_BOOTSTRAP_ITERATIONS,
+    TRUSTED_BENCHMARK_BOOTSTRAP_SEED,
+    TRUSTED_BENCHMARK_CASE_COUNT,
+    TRUSTED_BENCHMARK_CONTRACT_ID,
+    TRUSTED_BENCHMARK_DATASET_VERSION,
+    TRUSTED_BENCHMARK_DATASET_SHA256,
+    TRUSTED_BENCHMARK_MATCHER_VERSION,
+    TRUSTED_BENCHMARK_METRICS_VERSION,
+    TRUSTED_BENCHMARK_VERSION,
+    TRUSTED_OFFICIAL_CASE_INVENTORIES,
+)
 from app.evaluation.ground_truth.catalog import CapabilityCatalog, load_capability_catalog
 from app.evaluation.ground_truth.leakage import (
     LeakageDetector,
@@ -35,6 +53,7 @@ from app.evaluation.ground_truth.metrics import (
     BenchmarkAggregateMetrics,
     aggregate_case_metrics,
 )
+from app.evaluation.ground_truth.holdout_governance import HoldoutAuthorizationContract
 from app.evaluation.ground_truth.schemas import (
     BenchmarkCase,
     BenchmarkContract,
@@ -61,28 +80,73 @@ _NEUTRAL_NULL_COMMIT = "0000000000000000000000000000000000000000"
 _NEUTRAL_BASE_COMMIT = "base000000000000000000000000000000000000"
 _NEUTRAL_HEAD_COMMIT = "head000000000000000000000000000000000000"
 
+# An official report is an execution result, not a label that may be restored
+# from caller-controlled JSON. Only the verified runner sets this process-local
+# mint while constructing its report. It is deliberately not serialized.
+_OFFICIAL_REPORT_MINT = object()
+_official_report_mint: ContextVar[object | None] = ContextVar(
+    "repolens_official_benchmark_report_mint",
+    default=None,
+)
+
 
 def _get_git_commit_sha() -> str:
     """Retrieve the current local git commit SHA or UNKNOWN."""
     try:
         res = subprocess.run(
             ["git", "rev-parse", "HEAD"],
+            cwd=REPO_ROOT,
             capture_output=True,
             text=True,
             check=False,
+            env=_git_identity_environment(),
         )
-        if res.returncode == 0 and res.stdout.strip():
-            return res.stdout.strip()
+        candidate = res.stdout.strip()
+        if res.returncode == 0 and _is_commit_sha(candidate):
+            return candidate
     except Exception:
         pass
     return "UNKNOWN_COMMIT"
 
 
+def _git_identity_environment() -> dict[str, str]:
+    """Avoid caller-injected Git directory/index/config overrides for identity checks."""
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.upper().startswith("GIT_")
+    }
+    environment["GIT_CONFIG_NOSYSTEM"] = "1"
+    environment["GIT_CONFIG_GLOBAL"] = os.devnull
+    environment["GIT_OPTIONAL_LOCKS"] = "0"
+    return environment
+
+
+def _is_commit_sha(value: str) -> bool:
+    return len(value) in {40, 64} and all(character in "0123456789abcdef" for character in value)
+
+
+def _repository_tree_is_clean() -> bool:
+    """Fail closed unless HEAD exactly describes the current tracked/untracked source tree."""
+    try:
+        result = subprocess.run(
+            ["git", "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "--untracked-files=all"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=_git_identity_environment(),
+        )
+    except Exception:
+        return False
+    return result.returncode == 0 and not result.stdout.strip()
+
+
 class BenchmarkRunReport(BaseModel):
     """Complete machine-readable artifact of a benchmark evaluation run."""
 
-    benchmark_version: str = "1.0.1"
-    dataset_version: str = "1.0.0"
+    benchmark_version: str = TRUSTED_BENCHMARK_VERSION
+    dataset_version: str = TRUSTED_BENCHMARK_DATASET_VERSION
     canonical_dataset_hash: str
     git_commit_sha: str
     python_version: str
@@ -109,6 +173,124 @@ class BenchmarkRunReport(BaseModel):
     aggregate_metrics: BenchmarkAggregateMetrics
     per_case_results: List[CaseEvaluationResult]
 
+    @staticmethod
+    def _case_inventory_digest(results: List[CaseEvaluationResult]) -> str:
+        """Digest only public case identity/label metadata, never fixture contents."""
+        inventory = sorted(
+            [
+                [
+                    result.case_id,
+                    result.case_family,
+                    result.split,
+                    result.category,
+                    result.difficulty,
+                    result.evaluation_stage.value,
+                    result.expected_verdict.value,
+                    result.evaluation_scope.value,
+                ]
+                for result in results
+            ],
+            key=lambda item: item[0],
+        )
+        payload = json.dumps(inventory, separators=(",", ":"), ensure_ascii=False)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    @model_validator(mode="after")
+    def validate_report_identity_and_accounting(self) -> "BenchmarkRunReport":
+        contract = self.benchmark_contract
+        if contract is None:
+            raise ValueError("benchmark report must include its run identity contract")
+        if contract.execution_scope != self.execution_scope:
+            raise ValueError("report execution scope must match its benchmark contract")
+        if contract.dataset_canonical_hash != self.canonical_dataset_hash:
+            raise ValueError("report dataset digest must match its benchmark contract")
+        if contract.git_commit_sha != self.git_commit_sha:
+            raise ValueError("report commit SHA must match its benchmark contract")
+        if contract.benchmark_version != self.benchmark_version:
+            raise ValueError("report version must match its benchmark contract")
+        if (
+            self.execution_scope != ExecutionScope.CUSTOM
+            and _official_report_mint.get() is not _OFFICIAL_REPORT_MINT
+        ):
+            raise ValueError(
+                "official benchmark authority is minted only during verified in-process runner execution; "
+                "serialized reports are unauthenticated"
+            )
+        case_ids = [result.case_id for result in self.per_case_results]
+        if len(case_ids) != len(set(case_ids)):
+            raise ValueError("per-case results cannot contain duplicate case IDs")
+        if self.eligible_cases > self.total_cases:
+            raise ValueError("eligible case count cannot exceed total case count")
+        if self.executed_cases > self.eligible_cases:
+            raise ValueError("executed case count cannot exceed eligible case count")
+        if self.failed_cases > self.executed_cases:
+            raise ValueError("failed case count cannot exceed executed case count")
+        if len(self.per_case_results) != self.executed_cases:
+            raise ValueError("per-case results must match the executed case count")
+        if self.skipped_cases != self.eligible_cases - self.executed_cases:
+            raise ValueError("skipped case count must match eligible minus executed cases")
+        observed_failures = sum(
+            any("Pipeline error:" in reason for reason in result.mismatch_reasons)
+            for result in self.per_case_results
+        )
+        if self.failed_cases != observed_failures:
+            raise ValueError("failed case count must match per-case pipeline failures")
+
+        expected_completion = (
+            round(self.executed_cases / self.eligible_cases, 4)
+            if self.eligible_cases
+            else 0.0
+        )
+        if self.completion_fraction != expected_completion:
+            raise ValueError("completion fraction must match executed/eligible case counts")
+
+        expected_status = (
+            ExecutionStatus.FAILED
+            if self.failed_cases > 0
+            else ExecutionStatus.COMPLETED
+            if self.executed_cases == self.eligible_cases
+            else ExecutionStatus.PARTIAL_RUN
+        )
+        if self.execution_status != expected_status:
+            raise ValueError("execution status must match case completion and failure counts")
+
+        # Aggregate fields are derived claims. Recompute every metric, including
+        # seeded confidence intervals, from the child results before trusting them.
+        expected_metrics = aggregate_case_metrics(
+            self.per_case_results,
+            run_bootstrap=True,
+            bootstrap_iterations=TRUSTED_BENCHMARK_BOOTSTRAP_ITERATIONS,
+            bootstrap_seed=TRUSTED_BENCHMARK_BOOTSTRAP_SEED,
+        )
+        if (
+            expected_metrics.model_dump(mode="json")
+            != self.aggregate_metrics.model_dump(mode="json")
+        ):
+            raise ValueError("aggregate metrics must be recomputed from per-case results")
+
+        if self.execution_scope != ExecutionScope.CUSTOM:
+            pinned_inventory = TRUSTED_OFFICIAL_CASE_INVENTORIES.get(self.execution_scope.value)
+            if pinned_inventory is None:
+                raise ValueError("official report scope is not pinned")
+            expected_count, expected_inventory_digest = pinned_inventory
+            if self.benchmark_version != TRUSTED_BENCHMARK_VERSION:
+                raise ValueError("official report requires the repository-pinned benchmark version")
+            if self.dataset_version != TRUSTED_BENCHMARK_DATASET_VERSION:
+                raise ValueError("official report requires the repository-pinned dataset version")
+            if contract.matcher_version != TRUSTED_BENCHMARK_MATCHER_VERSION:
+                raise ValueError("official report requires the repository-pinned matcher version")
+            if contract.metrics_version != TRUSTED_BENCHMARK_METRICS_VERSION:
+                raise ValueError("official report requires the repository-pinned metrics version")
+            if self.total_cases != TRUSTED_BENCHMARK_CASE_COUNT:
+                raise ValueError("official report total must match the pinned public corpus")
+            if self.eligible_cases != expected_count or self.executed_cases != expected_count:
+                raise ValueError("official report must execute the complete pinned case inventory")
+            if self.execution_status == ExecutionStatus.PARTIAL_RUN:
+                raise ValueError("official report cannot claim a partial case inventory")
+            if self._case_inventory_digest(self.per_case_results) != expected_inventory_digest:
+                raise ValueError("official report case inventory does not match the pinned scope")
+        return self
+
 
 class BenchmarkRunner:
     """Orchestrates sandboxed evaluation of RepoLens on benchmark cases."""
@@ -118,6 +300,7 @@ class BenchmarkRunner:
         catalog: Optional[CapabilityCatalog] = None,
         judge: Optional[IndependentBenchmarkJudge] = None,
     ) -> None:
+        self._canonical_dependencies = catalog is None and judge is None
         self.catalog = catalog or load_capability_catalog()
         self.judge = judge or IndependentBenchmarkJudge(catalog=self.catalog)
 
@@ -445,20 +628,57 @@ class BenchmarkRunner:
     ) -> BenchmarkRunReport:
         """Execute complete benchmark suite and return full auditable report."""
         start_time = time.perf_counter()
-        loaded_cases = cases or load_benchmark_dataset(cases_dir=cases_dir, catalog=self.catalog)
+        if cases is not None and cases_dir is not None:
+            raise ValueError("provide either explicit cases or cases_dir, not both")
+
+        has_explicit_dataset = cases is not None or cases_dir is not None
+        if cases is not None:
+            # An explicitly supplied empty list is a real empty custom dataset,
+            # not a request to fall back to the repository benchmark.
+            loaded_cases = cases
+        else:
+            loaded_cases = load_benchmark_dataset(cases_dir=cases_dir, catalog=self.catalog)
 
         eligible_cases = loaded_cases if split is None else filter_by_split(loaded_cases, split)
         dataset_hash = compute_canonical_benchmark_hash(loaded_cases)
+        commit_sha = _get_git_commit_sha()
 
-        # Determine execution scope from split
-        if split == BenchmarkSplit.FROZEN_PUBLIC_EVAL:
+        # Official labels require implicit canonical inputs, default evaluator
+        # dependencies, a supported split, and a successful repository-pinned
+        # benchmark verification. Explicit caller data is always CUSTOM even if
+        # it happens to have the same bytes as the public corpus.
+        supported_official_split = split in {
+            None,
+            BenchmarkSplit.DEV,
+            BenchmarkSplit.FROZEN_PUBLIC_EVAL,
+        }
+        benchmark_verified = False
+        if (
+            not has_explicit_dataset
+            and self._canonical_dependencies
+            and supported_official_split
+            and _is_commit_sha(commit_sha)
+            and _repository_tree_is_clean()
+        ):
+            try:
+                validation = HoldoutAuthorizationContract.verify_benchmark_contract(
+                    BENCHMARK_MANIFEST_PATH,
+                    cases_dir=BENCHMARK_CASES_DIR,
+                    root_dir=REPO_ROOT,
+                )
+                benchmark_verified = validation.valid
+            except Exception:
+                # Verification failures must never grant an official identity.
+                benchmark_verified = False
+
+        if not benchmark_verified or dataset_hash != TRUSTED_BENCHMARK_DATASET_SHA256:
+            exec_scope = ExecutionScope.CUSTOM
+        elif split == BenchmarkSplit.FROZEN_PUBLIC_EVAL:
             exec_scope = ExecutionScope.OFFICIAL_PUBLIC_EVAL
         elif split == BenchmarkSplit.DEV:
             exec_scope = ExecutionScope.OFFICIAL_DEV
-        elif split is None:
-            exec_scope = ExecutionScope.OFFICIAL_FULL_DIAGNOSTIC
         else:
-            exec_scope = ExecutionScope.CUSTOM
+            exec_scope = ExecutionScope.OFFICIAL_FULL_DIAGNOSTIC
 
         results: List[CaseEvaluationResult] = []
         failed_cases = 0
@@ -479,33 +699,51 @@ class BenchmarkRunner:
             ExecutionStatus.FAILED if failed_cases > 0 else ExecutionStatus.PARTIAL_RUN
         )
 
-        agg_metrics = aggregate_case_metrics(results, run_bootstrap=True)
-        commit_sha = _get_git_commit_sha()
-
+        agg_metrics = aggregate_case_metrics(
+            results,
+            run_bootstrap=True,
+            bootstrap_iterations=TRUSTED_BENCHMARK_BOOTSTRAP_ITERATIONS,
+            bootstrap_seed=TRUSTED_BENCHMARK_BOOTSTRAP_SEED,
+        )
         # Build cryptographic binding contract
         contract = BenchmarkContract(
+            dataset_canonical_hash=dataset_hash,
             git_commit_sha=commit_sha,
             execution_scope=exec_scope,
-            benchmark_contract_id=f"{exec_scope.value}:{dataset_hash[:16]}:{commit_sha[:12]}",
+            benchmark_contract_id=f"{exec_scope.value}:{dataset_hash}:{commit_sha}",
+            benchmark_authority_id=(
+                TRUSTED_BENCHMARK_CONTRACT_ID
+                if exec_scope != ExecutionScope.CUSTOM
+                else None
+            ),
         )
 
-        return BenchmarkRunReport(
-            benchmark_version="1.0.1",
-            dataset_version="1.0.0",
-            canonical_dataset_hash=dataset_hash,
-            git_commit_sha=commit_sha,
-            python_version=platform.python_version(),
-            platform=f"{platform.system()} {platform.release()}",
-            timestamp=datetime.now(timezone.utc).isoformat(),
-            duration_seconds=elapsed,
-            execution_scope=exec_scope,
-            benchmark_contract=contract,
-            execution_status=status,
-            total_cases=total_count,
-            eligible_cases=eligible_count,
-            executed_cases=executed_count,
-            failed_cases=failed_cases,
-            completion_fraction=completion_fraction,
-            aggregate_metrics=agg_metrics,
-            per_case_results=results,
+        mint_token = (
+            _official_report_mint.set(_OFFICIAL_REPORT_MINT)
+            if exec_scope != ExecutionScope.CUSTOM
+            else None
         )
+        try:
+            return BenchmarkRunReport(
+                benchmark_version=TRUSTED_BENCHMARK_VERSION,
+                dataset_version=TRUSTED_BENCHMARK_DATASET_VERSION,
+                canonical_dataset_hash=dataset_hash,
+                git_commit_sha=commit_sha,
+                python_version=platform.python_version(),
+                platform=f"{platform.system()} {platform.release()}",
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                duration_seconds=elapsed,
+                execution_scope=exec_scope,
+                benchmark_contract=contract,
+                execution_status=status,
+                total_cases=total_count,
+                eligible_cases=eligible_count,
+                executed_cases=executed_count,
+                failed_cases=failed_cases,
+                completion_fraction=completion_fraction,
+                aggregate_metrics=agg_metrics,
+                per_case_results=results,
+            )
+        finally:
+            if mint_token is not None:
+                _official_report_mint.reset(mint_token)

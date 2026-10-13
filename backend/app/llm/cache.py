@@ -62,7 +62,7 @@ class CacheLookup:
 class AIResponseCache:
     """Small Redis-backed cache whose keys include authority and evidence identity."""
 
-    VERSION = "ai-response-cache/1.1"
+    VERSION = "ai-response-cache/1.2"
 
     def __init__(
         self,
@@ -328,7 +328,7 @@ class AIResponseCache:
         }
         if include_messages:
             payload["messages"] = [
-                {"role": item.role, "content": " ".join(item.content.split())}
+                {"role": item.role, "content": item.content}
                 for item in request.messages
             ]
         return payload

@@ -130,6 +130,14 @@
 
 ## 5. Primary Workflows
 
+The diagrams below describe the admitted local/development workflow. **Production
+currently rejects new repository acquisition before quota/work admission** and
+does not run external scanner subprocesses. Reactive Git object-store monitoring,
+timeouts, output caps, and process-tree cleanup are defense-in-depth, not hard
+disk, network, CPU, memory, or PID quotas. Built-in deterministic analysis
+remains available for already-admitted work; unavailable scanner coverage is
+reported rather than fabricated.
+
 ### Flow 1: Security Scan & Remediation Lifecycle
 ```
 User submits URL
@@ -138,10 +146,10 @@ User submits URL
 Validate GitHub URL & check daily quota (SCAN_CREATE)
   │
   ▼
-Ephemeral shallow clone (120s timeout; bounded tree/file admission; reactive object-store monitor, not a hard disk/network quota)
+Development/test only: ephemeral shallow clone (bounded inputs and reactive object-store monitoring)
   │
   ▼
-Tree-sitter AST parsing & Static Scanner execution (Semgrep / Trivy / OSV)
+Tree-sitter AST parsing; external Semgrep / Trivy / OSV subprocesses are unavailable in production
   │
   ▼
 Construct NetworkX RepositoryGraph (CALLS, IMPORTS, EXPOSES_API)
@@ -170,10 +178,10 @@ Human Review: User approves patch (or submits feedback for iterative revision)
 
 ### Flow 2: PR Change Intelligence & Review Publication
 ```
-User submits Public PR URL (or dual commit SHAs)
+Development/test only: user submits public PR URL (or dual commit SHAs)
   │
   ▼
-Validate PR URL & check daily quota (CHANGE_ANALYSIS_CREATE)
+Validate PR URL & check daily quota (CHANGE_ANALYSIS_CREATE); production acquisition is rejected until hard isolation is provisioned
   │
   ▼
 Credential-free PR metadata resolution -> Reconstruct base & head commit SHAs
@@ -201,6 +209,31 @@ Operator reviews preview -> Approves review publication
 ```
 
 ---
+
+### Production worker boundary required before acquisition is enabled
+
+The current code intentionally has no trusted provisioner configured. A future
+worker integration must provide one versioned, testable job contract covering
+all of the following before the production admission gate can be changed:
+
+1. Atomically reserve tenant/work-item concurrency and hard workspace byte and
+   inode quotas before clone or scanner execution.
+2. Create and destroy a per-job isolated workspace with enforced filesystem
+   limits, including crash-safe lease expiry and orphan recovery.
+3. Enforce transfer-byte limits and default-deny outbound networking through a
+   controlled egress path; reactive Git object-store monitoring is insufficient.
+4. Run Git and fixed RepoLens-owned scanner commands inside the same kernel
+   boundary with hard CPU, memory, process-count, wall-clock, and descendant
+   containment limits. A POSIX process group alone is insufficient because a
+   child can detach with `setsid()`.
+5. Return only bounded result metadata and artifacts bound to a snapshot digest;
+   release the resource reservation exactly once on completion or recovery.
+
+The worker API should have explicit `reserve`, `create_workspace`,
+`run_fixed_process`, `report_usage`, `finalize`, and `recover_expired` operations.
+Every operation must be scoped by an authenticated tenant/work-item identity and
+an immutable limits profile. No provider is wired to the application today;
+asserting capabilities in configuration alone must not make the gate ready.
 
 ## 6. Deployment Shape & Portability
 

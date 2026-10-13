@@ -8,18 +8,34 @@ import os
 import tempfile
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
-from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
 from app.evaluation.ground_truth.loader import compute_canonical_benchmark_hash, load_benchmark_dataset
+from app.evaluation.ground_truth.authority import (
+    BENCHMARK_CASES_DIR,
+    BENCHMARK_CONTRACT_COMPONENTS,
+    PRODUCTION_FREEZE_COMPONENTS,
+    REPO_ROOT,
+    TRUSTED_BENCHMARK_CATALOG_SHA256,
+    TRUSTED_BENCHMARK_CONTRACT_ID,
+    TRUSTED_BENCHMARK_DATASET_SHA256,
+    TRUSTED_PRODUCTION_FREEZE_ID,
+)
 
 
 _LEDGER_LOCK_TIMEOUT_SECONDS = 10.0
 _LEDGER_LOCK_POLL_SECONDS = 0.025
+
+
+def _safe_resolve(path: str | Path) -> Path | None:
+    """Resolve an untrusted path without allowing symlink loops to escape fail-closed handling."""
+    try:
+        return Path(path).resolve()
+    except (OSError, RuntimeError):
+        return None
 
 
 def canonical_hash(obj: Dict[str, Any]) -> str:
@@ -81,7 +97,7 @@ class PrivateHoldoutMetadata(BaseModel):
 
 
 class HoldoutAuthorizationContract:
-    """Cryptographic authority governing whether execution against a private holdout is permitted."""
+    """Verify pinned public freezes and fail closed for unconfigured private execution."""
 
     @staticmethod
     def verify_production_freeze(
@@ -92,8 +108,7 @@ class HoldoutAuthorizationContract:
 
         Args:
             manifest_path: Path to the production freeze manifest JSON.
-            root_dir: Repository root directory for resolving component paths.
-                      When None, component paths are resolved relative to CWD.
+            root_dir: Optional root assertion. It must resolve to RepoLens's canonical root.
         """
         p = Path(manifest_path)
         if not p.is_file():
@@ -104,10 +119,28 @@ class HoldoutAuthorizationContract:
                 expected_id="UNKNOWN",
                 mismatches=[f"Production freeze manifest not found: {p}"],
             )
-        with open(p, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            return FreezeValidationResult(
+                valid=False,
+                manifest_type="PRODUCTION_ANALYZER",
+                manifest_id="UNKNOWN",
+                expected_id=TRUSTED_PRODUCTION_FREEZE_ID,
+                mismatches=[f"Production freeze manifest is unreadable: {type(exc).__name__}"],
+            )
+        if not isinstance(data, dict):
+            return FreezeValidationResult(
+                valid=False,
+                manifest_type="PRODUCTION_ANALYZER",
+                manifest_id="UNKNOWN",
+                expected_id=TRUSTED_PRODUCTION_FREEZE_ID,
+                mismatches=["Production freeze manifest must be a JSON object."],
+            )
 
-        expected_id = data.get("production_freeze_id", "")
+        recorded_id = data.get("production_freeze_id")
+        expected_id = recorded_id if isinstance(recorded_id, str) else ""
         # Compute canonical hash of manifest content excluding the ID itself
         data_to_hash = {k: v for k, v in data.items() if k != "production_freeze_id"}
         actual_id = canonical_hash(data_to_hash)
@@ -117,18 +150,40 @@ class HoldoutAuthorizationContract:
             mismatches.append(
                 f"Production freeze ID mismatch: recorded={expected_id}, computed={actual_id}"
             )
+        if expected_id != TRUSTED_PRODUCTION_FREEZE_ID:
+            mismatches.append("Production freeze does not match the repository-pinned trust anchor.")
 
-        for comp_path, comp_info in data.get("components", {}).items():
-            expected_hash = comp_info.get("sha256")
-            resolved_path = Path(root_dir) / comp_path if root_dir else Path(comp_path)
+        components = data.get("components")
+        if not isinstance(components, dict) or set(components) != PRODUCTION_FREEZE_COMPONENTS:
+            mismatches.append("Production freeze component inventory differs from the pinned inventory.")
+
+        canonical_root = REPO_ROOT.resolve()
+        supplied_root = _safe_resolve(root_dir) if root_dir is not None else canonical_root
+        if supplied_root != canonical_root:
+            mismatches.append("Production freeze verification is restricted to the canonical repository root.")
+
+        for comp_path in sorted(PRODUCTION_FREEZE_COMPONENTS if isinstance(components, dict) else ()):
+            comp_info = components.get(comp_path)
+            expected_hash = comp_info.get("sha256") if isinstance(comp_info, dict) else None
+            if supplied_root != canonical_root:
+                continue
+            resolved_path = _safe_resolve(canonical_root / comp_path)
+            if resolved_path is None:
+                mismatches.append(f"Production component path is not safely resolvable: {comp_path}")
+                continue
+            if not resolved_path.is_relative_to(canonical_root):
+                mismatches.append(f"Production component escapes the canonical repository: {comp_path}")
+                continue
             try:
+                if not isinstance(expected_hash, str) or len(expected_hash) != 64:
+                    raise ValueError("component digest is malformed")
                 actual_hash = compute_file_sha256(resolved_path)
                 if actual_hash != expected_hash:
                     mismatches.append(
                         f"Component tampered: {comp_path} (recorded={expected_hash[:12]}..., actual={actual_hash[:12]}...)"
                     )
             except Exception as e:
-                mismatches.append(f"Failed to verify component {comp_path}: {e}")
+                mismatches.append(f"Failed to verify production component {comp_path}: {type(e).__name__}")
 
         return FreezeValidationResult(
             valid=len(mismatches) == 0,
@@ -149,8 +204,7 @@ class HoldoutAuthorizationContract:
         Args:
             manifest_path: Path to the benchmark contract manifest JSON.
             cases_dir: Directory containing benchmark case files.
-            root_dir: Repository root directory for resolving component paths.
-                      When None, component paths are resolved relative to CWD.
+            root_dir: Optional root assertion. It must resolve to RepoLens's canonical root.
         """
         p = Path(manifest_path)
         if not p.is_file():
@@ -161,10 +215,28 @@ class HoldoutAuthorizationContract:
                 expected_id="UNKNOWN",
                 mismatches=[f"Benchmark contract manifest not found: {p}"],
             )
-        with open(p, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            return FreezeValidationResult(
+                valid=False,
+                manifest_type="BENCHMARK_CONTRACT",
+                manifest_id="UNKNOWN",
+                expected_id=TRUSTED_BENCHMARK_CONTRACT_ID,
+                mismatches=[f"Benchmark contract manifest is unreadable: {type(exc).__name__}"],
+            )
+        if not isinstance(data, dict):
+            return FreezeValidationResult(
+                valid=False,
+                manifest_type="BENCHMARK_CONTRACT",
+                manifest_id="UNKNOWN",
+                expected_id=TRUSTED_BENCHMARK_CONTRACT_ID,
+                mismatches=["Benchmark contract manifest must be a JSON object."],
+            )
 
-        expected_id = data.get("benchmark_contract_id", "")
+        recorded_id = data.get("benchmark_contract_id")
+        expected_id = recorded_id if isinstance(recorded_id, str) else ""
         data_to_hash = {k: v for k, v in data.items() if k != "benchmark_contract_id"}
         actual_id = canonical_hash(data_to_hash)
 
@@ -173,31 +245,63 @@ class HoldoutAuthorizationContract:
             mismatches.append(
                 f"Benchmark contract ID mismatch: recorded={expected_id}, computed={actual_id}"
             )
+        if expected_id != TRUSTED_BENCHMARK_CONTRACT_ID:
+            mismatches.append("Benchmark contract does not match the repository-pinned trust anchor.")
 
-        # Verify dataset hash if directory provided
-        if cases_dir:
+        components = data.get("components")
+        if not isinstance(components, dict) or set(components) != BENCHMARK_CONTRACT_COMPONENTS:
+            mismatches.append("Benchmark component inventory differs from the pinned inventory.")
+
+        canonical_root = REPO_ROOT.resolve()
+        supplied_root = _safe_resolve(root_dir) if root_dir is not None else canonical_root
+        if supplied_root != canonical_root:
+            mismatches.append("Benchmark verification is restricted to the canonical repository root.")
+
+        canonical_cases = BENCHMARK_CASES_DIR.resolve()
+        supplied_cases = _safe_resolve(cases_dir) if cases_dir is not None else canonical_cases
+        if supplied_cases != canonical_cases:
+            mismatches.append("Benchmark dataset verification is restricted to the canonical public corpus.")
+
+        if supplied_root == canonical_root and supplied_cases == canonical_cases:
             try:
-                cases = load_benchmark_dataset(cases_dir=str(cases_dir))
+                cases = load_benchmark_dataset(cases_dir=str(canonical_cases))
                 actual_ds_hash = compute_canonical_benchmark_hash(cases)
+                if actual_ds_hash != TRUSTED_BENCHMARK_DATASET_SHA256:
+                    mismatches.append("Canonical public dataset differs from the repository-pinned trust anchor.")
                 if actual_ds_hash != data.get("canonical_dataset_hash"):
                     mismatches.append(
-                        f"Canonical dataset hash mismatch: recorded={data.get('canonical_dataset_hash')}, actual={actual_ds_hash}"
+                        "Canonical dataset hash mismatch: manifest does not match the loaded public corpus."
                     )
             except Exception as e:
-                mismatches.append(f"Failed to verify dataset at {cases_dir}: {e}")
+                mismatches.append(f"Failed to verify canonical public dataset: {type(e).__name__}")
+        if data.get("canonical_dataset_hash") != TRUSTED_BENCHMARK_DATASET_SHA256:
+            mismatches.append("Benchmark manifest dataset hash differs from the repository-pinned trust anchor.")
+        if data.get("catalog_hash") != TRUSTED_BENCHMARK_CATALOG_SHA256:
+            mismatches.append("Benchmark manifest catalog hash differs from the repository-pinned trust anchor.")
 
         # Verify benchmark component files
-        for comp_path, comp_info in data.get("components", {}).items():
-            expected_hash = comp_info.get("sha256")
-            resolved_path = Path(root_dir) / comp_path if root_dir else Path(comp_path)
+        for comp_path in sorted(BENCHMARK_CONTRACT_COMPONENTS if isinstance(components, dict) else ()):
+            comp_info = components.get(comp_path)
+            expected_hash = comp_info.get("sha256") if isinstance(comp_info, dict) else None
+            if supplied_root != canonical_root:
+                continue
+            resolved_path = _safe_resolve(canonical_root / comp_path)
+            if resolved_path is None:
+                mismatches.append(f"Benchmark component path is not safely resolvable: {comp_path}")
+                continue
+            if not resolved_path.is_relative_to(canonical_root):
+                mismatches.append(f"Benchmark component escapes the canonical repository: {comp_path}")
+                continue
             try:
+                if not isinstance(expected_hash, str) or len(expected_hash) != 64:
+                    raise ValueError("component digest is malformed")
                 actual_hash = compute_file_sha256(resolved_path)
                 if actual_hash != expected_hash:
                     mismatches.append(
                         f"Benchmark component tampered: {comp_path} (recorded={expected_hash[:12]}..., actual={actual_hash[:12]}...)"
                     )
             except Exception as e:
-                mismatches.append(f"Failed to verify benchmark component {comp_path}: {e}")
+                mismatches.append(f"Failed to verify benchmark component {comp_path}: {type(e).__name__}")
 
         return FreezeValidationResult(
             valid=len(mismatches) == 0,
@@ -217,68 +321,18 @@ class HoldoutAuthorizationContract:
         cases_dir: Optional[str | Path] = None,
         root_dir: Optional[str | Path] = None,
     ) -> Tuple[bool, List[str]]:
-        """Evaluate full authorization gate for executing unseen private holdout.
+        """Deny private holdout execution until a trusted execution authority exists.
 
         Returns:
             (is_authorized: bool, failure_reasons: List[str])
         """
-        reasons: List[str] = []
-
-        # 1. Verify Production Freeze
-        prod_val = cls.verify_production_freeze(production_manifest_path, root_dir=root_dir)
-        if not prod_val.valid:
-            reasons.extend(prod_val.mismatches)
-
-        # 2. Verify Benchmark Contract Freeze
-        bench_val = cls.verify_benchmark_contract(
-            benchmark_manifest_path, cases_dir=cases_dir, root_dir=root_dir
-        )
-        if not bench_val.valid:
-            reasons.extend(bench_val.mismatches)
-
-        # 3. Check Holdout Existence and Integrity
-        if holdout_metadata is None:
-            reasons.append(
-                "PRIVATE_FINAL_HOLDOUT does not exist. Independent curation is required before execution."
-            )
-            return False, reasons
-
-        if not holdout_metadata.independent_review_complete:
-            reasons.append("Private holdout independent review is not complete.")
-
-        if holdout_metadata.seal_status != "SEALED":
-            reasons.append(f"Private holdout is not SEALED (status: {holdout_metadata.seal_status}).")
-
-        if holdout_metadata.fixture_content_accessed:
-            reasons.append("Private holdout content was accessed by development agent prior to execution.")
-
-        # 4. Check Single-Use Ledger
-        if ledger.is_consumed(holdout_metadata.holdout_id):
-            reasons.append(
-                f"Private holdout {holdout_metadata.holdout_id} has already been consumed in the single-use ledger."
-            )
-
-        # The read above is only an early rejection. Atomically consume the
-        # holdout before returning authorization so concurrent checks cannot
-        # both receive permission. A crash after this point is fail-closed.
-        if not reasons:
-            try:
-                ledger.claim_execution(
-                    authorization_id=uuid4().hex,
-                    production_freeze_id=prod_val.manifest_id,
-                    benchmark_contract_id=bench_val.manifest_id,
-                    holdout_id=holdout_metadata.holdout_id,
-                    execution_timestamp=datetime.now(timezone.utc).isoformat(),
-                )
-            except ValueError:
-                reasons.append(
-                    f"Private holdout {holdout_metadata.holdout_id} has already been claimed."
-                )
-            except (OSError, TimeoutError):
-                reasons.append("The single-use authorization ledger is unavailable.")
-
-        is_authorized = len(reasons) == 0
-        return is_authorized, reasons
+        # No private fixture artifact, authenticated operator authority,
+        # independently trusted holdout manifest, or transactional deployment
+        # claim service is configured. In particular, do not open caller paths
+        # or claim a local ledger on the strength of caller-constructed metadata.
+        return False, [
+            "PRIVATE_FINAL_HOLDOUT execution is NOT_CONFIGURED: trusted holdout artifacts, authenticated operator authorization, and an authoritative claim service are unavailable."
+        ]
 
 
 class SingleUseLedger:

@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.execution.application import WorkSubmissionService, deterministic_resource_id
 from app.execution.types import ResourceProfile, WorkKind
 from app.governance.events import AuditLedger
@@ -26,6 +27,7 @@ from app.schemas.enums import ChangeAnalysisStatus, UsageOperation
 from app.schemas.workflow_event import WorkflowEventCreate, WorkflowEventType
 from app.services.quota_service import check_and_increment_quota
 from app.services.workflow_event_service import WorkflowEventService
+from app.ingestion.acquisition_boundary import require_acquisition_boundary
 
 _SIGNATURE = re.compile(r"^sha256=[0-9a-f]{64}$")
 _DELIVERY = re.compile(r"^[A-Za-z0-9-]{1,128}$")
@@ -321,6 +323,12 @@ def _enqueue_pull_request(db: Session, payload: dict[str, Any], action: str) -> 
     updated_at = _pull_request_updated_at(pr)
     if updated_at is None:
         return installation_id, None
+
+    # Reject unavailable acquisition before quota accounting or staging any
+    # analysis/work rows. WorkSubmissionService repeats this defense at the
+    # durable admission boundary. Delivery deduplication happens before this
+    # function, so already-accepted retries remain idempotently acknowledgeable.
+    require_acquisition_boundary(get_settings())
 
     current = db.query(GitHubAppPullRequestHeadModel).filter_by(
         installation_id=installation_id, repository_id=repository_id, pull_number=number

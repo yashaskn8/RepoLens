@@ -116,7 +116,7 @@ def test_attack_4_dataset_hash_changed(tmp_path):
         tampered_manifest_path, cases_dir=CASES_DIR, root_dir=_REPO_ROOT
     )
     assert res.valid is False
-    assert any("Canonical dataset hash mismatch" in m for m in res.mismatches)
+    assert any("dataset hash" in m.lower() for m in res.mismatches)
 
 
 def test_attack_5_normalization_contract_changed(tmp_path):
@@ -177,7 +177,8 @@ def test_attack_8_private_auth_wrong_production_id(tmp_path):
         root_dir=_REPO_ROOT,
     )
     assert is_auth is False
-    assert any("Production freeze ID mismatch" in r for r in reasons)
+    assert any("NOT_CONFIGURED" in r for r in reasons)
+    assert ledger.entries == []
 
 
 def test_attack_9_private_auth_wrong_benchmark_id(tmp_path):
@@ -200,7 +201,8 @@ def test_attack_9_private_auth_wrong_benchmark_id(tmp_path):
         root_dir=_REPO_ROOT,
     )
     assert is_auth is False
-    assert any("Benchmark contract ID mismatch" in r for r in reasons)
+    assert any("NOT_CONFIGURED" in r for r in reasons)
+    assert ledger.entries == []
 
 
 def test_attack_10_reused_single_use_ledger_entry(tmp_path):
@@ -250,7 +252,7 @@ def test_attack_10_reused_single_use_ledger_entry(tmp_path):
         root_dir=_REPO_ROOT,
     )
     assert is_auth is False
-    assert any("already been consumed" in r for r in reasons)
+    assert any("NOT_CONFIGURED" in r for r in reasons)
 
 
 def test_single_use_ledger_allows_only_one_cross_process_claim(tmp_path):
@@ -267,7 +269,7 @@ from app.evaluation.ground_truth.holdout_governance import SingleUseLedger
 ledger_path, ready_dir, release_path, worker_id = sys.argv[1:]
 ledger = SingleUseLedger(ledger_path)
 (Path(ready_dir) / worker_id).write_text("ready", encoding="utf-8")
-deadline = time.monotonic() + 15
+deadline = time.monotonic() + 60
 while not Path(release_path).exists():
     if time.monotonic() >= deadline:
         raise SystemExit(4)
@@ -304,7 +306,10 @@ raise SystemExit(0)
         for worker_id in ("worker-a", "worker-b")
     ]
     try:
-        deadline = time.monotonic() + 15
+        # Fresh Windows Python workers can take longer to import the app when
+        # the full suite is under load; this bounds startup without weakening
+        # the atomic one-winner/one-rejected claim assertion below.
+        deadline = time.monotonic() + 60
         while not all((ready_dir / worker_id).exists() for worker_id in ("worker-a", "worker-b")):
             if time.monotonic() >= deadline:
                 pytest.fail("claim workers did not both load the empty ledger")
@@ -353,15 +358,9 @@ def test_single_use_ledger_allows_only_one_same_process_thread_claim(tmp_path):
     assert SingleUseLedger(ledger_file).is_consumed("holdout-thread-race") is True
 
 
-def test_successful_holdout_authorization_claims_before_returning(tmp_path):
-    production_manifest = {"components": {}}
-    production_manifest["production_freeze_id"] = canonical_hash(production_manifest)
-    benchmark_manifest = {"components": {}, "canonical_dataset_hash": "not-loaded"}
-    benchmark_manifest["benchmark_contract_id"] = canonical_hash(benchmark_manifest)
-    production_path = tmp_path / "production.json"
-    benchmark_path = tmp_path / "benchmark.json"
-    production_path.write_text(json.dumps(production_manifest), encoding="utf-8")
-    benchmark_path.write_text(json.dumps(benchmark_manifest), encoding="utf-8")
+def test_holdout_authorization_is_not_configured_and_never_claims(tmp_path):
+    production_path = tmp_path / "must-not-be-opened-production.json"
+    benchmark_path = tmp_path / "must-not-be-opened-benchmark.json"
     ledger = SingleUseLedger(tmp_path / "ledger.json")
     metadata = PrivateHoldoutMetadata(
         holdout_id="holdout-authorize-once",
@@ -379,15 +378,46 @@ def test_successful_holdout_authorization_claims_before_returning(tmp_path):
         holdout_metadata=metadata,
         ledger=ledger,
     )
-    assert authorized is True
-    assert reasons == []
-    assert ledger.is_consumed(metadata.holdout_id) is True
+    assert authorized is False
+    assert any("NOT_CONFIGURED" in reason for reason in reasons)
+    assert production_path.exists() is False
+    assert benchmark_path.exists() is False
+    assert ledger.entries == []
+    assert ledger.ledger_file.exists() is False
 
-    replay_authorized, replay_reasons = HoldoutAuthorizationContract.check_authorization(
-        production_manifest_path=production_path,
-        benchmark_manifest_path=benchmark_path,
-        holdout_metadata=metadata,
-        ledger=ledger,
+
+def test_forged_self_consistent_empty_freeze_manifests_are_rejected(tmp_path):
+    production_manifest = {"components": {}}
+    production_manifest["production_freeze_id"] = canonical_hash(production_manifest)
+    benchmark_manifest = {"components": {}, "canonical_dataset_hash": "not-loaded"}
+    benchmark_manifest["benchmark_contract_id"] = canonical_hash(benchmark_manifest)
+    production_path = tmp_path / "production.json"
+    benchmark_path = tmp_path / "benchmark.json"
+    production_path.write_text(json.dumps(production_manifest), encoding="utf-8")
+    benchmark_path.write_text(json.dumps(benchmark_manifest), encoding="utf-8")
+
+    prod = HoldoutAuthorizationContract.verify_production_freeze(production_path, root_dir=_REPO_ROOT)
+    bench = HoldoutAuthorizationContract.verify_benchmark_contract(benchmark_path, root_dir=_REPO_ROOT)
+
+    assert prod.valid is False
+    assert any("pinned" in mismatch.lower() or "inventory" in mismatch.lower() for mismatch in prod.mismatches)
+    assert bench.valid is False
+    assert any("pinned" in mismatch.lower() or "inventory" in mismatch.lower() for mismatch in bench.mismatches)
+
+
+def test_custom_roots_and_cases_directories_cannot_verify_as_frozen(tmp_path):
+    bench = HoldoutAuthorizationContract.verify_benchmark_contract(
+        BENCH_MANIFEST_PATH,
+        cases_dir=tmp_path,
+        root_dir=_REPO_ROOT,
     )
-    assert replay_authorized is False
-    assert any("already been consumed" in reason for reason in replay_reasons)
+    assert bench.valid is False
+    assert any("canonical public corpus" in mismatch for mismatch in bench.mismatches)
+
+    custom_root = HoldoutAuthorizationContract.verify_benchmark_contract(
+        BENCH_MANIFEST_PATH,
+        cases_dir=CASES_DIR,
+        root_dir=tmp_path,
+    )
+    assert custom_root.valid is False
+    assert any("canonical repository root" in mismatch for mismatch in custom_root.mismatches)

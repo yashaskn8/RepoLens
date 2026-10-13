@@ -1,11 +1,16 @@
 # RepoLens Ground-Truth Evaluation Benchmark: Methodology and Specification
 
-- **Benchmark Version**: `1.0.1`
+- **Benchmark Version**: `1.3.0`
 - **Dataset Version**: `1.0.0`
 - **Canonical Dataset Hash**: `1611efec9c34421b19d862427241fde5061170d7268602103fd5585e66b317bf`
 - **Evaluation Harness**: `backend/app/evaluation/ground_truth/`
 - **Cases Directory**: `backend/evaluation_data/ground_truth/v1/cases/`
 - **CLI Runner**: `python -m app.cli.run_benchmark`
+
+Official-scope identity is minted only by the verified in-process benchmark
+runner. Exported JSON is an audit artifact, not a signed execution attestation;
+reloading it cannot recreate official authority. Report validation also checks
+the pinned case inventory and recomputes aggregate metrics from case results.
 
 ---
 

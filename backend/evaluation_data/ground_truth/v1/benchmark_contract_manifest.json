@@ -3,7 +3,7 @@
   "freeze_type": "BENCHMARK_CONTRACT",
   "freeze_status": "FROZEN",
   "freeze_timestamp": "2026-09-14T13:30:00Z",
-  "benchmark_version": "1.1.0",
+  "benchmark_version": "1.3.0",
   "canonical_dataset_hash": "1611efec9c34421b19d862427241fde5061170d7268602103fd5585e66b317bf",
   "catalog_hash": "835c22b4f9355738413b0c390c29e6f78b4b082c6a76151161388256b3d1b1ab",
   "case_count": 90,
@@ -41,7 +41,7 @@
       "scoring_critical": true
     },
     "backend/app/evaluation/ground_truth/runner.py": {
-      "sha256": "87c63240588ecce96088723a1656b1c47ff76dba11228ab28ab81452aa042abd",
+      "sha256": "d4c1c74b0ef46290a1669cf8d70f6805730eb423bb61b4d519ca3e8cf948dfec",
       "role": "Benchmark execution runner and sandbox coordinator",
       "scoring_critical": true
     },
@@ -56,7 +56,7 @@
       "scoring_critical": true
     },
     "backend/app/evaluation/ground_truth/schemas.py": {
-      "sha256": "3849bb6dc7b145190206af18cbc4ba912d16e3f8524c2c5a22e898fb3be48030",
+      "sha256": "62fcd570c29192ec685ecd811888558139ab350cce5533ab6e55140e7f36008a",
       "role": "Pydantic schemas for cases, annotations, claims, and contracts",
       "scoring_critical": true
     },
@@ -70,11 +70,16 @@
       "role": "Hostile anti-leakage detector and sandbox hygiene enforcer",
       "scoring_critical": true
     },
+    "backend/app/evaluation/ground_truth/holdout_governance.py": {
+      "sha256": "7909ec107f56ad0a456189bb8a18e135865543b22634204f4fb122a23afd8900",
+      "role": "Pinned public benchmark verification and fail-closed private holdout authorization",
+      "scoring_critical": true
+    },
     "backend/evaluation_data/ground_truth/v1/catalog.json": {
       "sha256": "835c22b4f9355738413b0c390c29e6f78b4b082c6a76151161388256b3d1b1ab",
       "role": "Canonical capability catalog definition",
       "scoring_critical": true
     }
   },
-  "benchmark_contract_id": "837f3794009793f8d337aaa3f3c7a97c27c036d161169eec460ef955c0154fe7"
+  "benchmark_contract_id": "ce789690aae268a55c3c9b3bbe6d34cc2b8d56927af0745b353186fd6bccc85b"
 }

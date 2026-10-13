@@ -17,12 +17,15 @@ Simulates 11 active cheating strategies and adversarial attacks:
 import base64
 import sys
 import urllib.parse
+from types import SimpleNamespace
 from unittest.mock import patch
 import pytest
 
+import app.evaluation.ground_truth.runner as benchmark_runner_module
 from app.evaluation.ground_truth.catalog import load_capability_catalog
 from app.evaluation.ground_truth.leakage import LeakageDetector, create_neutral_sandbox
 from app.evaluation.ground_truth.matcher import (
+    CaseEvaluationResult,
     EvaluatedFinding,
     IndependentBenchmarkJudge,
 )
@@ -30,12 +33,17 @@ from app.evaluation.ground_truth.metrics import (
     aggregate_case_metrics,
     safe_div,
 )
-from app.evaluation.ground_truth.runner import BenchmarkRunner
+from app.evaluation.ground_truth.authority import (
+    TRUSTED_BENCHMARK_CONTRACT_ID,
+    TRUSTED_BENCHMARK_DATASET_SHA256,
+)
+from app.evaluation.ground_truth.runner import BenchmarkRunReport, BenchmarkRunner
 from app.evaluation.ground_truth.schemas import (
     AbstentionOutcome,
     BenchmarkCase,
     BenchmarkCategory,
     BenchmarkDifficulty,
+    BenchmarkContract,
     BenchmarkSplit,
     EvaluationAnnotation,
     EvaluationScope,
@@ -400,15 +408,234 @@ def test_attack_neutral_sandbox_isolation():
 
 
 # --- Attack 14: Execution Scope and Cryptographic Binding ---
-def test_attack_execution_scope_and_cryptographic_binding(catalog):
-    """Running under FROZEN_PUBLIC_EVAL must produce OFFICIAL_PUBLIC_EVAL scope and a bound BenchmarkContract."""
+def test_explicit_cases_cannot_claim_official_execution_scope(catalog):
+    """Caller-supplied cases are custom even if they claim the frozen split."""
     runner = BenchmarkRunner(catalog=catalog)
     cases = [_make_sample_case("SCOPE-01A", is_issue=True)]
     cases[0].split = BenchmarkSplit.FROZEN_PUBLIC_EVAL
 
     report = runner.run_benchmark(cases=cases, split=BenchmarkSplit.FROZEN_PUBLIC_EVAL)
-    assert report.execution_scope == ExecutionScope.OFFICIAL_PUBLIC_EVAL
+    assert report.execution_scope == ExecutionScope.CUSTOM
     assert report.benchmark_contract is not None
-    assert report.benchmark_contract.execution_scope == ExecutionScope.OFFICIAL_PUBLIC_EVAL
-    assert report.benchmark_contract.benchmark_contract_id.startswith("OFFICIAL_PUBLIC_EVAL:")
-    assert report.benchmark_version == "1.0.1"
+    assert report.benchmark_contract.execution_scope == ExecutionScope.CUSTOM
+    assert report.benchmark_contract.dataset_canonical_hash == report.canonical_dataset_hash
+    assert report.benchmark_contract.benchmark_contract_id == (
+        f"CUSTOM:{report.canonical_dataset_hash}:{report.git_commit_sha}"
+    )
+
+
+def test_explicit_empty_cases_and_custom_directory_remain_custom(catalog, tmp_path):
+    runner = BenchmarkRunner(catalog=catalog)
+
+    empty = runner.run_benchmark(cases=[], split=BenchmarkSplit.FROZEN_PUBLIC_EVAL)
+    assert empty.total_cases == 0
+    assert empty.executed_cases == 0
+    assert empty.execution_scope == ExecutionScope.CUSTOM
+    assert empty.benchmark_contract is not None
+    assert empty.benchmark_contract.dataset_canonical_hash == empty.canonical_dataset_hash
+
+    custom_directory = tmp_path / "cases"
+    custom_directory.mkdir()
+    report = runner.run_benchmark(
+        cases_dir=str(custom_directory),
+        split=BenchmarkSplit.FROZEN_PUBLIC_EVAL,
+    )
+    assert report.total_cases == 0
+    assert report.execution_scope == ExecutionScope.CUSTOM
+    assert report.benchmark_contract is not None
+    assert report.benchmark_contract.execution_scope == ExecutionScope.CUSTOM
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "expected_clean"),
+    [
+        (0, "", True),
+        (0, " M backend/app/evaluation/ground_truth/runner.py\n", False),
+        (0, "?? untracked-evaluator.py\n", False),
+        (1, "", False),
+    ],
+)
+def test_repository_identity_cleanliness_probe_fails_closed(
+    monkeypatch, returncode, stdout, expected_clean
+):
+    observed = {}
+
+    def fake_run(args, **kwargs):
+        observed["args"] = args
+        observed.update(kwargs)
+        return SimpleNamespace(returncode=returncode, stdout=stdout)
+
+    monkeypatch.setattr(benchmark_runner_module.subprocess, "run", fake_run)
+    assert benchmark_runner_module._repository_tree_is_clean() is expected_clean
+    assert observed["cwd"] == benchmark_runner_module.REPO_ROOT
+    assert "GIT_CONFIG_COUNT" not in observed["env"]
+
+
+def test_dirty_source_tree_cannot_receive_official_scope(monkeypatch):
+    empty_dataset_hash = benchmark_runner_module.compute_canonical_benchmark_hash([])
+    monkeypatch.setattr(benchmark_runner_module, "load_benchmark_dataset", lambda **_: [])
+    monkeypatch.setattr(
+        benchmark_runner_module,
+        "TRUSTED_BENCHMARK_DATASET_SHA256",
+        empty_dataset_hash,
+    )
+    monkeypatch.setattr(benchmark_runner_module, "_repository_tree_is_clean", lambda: False)
+
+    report = BenchmarkRunner().run_benchmark()
+
+    assert report.execution_scope == ExecutionScope.CUSTOM
+    assert report.benchmark_contract is not None
+    assert report.benchmark_contract.execution_scope == ExecutionScope.CUSTOM
+
+
+def test_report_rejects_mismatched_outer_official_identity(catalog):
+    report = BenchmarkRunner(catalog=catalog).run_benchmark(cases=[])
+    payload = report.model_dump(mode="json")
+    payload["execution_scope"] = ExecutionScope.OFFICIAL_PUBLIC_EVAL.value
+    with pytest.raises(ValueError, match="execution scope"):
+        BenchmarkRunReport.model_validate(payload)
+
+    payload = report.model_dump(mode="json")
+    payload["canonical_dataset_hash"] = "0" * 64
+    with pytest.raises(ValueError, match="dataset digest"):
+        BenchmarkRunReport.model_validate(payload)
+
+    payload = report.model_dump(mode="json")
+    payload["git_commit_sha"] = "1" * 40
+    with pytest.raises(ValueError, match="commit SHA"):
+        BenchmarkRunReport.model_validate(payload)
+
+
+def test_report_recomputes_aggregate_metrics_from_case_results(catalog):
+    report = BenchmarkRunner(catalog=catalog).run_benchmark(
+        cases=[_make_sample_case("REPORT-INTEGRITY-01A")]
+    )
+    payload = report.model_dump(mode="json")
+    payload["aggregate_metrics"]["precision"] = (
+        None if payload["aggregate_metrics"]["precision"] is not None else 1.0
+    )
+
+    with pytest.raises(ValueError, match="recomputed from per-case results"):
+        BenchmarkRunReport.model_validate(payload)
+
+    payload = report.model_dump(mode="json")
+    payload["failed_cases"] = report.failed_cases + 1
+    with pytest.raises(ValueError, match="per-case pipeline failures"):
+        BenchmarkRunReport.model_validate(payload)
+
+    payload = report.model_dump(mode="json")
+    payload["skipped_cases"] = 1
+    with pytest.raises(ValueError, match="eligible minus executed"):
+        BenchmarkRunReport.model_validate(payload)
+
+
+def test_report_rejects_forged_official_scope_with_empty_or_unpinned_inventory(catalog):
+    report = BenchmarkRunner(catalog=catalog).run_benchmark(cases=[])
+    payload = report.model_dump(mode="json")
+    payload["execution_scope"] = ExecutionScope.OFFICIAL_PUBLIC_EVAL.value
+    payload["canonical_dataset_hash"] = TRUSTED_BENCHMARK_DATASET_SHA256
+    payload["benchmark_version"] = "0.0.0"
+    payload["total_cases"] = 90
+    payload["eligible_cases"] = 22
+    payload["executed_cases"] = 0
+    payload["skipped_cases"] = 22
+    payload["completion_fraction"] = 0.0
+    payload["execution_status"] = ExecutionStatus.PARTIAL_RUN.value
+
+    contract = payload["benchmark_contract"]
+    contract["execution_scope"] = ExecutionScope.OFFICIAL_PUBLIC_EVAL.value
+    contract["dataset_canonical_hash"] = TRUSTED_BENCHMARK_DATASET_SHA256
+    contract["benchmark_version"] = "0.0.0"
+    contract["benchmark_authority_id"] = TRUSTED_BENCHMARK_CONTRACT_ID
+    contract["benchmark_contract_id"] = (
+        f"OFFICIAL_PUBLIC_EVAL:{TRUSTED_BENCHMARK_DATASET_SHA256}:{payload['git_commit_sha']}"
+    )
+
+    with pytest.raises(ValueError, match="pinned benchmark version"):
+        BenchmarkRunReport.model_validate(payload)
+
+    # Even a correctly versioned and self-consistent public contract cannot
+    # turn an empty custom report into a valid official report.
+    payload["benchmark_version"] = "1.3.0"
+    contract["benchmark_version"] = "1.3.0"
+    with pytest.raises(ValueError, match="serialized reports are unauthenticated"):
+        BenchmarkRunReport.model_validate(payload)
+
+
+def test_verified_runner_mints_official_scope_but_serialization_does_not(catalog, monkeypatch):
+    cases = benchmark_runner_module.load_benchmark_dataset(catalog=catalog)
+    monkeypatch.setattr(benchmark_runner_module, "load_benchmark_dataset", lambda **_: cases)
+    monkeypatch.setattr(benchmark_runner_module, "_get_git_commit_sha", lambda: "a" * 40)
+    monkeypatch.setattr(benchmark_runner_module, "_repository_tree_is_clean", lambda: True)
+    monkeypatch.setattr(
+        benchmark_runner_module.HoldoutAuthorizationContract,
+        "verify_benchmark_contract",
+        staticmethod(lambda *_args, **_kwargs: SimpleNamespace(valid=True)),
+    )
+
+    runner = BenchmarkRunner()
+
+    def evaluate_identity_only(case):
+        return CaseEvaluationResult(
+            case_id=case.case_id,
+            case_family=case.case_family,
+            split=case.split.value,
+            category=case.category.value,
+            difficulty=case.difficulty.value,
+            evaluation_stage=case.evaluation_stage,
+            expected_verdict=case.annotation.expected_verdict,
+            evaluation_scope=case.annotation.evaluation_scope,
+        )
+
+    monkeypatch.setattr(runner, "execute_case", evaluate_identity_only)
+    report = runner.run_benchmark(split=BenchmarkSplit.FROZEN_PUBLIC_EVAL)
+
+    assert report.execution_scope == ExecutionScope.OFFICIAL_PUBLIC_EVAL
+    assert report.executed_cases == 22
+    with pytest.raises(ValueError, match="serialized reports are unauthenticated"):
+        BenchmarkRunReport.model_validate_json(report.model_dump_json())
+
+
+def test_official_scope_contract_requires_pinned_dataset_and_authority():
+    run_sha = "a" * 40
+    base = {
+        "execution_scope": ExecutionScope.OFFICIAL_PUBLIC_EVAL,
+        "git_commit_sha": run_sha,
+        "benchmark_contract_id": (
+            f"OFFICIAL_PUBLIC_EVAL:{TRUSTED_BENCHMARK_DATASET_SHA256}:{run_sha}"
+        ),
+        "benchmark_authority_id": TRUSTED_BENCHMARK_CONTRACT_ID,
+    }
+    BenchmarkContract.model_validate(
+        {**base, "dataset_canonical_hash": TRUSTED_BENCHMARK_DATASET_SHA256}
+    )
+
+    with pytest.raises(ValueError, match="pinned benchmark version"):
+        BenchmarkContract.model_validate(
+            {
+                **base,
+                "dataset_canonical_hash": TRUSTED_BENCHMARK_DATASET_SHA256,
+                "benchmark_version": "0.0.0",
+            }
+        )
+
+    bad_dataset_hash = "2" * 64
+    with pytest.raises(ValueError, match="pinned public dataset"):
+        BenchmarkContract.model_validate(
+            {
+                **base,
+                "dataset_canonical_hash": bad_dataset_hash,
+                "benchmark_contract_id": (
+                    f"OFFICIAL_PUBLIC_EVAL:{bad_dataset_hash}:{run_sha}"
+                ),
+            }
+        )
+
+    with pytest.raises(ValueError, match="pinned benchmark authority"):
+        BenchmarkContract.model_validate(
+            {
+                **base,
+                "dataset_canonical_hash": TRUSTED_BENCHMARK_DATASET_SHA256,
+                "benchmark_authority_id": "3" * 64,
+            }
+        )

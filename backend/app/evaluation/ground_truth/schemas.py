@@ -4,7 +4,16 @@ from __future__ import annotations
 
 from enum import Enum
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.evaluation.ground_truth.authority import (
+    TRUSTED_BENCHMARK_CATALOG_SHA256,
+    TRUSTED_BENCHMARK_CONTRACT_ID,
+    TRUSTED_BENCHMARK_DATASET_SHA256,
+    TRUSTED_BENCHMARK_MATCHER_VERSION,
+    TRUSTED_BENCHMARK_METRICS_VERSION,
+    TRUSTED_BENCHMARK_VERSION,
+)
 
 
 class EvaluationStage(str, Enum):
@@ -127,14 +136,42 @@ class StructuredImpactMetrics(BaseModel):
 class BenchmarkContract(BaseModel):
     """Cryptographic binding contract identifying dataset, evaluator, and execution parameters."""
 
-    benchmark_version: str = "1.0.1"
-    dataset_canonical_hash: str = "1611efec9c34421b19d862427241fde5061170d7268602103fd5585e66b317bf"
+    benchmark_version: str = TRUSTED_BENCHMARK_VERSION
+    dataset_canonical_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     catalog_hash: str = "835c22b4f9355738413b0c390c29e6f78b4b082c6a76151161388256b3d1b1ab"
     matcher_version: str = "1.0.1"
     metrics_version: str = "1.0.1"
-    git_commit_sha: str = "aede4587ca195a7b072210589b1a3daa3b4d6778"
+    git_commit_sha: str = Field(pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
     execution_scope: ExecutionScope
     benchmark_contract_id: str
+    benchmark_authority_id: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_identity_binding(self) -> "BenchmarkContract":
+        expected_id = (
+            f"{self.execution_scope.value}:"
+            f"{self.dataset_canonical_hash}:"
+            f"{self.git_commit_sha}"
+        )
+        if self.benchmark_contract_id != expected_id:
+            raise ValueError("benchmark contract ID must bind scope, dataset digest, and commit SHA")
+        if self.execution_scope == ExecutionScope.CUSTOM:
+            if self.benchmark_authority_id is not None:
+                raise ValueError("custom benchmark reports cannot carry official authority identity")
+        else:
+            if self.benchmark_version != TRUSTED_BENCHMARK_VERSION:
+                raise ValueError("official scope requires the repository-pinned benchmark version")
+            if self.matcher_version != TRUSTED_BENCHMARK_MATCHER_VERSION:
+                raise ValueError("official scope requires the repository-pinned matcher version")
+            if self.metrics_version != TRUSTED_BENCHMARK_METRICS_VERSION:
+                raise ValueError("official scope requires the repository-pinned metrics version")
+            if self.dataset_canonical_hash != TRUSTED_BENCHMARK_DATASET_SHA256:
+                raise ValueError("official scope requires the repository-pinned public dataset digest")
+            if self.catalog_hash != TRUSTED_BENCHMARK_CATALOG_SHA256:
+                raise ValueError("official scope requires the repository-pinned capability catalog")
+            if self.benchmark_authority_id != TRUSTED_BENCHMARK_CONTRACT_ID:
+                raise ValueError("official scope requires the repository-pinned benchmark authority ID")
+        return self
 
 
 class FindingClaimSpec(BaseModel):

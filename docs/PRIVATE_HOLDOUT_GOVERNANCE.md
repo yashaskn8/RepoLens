@@ -36,26 +36,19 @@ Development tooling must **NEVER** receive before final execution:
 
 ---
 
-## 3. Cryptographic Authorization Gate
+## 3. Current Execution Authority
 
-Execution against the private holdout is blocked by default (`PRIVATE_FINAL_EVALUATION_AUTHORIZED = false`). Authorization is granted only when all of the following conditions are simultaneously met:
+Private holdout execution is **NOT CONFIGURED**. There is no trusted private fixture manifest, authenticated operator authorization path, or authoritative transactional claim service in this repository. `HoldoutAuthorizationContract.check_authorization()` therefore denies execution before opening caller-supplied paths or claiming the local ledger. The local `SingleUseLedger` remains a utility and is not an official execution authority.
 
-1. **Production Freeze Valid**: All 12 production analyzer files match their registered SHA-256 hashes in `production_freeze_manifest.json` (`production_freeze_id: e54409eb0ea30e70cde4ff9abe3143c8a775e04c2b0c330db6819e6a57d1a516`).
-2. **Benchmark Contract Freeze Valid**: Runner, matcher, loader, metrics, and schema files match `benchmark_contract_manifest.json` (`benchmark_contract_id: 9685a5e2d0eff38659552a42c894e4f2db2c23031e77a376734b5a8fed2f76a8`).
-3. **Canonical Dataset Intact**: Public 90-case dataset hash equals `1611efec9c34421b19d862427241fde5061170d7268602103fd5585e66b317bf`.
-4. **Adversarial Audit Passed**: 0 critical/high findings in the hostile evaluation audit.
-5. **Private Holdout Sealed**: Independent curator has cryptographically sealed the holdout manifest.
-6. **Single-Use Ledger Available**: Holdout has not been executed previously.
+The public benchmark contract is source-pinned and binds its exact component inventory, evaluator files, catalog, and canonical dataset. Any evaluator change invalidates that contract until a reviewed manifest and matching source pin are updated. This repository pin is not a cryptographic signature or proof of an external review. Official execution scope is minted only by the verified in-process runner; serialized report JSON is untrusted and cannot recreate that authority.
+
+The production analyzer freeze remains stale whenever its registered source digests do not match. That validation is separate from public benchmark identity and does not authorize private evaluation.
 
 ---
 
-## 4. Single-Use Evaluation Ledger
+## 4. Local Single-Use Ledger Utility
 
-To prevent iterative tuning against the private holdout:
-1. Each private holdout may be executed **exactly once** as an official evaluation.
-2. The execution is immutably recorded in `single_use_ledger.json` with timestamp, commit SHA, and authorization ID.
-3. Once executed, `consumed = True`. Re-execution against the same holdout is strictly forbidden.
-4. If RepoLens code is modified based on post-evaluation error analysis, the holdout is automatically downgraded to regression data and cannot serve as an unseen generalization benchmark.
+The local file ledger supports single-host concurrency tests and records utility entries. It is not a distributed or multi-host authorization service and is not called by an official private-holdout execution path. A future official evaluator must use a trusted holdout identity, authenticated operator authorization, claim-before-fixture-access semantics, and durable transactional uniqueness before private fixtures are made available.
 
 ---
 
@@ -64,10 +57,11 @@ To prevent iterative tuning against the private holdout:
 ```json
 {
   "production_freeze_id": "e54409eb0ea30e70cde4ff9abe3143c8a775e04c2b0c330db6819e6a57d1a516",
-  "benchmark_contract_id": "9685a5e2d0eff38659552a42c894e4f2db2c23031e77a376734b5a8fed2f76a8",
+  "benchmark_contract_id": "ce789690aae268a55c3c9b3bbe6d34cc2b8d56927af0745b353186fd6bccc85b",
   "private_holdout_content_accessed": false,
   "private_final_holdout_exists": false,
   "private_final_evaluation_authorized": false,
+  "private_final_evaluation_status": "NOT_CONFIGURED",
   "unseen_generalization_score": "NOT_MEASURED"
 }
 ```

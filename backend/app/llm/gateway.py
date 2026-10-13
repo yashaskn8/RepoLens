@@ -10,7 +10,11 @@ from typing import Callable, Mapping
 from uuid import uuid4
 
 from app.llm.base import BaseLLMAdapter
-from app.llm.capabilities import ModelCapabilityRegistry, RoutingPolicy
+from app.llm.capabilities import (
+    ModelCapabilityRegistry,
+    ModelCapabilitySpec,
+    RoutingPolicy,
+)
 from app.llm.context import ContextEstimate, ContextEstimator
 from app.llm.exceptions import (
     LLMAllFallbacksFailedError,
@@ -87,9 +91,7 @@ class CapabilityAIGateway:
         return self.quota.reconcile_expired(limit=limit)
 
     def validate_request_context(self, request: LLMRequest) -> ContextEstimate:
-        """Enforce request context budgets before either cache reuse or execution."""
-        if request.capability is None:
-            raise ValueError("CapabilityAIGateway requires request.capability")
+        """Enforce context budgets independently of routing capability."""
         estimate = self.context_estimator.estimate(request)
         if estimate.input_tokens > request.budget.max_input_tokens:
             raise LLMContextLimitError("Estimated input exceeds the request input-token budget.")
@@ -97,14 +99,43 @@ class CapabilityAIGateway:
             raise LLMContextLimitError("Estimated request exceeds the configured context budget.")
         return estimate
 
-    async def generate(self, request: LLMRequest) -> LLMResponse:
-        estimate = self.validate_request_context(request)
+    async def cached_response_is_currently_eligible(
+        self,
+        request: LLMRequest,
+        response: LLMResponse,
+    ) -> bool:
+        """Reuse a capability response only if its route remains policy-eligible.
 
-        runtime_limits = (
-            await asyncio.to_thread(self.policy_resolver, request.lineage.policy_snapshot_id)
-            if self.policy_resolver is not None
-            else AIRoutingLimits(max_cost_tier=request.budget.max_escalation_tier)
+        Cache hits intentionally do not reserve provider/work-item quotas because
+        no provider execution occurs. They must still respect the current model
+        registry and operational provider/model policy, including the active
+        policy when a request has no durable policy snapshot.
+        """
+        if request.capability is None:
+            return True
+        estimate = self.validate_request_context(request)
+        runtime_limits = await self._resolve_routing_limits(request)
+        return any(
+            candidate.provider == response.provider and candidate.model == response.model
+            for candidate in self._eligible_candidates(request, estimate, runtime_limits)
         )
+
+    async def _resolve_routing_limits(self, request: LLMRequest) -> AIRoutingLimits:
+        if self.policy_resolver is not None:
+            return await asyncio.to_thread(
+                self.policy_resolver,
+                request.lineage.policy_snapshot_id,
+            )
+        return AIRoutingLimits(max_cost_tier=request.budget.max_escalation_tier)
+
+    def _eligible_candidates(
+        self,
+        request: LLMRequest,
+        estimate: ContextEstimate,
+        runtime_limits: AIRoutingLimits,
+    ) -> tuple[ModelCapabilitySpec, ...]:
+        if request.capability is None:
+            raise ValueError("CapabilityAIGateway requires request.capability")
         effective_tier = ModelCostTier(
             min(request.budget.max_escalation_tier.value, runtime_limits.max_cost_tier.value)
         )
@@ -129,6 +160,14 @@ class CapabilityAIGateway:
             )
         elif request.model is not None:
             candidates = tuple(item for item in candidates if item.model == request.model)
+        return candidates
+
+    async def generate(self, request: LLMRequest) -> LLMResponse:
+        if request.capability is None:
+            raise ValueError("CapabilityAIGateway requires request.capability")
+        estimate = self.validate_request_context(request)
+        runtime_limits = await self._resolve_routing_limits(request)
+        candidates = self._eligible_candidates(request, estimate, runtime_limits)
         if not candidates:
             raise LLMContextLimitError(
                 f"No enabled model satisfies capability {request.capability.value} within the request budget."

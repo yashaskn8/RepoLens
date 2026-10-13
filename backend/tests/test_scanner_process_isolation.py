@@ -4,11 +4,39 @@ import asyncio
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
-from app.analysis.base import BaseScannerAdapter, ScannerOutputError
+from app.analysis.base import (
+    BaseScannerAdapter,
+    ScannerOutputError,
+    external_scanner_execution_allowed,
+)
 from app.analysis.schemas import StaticFinding
+
+
+def test_external_scanners_fail_closed_in_production_without_hard_worker_boundary():
+    assert external_scanner_execution_allowed(SimpleNamespace(is_production=False)) is True
+    assert external_scanner_execution_allowed(SimpleNamespace(is_production=True)) is False
+
+
+@pytest.mark.asyncio
+async def test_production_scan_reports_unavailable_without_starting_child(monkeypatch, tmp_path):
+    scanner = _ProcessTreeScanner()
+    monkeypatch.setattr(
+        "app.analysis.base.get_settings",
+        lambda: SimpleNamespace(is_production=True, SCANNER_TIMEOUT_SECONDS=5),
+    )
+    execute = AsyncMock(side_effect=AssertionError("production must not start a scanner child"))
+    monkeypatch.setattr(scanner, "_execute_command", execute)
+
+    result = await scanner.scan(str(tmp_path))
+
+    assert result.status.value == "UNAVAILABLE"
+    assert "CPU, memory, PID" in result.error_message
+    execute.assert_not_awaited()
 
 
 class _ProcessTreeScanner(BaseScannerAdapter):

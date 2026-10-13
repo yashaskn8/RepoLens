@@ -69,6 +69,12 @@ def safe_scanner_environment() -> dict[str, str]:
     return env
 
 
+def external_scanner_execution_allowed(settings=None) -> bool:
+    """External scanners lack hard resource isolation, so production must not run them."""
+    active_settings = settings or get_settings()
+    return not bool(getattr(active_settings, "is_production", False))
+
+
 def _bound_stderr(stderr: Optional[str]) -> Optional[str]:
     """Truncate stderr to bounded length, stripping trailing whitespace."""
     if not stderr or not stderr.strip():
@@ -143,6 +149,10 @@ class BaseScannerAdapter(ABC):
         Raises subprocess.TimeoutExpired on timeout (NOT asyncio.TimeoutError).
         """
         settings = get_settings()
+        if not external_scanner_execution_allowed(settings):
+            raise RuntimeError(
+                "External scanner execution is unavailable without a quota-enforced worker boundary."
+            )
         timeout = timeout_seconds or settings.SCANNER_TIMEOUT_SECONDS
         cancellation_requested = threading.Event()
 
@@ -307,6 +317,19 @@ class BaseScannerAdapter(ABC):
                 tool=self.tool_name,
                 status=ToolStatus.DISABLED,
                 error_message=f"{self.tool_name} is disabled in configuration.",
+            )
+
+        settings = get_settings()
+        if not external_scanner_execution_allowed(settings):
+            return ScannerResult(
+                tool=self.tool_name,
+                status=ToolStatus.UNAVAILABLE,
+                error_message=(
+                    "External scanner execution is unavailable in production until a worker "
+                    "enforces CPU, memory, PID, workspace, egress, and crash-cleanup limits. "
+                    "RepoLens built-in deterministic analysis continues; this scanner's "
+                    "specialized coverage is not included."
+                ),
             )
 
         if not self.is_available():

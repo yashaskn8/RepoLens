@@ -670,6 +670,58 @@ def test_webhook_enqueues_only_bound_same_repository_heads_and_rejects_stale_hea
         assert current.current_analysis_id == analysis_id and current.head_sha == head_a
 
 
+def test_unavailable_acquisition_rejects_github_pr_before_quota_or_work(db_session):
+    from types import SimpleNamespace
+
+    from app.cli.create_operator import create_or_elevate_operator
+    from app.execution.application import WorkSubmissionService
+    from app.github_app import webhooks
+    from app.ingestion.acquisition_boundary import AcquisitionEnforcementUnavailable
+    from app.models.execution import WorkItemModel
+
+    user = create_or_elevate_operator(
+        db_session,
+        email="default_test_user@example.com",
+        password="DefaultTestPass12345!",
+    )
+    db_session.add(GitHubAppInstallationModel(
+        installation_id="44", account_id="99", account_login="sample-org",
+        account_type="Organization", owner_user_id=user.id, status="ACTIVE",
+        permissions_json='{"contents":"read","pull_requests":"write"}',
+        permissions_digest=hashlib.sha256(b'{"contents":"read","pull_requests":"write"}').hexdigest(),
+    ))
+    db_session.add(GitHubAppRepositoryModel(
+        repository_id="77", installation_id="44", owner_login="sample-org",
+        repository_name="private-repo", is_private=True, active=True,
+    ))
+    db_session.flush()
+    delivery_id = str(uuid4())
+    resource_count = db_session.query(ChangeAnalysisModel).count()
+    work_count = db_session.query(WorkItemModel).count()
+
+    with (
+        patch.object(webhooks, "get_settings", return_value=SimpleNamespace(is_production=True)),
+        patch.object(webhooks, "check_and_increment_quota") as quota,
+        patch.object(WorkSubmissionService, "submit") as submit,
+    ):
+        with pytest.raises(AcquisitionEnforcementUnavailable):
+            webhooks.accept_webhook_delivery(
+                db_session,
+                raw_body=b"{}",
+                delivery_id=delivery_id,
+                event_name="pull_request",
+                payload=_pr_payload(updated_at="2026-09-25T10:00:00Z", head_sha="b" * 40),
+            )
+        # The route's transaction rollback also removes the staged delivery.
+        db_session.rollback()
+
+    quota.assert_not_called()
+    submit.assert_not_called()
+    assert db_session.query(ChangeAnalysisModel).count() == resource_count
+    assert db_session.query(WorkItemModel).count() == work_count
+    assert db_session.query(GitHubAppWebhookDeliveryModel).filter_by(delivery_id=delivery_id).count() == 0
+
+
 def test_fork_pull_request_is_not_enqueued(client, db_session):
     from app.github_app import webhooks
     from app.services import quota_service
