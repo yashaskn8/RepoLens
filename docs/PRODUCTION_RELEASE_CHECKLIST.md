@@ -4,6 +4,10 @@
 capability assessment, not a statement about CI quality. CI checks can pass
 while real deployment requirements remain unmet.
 
+For the concrete **no-local-Docker** security implementation and acceptance
+tests required to unblock acquisition, consult
+[Secure Production Sandbox](SECURE_PRODUCTION_SANDBOX.md).
+
 ## What is verified in repository code
 
 - Required CI tests Python, frontend TypeScript/lint/build, Windows reparse
