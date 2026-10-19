@@ -26,13 +26,13 @@ export const FEATURES_DATA: FeatureItem[] = [
   },
   {
     icon: '🤖',
-    title: 'Multi-Agent Specialist Consensus',
-    badge: 'Consensus Engine',
+    title: 'Specialist Reasoning and Verification',
+    badge: 'Evidence Verification',
     description:
-      'Specialist analysis personas (Security Auditor, Architecture Sentinel, Impact Assessor, and Remediation Engineer) cross-validate each finding against verified code evidence.',
-    tags: ['Parallel LLMs', 'Cross-Verification', 'Zero Hallucinations'],
+      'Specialist workflows analyze source-derived evidence and separate verification checks limit unsupported claims.',
+    tags: ['Parallel LLMs', 'Cross-Verification', 'Grounded Evidence'],
     targetMode: 'ARCHITECTURE',
-    actionText: 'View Consensus Engine →',
+    actionText: 'View Verification Workflow →',
   },
   {
     icon: '📊',
@@ -49,8 +49,8 @@ export const FEATURES_DATA: FeatureItem[] = [
     title: '6-Step Verifiable Remediation',
     badge: 'Automated Patches',
     description:
-      'Rigorous 6-step lifecycle: Context discovery, hypothesis synthesis, unified patch generation, sandbox compilation, automated test verification, and operator sign-off.',
-    tags: ['Patch Diff', 'Sandbox Verification', 'Human-in-the-Loop'],
+      'Rigorous 6-step lifecycle: Context discovery, hypothesis synthesis, unified patch generation, deterministic patch checks, source parsing, and operator sign-off.',
+    tags: ['Patch Diff', 'Deterministic Checks', 'Human-in-the-Loop'],
     targetMode: 'SCAN',
     actionText: 'Generate Verified Patches →',
   },
@@ -69,7 +69,7 @@ export const FEATURES_DATA: FeatureItem[] = [
     title: 'GitHub Operator PR Integration',
     badge: 'CI/CD Delivery',
     description:
-      'Publishes line-level automated code reviews directly to GitHub Pull Requests and creates ready-to-merge remediation branches with RBAC audit logs.',
+      'Publishes line-level automated code reviews directly to GitHub Pull Requests and supports approval-gated remediation delivery with audit logs.',
     tags: ['PR Comments', 'Branch Creation', 'RBAC Security'],
     targetMode: 'CHANGE_ANALYSIS',
     actionText: 'Review PR Delivery →',
@@ -92,8 +92,7 @@ export function LandingFeatures({ onNavigate }: LandingFeaturesProps) {
           Engineered for Enterprise Security &amp; Speed
         </h2>
         <p className="text-sm text-slate-400">
-          Every finding and patch is grounded in verifiable deterministic evidence — combining static AST parsers,
-          CVE databases, and multi-agent AI verification.
+          Confirmed findings must be evidence-backed; scanner coverage may vary and model-generated proposals can be rejected.
         </p>
       </div>
 
@@ -151,7 +150,7 @@ export function LandingFeatures({ onNavigate }: LandingFeaturesProps) {
               <span className="badge-tag text-[10px] text-cyan-300 border-cyan-500/30">Deep Dive</span>
             </div>
             <h3 className="text-lg font-bold text-white">
-              Want to see how Tree-sitter &amp; Multi-Agent Consensus eliminate hallucinations?
+              Want to see how Tree-sitter and independent verification reduce unsupported findings?
             </h3>
             <p className="text-xs text-slate-400 mt-0.5">
               Explore the deterministic AST parsing, static toolchain triangulation, and 6-step patch verification sandbox.

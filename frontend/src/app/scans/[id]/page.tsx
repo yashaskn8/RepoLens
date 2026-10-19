@@ -519,19 +519,19 @@ export default function ScanDetailPage({ params }: ScanDetailPageProps) {
                 <div style={{ padding: '0.85rem', background: 'rgba(5, 8, 18, 0.7)', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-subtle)' }}>
                   <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Tools Completed</div>
                   <div style={{ fontSize: '1.125rem', fontWeight: 700, color: '#ffffff', marginTop: '0.2rem' }}>
-                    {telemetry?.tools_completed ?? 0}
+                    {telemetry?.tools_completed ?? 'Not reported'}
                   </div>
                 </div>
                 <div style={{ padding: '0.85rem', background: 'rgba(5, 8, 18, 0.7)', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-subtle)' }}>
                   <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Token Consumption</div>
                   <div style={{ fontSize: '1.125rem', fontWeight: 700, color: '#ffffff', marginTop: '0.2rem' }}>
-                    {telemetry?.total_tokens || 0}
+                    {telemetry?.total_tokens ?? 'Not reported'}
                   </div>
                 </div>
                 <div style={{ padding: '0.85rem', background: 'rgba(5, 8, 18, 0.7)', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-subtle)' }}>
-                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Confirmed Invariants</div>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Confirmed Findings</div>
                   <div style={{ fontSize: '1.125rem', fontWeight: 700, color: 'var(--success-text)', marginTop: '0.2rem' }}>
-                    {telemetry?.confirmed_findings ?? findings.length}
+                    {telemetry?.confirmed_findings ?? (scan?.status === 'COMPLETED' ? findings.length : 'Not reported')}
                   </div>
                 </div>
               </div>

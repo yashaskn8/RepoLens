@@ -25,10 +25,10 @@ export const PIPELINE_STEPS: PipelineStep[] = [
     details: ['Concrete Syntax Tree', 'Symbol Mapping', 'Route Discovery'],
     deepDive: {
       overview:
-        'Tree-sitter provides sub-millisecond, error-tolerant parsing for every file in the target repository. We extract full symbol hierarchies, class declarations, function signatures, and route handlers directly from the AST.',
+        'Tree-sitter provides error-tolerant parsing for supported files, with explicit partial-coverage reporting. We extract full symbol hierarchies, class declarations, function signatures, and route handlers directly from the AST.',
       guarantees: [
         'Deterministic, reproducible symbol graph extraction',
-        'Zero reliance on unreliable heuristic regexes',
+        'AST-derived facts where supported',
         'Native support for TypeScript, JavaScript, Python, Go, Rust, and Java',
       ],
       technicalDetails:
@@ -43,11 +43,11 @@ export const PIPELINE_STEPS: PipelineStep[] = [
     details: ['Semgrep Security Rules', 'Trivy Vuln DB', 'OSV Dependency Scan'],
     deepDive: {
       overview:
-        'Combines deterministic static analyzers with vulnerability intelligence feeds. Every flagged line is cross-referenced with upstream CVE databases and Semgrep security rulesets.',
+        'Combines deterministic static analyzers with vulnerability intelligence feeds. Only available scanner evidence can support a finding; missing coverage must be identified.',
       guarantees: [
         'Triangulation of pattern matching + dependency CVE databases',
         'Direct fingerprinting against known CWE security vulnerabilities',
-        'Continuous synchronization with OSV and NIST NVD registries',
+        'Scanner and vulnerability-database availability is explicitly reported',
       ],
       technicalDetails:
         'Outputs normalized Finding records with exact source code spans, CWE identifiers, severity classifications, and fix suggestions.',
@@ -55,38 +55,38 @@ export const PIPELINE_STEPS: PipelineStep[] = [
   },
   {
     step: '03',
-    title: 'Multi-Agent Consensus',
+    title: 'Specialist Analysis and Verification',
     badge: 'Parallel LLMs',
-    desc: 'Security, Architecture, and PR Impact specialist agents review findings against real AST snippets to eliminate false positives.',
+    desc: 'Specialist workflows analyze bounded source evidence; independent verification checks candidates and may abstain.',
     details: ['Parallel Evaluation', 'Cross-Validation', 'Confidence Scoring'],
     deepDive: {
       overview:
-        'Four isolated specialist LLM personas (Security Auditor, Architecture Sentinel, Impact Assessor, Remediation Engineer) concurrently analyze each finding with the full AST node context.',
+        'Specialist workflows use bounded source-derived context; independent evidence checks constrain their conclusions.',
       guarantees: [
-        'Strict evidence grounding: agents cannot hallucinate non-existent files or functions',
-        'Cross-agent consensus voting with confidence score thresholding',
+        'Evidence checks reduce unsupported claims, but cannot guarantee zero hallucinations',
+        'Independent verification without model voting',
         'Verification against repo dependencies and system architecture boundaries',
       ],
       technicalDetails:
-        'Agents return structured schema-validated verdicts. Findings without consensus are flagged for operator review.',
+        'Model output must pass schema and evidence checks; unverifiable findings cannot be marked confirmed.',
     },
   },
   {
     step: '04',
     title: 'Verifiable Remediation & PR',
     badge: 'Automated Patches',
-    desc: 'Synthesizes surgical patch diffs, validates them in test sandbox, and delivers ready-to-merge GitHub Pull Requests.',
+    desc: 'Proposes bounded patch diffs with deterministic checks and explicit human approval before authorized GitHub delivery.',
     details: ['Patch Diff Synthesis', 'Sandbox Test Pass', 'One-Click PR Delivery'],
     deepDive: {
       overview:
-        'Transforms validated security findings into surgical, minimal unified git patch diffs. The patch is tested against existing unit test suites in an isolated sandbox.',
+        'Transforms validated security findings into surgical, minimal unified git patch diffs. The patch is statically checked in a temporary worktree without executing untrusted repository tests or scripts.',
       guarantees: [
-        'Rigorous 6-step lifecycle prevents breaking existing functionality',
+        'Deterministic checks reduce, but do not eliminate, patch risk',
         'Cryptographic audit trail and RBAC role gating for patch application',
         'Automated GitHub Pull Request creation and inline review comments',
       ],
       technicalDetails:
-        'Operators can inspect the full unified diff, examine AST impact, and apply the patch with one click.',
+        'Operators review diff evidence and authorize any allowed delivery separately.',
     },
   },
 ];
@@ -160,8 +160,8 @@ export function ArchitecturePipeline({
         </div>
 
         <p className="text-xs text-slate-300 leading-relaxed mb-6 max-w-3xl">
-          RepoLens guarantees zero hallucinations by enforcing strict evidence grounding: every LLM judgment is bound to
-          Tree-sitter AST nodes, static scanner diagnostics, and sandbox-verified code patches.
+          RepoLens combines deterministic source analysis with independent evidence verification to reduce unsupported
+          claims. Model judgments remain fallible and untrusted repository tests are never executed.
         </p>
 
         {/* 4 Pipeline Stages */}
