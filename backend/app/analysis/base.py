@@ -402,7 +402,12 @@ class BaseScannerAdapter(ABC):
             return ScannerResult(
                 tool=self.tool_name,
                 status=ToolStatus.INVALID_OUTPUT,
-                error_message=f"Failed to parse {self.tool_name} output.",
+                error_message=(
+                    f"Failed to parse {self.tool_name} output: "
+                    + ("Invalid JSON" if "Invalid JSON" in exc.reason
+                       else "Malformed result entry" if "Malformed result entry" in exc.reason
+                       else "Invalid structured scanner output")
+                ),
                 execution_time_ms=execution_time_ms,
             )
 

@@ -74,15 +74,18 @@ def safe_git_environment() -> dict[str, str]:
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_ASKPASS": "",
         "GIT_LFS_SKIP_SMUDGE": "1",
-        "GIT_ALLOW_PROTOCOL": "https",
-        "GIT_PROTOCOL_FROM_USER": "0",
-        "GIT_NO_REPLACE_OBJECTS": "1",
-        # Reject cross-host or protocol redirects even for a valid GitHub URL.
-        "GIT_CONFIG_COUNT": "1",
-        "GIT_CONFIG_KEY_0": "http.followRedirects",
-        "GIT_CONFIG_VALUE_0": "false",
     })
-    if get_settings().is_production:
+    if bool(getattr(get_settings(), "is_production", False)):
+        # Development fixtures use file:// repositories; production must only
+        # contact the HTTPS GitHub transport selected by the admission gate.
+        env.update({
+            "GIT_ALLOW_PROTOCOL": "https",
+            "GIT_PROTOCOL_FROM_USER": "0",
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "http.followRedirects",
+            "GIT_CONFIG_VALUE_0": "false",
+        })
         # Production Git transport must not inherit ambient proxy credentials
         # or host-user Git credentials. The isolated worker's network policy,
         # not application-process environment, must enforce egress.
