@@ -665,3 +665,40 @@ class TestScannerOutputError:
         adapter = TrivyAdapter()
         findings = adapter.parse_output(json.dumps([{"Target": "f.txt"}]), "/tmp/repo")
         assert findings == []  # valid structure, no vulns
+
+
+@pytest.mark.asyncio
+async def test_scanner_exception_does_not_echo_secret_to_result(monkeypatch, tmp_path):
+    from app.analysis.base import BaseScannerAdapter
+    from app.analysis.schemas import StaticFinding
+
+    class BrokenScanner(BaseScannerAdapter):
+        @property
+        def tool_name(self):
+            return "broken-scanner"
+
+        @property
+        def tool_path(self):
+            return "python"
+
+        @property
+        def is_enabled(self):
+            return True
+
+        def is_available(self):
+            return True
+
+        def _build_command(self, _repo_dir):
+            return ["python", "-V"]
+
+        def parse_output(self, _text, _repo_dir) -> list[StaticFinding]:
+            return []
+
+    async def fail(*_args, **_kwargs):
+        raise RuntimeError("SECRET_MUST_NEVER_BE_LOGGED")
+
+    scanner = BrokenScanner()
+    monkeypatch.setattr(scanner, "_execute_command", fail)
+    result = await scanner.scan(str(tmp_path))
+    assert result.status.value == "FAILED"
+    assert "SECRET_MUST_NEVER_BE_LOGGED" not in (result.error_message or "")

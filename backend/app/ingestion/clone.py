@@ -74,7 +74,24 @@ def safe_git_environment() -> dict[str, str]:
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_ASKPASS": "",
         "GIT_LFS_SKIP_SMUDGE": "1",
+        "GIT_ALLOW_PROTOCOL": "https",
+        "GIT_PROTOCOL_FROM_USER": "0",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        # Reject cross-host or protocol redirects even for a valid GitHub URL.
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.followRedirects",
+        "GIT_CONFIG_VALUE_0": "false",
     })
+    if get_settings().is_production:
+        # Production Git transport must not inherit ambient proxy credentials
+        # or host-user Git credentials. The isolated worker's network policy,
+        # not application-process environment, must enforce egress.
+        for key in tuple(env):
+            if key.upper() in {
+                "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+                "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+            }:
+                env.pop(key, None)
     return env
 
 
@@ -730,7 +747,7 @@ def clone_repository(
             # Clean up directory on failure if created by us
             if target_dir is None and os.path.exists(dest_dir):
                 shutil.rmtree(dest_dir, ignore_errors=True)
-            raise CloneFailedError(f"git clone failed with exit code {result.returncode}: {result.stderr.strip()}")
+            raise CloneFailedError(f"git clone failed with exit code {result.returncode}")
 
         validate_repository_tree_budget(
             dest_dir,
@@ -771,13 +788,13 @@ def clone_repository(
         if rev_result.returncode != 0:
             if target_dir is None and os.path.exists(dest_dir):
                 shutil.rmtree(dest_dir, ignore_errors=True)
-            raise CloneFailedError(f"git rev-parse HEAD failed with exit code {rev_result.returncode}: {rev_result.stderr.strip()}")
+            raise CloneFailedError(f"git rev-parse HEAD failed with exit code {rev_result.returncode}")
 
         commit_sha = rev_result.stdout.strip()
         if not re.match(r"^[0-9a-fA-F]{40}$", commit_sha):
             if target_dir is None and os.path.exists(dest_dir):
                 shutil.rmtree(dest_dir, ignore_errors=True)
-            raise CloneFailedError(f"git rev-parse HEAD returned invalid non-40-character commit SHA: '{commit_sha}'")
+            raise CloneFailedError("git rev-parse HEAD returned an invalid commit SHA")
 
         return dest_dir, commit_sha
 
@@ -790,7 +807,7 @@ def clone_repository(
             shutil.rmtree(dest_dir, ignore_errors=True)
         if isinstance(exc, (IngestionError, AcquisitionEnforcementUnavailable)):
             raise
-        raise CloneFailedError(f"Unexpected clone error: {str(exc)}")
+        raise CloneFailedError(f"Unexpected clone error ({type(exc).__name__})")
 
 
 def get_git_resolved_branch_or_ref(repo_dir: str) -> Optional[str]:

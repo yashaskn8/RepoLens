@@ -468,3 +468,32 @@ def test_clone_repository_non_zero_exit_handling():
                 target_dir="/tmp/fail_test",
             )
         assert "git clone failed with exit code 128" in str(exc_info.value)
+
+
+def test_safe_git_environment_blocks_redirects_and_external_protocols(monkeypatch):
+    from app.ingestion.clone import safe_git_environment
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "5")
+    monkeypatch.setenv("GIT_ALLOW_PROTOCOL", "file:ssh:ext")
+    env = safe_git_environment()
+    assert env["GIT_ALLOW_PROTOCOL"] == "https"
+    assert env["GIT_PROTOCOL_FROM_USER"] == "0"
+    assert env["GIT_CONFIG_KEY_0"] == "http.followRedirects"
+    assert env["GIT_CONFIG_VALUE_0"] == "false"
+    assert env["GIT_CONFIG_COUNT"] == "1"
+
+
+def test_production_git_environment_does_not_inherit_proxy_credentials(monkeypatch):
+    from types import SimpleNamespace
+    from app.ingestion.clone import safe_git_environment
+
+    secret = "http://someuser:private-password@proxy.internal:8080"
+    monkeypatch.setenv("HTTPS_PROXY", secret)
+    monkeypatch.setenv("HOME", "/private/tenant-secrets")
+    monkeypatch.setattr(
+        "app.ingestion.clone.get_settings",
+        lambda: SimpleNamespace(is_production=True),
+    )
+    env = safe_git_environment()
+    assert not any(key.upper().endswith("_PROXY") for key in env)
+    assert "HOME" not in env
+    assert secret not in str(env)

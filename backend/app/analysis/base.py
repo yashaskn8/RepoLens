@@ -79,7 +79,9 @@ def _bound_stderr(stderr: Optional[str]) -> Optional[str]:
     """Truncate stderr to bounded length, stripping trailing whitespace."""
     if not stderr or not stderr.strip():
         return None
-    bounded = stderr.strip()[:_MAX_DIAGNOSTIC_STDERR_CHARS]
+    from app.security.redaction import redact_secrets
+
+    bounded = redact_secrets(stderr.strip())[:_MAX_DIAGNOSTIC_STDERR_CHARS]
     if len(stderr.strip()) > _MAX_DIAGNOSTIC_STDERR_CHARS:
         bounded += "\n... [truncated]"
     return bounded
@@ -400,7 +402,7 @@ class BaseScannerAdapter(ABC):
             return ScannerResult(
                 tool=self.tool_name,
                 status=ToolStatus.INVALID_OUTPUT,
-                error_message=f"Failed to parse {self.tool_name} output: {exc.reason}",
+                error_message=f"Failed to parse {self.tool_name} output.",
                 execution_time_ms=execution_time_ms,
             )
 
@@ -409,7 +411,7 @@ class BaseScannerAdapter(ABC):
             return ScannerResult(
                 tool=self.tool_name,
                 status=ToolStatus.FAILED,
-                error_message=f"Failed to execute {self.tool_name}: {str(exc)}",
+                error_message=f"Failed to execute {self.tool_name} ({type(exc).__name__}).",
                 execution_time_ms=execution_time_ms,
             )
 
