@@ -18,6 +18,7 @@ from app.cli.production_preflight import (
     PRODUCTION_REQUIRED_MODULES,
     ProductionDependencyError,
     check_production_dependencies,
+    check_production_release_capabilities,
     require_production_dependencies,
 )
 from app.core.config import Settings
@@ -731,3 +732,17 @@ async def test_production_readiness_fails_closed_without_acquisition_and_scanner
     result = await health_routes.readiness(response, DatabaseMustNotBeQueried())  # type: ignore[arg-type]
     assert response.status_code == 503
     assert result == {"status": "not_ready"}
+
+
+def test_offline_production_release_capability_gate_fails_closed_without_isolation() -> None:
+    """Green imports cannot certify a service that cannot acquire safely."""
+    config = _production_settings()
+    modules = check_production_dependencies(config, importer=lambda _name: object())
+    assert modules.ready
+    capabilities = check_production_release_capabilities(config)
+    assert not capabilities.eligible
+    assert "ACQUISITION_HARD_QUOTA_EGRESS_UNAVAILABLE" in capabilities.blocked_codes
+    assert "EXTERNAL_SCANNER_ISOLATION_UNAVAILABLE" in capabilities.blocked_codes
+    # Development must not be silently accepted as a production release.
+    dev = Settings(_env_file=None, ENVIRONMENT="development")
+    assert not check_production_release_capabilities(dev).eligible

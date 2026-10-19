@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass
 from importlib import import_module
 from typing import Callable
@@ -92,8 +93,45 @@ def require_production_dependencies(
     return result
 
 
+@dataclass(frozen=True)
+class ProductionReleaseCapabilityResult:
+    """Offline capability assessment, not a substitute for live deployment tests."""
+
+    blocked_codes: tuple[str, ...]
+
+    @property
+    def eligible(self) -> bool:
+        return not self.blocked_codes
+
+
+def check_production_release_capabilities(settings: Settings) -> ProductionReleaseCapabilityResult:
+    """Block release while mandatory OS-enforced untrusted-work boundaries are absent.
+
+    These predicates must only return True after a real resource and egress
+    enforcement integration has been implemented and independently tested.
+    """
+    from app.analysis.base import external_scanner_execution_allowed
+    from app.ingestion.acquisition_boundary import acquisition_boundary_available
+
+    blocked: list[str] = []
+    if not settings.is_production:
+        blocked.append("PRODUCTION_CONFIGURATION_REQUIRED")
+    if not acquisition_boundary_available(settings):
+        blocked.append("ACQUISITION_HARD_QUOTA_EGRESS_UNAVAILABLE")
+    if not external_scanner_execution_allowed(settings):
+        blocked.append("EXTERNAL_SCANNER_ISOLATION_UNAVAILABLE")
+    return ProductionReleaseCapabilityResult(tuple(blocked))
+
+
 def main() -> int:
-    """Operator entry point. It never contacts configured external services."""
+    """Operator entry point. No DB, network or untrusted repository work."""
+    parser = argparse.ArgumentParser(description="RepoLens offline production preflight")
+    parser.add_argument(
+        "--release-gate",
+        action="store_true",
+        help="Fail if mandatory production analysis isolation is not implemented.",
+    )
+    args = parser.parse_args()
     try:
         settings = get_settings()
     except Exception:
@@ -102,6 +140,9 @@ def main() -> int:
 
     result = check_production_dependencies(settings)
     if not result.production:
+        if args.release_gate:
+            print("Release gate BLOCKED: PRODUCTION_CONFIGURATION_REQUIRED")
+            return 2
         print("Production-only dependency checks skipped outside production mode.")
         return 0
     if not result.ready:
@@ -110,7 +151,14 @@ def main() -> int:
             'Install with `python -m pip install -e ".[production]"`.'
         )
         return 1
-    print("Production dependency preflight passed.")
+    if args.release_gate:
+        capabilities = check_production_release_capabilities(settings)
+        if not capabilities.eligible:
+            print("Release gate BLOCKED: " + ", ".join(capabilities.blocked_codes))
+            return 1
+        print("Offline release capability preflight passed; live deployment validation still required.")
+        return 0
+    print("Production dependency preflight passed (imports only; not a release approval).")
     return 0
 
 

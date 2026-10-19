@@ -81,6 +81,12 @@ jobs:
           cd backend
           uv run --locked --extra dev --extra observability python -c "import app.main; import app.services.authorization_service; import app.services.quota_service; import app.ingestion.github_pr; import app.delivery.github_client; print('RepoLens backend import smoke: OK')"
 
+      - name: Verify no false production release eligibility
+        run: |
+          cd backend
+          uv run --locked --extra dev --extra observability python -m pytest \
+            tests/test_production_deployment_readiness.py::test_offline_production_release_capability_gate_fails_closed_without_isolation -q
+
       - name: Reversible Migration Lifecycle Proof
         run: |
           cd backend
