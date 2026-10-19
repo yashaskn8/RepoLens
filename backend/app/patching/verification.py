@@ -69,7 +69,14 @@ class PatchVerificationService:
         Shutil with symlinks=False follows links by default. A hostile linked
         directory could copy external files into the verification workspace.
         """
-        if os.path.islink(source_dir) or not os.path.isdir(source_dir):
+        # A Windows junction at the workspace root is as dangerous as a
+        # POSIX symlink in an individual source entry.
+        is_root_junction = getattr(os.path, "isjunction", None)
+        if (
+            os.path.islink(source_dir)
+            or (is_root_junction is not None and is_root_junction(source_dir))
+            or not os.path.isdir(source_dir)
+        ):
             raise ValueError("Patch verification source workspace is not a regular directory.")
 
         from app.core.config import get_settings

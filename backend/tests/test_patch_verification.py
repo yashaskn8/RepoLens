@@ -815,3 +815,16 @@ async def test_unsafe_patch_source_is_structured_failure_not_exception(tmp_path)
     assert len(result.checks) == 12
     assert [check.status for check in result.checks[6:]] == [CheckStatus.NOT_EVALUATED] * 6
     assert "PRIVATE_SOURCE_CANARY" not in str(result)
+
+
+
+def test_patch_verification_copy_rejects_linked_workspace_root(tmp_path, monkeypatch):
+    source = tmp_path / "regular-root"
+    dest = tmp_path / "dest"
+    source.mkdir()
+    dest.mkdir()
+    (source / "main.py").write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr(os.path, "isjunction", lambda path: str(path) == str(source), raising=False)
+    with pytest.raises(ValueError, match="regular directory"):
+        PatchVerificationService()._copy_repo_to_temp(str(source), str(dest))
+    assert list(dest.iterdir()) == []
