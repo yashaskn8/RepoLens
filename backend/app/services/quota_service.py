@@ -38,6 +38,7 @@ def _get_limit(settings: Settings, operation: str) -> int:
         UsageOperation.SCAN_CREATE.value: settings.MAX_DAILY_SCANS_PER_USER,
         UsageOperation.CHANGE_ANALYSIS_CREATE.value: settings.MAX_DAILY_CHANGE_ANALYSES_PER_USER,
         UsageOperation.PATCH_GENERATE.value: settings.MAX_DAILY_PATCH_GENERATIONS_PER_USER,
+        UsageOperation.CHAINBRAIN_AI_EXPLAIN.value: settings.MAX_DAILY_CHAINBRAIN_AI_EXPLANATIONS_PER_USER,
     }
     return limits.get(operation, 999999)
 

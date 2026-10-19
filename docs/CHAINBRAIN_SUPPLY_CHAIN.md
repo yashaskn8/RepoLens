@@ -39,11 +39,18 @@ contents. These require independently controlled data sources. The
 existing OSV scanner may supply its own separate vulnerability coverage
 when available and isolated.
 
-Descriptions and mitigations are currently **deterministic and
-evidence-grounded**. An LLM-generated explanation layer is **not enabled**
-by this release; it must not be represented as verified AI output. Any
-future LLM narrative may restate evidence but must not change detector
-scores, claim verified maliciousness, or invent registry facts.
+Descriptions and mitigations are **deterministic and evidence-grounded**.
+An optional **AI Explanation Layer** is available behind the disabled-by-default
+`CHAINBRAIN_AI_EXPLANATIONS_ENABLED` deployment flag. The user must
+explicitly request one narrative from the Dependencies tab; the authenticated
+endpoint requires CSRF and enforces a durable per-user daily quota (default
+10). It sends only a bounded allowlisted detector signal to the governed
+model gateway, never scripts, tokens or arbitrary repository code. Invalid
+or failed model replies return a deterministic fallback. Valid model text
+is labeled **model-generated and unverified**; it cannot alter findings,
+scoring, or verified evidence. A production operator must configure the
+model gateway, quotas, credentials and appropriate provider egress before
+enabling this optional capability. AI enrichment remains off otherwise.
 
 ## Security and incomplete assessment
 

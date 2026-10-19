@@ -12,7 +12,7 @@ import { SearchInput, Select } from '@/components/ui/Input';
 import { Drawer } from '@/components/ui/Drawer';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { EmptyState } from '@/components/ui/EmptyState';
-import { fetchScan, fetchScanFindings, fetchScanTelemetry } from '@/lib/api';
+import { fetchScan, fetchScanFindings, fetchScanTelemetry, explainChainBrainSignal } from '@/lib/api';
 import { useWorkflowStream } from '@/lib/useWorkflowStream';
 import { ScanReportAction } from '@/features/scan/ScanReportAction';
 import { FindingCard } from '@/features/findings/FindingCard';
@@ -65,6 +65,8 @@ export default function ScanDetailPage({ params }: ScanDetailPageProps) {
   const [telemetry, setTelemetry] = useState<ScanTelemetry | null>(null);
   const [activeTab, setActiveTab] = useState<string>('findings');
   const [expandedFindingId, setExpandedFindingId] = useState<string | null>(null);
+  const [chainbrainAiNotes, setChainbrainAiNotes] = useState<Record<number, Record<string, unknown>>>({});
+  const [chainbrainAiBusy, setChainbrainAiBusy] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [findingsLoaded, setFindingsLoaded] = useState(false);
 
@@ -86,6 +88,8 @@ export default function ScanDetailPage({ params }: ScanDetailPageProps) {
     setFindings([]);
     setTelemetry(null);
     setFindingsLoaded(false);
+    setChainbrainAiNotes({});
+    setChainbrainAiBusy(null);
     setIsLoading(true);
 
     async function loadData() {
@@ -508,6 +512,40 @@ export default function ScanDetailPage({ params }: ScanDetailPageProps) {
                         Heuristic risk score: {typeof signal.risk_score === 'number' ? signal.risk_score : 'unknown'}/100
                         {' · Not a maliciousness probability'}
                       </p>
+                      <button
+                        type="button"
+                        className="filter-btn mt-2"
+                        disabled={chainbrainAiBusy !== null || scan?.status !== 'COMPLETED'}
+                        onClick={async () => {
+                          if (!scan) return;
+                          setChainbrainAiBusy(index);
+                          try {
+                            const note = await explainChainBrainSignal(scan.id, index);
+                            setChainbrainAiNotes((previous) => ({ ...previous, [index]: note }));
+                          } catch {
+                            setChainbrainAiNotes((previous) => ({
+                              ...previous, [index]: { ai_status: 'unavailable', explanation: String(signal.description ?? '') },
+                            }));
+                          } finally {
+                            setChainbrainAiBusy(null);
+                          }
+                        }}
+                      >
+                        {chainbrainAiBusy === index ? 'Explaining…' : 'Ask AI to explain (if enabled)'}
+                      </button>
+                      {chainbrainAiNotes[index] && (
+                        <div className="text-xs text-slate-300 mt-2" role="status">
+                          {String(chainbrainAiNotes[index].ai_status) === 'model_generated_unverified' ? (
+                            <>
+                              <p>{String(chainbrainAiNotes[index].ai_explanation ?? '')}</p>
+                              <p className="mt-1">{String(chainbrainAiNotes[index].ai_review_step ?? '')}</p>
+                              <p className="text-amber-300 mt-1">AI narrative is unverified; risk scores and evidence remain deterministic.</p>
+                            </>
+                          ) : (
+                            <p>AI explanation unavailable. The evidence-backed description above remains authoritative.</p>
+                          )}
+                        </div>
+                      </div>
                     </li>
                   ))}
                 </ul>

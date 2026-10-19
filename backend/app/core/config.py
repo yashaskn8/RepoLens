@@ -249,6 +249,10 @@ class Settings(BaseSettings):
     TRIVY_PATH: str = "trivy"
     OSV_SCANNER_PATH: str = "osv-scanner"
     SCANNER_TIMEOUT_SECONDS: int = 60
+    # Only the authenticated, user-initiated narrative path may invoke an LLM.
+    # Deterministic ChainBrain risk detection is always model-independent.
+    CHAINBRAIN_AI_EXPLANATIONS_ENABLED: bool = False
+    MAX_DAILY_CHAINBRAIN_AI_EXPLANATIONS_PER_USER: int = Field(default=10, ge=1, le=100)
     SEMGREP_ENABLED: bool = True
     TRIVY_ENABLED: bool = True
     OSV_SCANNER_ENABLED: bool = True

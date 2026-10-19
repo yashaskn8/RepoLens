@@ -293,6 +293,15 @@ export async function startScan(payload: ScanCreate): Promise<Scan> {
   return response.json();
 }
 
+export async function explainChainBrainSignal(scanId: string, signalIndex: number): Promise<Record<string, unknown>> {
+  const res = await apiFetch(
+    `/api/v1/scans/${encodeURIComponent(scanId)}/supply-chain/signals/${signalIndex}/explain`,
+    { method: 'POST' },
+  );
+  if (!res.ok) throw await apiErrorFromResponse(res, 'AI explanation unavailable');
+  return res.json();
+}
+
 export async function fetchScan(scanId: string): Promise<Scan> {
   const response = await apiFetch(`/api/v1/scans/${scanId}`, {
     cache: 'no-store',

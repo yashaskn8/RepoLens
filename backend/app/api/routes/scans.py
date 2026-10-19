@@ -17,6 +17,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.agents.checkpointer import get_analysis_checkpointer
 from app.agents.graph import run_analysis_workflow
 from app.analysis.service import get_intelligence_service
+from app.analysis.chainbrain_explanations import explain_with_ai
 from app.analysis.authority import authority_digest, compatibility_digest, runtime_authorities
 from app.artifacts.scan_provenance import (
     publish_analysis_artifacts,
@@ -826,6 +827,63 @@ async def execute_background_scan(
         if workspace_dir and os.path.exists(workspace_dir):
             shutil.rmtree(workspace_dir, ignore_errors=True)
 
+
+
+
+@router.post("/{scan_id}/supply-chain/signals/{signal_index}/explain")
+async def explain_chainbrain_signal(
+    scan_id: str,
+    signal_index: int,
+    request: Request,
+    current_user: CurrentUser = Depends(get_current_user),
+    _csrf: None = Depends(verify_csrf),
+    db: Session = Depends(get_db),
+):
+    """One opt-in narrative for an owned, previously recorded risk signal.
+
+    The client never supplies prompts, scores, URLs or package metadata.
+    A failed model request retains the original deterministic evidence.
+    """
+    scan = get_owned_scan_or_404(db, scan_id, current_user)
+    if not get_settings().CHAINBRAIN_AI_EXPLANATIONS_ENABLED:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error_code": "CHAINBRAIN_AI_DISABLED",
+                "message": "AI explanations are disabled in this deployment.",
+            },
+        )
+    if scan.status != ScanStatus.COMPLETED.value:
+        raise HTTPException(
+            status_code=409,
+            detail={"error_code": "SCAN_NOT_COMPLETED", "message": "The scan is not complete."},
+        )
+    metadata = scan.model_metadata if isinstance(scan.model_metadata, dict) else {}
+    report = metadata.get("supply_chain")
+    if not isinstance(report, dict) or report.get("status") != ToolStatus.COMPLETED.value:
+        raise HTTPException(
+            status_code=409,
+            detail={"error_code": "CHAINBRAIN_INCOMPLETE", "message": "Package risk assessment is incomplete."},
+        )
+    signals = report.get("signals")
+    if (
+        not isinstance(signals, list) or not 0 <= signal_index < min(len(signals), 60)
+        or not isinstance(signals[signal_index], dict)
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"error_code": "SIGNAL_NOT_FOUND", "message": "Risk signal not found."},
+        )
+    signal = signals[signal_index]
+    # Durable daily user quota applies before any external model call.
+    check_and_increment_quota(db, current_user.id, UsageOperation.CHAINBRAIN_AI_EXPLAIN.value)
+    db.commit()
+    result = await explain_with_ai(
+        signal,
+        tenant_id=current_user.id,
+        request_id=getattr(request.state, "request_id", str(uuid4())),
+    )
+    return result
 
 @router.post("", response_model=Scan, status_code=status.HTTP_202_ACCEPTED)
 async def create_scan(
