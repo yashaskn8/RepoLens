@@ -45,6 +45,20 @@ async def readiness(response: Response, db: Session = Depends(get_db)) -> dict[s
     """Readiness requires schema and checkpointer, but never calls an LLM."""
     from app.observability.operations import check_checkpointer_readiness, schema_readiness
 
+    # Database/checkpointer health is insufficient for an acquisition service:
+    # the production worker currently lacks enforced disk quotas/egress control.
+    # Never advertise a deployable scanner while those boundaries are absent.
+    from app.ingestion.acquisition_boundary import acquisition_boundary_available
+    from app.analysis.base import external_scanner_execution_allowed
+
+    active_settings = get_settings()
+    if not (
+        acquisition_boundary_available(active_settings)
+        and external_scanner_execution_allowed(active_settings)
+    ):
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        return {"status": "not_ready"}
+
     database_ready = False
     schema: dict[str, Any] = {"ready": False}
     try:

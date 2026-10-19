@@ -10,6 +10,8 @@ def test_staging_smoke_default_reaches_previews_without_external_writes():
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append((request.method, request.url.path))
         path = request.url.path
+        if path == "/health/ready":
+            return httpx.Response(200, json={"status": "ready"})
         if path.endswith("/auth/login"):
             return httpx.Response(200, headers=[("set-cookie", "repolens_session=session; Path=/; HttpOnly"),
                 ("set-cookie", "repolens_csrf=csrf; Path=/")], json={"id": "user-1"})
@@ -63,3 +65,65 @@ def test_external_smoke_requires_environment_interlock(monkeypatch):
         assert "REPOLENS_SMOKE_ALLOW_EXTERNAL_WRITES" in str(exc)
     else:
         raise AssertionError("external smoke was enabled without the environment interlock")
+
+
+def test_staging_smoke_rejects_malformed_origins_and_embedded_credentials():
+    invalid = (
+        "ftp://localhost:8000", "http://attacker.example",
+        "https://user:password@staging.invalid", "https://staging.invalid/path",
+        "https://staging.invalid/?debug=1", "https://staging.invalid/#fragment",
+    )
+    for origin in invalid:
+        try:
+            StagingSmoke(origin, "operator@example.com", "password")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"StagingSmoke accepted malformed origin {origin!r}")
+
+
+def test_staging_smoke_rejects_timed_out_job_and_sanitizes_errors():
+    smoke = StagingSmoke("https://staging.invalid", "operator@example.com", "password")
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/jobs/123"):
+            return httpx.Response(200, json={"state": "TIMED_OUT", "failure_code": "PRIVATE_TOKEN"})
+        return httpx.Response(503, text="secret://hidden.internal/credential")
+    smoke.client.close()
+    smoke.client = httpx.Client(base_url="https://staging.invalid", transport=httpx.MockTransport(handler))
+    try:
+        try:
+            smoke._wait("/api/v1/jobs/123", {"SUCCEEDED", "FAILED", "TIMED_OUT"}, stage="job")
+        except RuntimeError as exc:
+            assert "TIMED_OUT" in str(exc)
+            assert "PRIVATE_TOKEN" not in str(exc)
+        else:
+            raise AssertionError("Timed out job accepted as successful")
+        try:
+            smoke._require(smoke.client.get("/internal"), {200}, "health")
+        except RuntimeError as exc:
+            assert "503" in str(exc)
+            assert "secret://" not in str(exc)
+        else:
+            raise AssertionError("Invalid health response was accepted")
+    finally:
+        smoke.client.close()
+
+
+def test_staging_smoke_requires_ready_before_authentication():
+    calls = []
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(503, json={"status": "not_ready"})
+    smoke = StagingSmoke("https://staging.invalid", "operator@example.com", "password")
+    smoke.client.close()
+    smoke.client = httpx.Client(base_url="https://staging.invalid", transport=httpx.MockTransport(handler))
+    try:
+        try:
+            smoke.run(repository_url="https://github.com/example/repo", pr_url="https://github.com/example/repo/pull/1")
+        except RuntimeError as exc:
+            assert "readiness" in str(exc)
+        else:
+            raise AssertionError("Smoke attempted work while service was not ready")
+        assert calls == ["/health/ready"]
+    finally:
+        smoke.client.close()

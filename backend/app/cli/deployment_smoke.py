@@ -33,8 +33,17 @@ class StagingSmoke:
     def __init__(self, base_url: str, email: str, password: str, *, timeout_seconds: int = 600,
                  allow_external_writes: bool = False):
         parsed = urlparse(base_url)
-        if parsed.scheme != "https" and parsed.hostname not in {"localhost", "127.0.0.1"}:
-            raise ValueError("staging smoke requires HTTPS except on loopback")
+        loopback = parsed.hostname in {"localhost", "127.0.0.1"}
+        if (
+            (parsed.scheme != "https" and not (loopback and parsed.scheme == "http"))
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+        ):
+            raise ValueError("staging smoke requires a clean HTTPS origin (HTTP only on loopback)")
         if allow_external_writes and os.environ.get("REPOLENS_SMOKE_ALLOW_EXTERNAL_WRITES") != "1":
             raise ValueError("external writes require REPOLENS_SMOKE_ALLOW_EXTERNAL_WRITES=1")
         self.client = httpx.Client(base_url=base_url.rstrip("/"), timeout=30, follow_redirects=False)
@@ -51,7 +60,9 @@ class StagingSmoke:
     @staticmethod
     def _require(response: httpx.Response, allowed: set[int], stage: str) -> dict:
         if response.status_code not in allowed:
-            raise RuntimeError(f"{stage} failed with HTTP {response.status_code}: {response.text[:500]}")
+            # Provider and proxy error bodies can contain bearer tokens, cookie
+            # fragments or internal diagnostics: never echo them into CI logs.
+            raise RuntimeError(f"{stage} failed with HTTP {response.status_code}")
         if not response.content:
             return {}
         value = response.json()
@@ -65,8 +76,8 @@ class StagingSmoke:
             value = self._require(self.client.get(path), {200}, stage)
             state = str(value.get("status") or value.get("state") or "").upper()
             if state in terminal:
-                if state in {"FAILED", "CANCELLED", "REJECTED"}:
-                    raise RuntimeError(f"{stage} terminalized as {state}: {value.get('failure_code')}")
+                if state not in {"COMPLETED", "SUCCEEDED", "READY"}:
+                    raise RuntimeError(f"{stage} terminalized as {state}")
                 return value
             time.sleep(2)
         raise RuntimeError(f"{stage} exceeded {self.timeout_seconds}s")
@@ -74,6 +85,9 @@ class StagingSmoke:
     def run(self, *, repository_url: str, pr_url: str, register: bool = False,
             finding_id: str | None = None) -> dict:
         result: dict = {"mode": "STAGING", "external_writes": self.allow_external_writes}
+        ready_response = self._require(self.client.get("/health/ready"), {200}, "readiness")
+        if ready_response.get("status") != "ready":
+            raise RuntimeError("readiness did not confirm service availability")
         if register:
             registration = self.client.post("/api/v1/auth/register",
                 json={"email": self.email, "password": self.password})

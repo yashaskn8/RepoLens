@@ -712,3 +712,22 @@ async def _enter_lifespan(lifespan, app) -> None:
 async def _yield_lifespan(lifespan, app) -> bool:
     async with lifespan(app):
         return True
+
+
+@pytest.mark.asyncio
+async def test_production_readiness_fails_closed_without_acquisition_and_scanner_isolation(monkeypatch):
+    from app.api.routes import health as health_routes
+
+    class DatabaseMustNotBeQueried:
+        def execute(self, *_args, **_kwargs):
+            raise AssertionError("Missing production sandbox must short-circuit readiness")
+
+    monkeypatch.setattr(
+        health_routes,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=True),
+    )
+    response = Response()
+    result = await health_routes.readiness(response, DatabaseMustNotBeQueried())  # type: ignore[arg-type]
+    assert response.status_code == 503
+    assert result == {"status": "not_ready"}
