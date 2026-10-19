@@ -203,5 +203,6 @@ async def test_chainbrain_signals_flow_into_evidence_store(tmp_path):
         commit_hash="a" * 40,
     )
     assert store.scanner_results["chainbrain"].status.value == "COMPLETED"
-    assert any(f.tool == "chainbrain" for f in store.all_findings)
-    assert store.get_summary()["findings_by_tool"]["chainbrain"] >= 1
+    assert store.scanner_results["chainbrain"].findings
+    assert not any(f.tool == "chainbrain" for f in store.all_findings)
+    assert store.get_summary()["supply_chain_risk_signals"] >= 1

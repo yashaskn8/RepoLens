@@ -574,7 +574,8 @@ class TestIntelligenceServiceFailureIsolation:
             # Trivy exception was converted to FAILED (not missing or crash)
             assert "trivy" in evidence_store.scanner_results
             assert evidence_store.scanner_results["trivy"].status == ToolStatus.FAILED
-            assert "segfault simulation" in evidence_store.scanner_results["trivy"].error_message
+            assert "RuntimeError" in evidence_store.scanner_results["trivy"].error_message
+            assert "segfault simulation" not in evidence_store.scanner_results["trivy"].error_message
 
             # OSV recorded as FAILED
             assert evidence_store.scanner_results["osv-scanner"].status == ToolStatus.FAILED

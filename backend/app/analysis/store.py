@@ -25,7 +25,10 @@ class EvidenceStore:
 
         # Flatten and index all static findings
         for result in self.scanner_results.values():
-            if result.status == ToolStatus.COMPLETED:
+            if result.status == ToolStatus.COMPLETED and result.tool != "chainbrain":
+                # ChainBrain flags unverified package-risk signals. They must
+                # not become confirmed SAST findings or influence downstream
+                # agent candidate ranking.
                 self._findings.extend(result.findings)
 
         # Index files by normalized path
@@ -41,7 +44,7 @@ class EvidenceStore:
     def add_scanner_result(self, result: ScannerResult) -> None:
         """Add or update a scanner result in the evidence store."""
         self.scanner_results[result.tool] = result
-        if result.status == ToolStatus.COMPLETED:
+        if result.status == ToolStatus.COMPLETED and result.tool != "chainbrain":
             self._findings.extend(result.findings)
 
     def get_findings(
@@ -162,4 +165,10 @@ class EvidenceStore:
             "scanners_executed": {
                 tool: res.status.value for tool, res in self.scanner_results.items()
             },
+            "supply_chain_risk_signals": (
+                len(self.scanner_results["chainbrain"].findings)
+                if "chainbrain" in self.scanner_results
+                and self.scanner_results["chainbrain"].status == ToolStatus.COMPLETED
+                else None
+            ),
         }
