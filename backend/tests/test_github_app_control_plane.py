@@ -92,6 +92,13 @@ def test_app_jwt_is_short_lived_rs256(app_key_pem):
     assert claims == {"iat": now - 60, "exp": now + 540, "iss": "123456"}
 
 
+def test_github_app_rejects_strict_session_cookie_that_breaks_oauth_callback(app_key_pem):
+    settings = app_settings(app_key_pem).model_dump()
+    settings["AUTH_COOKIE_SAMESITE"] = "strict"
+    with pytest.raises(ValidationError, match="GitHub App OAuth callback"):
+        Settings(**settings)
+
+
 def test_oauth_verifier_is_authenticated_encrypted_and_tamper_evident(app_key_pem):
     cfg = app_settings(app_key_pem)
     raw = "verifier-that-is-not-a-token-and-is-long-enough"

@@ -478,6 +478,13 @@ class Settings(BaseSettings):
         )
 
         if self.GITHUB_APP_ENABLED:
+            # GitHub redirects the browser from github.com back to this GET
+            # callback, which requires the ambient authenticated RepoLens session.
+            # SameSite=Strict omits it on cross-site top-level navigation.
+            if self.AUTH_COOKIE_SAMESITE == "strict":
+                raise ValueError(
+                    "GitHub App OAuth callback requires AUTH_COOKIE_SAMESITE=lax or none, not strict."
+                )
             required_app_values = (
                 self.GITHUB_APP_ID,
                 self.GITHUB_APP_CLIENT_ID,
