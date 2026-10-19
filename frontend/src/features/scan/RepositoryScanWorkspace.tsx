@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Finding, Scan, ScanTelemetry } from '@/types/domain';
 import { fetchScan, fetchScanFindings, fetchScanTelemetry, startScan } from '@/lib/api';
 import { WorkspaceMode } from '@/components/layout/WorkspaceNav';
@@ -33,6 +33,7 @@ export function RepositoryScanWorkspace({
   const [severityFilter, setSeverityFilter] = useState<string>('ALL');
   const [expandedFindingId, setExpandedFindingId] = useState<string | null>(null);
   const [telemetry, setTelemetry] = useState<ScanTelemetry | null>(null);
+  const scanGenerationRef = useRef(0);
 
   // Sync initialRepoUrl / initialBranch when changed externally (e.g. from preset click)
   useEffect(() => {
@@ -40,30 +41,46 @@ export function RepositoryScanWorkspace({
     if (initialBranch) setBranch(initialBranch);
   }, [initialRepoUrl, initialBranch]);
 
-  // Poll active scan status every 2 seconds
+  // Keep polling single-flight and ignore responses from replaced scans.
   useEffect(() => {
     if (!activeScan || activeScan.status === 'COMPLETED' || activeScan.status === 'FAILED') {
       return;
     }
 
+    let stopped = false;
+    let inFlight = false;
+    const generation = scanGenerationRef.current;
+    const scanId = activeScan.id;
+    const isCurrent = () => !stopped && generation === scanGenerationRef.current;
+
     const interval = setInterval(async () => {
+      if (inFlight || !isCurrent()) return;
+      inFlight = true;
       try {
-        const updated = await fetchScan(activeScan.id);
-        setActiveScan(updated);
+        const updated = await fetchScan(scanId);
+        if (!isCurrent()) return;
+        setActiveScan((current) => current?.id === scanId ? updated : current);
 
         if (updated.status === 'COMPLETED' || updated.status === 'FAILED') {
-          if (updated.status === 'COMPLETED') {
-            const scanFindings = await fetchScanFindings(updated.id);
-            setFindings(scanFindings);
-          }
-          fetchScanTelemetry(updated.id).then(setTelemetry).catch(() => setTelemetry(null));
+          const [findingsResult, telemetryResult] = await Promise.allSettled([
+            updated.status === 'COMPLETED' ? fetchScanFindings(scanId) : Promise.resolve([]),
+            fetchScanTelemetry(scanId),
+          ]);
+          if (!isCurrent()) return;
+          if (findingsResult.status === 'fulfilled') setFindings(findingsResult.value);
+          if (telemetryResult.status === 'fulfilled') setTelemetry(telemetryResult.value);
         }
       } catch (err: unknown) {
-        console.error('Polling error for scan:', err);
+        if (isCurrent()) console.error('Polling error for scan:', err);
+      } finally {
+        inFlight = false;
       }
     }, 2000);
 
-    return () => clearInterval(interval);
+    return () => {
+      stopped = true;
+      clearInterval(interval);
+    };
   }, [activeScan]);
 
 
@@ -71,8 +88,10 @@ export function RepositoryScanWorkspace({
     e.preventDefault();
     if (!repoUrl.trim()) return;
 
+    const generation = ++scanGenerationRef.current;
     setErrorMsg(null);
     setIsSubmitting(true);
+    setActiveScan(null);
     setFindings([]);
     setTelemetry(null);
 
@@ -81,15 +100,13 @@ export function RepositoryScanWorkspace({
         repository_url: repoUrl.trim(),
         branch: branch.trim() || 'main',
       });
-      setActiveScan(scan);
+      if (generation === scanGenerationRef.current) setActiveScan(scan);
     } catch (err: unknown) {
-      if (err instanceof Error) {
-        setErrorMsg(err.message);
-      } else {
-        setErrorMsg('Failed to initiate scan.');
+      if (generation === scanGenerationRef.current) {
+        setErrorMsg(err instanceof Error ? err.message : 'Failed to initiate scan.');
       }
     } finally {
-      setIsSubmitting(false);
+      if (generation === scanGenerationRef.current) setIsSubmitting(false);
     }
   };
 

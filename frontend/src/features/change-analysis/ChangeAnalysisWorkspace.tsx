@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   ChangeAnalysisReportResponse,
   ChangeAnalysisResponse,
@@ -61,6 +61,7 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
 
   // Active Analysis state
   const [activeAnalysis, setActiveAnalysis] = useState<ChangeAnalysisResponse | null>(null);
+  const analysisGenerationRef = useRef(0);
   const [report, setReport] = useState<ChangeAnalysisReportResponse | null>(null);
   const [impacts, setImpacts] = useState<ChangeImpact[]>([]);
   const [reviewFindings, setReviewFindings] = useState<ChangeReviewFinding[]>([]);
@@ -103,31 +104,43 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
     activeAnalysis?.id
   );
 
-  // Polling active analysis status
+  // A previous in-flight poll must never replace a newly selected analysis.
   useEffect(() => {
     if (!activeAnalysis || activeAnalysis.status === 'COMPLETED' || activeAnalysis.status === 'FAILED') {
       return;
     }
 
-    const interval = setInterval(async () => {
-      try {
-        const updated = await fetchChangeAnalysis(activeAnalysis.id);
-        setActiveAnalysis(updated);
+    let stopped = false;
+    let inFlight = false;
+    const generation = analysisGenerationRef.current;
+    const analysisId = activeAnalysis.id;
+    const isCurrent = () => !stopped && generation === analysisGenerationRef.current;
 
-        if (updated.status === 'COMPLETED' || updated.status === 'FAILED') {
-          if (updated.status === 'COMPLETED') {
-            loadCompletedAnalysisData(updated.id);
-          }
+    const interval = setInterval(async () => {
+      if (inFlight || !isCurrent()) return;
+      inFlight = true;
+      try {
+        const updated = await fetchChangeAnalysis(analysisId);
+        if (!isCurrent()) return;
+        setActiveAnalysis((current) => current?.id === analysisId ? updated : current);
+
+        if (updated.status === 'COMPLETED') {
+          void loadCompletedAnalysisData(updated.id, generation);
         }
       } catch (err) {
-        console.error('Polling error for change analysis:', err);
+        if (isCurrent()) console.error('Polling error for change analysis:', err);
+      } finally {
+        inFlight = false;
       }
     }, 2000);
 
-    return () => clearInterval(interval);
+    return () => {
+      stopped = true;
+      clearInterval(interval);
+    };
   }, [activeAnalysis]);
 
-  const loadCompletedAnalysisData = async (analysisId: string) => {
+  const loadCompletedAnalysisData = async (analysisId: string, generation: number) => {
     try {
       const [fetchedImpacts, fetchedReview, fetchedReport, fetchedTelemetry, fetchedDiff, fetchedPub] =
         await Promise.all([
@@ -139,6 +152,7 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
           fetchReviewPublication(analysisId).catch(() => null),
         ]);
 
+      if (generation !== analysisGenerationRef.current) return;
       setImpacts(fetchedImpacts || []);
       if (fetchedReview && fetchedReview.findings) {
         setReviewFindings(fetchedReview.findings);
@@ -167,12 +181,17 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
 
   const handleStartAnalysis = async (e: React.FormEvent) => {
     e.preventDefault();
+    const generation = ++analysisGenerationRef.current;
     setErrorMsg(null);
     setIsSubmitting(true);
+    setActiveAnalysis(null);
     setReport(null);
     setImpacts([]);
     setReviewFindings([]);
     setTelemetry(null);
+    setPublication(null);
+    setPubError(null);
+    setDiffDeltas({ route_deltas: [], schema_deltas: [], dependency_deltas: [], config_deltas: [] });
 
     try {
       let res: ChangeAnalysisResponse;
@@ -193,15 +212,13 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
           head_ref: headRef.trim() || undefined,
         });
       }
-      setActiveAnalysis(res);
+      if (generation === analysisGenerationRef.current) setActiveAnalysis(res);
     } catch (err: unknown) {
-      if (err instanceof Error) {
-        setErrorMsg(err.message);
-      } else {
-        setErrorMsg('Failed to initiate change analysis.');
+      if (generation === analysisGenerationRef.current) {
+        setErrorMsg(err instanceof Error ? err.message : 'Failed to initiate change analysis.');
       }
     } finally {
-      setIsSubmitting(false);
+      if (generation === analysisGenerationRef.current) setIsSubmitting(false);
     }
   };
 
@@ -234,9 +251,10 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
     if (!activeAnalysis) return;
     setIsGeneratingPreview(true);
     setPubError(null);
+    const generation = analysisGenerationRef.current;
     try {
       const pub = await generateReviewPublicationPreview(activeAnalysis.id);
-      setPublication(pub);
+      if (generation === analysisGenerationRef.current) setPublication(pub);
     } catch (err: unknown) {
       setPubError(err instanceof Error ? err.message : 'Failed to generate review publication preview');
     } finally {
