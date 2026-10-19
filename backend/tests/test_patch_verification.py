@@ -706,3 +706,39 @@ async def test_adversarial_patch_introducing_new_high_severity_scanner_finding_f
 
         assert result.status == VerificationStatus.FAILED
         assert "check_12_no_new_critical_findings" in result.checks_failed
+
+
+def test_patch_verification_copy_rejects_symlink_escape(tmp_path):
+    """Hostile source trees must not copy files outside their workspace."""
+    source = tmp_path / "checkout"
+    dest = tmp_path / "worktree"
+    outside = tmp_path / "outside"
+    source.mkdir()
+    dest.mkdir()
+    outside.mkdir()
+    (outside / "secret.txt").write_text("outside boundary", encoding="utf-8")
+    (source / "safe.py").write_text("value = 1\n", encoding="utf-8")
+    (source / "nested").mkdir()
+    try:
+        (source / "nested" / "escape").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlinks are unavailable for this filesystem.")
+
+    service = PatchVerificationService()
+    with pytest.raises(ValueError, match="symbolic link"):
+        service._copy_repo_to_temp(str(source), str(dest))
+    assert not (dest / "nested" / "escape" / "secret.txt").exists()
+
+
+def test_patch_verification_copy_allows_regular_files(tmp_path):
+    source = tmp_path / "checkout"
+    dest = tmp_path / "worktree"
+    (source / "src").mkdir(parents=True)
+    dest.mkdir()
+    (source / "src" / "main.py").write_text("answer = 42\n", encoding="utf-8")
+    (source / "node_modules").mkdir()
+    (source / "node_modules" / "ignored.js").write_text("ignored", encoding="utf-8")
+
+    PatchVerificationService()._copy_repo_to_temp(str(source), str(dest))
+    assert (dest / "src" / "main.py").read_text(encoding="utf-8") == "answer = 42\n"
+    assert not (dest / "node_modules").exists()

@@ -63,20 +63,37 @@ class PatchVerificationService:
         ]
 
     def _copy_repo_to_temp(self, source_dir: str, dest_dir: str) -> None:
-        """Copy repository files into temporary sandbox directory."""
-        if not os.path.exists(source_dir):
-            return
+        """Copy only regular files and directories; never follow source links.
 
-        for item in os.listdir(source_dir):
-            s = os.path.join(source_dir, item)
-            d = os.path.join(dest_dir, item)
-            if os.path.isdir(s):
-                # Skip virtual environments and caches
-                if item in (".venv", "venv", "node_modules", ".git", "__pycache__", ".pytest_cache", ".next"):
-                    continue
-                shutil.copytree(s, d, symlinks=False, ignore=shutil.ignore_patterns("*.pyc", "__pycache__"))
-            else:
-                shutil.copy2(s, d)
+        Shutil with symlinks=False follows links by default. A hostile linked
+        directory could copy external files into the verification workspace.
+        """
+        if os.path.islink(source_dir) or not os.path.isdir(source_dir):
+            raise ValueError("Patch verification source workspace is not a regular directory.")
+
+        skipped = frozenset({
+            ".venv", "venv", "node_modules", ".git", "__pycache__",
+            ".pytest_cache", ".next",
+        })
+
+        def copy_directory(source: str, destination: str) -> None:
+            with os.scandir(source) as entries:
+                for entry in entries:
+                    if entry.name in skipped or entry.name.endswith(".pyc"):
+                        continue
+                    is_junction = getattr(entry, "is_junction", None)
+                    if entry.is_symlink() or (is_junction is not None and is_junction()):
+                        raise ValueError("Patch verification workspace contains a symbolic link or junction.")
+                    target = os.path.join(destination, entry.name)
+                    if entry.is_dir(follow_symlinks=False):
+                        os.mkdir(target)
+                        copy_directory(entry.path, target)
+                    elif entry.is_file(follow_symlinks=False):
+                        shutil.copy2(entry.path, target, follow_symlinks=False)
+                    else:
+                        raise ValueError("Patch verification workspace contains a non-regular filesystem entry.")
+
+        copy_directory(source_dir, dest_dir)
 
     def _check_secrets(self, diff_text: str, patched_contents: Dict[str, str]) -> Tuple[bool, List[str]]:
         """Check whether diff or patched files introduce obvious secrets."""
