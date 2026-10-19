@@ -135,6 +135,21 @@ uvicorn app.main:app --reload --port 8000
 ```
 Backend API will be available at `http://localhost:8000` (`/api/v1/docs` for Swagger UI, `/health` for health check).
 
+### Production readiness: hard blockers
+
+**A green CI run does not make RepoLens safe to host for public repository scans.**
+The current production acquisition gate deliberately returns
+`ACQUISITION_ENFORCEMENT_UNAVAILABLE` because there is no independently enforced
+per-job workspace quota or controlled Git egress; external scanners also require
+hard worker isolation. The production `/health/ready` endpoint returns 503
+while either boundary is unavailable.
+
+Run `python -m app.cli.production_preflight --release-gate` with a valid
+production configuration to see the **offline** release blockers without network
+access. This gate currently fails by design; never disable it to obtain a green
+deployment. See [Production Release Checklist](docs/PRODUCTION_RELEASE_CHECKLIST.md)
+for the host requirements and manual staging validation steps.
+
 ### Production deployment
 
 Production requires PostgreSQL for the application database and LangGraph checkpoints. The single production dependency command installs the PostgreSQL driver and PostgreSQL checkpoint saver; pytest, local ML, and optional OTLP exporters are not part of this extra.
