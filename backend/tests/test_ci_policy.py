@@ -143,3 +143,19 @@ def test_secret_backed_manual_jobs_are_main_only_and_secrets_are_step_scoped():
         assert not re.search(r"(?m)^    env:\s*$", section), (
             f"Job-level secret environment remains in {job_name}"
         )
+
+
+
+def test_manual_postgres_dependency_probe_has_complete_non_live_production_profile():
+    """Manual integration preflight must not fail for omitted artifact mode."""
+    workflow = (_WORKFLOWS / "production-validation.yml").read_text(encoding="utf-8")
+    marker = "- name: Verify production imports with a syntactically valid, non-live profile"
+    assert marker in workflow
+    section = workflow.split(marker, 1)[1].split("- name: Run PostgreSQL and pgvector integration", 1)[0]
+    assert 'ENVIRONMENT: production' in section
+    assert 'AUTH_COOKIE_SECURE: "true"' in section
+    assert 'ARTIFACT_DEPLOYMENT_MODE: single_persistent_local' in section
+    assert 'ARTIFACT_STORAGE_BACKEND: local' in section
+    assert 'CORS_ORIGINS: https://app.example.com' in section
+    assert 'TRUSTED_HOSTS: app.example.com' in section
+    assert 'python -m app.cli.production_preflight' in section

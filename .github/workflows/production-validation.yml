@@ -144,7 +144,7 @@ jobs:
       - name: Install PostgreSQL support
         working-directory: backend
         run: uv sync --locked --extra dev --extra production
-      - name: Verify production runtime dependencies
+      - name: Verify production imports with a syntactically valid, non-live profile
         working-directory: backend
         env:
           ENVIRONMENT: production
@@ -152,6 +152,8 @@ jobs:
           AUTH_COOKIE_SECURE: "true"
           CORS_ORIGINS: https://app.example.com
           TRUSTED_HOSTS: app.example.com
+          ARTIFACT_DEPLOYMENT_MODE: single_persistent_local
+          ARTIFACT_STORAGE_BACKEND: local
         run: uv run --locked --extra dev --extra production python -m app.cli.production_preflight
       - name: Run PostgreSQL and pgvector integration
         working-directory: backend
