@@ -340,9 +340,9 @@ export default function LandingPage() {
                 <div>
                   <div style={{ marginBottom: '1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <span style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>
-                      Interactive dependency map connecting frontend API calls to backend route handlers
+                      Illustrative relationship map showing a possible UI-to-storage flow, not a live repository trace
                     </span>
-                    <Badge variant="cyan" size="sm">Deterministic Map</Badge>
+                    <Badge variant="default" size="sm">Sample only</Badge>
                   </div>
                   <ArchitectureGraph />
                 </div>

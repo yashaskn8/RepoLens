@@ -12,7 +12,6 @@ import { SearchInput, Select } from '@/components/ui/Input';
 import { Drawer } from '@/components/ui/Drawer';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { EmptyState } from '@/components/ui/EmptyState';
-import { ArchitectureGraph } from '@/components/visualization/ArchitectureGraph';
 import { fetchScan, fetchScanFindings, fetchScanTelemetry } from '@/lib/api';
 import { useWorkflowStream } from '@/lib/useWorkflowStream';
 import { ScanReportAction } from '@/features/scan/ScanReportAction';
@@ -434,14 +433,12 @@ export default function ScanDetailPage({ params }: ScanDetailPageProps) {
           </div>
         )}
 
-        {/* Tab 2: Code Relationships (Architecture / Graph) */}
+        {/* A static example must never appear as scan-specific evidence. */}
         {activeTab === 'relationships' && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-            <div style={{ padding: '0.75rem 1rem', background: 'rgba(99, 102, 241, 0.08)', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-subtle)', fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>
-              Interactive dependency and call graph constructed from deterministic Tree-sitter parsing.
-            </div>
-            <ArchitectureGraph />
-          </div>
+          <EmptyState
+            title="Scan-specific relationship graph unavailable"
+            description="This screen does not yet expose verified symbol nodes and dependency edges for this scan. No illustrative graph is presented as measured scan evidence."
+          />
         )}
 
         {/* Tab 3: Dependencies */}

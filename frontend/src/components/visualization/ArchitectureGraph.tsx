@@ -34,73 +34,14 @@ export interface ArchitectureEdge {
   breaking?: boolean;
 }
 
+// Conceptual landing-page illustration, never scan-specific or verified evidence.
 const DEFAULT_NODES: ArchitectureNode[] = [
-  {
-    id: 'fe-form',
-    layer: 'frontend',
-    name: 'RepositoryScanForm.tsx',
-    file: 'frontend/src/features/scan/RepositoryScanForm.tsx',
-    lineRange: 'L42-L88',
-    contract: 'POST payload { repository_url, branch }',
-    status: 'synced',
-    details: 'React component dispatching mutation to backend with CSRF header injection.',
-    evidenceSnippet: `const response = await startScan({\n  repository_url: repoUrl,\n  branch: branchName,\n});`,
-  },
-  {
-    id: 'fe-client',
-    layer: 'frontend',
-    name: 'api.ts:startScan()',
-    file: 'frontend/src/lib/api.ts',
-    lineRange: 'L155-L167',
-    contract: 'ScanCreate -> Promise<Scan>',
-    status: 'synced',
-    details: 'Typed client invoking /api/v1/scans with automatic credentials.',
-    evidenceSnippet: `export async function startScan(payload: ScanCreate): Promise<Scan> {\n  return apiFetch('/api/v1/scans', { method: 'POST', body: JSON.stringify(payload) });\n}`,
-  },
-  {
-    id: 'api-route',
-    layer: 'route',
-    name: 'POST /api/v1/scans',
-    file: 'backend/src/api/routes/scans.py',
-    lineRange: 'L74-L95',
-    contract: 'Request: ScanCreate -> Response: ScanRead',
-    status: 'verified',
-    details: 'FastAPI route enforcing authentication and rate limits before task delegation.',
-    evidenceSnippet: `@router.post('/api/v1/scans', response_model=ScanRead, status_code=202)\nasync def initiate_scan(payload: ScanCreate, current_user = Depends(get_current_user)):`,
-  },
-  {
-    id: 'handler-svc',
-    layer: 'handler',
-    name: 'ScanService.execute()',
-    file: 'backend/src/services/scan_service.py',
-    lineRange: 'L120-L165',
-    contract: 'execute(repo_url, branch) -> ScanWorkflow',
-    status: 'verified',
-    details: 'Orchestrates sandbox cloning, AST extraction, deterministic rules, and LLM verification.',
-    evidenceSnippet: `async def execute_scan(self, repo_url: str, branch: Optional[str] = None):\n    manifest = await self.git_cloner.clone_and_parse(repo_url, branch)\n    return await self.engine.run_pipeline(manifest)`,
-  },
-  {
-    id: 'schema-pydantic',
-    layer: 'schema',
-    name: 'ScanCreate & ScanRead',
-    file: 'backend/src/schemas/scan.py',
-    lineRange: 'L15-L48',
-    contract: 'Pydantic BaseModel with strict url validation',
-    status: 'verified',
-    details: 'Strict schema with URL sanitation and regex branch validation.',
-    evidenceSnippet: `class ScanCreate(BaseModel):\n    repository_url: HttpUrl\n    branch: Optional[str] = Field(default='main')`,
-  },
-  {
-    id: 'db-model',
-    layer: 'model',
-    name: 'ScanRecord (SQLAlchemy)',
-    file: 'backend/src/models/scan.py',
-    lineRange: 'L30-L75',
-    contract: 'Table "scans" (id, repo_url, status, commit_sha)',
-    status: 'synced',
-    details: 'SQLAlchemy model mapped to SQLite/PostgreSQL with indexed foreign keys for findings.',
-    evidenceSnippet: `class ScanRecord(Base):\n    __tablename__ = "scans"\n    id = Column(String, primary_key=True, default=generate_uuid)\n    status = Column(Enum(ScanStatus), nullable=False)`,
-  },
+  { id: 'fe-form', layer: 'frontend', name: 'Example UI form', file: 'Illustration only', lineRange: 'Not traced', contract: 'Example input', status: 'warning', details: 'A hypothetical client-side input form.' },
+  { id: 'fe-client', layer: 'frontend', name: 'Example API client', file: 'Illustration only', lineRange: 'Not traced', contract: 'Example HTTP call', status: 'warning', details: 'A hypothetical API request.' },
+  { id: 'api-route', layer: 'route', name: 'Example route', file: 'Illustration only', lineRange: 'Not traced', contract: 'Example request validation', status: 'warning', details: 'A hypothetical server endpoint.' },
+  { id: 'handler-svc', layer: 'handler', name: 'Example analysis worker', file: 'Illustration only', lineRange: 'Not traced', contract: 'Example queued job', status: 'warning', details: 'A hypothetical bounded analysis worker.' },
+  { id: 'schema-pydantic', layer: 'schema', name: 'Example schema', file: 'Illustration only', lineRange: 'Not traced', contract: 'Example typed contract', status: 'warning', details: 'A hypothetical request and result schema.' },
+  { id: 'db-model', layer: 'model', name: 'Example storage record', file: 'Illustration only', lineRange: 'Not traced', contract: 'Example persistence', status: 'warning', details: 'A hypothetical persisted result.' },
 ];
 
 const DEFAULT_EDGES: ArchitectureEdge[] = [
@@ -125,6 +66,7 @@ export function ArchitectureGraph({
   onSelectNode,
   interactive = true,
 }: ArchitectureGraphProps) {
+  const illustrative = nodes === DEFAULT_NODES;
   const [selectedNodeId, setSelectedNodeId] = useState<string>(nodes[0]?.id || 'fe-form');
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
 
@@ -190,16 +132,16 @@ export function ArchitectureGraph({
               Cross-Layer Contract & Relationship Graph
             </h3>
             <Badge variant="cyan" size="sm">
-              Live AST Trace
+              {illustrative ? 'Illustrative example' : 'Supplied relationship data'}
             </Badge>
           </div>
           <p style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
-            Deterministic end-to-end evidence linking UI components down to database schemas.
+            {illustrative ? 'Conceptual flow only. No scanned code or verified edges are shown.' : 'Supplied relationship nodes; verify provenance before relying on these links.'}
           </p>
         </div>
 
         <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Click any node to inspect evidence</span>
+          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Select a node to inspect its description</span>
         </div>
       </div>
 
@@ -309,7 +251,7 @@ export function ArchitectureGraph({
                             gap: '0.25rem',
                           }}
                         >
-                          <CheckCircle2 size={11} /> {node.status}
+                          {illustrative ? 'SAMPLE' : node.status}
                         </span>
                         {isSelected && (
                           <span style={{ fontSize: '0.65rem', color: 'var(--accent-cyan)', fontWeight: 600 }}>
@@ -348,8 +290,8 @@ export function ArchitectureGraph({
                 <Badge variant="cyan" size="sm">
                   {selectedNode.layer.toUpperCase()}
                 </Badge>
-                <Badge variant="success" size="sm">
-                  Verified AST Node
+                <Badge variant="default" size="sm">
+                  {illustrative ? 'Sample node — not verified' : 'Supplied node'}
                 </Badge>
               </div>
               <div
@@ -376,7 +318,7 @@ export function ArchitectureGraph({
           {selectedNode.evidenceSnippet && (
             <div>
               <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '0.3rem' }}>
-                Verified AST Source Evidence
+                {illustrative ? 'Example snippet' : 'Supplied excerpt (provenance not verified)'}
               </div>
               <pre
                 style={{
