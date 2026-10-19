@@ -545,7 +545,7 @@ export default function ScanDetailPage({ params }: ScanDetailPageProps) {
                             <p>AI explanation unavailable. The evidence-backed description above remains authoritative.</p>
                           )}
                         </div>
-                      </div>
+                      )}
                     </li>
                   ))}
                 </ul>
