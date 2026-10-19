@@ -530,15 +530,15 @@ def get_change_analysis_review(
     
     meta = model.model_metadata or {}
     review_report = meta.get("review_report")
-    if not review_report:
-        return {
-            "analysis_id": str(analysis_id),
-            "summary": "AI review not available or still in progress",
-            "findings": [],
-            "rejected_findings": [],
-            "total_findings": 0,
-            "overall_risk_level": model.risk_level or "LOW",
-        }
+    if not isinstance(review_report, dict) or not review_report:
+        # An absent verifier report is not evidence of zero findings or LOW risk.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error_code": "CHANGE_REVIEW_UNAVAILABLE",
+                "message": "Verified change review is unavailable for this analysis.",
+            },
+        )
     return review_report
 
 
@@ -556,19 +556,15 @@ def get_change_analysis_diff(
     model = get_owned_change_analysis_or_404(db, str(analysis_id), current_user)
     meta = model.model_metadata or {}
     diff_data = meta.get("diff_result")
-    if not diff_data:
-        return {
-            "base_commit_sha": model.base_commit_sha,
-            "head_commit_sha": model.head_commit_sha,
-            "repository_url": model.repository_url,
-            "changed_files": [],
-            "changed_symbols": [],
-            "route_deltas": [],
-            "schema_deltas": [],
-            "dependency_deltas": [],
-            "config_deltas": [],
-            "summary": {},
-        }
+    if not isinstance(diff_data, dict) or not diff_data:
+        # Missing structural analysis must never be reported as zero changes.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error_code": "CHANGE_DIFF_UNAVAILABLE",
+                "message": "Structural diff evidence is unavailable for this analysis.",
+            },
+        )
     return diff_data
 
 

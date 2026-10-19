@@ -391,3 +391,26 @@ def test_api_list_analyses_and_events(client: TestClient, db_session: Session):
     assert ev_res.status_code == status.HTTP_200_OK
     assert len(ev_res.json()) >= 1
     assert ev_res.json()[0]["event_type"] == "CHANGE_ANALYSIS_REQUESTED"
+
+
+def test_missing_review_and_diff_evidence_fail_closed(client: TestClient, db_session: Session):
+    """A completed result with missing artifacts must not masquerade as LOW risk."""
+    analysis_id = str(uuid4())
+    db_session.add(ChangeAnalysisModel(
+        id=analysis_id,
+        repository_url="https://github.com/example/repo",
+        repository_owner="example",
+        repository_name="repo",
+        base_commit_sha="1" * 40,
+        head_commit_sha="2" * 40,
+        status="COMPLETED",
+        risk_level="LOW",
+        model_metadata={},
+    ))
+    db_session.commit()
+    review = client.get(f"/api/v1/change-analyses/{analysis_id}/review")
+    diff = client.get(f"/api/v1/change-analyses/{analysis_id}/diff")
+    assert review.status_code == 409
+    assert review.json()["detail"]["error_code"] == "CHANGE_REVIEW_UNAVAILABLE"
+    assert diff.status_code == 409
+    assert diff.json()["detail"]["error_code"] == "CHANGE_DIFF_UNAVAILABLE"

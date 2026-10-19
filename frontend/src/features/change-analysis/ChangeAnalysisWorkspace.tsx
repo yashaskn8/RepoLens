@@ -171,8 +171,9 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
         config_deltas: diff.config_deltas || [],
       });
     } else missing.push('structural diff');
+    // Publication is optional and is normally 404 until an operator requests
+    // a preview. It is not a required change-analysis artifact.
     if (publicationResult.status === 'fulfilled') setPublication(publicationResult.value);
-    else missing.push('publication status');
 
     setArtifactError(missing.length
       ? `Analysis completed, but unavailable artifacts: ${missing.join(', ')}. Empty panels are not evidence of zero findings.`
