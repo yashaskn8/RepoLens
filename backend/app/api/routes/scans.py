@@ -317,6 +317,40 @@ async def execute_background_scan(
         # Update scan metadata with analysis scope and scanner coverage
         meta = dict(scan_model.model_metadata or {})
         meta["scanner_coverage"] = scanner_summary
+        # Store bounded, purely deterministic risk signals separately from the
+        # confirmed finding catalog. A heuristic signal is NOT verified malware.
+        supply = (evidence_store.scanner_results or {}).get("chainbrain")
+        if supply is not None:
+            meta["supply_chain"] = {
+                "tool": "chainbrain",
+                "status": supply.status.value,
+                "policy": "chainbrain.offline.v1",
+                "total_signals": len(supply.findings),
+                "items_truncated": len(supply.findings) > 60,
+                "signals": [
+                    {
+                        "rule_id": item.rule_id,
+                        "title": item.title[:220],
+                        "description": item.description[:600],
+                        "severity": item.severity.value,
+                        "file_path": item.evidence.file_path,
+                        "line_number": item.evidence.start_line,
+                        "package": item.raw_details.get("package"),
+                        "ecosystem": item.raw_details.get("ecosystem"),
+                        "scope": item.raw_details.get("dependency_scope"),
+                        "risk_score": item.raw_details.get("risk_score"),
+                        "risk_score_kind": "heuristic_not_probability",
+                    }
+                    for item in supply.findings[:60]
+                ] if supply.status == ToolStatus.COMPLETED else [],
+                "maintainer_reputation": "not_evaluated",
+                "registry_metadata": "not_evaluated",
+                "ai_explanation": "not_requested",
+                "warning": (
+                    None if supply.status == ToolStatus.COMPLETED
+                    else "The offline package assessment was incomplete; absence of signals is not evidence of safety."
+                ),
+            }
         if evidence_store.persistent_index is persistent_index:
             meta["index_coverage"] = dict(persistent_index.stats)
         if evidence_store.manifest.analysis_scope:

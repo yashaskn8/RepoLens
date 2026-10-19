@@ -198,6 +198,11 @@ export default function ScanDetailPage({ params }: ScanDetailPageProps) {
     (tool) => String(tool.tool || '').toLowerCase().includes('osv')
   );
   const dependencyCoverageComplete = String(dependencyScanner?.status || '').toUpperCase() === 'COMPLETED';
+  const chainbrain = asRecord(metadata.supply_chain);
+  const chainbrainSignals = Array.isArray(chainbrain.signals)
+    ? chainbrain.signals.map(asRecord)
+    : [];
+  const chainbrainStatus = String(chainbrain.status || 'NOT_RUN').toUpperCase();
   const hasActiveFindingFilters = Boolean(searchQuery.trim() || severityFilter !== 'ALL');
 
   const repoName = scan
@@ -468,6 +473,57 @@ export default function ScanDetailPage({ params }: ScanDetailPageProps) {
         {/* Tab 3: Dependencies */}
         {activeTab === 'dependencies' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+            <Card title="ChainBrain · Supply-Chain Risk Signals">
+              <p className="text-sm text-slate-300">
+                Offline, evidence-backed heuristic assessment of npm and Python dependency declarations,
+                install hooks and lockfile integrity. A signal is not proof of malicious code.
+                Maintainer reputation, registry telemetry and AI enrichment have not been verified.
+              </p>
+              <p className="text-xs text-slate-400 mt-2" role="status">
+                Assessment: {chainbrainStatus}
+                {chainbrainStatus === 'COMPLETED'
+                  ? ` · ${String(chainbrain.total_signals ?? chainbrainSignals.length)} risk signals`
+                  : ' · risk level unknown until a successful assessment'}
+              </p>
+              {chainbrainStatus !== 'COMPLETED' && (
+                <p className="text-sm text-amber-300 mt-3">
+                  ChainBrain did not complete. Do not interpret missing signals as a clean package inventory.
+                </p>
+              )}
+              {chainbrainSignals.length > 0 && (
+                <ul className="mt-4 space-y-3">
+                  {chainbrainSignals.map((signal, index) => (
+                    <li key={String(signal.rule_id) + String(signal.file_path) + index}
+                      className="rounded-md border border-white/10 p-3">
+                      <div className="font-semibold text-sm text-white">
+                        {String(signal.title ?? 'Package risk signal')}
+                      </div>
+                      <div className="text-xs text-slate-400 mt-1">
+                        {String(signal.severity ?? 'UNKNOWN')} · {String(signal.rule_id ?? 'rule unavailable')}
+                        {' · '}{String(signal.file_path ?? 'unknown file')}
+                        {typeof signal.line_number === 'number' ? `:${signal.line_number}` : ''}
+                      </div>
+                      <p className="text-sm text-slate-300 mt-2">{String(signal.description ?? '')}</p>
+                      <p className="text-xs text-slate-400 mt-1">
+                        Heuristic risk score: {typeof signal.risk_score === 'number' ? signal.risk_score : 'unknown'}/100
+                        {' · Not a maliciousness probability'}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {chainbrain.items_truncated === true && (
+                <p className="text-xs text-amber-300 mt-3">
+                  Only the first 60 signals are shown. Do not treat this panel as complete.
+                </p>
+              )}
+              {chainbrainStatus === 'COMPLETED' && chainbrainSignals.length === 0 && (
+                <p className="text-sm text-slate-300 mt-3">
+                  No ChainBrain heuristic signals were detected in the inspected metadata;
+                  this does not certify package safety.
+                </p>
+              )}
+            </Card>
             <div
               className="glass-panel"
               style={{

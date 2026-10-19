@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 from app.analysis.adapters import OSVScannerAdapter, SemgrepAdapter, TrivyAdapter
 from app.analysis.base import BaseScannerAdapter
 from app.analysis.core import analyze_core_repository
+from app.analysis.chainbrain import analyze_supply_chain_repository
 from app.analysis.schemas import ScannerResult, ToolStatus
 from app.analysis.store import EvidenceStore
 from app.ingestion.manifest import build_manifest
@@ -67,13 +68,12 @@ class RepositoryIntelligenceService:
                 logger.error(
                     "Scanner %s raised unhandled exception: %s",
                     adapter.tool_name,
-                    result_or_exc,
-                    exc_info=result_or_exc,
+                    type(result_or_exc).__name__,
                 )
                 scanner_results[adapter.tool_name] = ScannerResult(
                     tool=adapter.tool_name,
                     status=ToolStatus.FAILED,
-                    error_message=f"Unhandled exception in {adapter.tool_name}: {result_or_exc}",
+                    error_message=f"Unhandled scanner exception ({type(result_or_exc).__name__}).",
                 )
             else:
                 scanner_results[result_or_exc.tool] = result_or_exc
@@ -90,6 +90,19 @@ class RepositoryIntelligenceService:
                 error_message="RepoLens core deterministic analysis failed.",
             )
         scanner_results[core_result.tool] = core_result
+
+        # ChainBrain is a RepoLens-owned, no-network package risk analyzer.
+        # Keep its status separate: incomplete metadata is INVALID_OUTPUT,
+        # never silently counted as zero package risk.
+        try:
+            supply_result = await asyncio.to_thread(analyze_supply_chain_repository, repo_dir, manifest)
+        except Exception:
+            logger.error("ChainBrain package risk analyzer failed (details withheld).")
+            supply_result = ScannerResult(
+                tool="chainbrain", status=ToolStatus.FAILED,
+                error_message="ChainBrain package-risk analysis failed.",
+            )
+        scanner_results[supply_result.tool] = supply_result
 
         # 3. Assemble unified EvidenceStore
         store = EvidenceStore(manifest=manifest, scanner_results=scanner_results)
