@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { useState } from 'react';
 import Link from 'next/link';
 import { useAuth } from '@/context/AuthContext';
 import { HealthResponse } from '@/types/domain';
@@ -33,6 +33,7 @@ export function AppHeader({
   breadcrumbs = [],
 }: AppHeaderProps) {
   const { user, isAuthenticated, isOperator, logout } = useAuth();
+  const [logoutError, setLogoutError] = useState<string | null>(null);
 
   return (
     <header
@@ -160,11 +161,11 @@ export function AppHeader({
           className="hidden md:flex"
         >
           <StatusIndicator
-            status={health?.status === 'healthy' ? 'healthy' : health?.status === 'degraded' ? 'degraded' : 'running'}
+            status={health?.status === 'healthy' ? 'healthy' : health?.status === 'degraded' ? 'degraded' : 'pending'}
             size="sm"
           />
           <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>
-            {health?.database || 'engine:connected'}
+            {health?.database || 'engine:unknown'}
           </span>
         </div>
 
@@ -195,12 +196,16 @@ export function AppHeader({
             <Button
               variant="ghost"
               size="sm"
-              onClick={logout}
+              onClick={() => {
+                setLogoutError(null);
+                void logout().catch(() => setLogoutError('Sign-out failed; your session may still be active.'));
+              }}
               title="Sign Out"
               style={{ padding: '0.4rem' }}
             >
               <LogOut size={15} />
             </Button>
+            {logoutError && <span role="alert" className="text-xs text-red-400">{logoutError}</span>}
           </div>
         ) : (
           <Button

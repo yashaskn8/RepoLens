@@ -68,12 +68,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const logout = async () => {
     const version = ++authRequestVersion.current;
     try {
+      // A failed revoke must not make an authenticated browser appear signed out.
       await logoutUser();
+      if (version === authRequestVersion.current) setUser(null);
     } finally {
-      if (version === authRequestVersion.current) {
-        setUser(null);
-        setIsLoading(false);
-      }
+      if (version === authRequestVersion.current) setIsLoading(false);
     }
   };
 

@@ -26,6 +26,7 @@ export default function AccountPage() {
   const { user, isAuthenticated, isOperator, logout, refreshUser } = useAuth();
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [clearMessage, setClearMessage] = useState<string | null>(null);
+  const [signOutError, setSignOutError] = useState<string | null>(null);
 
   const csrfToken = typeof window !== 'undefined' ? getCsrfToken() : null;
 
@@ -89,14 +90,17 @@ export default function AccountPage() {
                   </Badge>
                 </div>
                 <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
-                  User ID: {user?.id || 'session-ephemeral'}
+                  User ID: {user?.id || 'Not authenticated'}
                 </div>
               </div>
             </div>
 
             <div style={{ display: 'flex', gap: '0.75rem' }}>
               {isAuthenticated ? (
-                <Button variant="danger" size="md" onClick={logout} leftIcon={<LogOut size={16} />}>
+                <Button variant="danger" size="md" onClick={() => {
+                  setSignOutError(null);
+                  void logout().catch(() => setSignOutError('Sign-out failed; your session may still be active.'));
+                }} leftIcon={<LogOut size={16} />}>
                   Sign Out
                 </Button>
               ) : (
@@ -107,6 +111,7 @@ export default function AccountPage() {
             </div>
           </div>
         </Card>
+        {signOutError && <div role="alert" className="text-sm text-red-400">{signOutError}</div>}
 
         {/* Role Capabilities Matrix (USER vs OPERATOR) */}
         <Card style={{ padding: '2rem', display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
@@ -212,14 +217,14 @@ export default function AccountPage() {
             <div style={{ padding: '1rem', background: 'rgba(5, 8, 18, 0.7)', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-subtle)' }}>
               <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>CSRF Protection</div>
               <div style={{ fontSize: '1rem', fontWeight: 600, color: 'var(--success-text)', marginTop: '0.2rem', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
-                <ShieldCheck size={16} /> Active (Cookie Token)
+                <ShieldCheck size={16} /> {isAuthenticated && csrfToken ? 'Token present (server-validated)' : 'Token not verified'}
               </div>
             </div>
 
             <div style={{ padding: '1rem', background: 'rgba(5, 8, 18, 0.7)', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-subtle)' }}>
               <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Session Storage</div>
               <div style={{ fontSize: '1rem', fontWeight: 600, color: '#ffffff', marginTop: '0.2rem' }}>
-                HttpOnly Secure Cookie
+                {isAuthenticated ? 'Server-managed session cookie' : 'Session not verified'}
               </div>
             </div>
 
