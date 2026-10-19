@@ -46,3 +46,20 @@ def test_health_reports_connected_but_unmigrated_database_as_degraded(client: Te
     data = response.json()
     assert data["status"] == "degraded"
     assert data["database"] == "migration_required"
+
+
+def test_public_health_does_not_log_database_connection_secret(caplog):
+    """Production logs must not echo secret-bearing driver diagnostics."""
+    from app.api.routes.health import check_health
+
+    canary = "postgresql://private-user:private-password@private.internal/database"
+
+    class BrokenDatabase:
+        def execute(self, *_args, **_kwargs):
+            raise RuntimeError(canary)
+
+    with caplog.at_level("ERROR"):
+        response = check_health(BrokenDatabase())  # type: ignore[arg-type]
+    assert response["status"] == "degraded"
+    assert canary not in caplog.text
+    assert "private-password" not in caplog.text

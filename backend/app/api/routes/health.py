@@ -94,7 +94,7 @@ def check_health(db: Session = Depends(get_db)) -> Dict[str, Any]:
         if missing_scan_storage_tables(db):
             db_status = "migration_required"
     except Exception as exc:
-        logger.error(f"Database health check failed: {exc}", exc_info=True)
+        logger.error("Database health check failed (%s)", type(exc).__name__)
         db_status = "unhealthy"
 
     from app.core.redis import get_redis_manager
@@ -124,7 +124,7 @@ def _build_telemetry_report(db: Session) -> TelemetryReport:
     try:
         db.execute(text("SELECT 1"))
     except Exception as exc:
-        logger.error(f"Database telemetry check failed: {exc}", exc_info=True)
+        logger.error("Database telemetry check failed (%s)", type(exc).__name__)
         db_status = "unhealthy"
 
     # 2. Providers configuration telemetry (booleans only, never keys)
@@ -210,7 +210,7 @@ def _build_telemetry_report(db: Session) -> TelemetryReport:
 
         metrics.total_workflow_events = db.query(func.count(WorkflowEventModel.id)).scalar() or 0
     except Exception as exc:
-        logger.warning(f"Error querying telemetry metrics: {str(exc)}")
+        logger.warning("Telemetry metrics unavailable (%s)", type(exc).__name__)
 
     overall_status = "healthy" if db_status == "connected" and snapshot_writable else "degraded"
 
