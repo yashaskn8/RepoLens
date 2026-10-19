@@ -1,4 +1,5 @@
 import hashlib
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
@@ -261,3 +262,47 @@ def test_get_scan_findings(client, db_session):
     assert data[0]["evidences"][0]["file_path"] == "src/auth.py"
     assert canary not in response.text
     assert "[REDACTED_GITHUB_TOKEN]" in data[0]["evidences"][0]["code_snippet"]
+
+
+def test_scan_findings_paginate_only_canonically_grounded_rows(client, db_session):
+    """An invalid confirmed row must not consume an API page slot."""
+    scan_id = str(uuid4())
+    commit_sha = "a" * 40
+    base_time = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    db_session.add(ScanModel(
+        id=scan_id, repository_url="https://github.com/org/pagination.git",
+        status=ScanStatus.COMPLETED.value, commit_hash=commit_sha,
+    ))
+    valid_ids = []
+    for index in range(3):
+        finding_id = str(uuid4())
+        finding = FindingModel(
+            id=finding_id, scan_id=scan_id, title=f"Evidence {index}",
+            description="Verified test fixture", severity=Severity.MEDIUM.value,
+            status=FindingStatus.OPEN.value,
+            verification_verdict=VerificationVerdict.CONFIRMED.value,
+            created_at=base_time + timedelta(seconds=3 - index),
+        )
+        if index > 0:
+            snippet = f"line {index}"
+            finding.evidences.append(EvidenceModel(
+                id=str(uuid4()), finding_id=finding_id, file_path="src/check.py",
+                start_line=1, end_line=1, code_snippet=snippet,
+                context_notes=build_grounding_context_notes(
+                    commit_sha=commit_sha, file_path="src/check.py",
+                    start_line=1, end_line=1, file_sha256="f" * 64,
+                    snippet_sha256=hashlib.sha256(snippet.encode()).hexdigest(),
+                ),
+            ))
+            valid_ids.append(finding_id)
+        db_session.add(finding)
+    db_session.commit()
+
+    first = client.get(f"/api/v1/scans/{scan_id}/findings?limit=1&offset=0")
+    second = client.get(f"/api/v1/scans/{scan_id}/findings?limit=1&offset=1")
+    third = client.get(f"/api/v1/scans/{scan_id}/findings?limit=1&offset=2")
+    assert [item["id"] for item in first.json()] == [valid_ids[0]]
+    assert [item["id"] for item in second.json()] == [valid_ids[1]]
+    assert third.json() == []
+    scan = client.get(f"/api/v1/scans/{scan_id}").json()
+    assert scan["findings_count"] == 2

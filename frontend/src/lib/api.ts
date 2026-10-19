@@ -345,15 +345,42 @@ export async function downloadReportPdf(reportId: string): Promise<Blob> {
 }
 
 export async function fetchScanFindings(scanId: string): Promise<Finding[]> {
-  const response = await apiFetch(`/api/v1/scans/${scanId}/findings`, {
-    cache: 'no-store',
-  });
+  // The server caps a page at 500. A single default request (100 findings)
+  // silently discarded later verified results on large scans.
+  const pageSize = 500;
+  const maxPages = 20;
+  const all: Finding[] = [];
+  const seen = new Set<string>();
 
-  if (!response.ok) {
-    throw await apiErrorFromResponse(response, 'Failed to fetch scan findings');
+  for (let page = 0; page < maxPages; page += 1) {
+    const params = new URLSearchParams({
+      limit: String(pageSize),
+      offset: String(page * pageSize),
+    });
+    const response = await apiFetch(`/api/v1/scans/${scanId}/findings?${params}`, {
+      cache: 'no-store',
+    });
+    if (!response.ok) {
+      throw await apiErrorFromResponse(response, 'Failed to fetch scan findings');
+    }
+    const batch: Finding[] = await response.json();
+    if (!Array.isArray(batch) || batch.length > pageSize) {
+      throw new ApiError('Invalid findings pagination response.', 502, 'FINDINGS_PAGE_INVALID');
+    }
+    for (const finding of batch) {
+      if (!finding || typeof finding.id !== 'string' || seen.has(finding.id)) {
+        throw new ApiError('Inconsistent findings pagination.', 502, 'FINDINGS_PAGE_INCONSISTENT');
+      }
+      seen.add(finding.id);
+      all.push(finding);
+    }
+    if (batch.length < pageSize) return all;
   }
-
-  return response.json();
+  throw new ApiError(
+    'Findings exceed the supported display limit; results are incomplete.',
+    413,
+    'FINDINGS_PAGE_LIMIT',
+  );
 }
 
 export async function listScans(limit = 20, offset = 0): Promise<Scan[]> {

@@ -11,7 +11,7 @@ from typing import List, Optional
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.agents.checkpointer import get_analysis_checkpointer
@@ -990,25 +990,43 @@ def get_scan_findings(
     """Retrieve verified findings for a completed or ongoing scan."""
     scan_model = get_owned_scan_or_404(db, str(scan_id), current_user)
 
-    finding_models = (
+    # Paginate AFTER canonical evidence validation. Paginating raw confirmed
+    # rows first can return a short/empty page while valid findings remain
+    # further down, silently hiding them from clients.
+    candidates = (
         db.query(FindingModel)
+        .options(selectinload(FindingModel.evidences))
         .filter(
             FindingModel.scan_id == str(scan_id),
             FindingModel.verification_verdict == VerificationVerdict.CONFIRMED.value,
         )
         .order_by(FindingModel.created_at.desc(), FindingModel.id.desc())
-        .offset(offset)
-        .limit(limit)
-        .all()
     )
+    finding_models: list[FindingModel] = []
+    raw_offset = 0
+    canonical_seen = 0
+    batch_size = 500
+    while len(finding_models) < limit:
+        batch = candidates.offset(raw_offset).limit(batch_size).all()
+        if not batch:
+            break
+        raw_offset += len(batch)
+        for fm in batch:
+            if not is_canonical_confirmed_finding(
+                fm, expected_commit_sha=scan_model.commit_hash or "__missing_commit__"
+            ):
+                continue
+            if canonical_seen >= offset:
+                finding_models.append(fm)
+                if len(finding_models) == limit:
+                    break
+            canonical_seen += 1
+        if len(batch) < batch_size:
+            break
+
     results: List[Finding] = []
 
     for fm in finding_models:
-        if not is_canonical_confirmed_finding(
-            fm,
-            expected_commit_sha=scan_model.commit_hash or "__missing_commit__",
-        ):
-            continue
         evidences = [
             Evidence(
                 id=UUID(em.id),
