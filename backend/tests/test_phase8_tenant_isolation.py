@@ -87,7 +87,11 @@ def test_cross_tenant_change_analysis_isolation_returns_404(client: TestClient, 
 
     # User A can access change analysis
     assert user_a["client"].get(f"/api/v1/change-analyses/{ca_id}").status_code == 200
-    assert user_a["client"].get(f"/api/v1/change-analyses/{ca_id}/diff").status_code == 200
+    # Pending analysis has no verified diff. Owning tenants get a truthful
+    # unavailable response, while other tenants still receive a masked 404.
+    pending_diff = user_a["client"].get(f"/api/v1/change-analyses/{ca_id}/diff")
+    assert pending_diff.status_code == 409
+    assert pending_diff.json()["detail"]["error_code"] == "CHANGE_DIFF_UNAVAILABLE"
     assert user_a["client"].get(f"/api/v1/change-analyses/{ca_id}/impacts").status_code == 200
     assert user_a["client"].get(f"/api/v1/change-analyses/{ca_id}/report").status_code == 200
 
