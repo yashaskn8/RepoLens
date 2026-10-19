@@ -75,32 +75,57 @@ export default function ChangeDetailPage({ params }: ChangeDetailPageProps) {
   const [publishMessage, setPublishMessage] = useState<string | null>(null);
 
   useEffect(() => {
-    async function loadData() {
-      try {
-        const [analysisRes, diffRes, impactsRes, reviewRes, pubRes] = await Promise.allSettled([
-          fetchChangeAnalysis(analysisId),
-          fetchChangeAnalysisDiff(analysisId),
-          fetchChangeAnalysisImpacts(analysisId),
-          fetchChangeAnalysisReview(analysisId),
-          fetchReviewPublication(analysisId),
-        ]);
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
-        if (analysisRes.status === 'fulfilled') setAnalysis(analysisRes.value);
-        if (diffRes.status === 'fulfilled') {
-          setDiff(diffRes.value);
-          if (diffRes.value.changed_files?.length > 0) {
-            setSelectedFile(diffRes.value.changed_files[0].file_path);
+    setAnalysis(null);
+    setDiff(null);
+    setImpacts([]);
+    setReview(null);
+    setPublication(null);
+    setSelectedFile(null);
+    setIsLoading(true);
+
+    async function loadData() {
+      let terminal = false;
+      try {
+        const current = await fetchChangeAnalysis(analysisId);
+        if (cancelled) return;
+        setAnalysis(current);
+        terminal = current.status === 'COMPLETED' || current.status === 'FAILED';
+        if (terminal) {
+          const [diffRes, impactsRes, reviewRes, pubRes] = await Promise.allSettled([
+            fetchChangeAnalysisDiff(analysisId),
+            fetchChangeAnalysisImpacts(analysisId),
+            fetchChangeAnalysisReview(analysisId),
+            fetchReviewPublication(analysisId),
+          ]);
+          if (cancelled) return;
+          if (diffRes.status === 'fulfilled') {
+            setDiff(diffRes.value);
+            if (diffRes.value.changed_files?.length > 0) {
+              setSelectedFile(diffRes.value.changed_files[0].file_path);
+            }
           }
+          if (impactsRes.status === 'fulfilled') setImpacts(impactsRes.value || []);
+          if (reviewRes.status === 'fulfilled') setReview(reviewRes.value);
+          if (pubRes.status === 'fulfilled') setPublication(pubRes.value);
         }
-        if (impactsRes.status === 'fulfilled') setImpacts(impactsRes.value || []);
-        if (reviewRes.status === 'fulfilled') setReview(reviewRes.value);
-        if (pubRes.status === 'fulfilled') setPublication(pubRes.value);
+      } catch {
+        // Do not infer zero findings or a clean diff from a failed request.
       } finally {
-        setIsLoading(false);
+        if (!cancelled) {
+          setIsLoading(false);
+          if (!terminal) retryTimer = setTimeout(loadData, 2000);
+        }
       }
     }
 
-    loadData();
+    void loadData();
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+    };
   }, [analysisId]);
 
   const handleGeneratePreview = async () => {
@@ -135,28 +160,39 @@ export default function ChangeDetailPage({ params }: ChangeDetailPageProps) {
   const breakingChangesCount = (diff?.route_deltas?.length || 0) + (diff?.schema_deltas?.length || 0);
   const criticalFindingsCount = review?.findings?.filter((f) => f.severity === 'CRITICAL' || f.severity === 'HIGH').length || 0;
 
-  // Compute recommendation
+  // Missing or failed evidence is UNKNOWN, never an implicit clean review.
+  const assessmentAvailable = analysis?.status === 'COMPLETED' && diff !== null && review !== null;
   let recommendation: {
-    status: 'Safe to merge' | 'Needs review' | 'Blocking issues';
+    status: 'Assessment unavailable' | 'Needs review' | 'Blocking issues' | 'No blockers detected';
     variant: 'success' | 'warning' | 'critical';
     details: string;
   } = {
-    status: 'Safe to merge',
-    variant: 'success',
-    details: 'No breaking contract mutations or high-risk findings detected.',
+    status: 'Assessment unavailable',
+    variant: 'warning',
+    details: analysis?.status === 'FAILED'
+      ? 'Analysis failed; no merge safety conclusion is available.'
+      : 'Waiting for completed analysis, structural diff and review evidence.',
   };
 
-  if (analysis?.risk_level === 'CRITICAL' || breakingChangesCount > 0) {
+  if (assessmentAvailable && (analysis.risk_level === 'CRITICAL' || breakingChangesCount > 0)) {
     recommendation = {
       status: 'Blocking issues',
       variant: 'critical',
-      details: `${breakingChangesCount > 0 ? `${breakingChangesCount} breaking contract delta(s)` : 'Critical security issues'} must be resolved before merging.`,
+      details: `${breakingChangesCount > 0 ? `${breakingChangesCount} breaking contract delta(s)` : 'Critical security issues'} need manual review before merging.`,
     };
-  } else if (analysis?.risk_level === 'HIGH' || analysis?.risk_level === 'MEDIUM' || criticalFindingsCount > 0) {
+  } else if (assessmentAvailable && (
+    analysis.risk_level === 'HIGH' || analysis.risk_level === 'MEDIUM' || criticalFindingsCount > 0
+  )) {
     recommendation = {
       status: 'Needs review',
       variant: 'warning',
-      details: 'Modifications touch downstream callers or non-critical risk patterns. Team review advised.',
+      details: 'Automated analysis identified risks that require human review.',
+    };
+  } else if (assessmentAvailable && analysis.risk_level === 'LOW') {
+    recommendation = {
+      status: 'No blockers detected',
+      variant: 'success',
+      details: 'No high-risk signals in the available analysis; human review is still required.',
     };
   }
 
@@ -251,13 +287,15 @@ export default function ChangeDetailPage({ params }: ChangeDetailPageProps) {
               <Badge variant="default" size="sm">
                 {diff?.changed_files?.length || 0} files
               </Badge>
-              {breakingChangesCount > 0 ? (
+              {diff === null ? (
+                <Badge variant="default" size="sm">Diff unavailable</Badge>
+              ) : breakingChangesCount > 0 ? (
                 <Badge variant="critical" size="sm">
-                  {breakingChangesCount} breaking changes
+                  {breakingChangesCount} contract deltas
                 </Badge>
               ) : (
                 <Badge variant="cyan" size="sm">
-                  0 breaking changes
+                  0 detected contract deltas
                 </Badge>
               )}
             </div>
@@ -568,7 +606,9 @@ export default function ChangeDetailPage({ params }: ChangeDetailPageProps) {
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
                 {(!review?.findings || review.findings.length === 0) ? (
                   <div style={{ fontSize: '0.8125rem', color: 'var(--text-muted)' }}>
-                    No automated review findings on this diff.
+                    {review === null
+                      ? 'Review evidence is unavailable.'
+                      : 'No automated review findings were returned; this is not a safety guarantee.'}
                   </div>
                 ) : (
                   review.findings.map((item, idx) => (

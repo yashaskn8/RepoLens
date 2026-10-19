@@ -76,23 +76,47 @@ export default function ScanDetailPage({ params }: ScanDetailPageProps) {
   const { events } = useWorkflowStream(scanId, true);
 
   useEffect(() => {
-    async function loadData() {
-      try {
-        const [scanRes, findingsRes, telemetryRes] = await Promise.allSettled([
-          fetchScan(scanId),
-          fetchScanFindings(scanId),
-          fetchScanTelemetry(scanId),
-        ]);
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
-        if (scanRes.status === 'fulfilled') setScan(scanRes.value);
-        if (findingsRes.status === 'fulfilled') setFindings(findingsRes.value || []);
-        if (telemetryRes.status === 'fulfilled') setTelemetry(telemetryRes.value);
+    // A route can open before the durable worker finishes. Poll until terminal
+    // status, then fetch artifacts; never install a result from a previous id.
+    setScan(null);
+    setFindings([]);
+    setTelemetry(null);
+    setIsLoading(true);
+
+    async function loadData() {
+      let terminal = false;
+      try {
+        const current = await fetchScan(scanId);
+        if (cancelled) return;
+        setScan(current);
+        terminal = current.status === 'COMPLETED' || current.status === 'FAILED';
+        if (terminal) {
+          const [findingsRes, telemetryRes] = await Promise.allSettled([
+            fetchScanFindings(scanId),
+            fetchScanTelemetry(scanId),
+          ]);
+          if (cancelled) return;
+          if (findingsRes.status === 'fulfilled') setFindings(findingsRes.value || []);
+          if (telemetryRes.status === 'fulfilled') setTelemetry(telemetryRes.value);
+        }
+      } catch {
+        // Retry transient API failures rather than freezing a pending detail page.
       } finally {
-        setIsLoading(false);
+        if (!cancelled) {
+          setIsLoading(false);
+          if (!terminal) retryTimer = setTimeout(loadData, 2000);
+        }
       }
     }
 
-    loadData();
+    void loadData();
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+    };
   }, [scanId]);
 
   // Tab definitions conforming to task requirements

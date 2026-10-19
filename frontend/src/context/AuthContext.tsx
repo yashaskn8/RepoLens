@@ -4,7 +4,7 @@
  * Authentication context and session management provider.
  */
 
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { UserResponse, UserRole } from '@/types/domain';
 import { fetchCurrentUser, loginUser, logoutUser, registerUser } from '@/lib/api';
 
@@ -24,15 +24,17 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<UserResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const authRequestVersion = useRef(0);
 
   const refreshUser = async () => {
+    const version = ++authRequestVersion.current;
     try {
       const current = await fetchCurrentUser();
-      setUser(current);
+      if (version === authRequestVersion.current) setUser(current);
     } catch {
-      setUser(null);
+      if (version === authRequestVersion.current) setUser(null);
     } finally {
-      setIsLoading(false);
+      if (version === authRequestVersion.current) setIsLoading(false);
     }
   };
 
@@ -41,23 +43,37 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const login = async (email: string, password: string) => {
-    const loggedIn = await loginUser({ email, password });
-    setUser(loggedIn);
+    const version = ++authRequestVersion.current;
+    try {
+      const loggedIn = await loginUser({ email, password });
+      if (version === authRequestVersion.current) setUser(loggedIn);
+    } finally {
+      if (version === authRequestVersion.current) setIsLoading(false);
+    }
   };
 
   const register = async (email: string, password: string) => {
-    await registerUser({ email, password });
-    // Registration creates the account only. Authenticate explicitly so the
-    // client state never claims a session before HttpOnly/CSRF cookies exist.
-    const loggedIn = await loginUser({ email, password });
-    setUser(loggedIn);
+    const version = ++authRequestVersion.current;
+    try {
+      await registerUser({ email, password });
+      // Registration creates the account only. Authenticate explicitly so the
+      // client state never claims a session before HttpOnly/CSRF cookies exist.
+      const loggedIn = await loginUser({ email, password });
+      if (version === authRequestVersion.current) setUser(loggedIn);
+    } finally {
+      if (version === authRequestVersion.current) setIsLoading(false);
+    }
   };
 
   const logout = async () => {
+    const version = ++authRequestVersion.current;
     try {
       await logoutUser();
     } finally {
-      setUser(null);
+      if (version === authRequestVersion.current) {
+        setUser(null);
+        setIsLoading(false);
+      }
     }
   };
 

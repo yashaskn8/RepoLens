@@ -344,7 +344,6 @@ def _enqueue_pull_request(db: Session, payload: dict[str, Any], action: str) -> 
             return installation_id, current.current_analysis_id
 
     owner_id = installation_row.owner_user_id
-    check_and_increment_quota(db, owner_id, UsageOperation.CHANGE_ANALYSIS_CREATE.value)
     analysis_id = deterministic_resource_id(
         owner_id,
         "github-app-pr-analysis",
@@ -355,6 +354,9 @@ def _enqueue_pull_request(db: Session, payload: dict[str, Any], action: str) -> 
     repository_url = f"https://github.com/{owner}/{name}"
     analysis = db.query(ChangeAnalysisModel).filter_by(id=analysis_id).first()
     if analysis is None:
+        # Revisited commits reuse the same semantic resource: charge only
+        # when a new analysis and durable work item are actually staged.
+        check_and_increment_quota(db, owner_id, UsageOperation.CHANGE_ANALYSIS_CREATE.value)
         analysis = ChangeAnalysisModel(
             id=analysis_id,
             owner_user_id=owner_id,

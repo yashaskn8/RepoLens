@@ -670,6 +670,56 @@ def test_webhook_enqueues_only_bound_same_repository_heads_and_rejects_stale_hea
         assert current.current_analysis_id == analysis_id and current.head_sha == head_a
 
 
+
+def test_webhook_revisited_commit_does_not_consume_quota_twice(client, db_session):
+    """A→B→A after a force-push reuses A's immutable analysis without new quota."""
+    from app.github_app import webhooks
+    from app.services.workflow_event_service import WorkflowEventService
+
+    user = db_session.query(UserModel).filter_by(email="default_test_user@example.com").one()
+    permissions = '{"contents":"read","pull_requests":"write"}'
+    db_session.add(GitHubAppInstallationModel(
+        installation_id="44", account_id="99", account_login="sample-org",
+        account_type="Organization", owner_user_id=user.id, status="ACTIVE",
+        permissions_json=permissions,
+        permissions_digest=hashlib.sha256(permissions.encode("utf-8")).hexdigest(),
+    ))
+    db_session.add(GitHubAppRepositoryModel(
+        repository_id="77", installation_id="44", owner_login="sample-org",
+        repository_name="private-repo", is_private=True, active=True,
+    ))
+    db_session.flush()
+
+    with (
+        patch.object(webhooks, "check_and_increment_quota") as charge,
+        patch.object(webhooks.WorkSubmissionService, "submit") as submit,
+        patch.object(WorkflowEventService, "emit_critical"),
+    ):
+        def deliver(timestamp, sha):
+            return webhooks.accept_webhook_delivery(
+                db_session,
+                raw_body=b"{}",
+                delivery_id=str(uuid4()),
+                event_name="pull_request",
+                payload=_pr_payload(updated_at=timestamp, head_sha=sha),
+            )[1]
+
+        first = deliver("2026-09-25T10:00:00Z", "b" * 40)
+        db_session.flush()
+        second = deliver("2026-09-25T10:00:01Z", "c" * 40)
+        db_session.flush()
+        revisited = deliver("2026-09-25T10:00:02Z", "b" * 40)
+        db_session.flush()
+
+    assert first != second
+    assert revisited == first
+    assert charge.call_count == 2
+    assert submit.call_count == 2
+    current = db_session.query(GitHubAppPullRequestHeadModel).one()
+    assert current.current_analysis_id == first
+    assert current.head_sha == "b" * 40
+
+
 def test_unavailable_acquisition_rejects_github_pr_before_quota_or_work(db_session):
     from types import SimpleNamespace
 
