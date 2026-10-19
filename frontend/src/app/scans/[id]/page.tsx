@@ -66,6 +66,7 @@ export default function ScanDetailPage({ params }: ScanDetailPageProps) {
   const [activeTab, setActiveTab] = useState<string>('findings');
   const [expandedFindingId, setExpandedFindingId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [findingsLoaded, setFindingsLoaded] = useState(false);
 
   // Filters for findings tab
   const [searchQuery, setSearchQuery] = useState('');
@@ -76,6 +77,7 @@ export default function ScanDetailPage({ params }: ScanDetailPageProps) {
 
   useEffect(() => {
     let cancelled = false;
+    let findingsRetries = 0;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
     // A route can open before the durable worker finishes. Poll until terminal
@@ -83,6 +85,7 @@ export default function ScanDetailPage({ params }: ScanDetailPageProps) {
     setScan(null);
     setFindings([]);
     setTelemetry(null);
+    setFindingsLoaded(false);
     setIsLoading(true);
 
     async function loadData() {
@@ -98,7 +101,14 @@ export default function ScanDetailPage({ params }: ScanDetailPageProps) {
             fetchScanTelemetry(scanId),
           ]);
           if (cancelled) return;
-          if (findingsRes.status === 'fulfilled') setFindings(findingsRes.value || []);
+          if (findingsRes.status === 'fulfilled') {
+            setFindings(findingsRes.value || []);
+            setFindingsLoaded(true);
+          } else if (current.status === 'COMPLETED' && ++findingsRetries < 4) {
+            // A completed worker can still have temporarily unavailable artifacts.
+            // Do not render an unavailable response as a clean empty finding list.
+            terminal = false;
+          }
           if (telemetryRes.status === 'fulfilled') setTelemetry(telemetryRes.value);
         }
       } catch {
@@ -394,6 +404,20 @@ export default function ScanDetailPage({ params }: ScanDetailPageProps) {
                 <Skeleton height="8rem" />
                 <Skeleton height="8rem" />
               </div>
+            ) : scan?.status !== 'COMPLETED' || !findingsLoaded ? (
+              <EmptyState
+                icon={<AlertTriangle size={28} style={{ color: 'var(--warning-text)' }} />}
+                title={scan?.status === 'FAILED'
+                  ? 'Scan failed — findings unverified'
+                  : scan?.status === 'COMPLETED'
+                    ? 'Findings unavailable'
+                    : 'Waiting for scan results'}
+                description={scan?.status === 'FAILED'
+                  ? 'This scan did not complete; no conclusion about findings can be made.'
+                  : scan?.status === 'COMPLETED'
+                    ? 'The analysis reached completion, but the findings endpoint did not return usable results. Check service health and retry.'
+                    : 'Analysis is still pending, or its status could not be retrieved. No findings conclusion is available.'}
+              />
             ) : filteredFindings.length === 0 ? (
               <EmptyState
                 icon={coverageLimited
@@ -460,7 +484,13 @@ export default function ScanDetailPage({ params }: ScanDetailPageProps) {
                 </h3>
               </div>
 
-              {dependencyFindings.length === 0 ? (
+              {scan?.status !== 'COMPLETED' || !findingsLoaded ? (
+                <EmptyState
+                  icon={<AlertTriangle size={24} style={{ color: 'var(--warning-text)' }} />}
+                  title="Dependency evidence unavailable"
+                  description="Waiting for completed scan findings. A missing response cannot establish zero dependency vulnerabilities."
+                />
+              ) : dependencyFindings.length === 0 ? (
                 <EmptyState
                   icon={dependencyCoverageComplete
                     ? <CheckCircle2 size={24} style={{ color: 'var(--success-text)' }} />
@@ -531,7 +561,7 @@ export default function ScanDetailPage({ params }: ScanDetailPageProps) {
                 <div style={{ padding: '0.85rem', background: 'rgba(5, 8, 18, 0.7)', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-subtle)' }}>
                   <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Confirmed Findings</div>
                   <div style={{ fontSize: '1.125rem', fontWeight: 700, color: 'var(--success-text)', marginTop: '0.2rem' }}>
-                    {telemetry?.confirmed_findings ?? (scan?.status === 'COMPLETED' ? findings.length : 'Not reported')}
+                    {telemetry?.confirmed_findings ?? (scan?.status === 'COMPLETED' && findingsLoaded ? findings.length : 'Not reported')}
                   </div>
                 </div>
               </div>
