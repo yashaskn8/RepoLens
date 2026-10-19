@@ -10,6 +10,7 @@ import { ScanOverview } from './ScanOverview';
 import { ScanTelemetryPanel } from './ScanTelemetryPanel';
 import { FindingsList } from '@/features/findings/FindingsList';
 import { WorkflowTimeline } from '@/components/WorkflowTimeline';
+import { Alert } from '@/components/ui/Alert';
 
 export interface RepositoryScanWorkspaceProps {
   initialRepoUrl?: string;
@@ -33,6 +34,8 @@ export function RepositoryScanWorkspace({
   const [severityFilter, setSeverityFilter] = useState<string>('ALL');
   const [expandedFindingId, setExpandedFindingId] = useState<string | null>(null);
   const [telemetry, setTelemetry] = useState<ScanTelemetry | null>(null);
+  const [findingsLoaded, setFindingsLoaded] = useState(false);
+  const [artifactError, setArtifactError] = useState<string | null>(null);
   const scanGenerationRef = useRef(0);
 
   // Sync initialRepoUrl / initialBranch when changed externally (e.g. from preset click)
@@ -41,21 +44,21 @@ export function RepositoryScanWorkspace({
     if (initialBranch) setBranch(initialBranch);
   }, [initialRepoUrl, initialBranch]);
 
-  // Keep polling single-flight and ignore responses from replaced scans.
+  // Keep one poller per scan identity, not per status object. A transition to
+  // COMPLETED must not cancel the still-pending findings/telemetry fetch.
   useEffect(() => {
-    if (!activeScan || activeScan.status === 'COMPLETED' || activeScan.status === 'FAILED') {
-      return;
-    }
+    const scanId = activeScan?.id;
+    if (!scanId) return;
 
-    let stopped = false;
-    let inFlight = false;
     const generation = scanGenerationRef.current;
-    const scanId = activeScan.id;
+    let stopped = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let artifactAttempts = 0;
     const isCurrent = () => !stopped && generation === scanGenerationRef.current;
 
-    const interval = setInterval(async () => {
-      if (inFlight || !isCurrent()) return;
-      inFlight = true;
+    const poll = async () => {
+      if (!isCurrent()) return;
+      let retry = true;
       try {
         const updated = await fetchScan(scanId);
         if (!isCurrent()) return;
@@ -67,21 +70,33 @@ export function RepositoryScanWorkspace({
             fetchScanTelemetry(scanId),
           ]);
           if (!isCurrent()) return;
-          if (findingsResult.status === 'fulfilled') setFindings(findingsResult.value);
+          if (updated.status === 'COMPLETED') {
+            if (findingsResult.status === 'fulfilled') {
+              setFindings(findingsResult.value);
+              setFindingsLoaded(true);
+              setArtifactError(null);
+            } else {
+              artifactAttempts += 1;
+              setArtifactError('Scan completed, but the findings endpoint could not be loaded. Results are unknown.');
+            }
+          }
           if (telemetryResult.status === 'fulfilled') setTelemetry(telemetryResult.value);
+          retry = updated.status === 'COMPLETED'
+            && findingsResult.status === 'rejected'
+            && artifactAttempts < 3;
         }
       } catch (err: unknown) {
         if (isCurrent()) console.error('Polling error for scan:', err);
-      } finally {
-        inFlight = false;
       }
-    }, 2000);
+      if (isCurrent() && retry) retryTimer = setTimeout(poll, 2000);
+    };
 
+    void poll();
     return () => {
       stopped = true;
-      clearInterval(interval);
+      if (retryTimer) clearTimeout(retryTimer);
     };
-  }, [activeScan]);
+  }, [activeScan?.id]);
 
 
   const handleStartScan = async (e: React.FormEvent) => {
@@ -93,6 +108,8 @@ export function RepositoryScanWorkspace({
     setIsSubmitting(true);
     setActiveScan(null);
     setFindings([]);
+    setFindingsLoaded(false);
+    setArtifactError(null);
     setTelemetry(null);
 
     try {
@@ -183,8 +200,13 @@ export function RepositoryScanWorkspace({
       {/* Execution Telemetry & Diagnostics */}
       {telemetry && <ScanTelemetryPanel telemetry={telemetry} />}
 
+      {/* Never interpret a missing findings response as an empty result set. */}
+      {activeScan?.status === 'COMPLETED' && artifactError && !findingsLoaded && (
+        <Alert variant="error" title="Findings unavailable">{artifactError}</Alert>
+      )}
+
       {/* Findings List & Remediation Workbench */}
-      {activeScan?.status === 'COMPLETED' && (
+      {activeScan?.status === 'COMPLETED' && findingsLoaded && (
         <FindingsList
           findings={findings}
           severityFilter={severityFilter}

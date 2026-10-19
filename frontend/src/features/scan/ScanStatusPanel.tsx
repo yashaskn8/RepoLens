@@ -44,7 +44,9 @@ export const ScanStatusPanel: React.FC<ScanStatusPanelProps> = ({ scan }) => {
         </div>
         <div className="metric-item">
           <div className="metric-label">VERIFIED FINDINGS</div>
-          <div className="metric-value text-sky-400 font-bold">{scan.findings_count}</div>
+          <div className="metric-value text-sky-400 font-bold">
+            {scan.status === 'COMPLETED' ? scan.findings_count : 'Not available'}
+          </div>
         </div>
       </div>
 

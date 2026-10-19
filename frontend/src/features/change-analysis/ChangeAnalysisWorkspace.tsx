@@ -30,6 +30,7 @@ import {
 } from '@/lib/api';
 import { useWorkflowStream } from '@/lib/useWorkflowStream';
 import { Card } from '@/components/ui/Card';
+import { Alert } from '@/components/ui/Alert';
 import { Button } from '@/components/ui/Button';
 import { ChangeAnalysisInput } from './ChangeAnalysisInput';
 import { ChangeAnalysisStatus } from './ChangeAnalysisStatus';
@@ -62,6 +63,7 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
   // Active Analysis state
   const [activeAnalysis, setActiveAnalysis] = useState<ChangeAnalysisResponse | null>(null);
   const analysisGenerationRef = useRef(0);
+  const [artifactError, setArtifactError] = useState<string | null>(null);
   const [report, setReport] = useState<ChangeAnalysisReportResponse | null>(null);
   const [impacts, setImpacts] = useState<ChangeImpact[]>([]);
   const [reviewFindings, setReviewFindings] = useState<ChangeReviewFinding[]>([]);
@@ -104,85 +106,84 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
     activeAnalysis?.id
   );
 
-  // A previous in-flight poll must never replace a newly selected analysis.
+  // Fetch one analysis identity until terminal; an already-completed response
+  // (e.g. idempotent reuse) must still populate the artifacts.
   useEffect(() => {
-    if (!activeAnalysis || activeAnalysis.status === 'COMPLETED' || activeAnalysis.status === 'FAILED') {
-      return;
-    }
+    const analysisId = activeAnalysis?.id;
+    if (!analysisId) return;
 
-    let stopped = false;
-    let inFlight = false;
     const generation = analysisGenerationRef.current;
-    const analysisId = activeAnalysis.id;
+    let stopped = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
     const isCurrent = () => !stopped && generation === analysisGenerationRef.current;
 
-    const interval = setInterval(async () => {
-      if (inFlight || !isCurrent()) return;
-      inFlight = true;
+    const poll = async () => {
+      if (!isCurrent()) return;
+      let terminal = false;
       try {
         const updated = await fetchChangeAnalysis(analysisId);
         if (!isCurrent()) return;
         setActiveAnalysis((current) => current?.id === analysisId ? updated : current);
-
+        terminal = updated.status === 'COMPLETED' || updated.status === 'FAILED';
         if (updated.status === 'COMPLETED') {
-          void loadCompletedAnalysisData(updated.id, generation);
+          await loadCompletedAnalysisData(analysisId, generation);
         }
       } catch (err) {
         if (isCurrent()) console.error('Polling error for change analysis:', err);
-      } finally {
-        inFlight = false;
       }
-    }, 2000);
+      if (isCurrent() && !terminal) retryTimer = setTimeout(poll, 2000);
+    };
 
+    void poll();
     return () => {
       stopped = true;
-      clearInterval(interval);
+      if (retryTimer) clearTimeout(retryTimer);
     };
-  }, [activeAnalysis]);
+  }, [activeAnalysis?.id]);
 
   const loadCompletedAnalysisData = async (analysisId: string, generation: number) => {
-    try {
-      const [fetchedImpacts, fetchedReview, fetchedReport, fetchedTelemetry, fetchedDiff, fetchedPub] =
-        await Promise.all([
-          fetchChangeAnalysisImpacts(analysisId).catch(() => []),
-          fetchChangeAnalysisReview(analysisId).catch(() => null),
-          fetchChangeAnalysisReport(analysisId).catch(() => null),
-          fetchChangeAnalysisTelemetry(analysisId).catch(() => null),
-          fetchChangeAnalysisDiff(analysisId).catch(() => null),
-          fetchReviewPublication(analysisId).catch(() => null),
-        ]);
+    const outcomes = await Promise.allSettled([
+      fetchChangeAnalysisImpacts(analysisId),
+      fetchChangeAnalysisReview(analysisId),
+      fetchChangeAnalysisReport(analysisId),
+      fetchChangeAnalysisTelemetry(analysisId),
+      fetchChangeAnalysisDiff(analysisId),
+      fetchReviewPublication(analysisId),
+    ]);
+    if (generation !== analysisGenerationRef.current) return;
 
-      if (generation !== analysisGenerationRef.current) return;
-      setImpacts(fetchedImpacts || []);
-      if (fetchedReview && fetchedReview.findings) {
-        setReviewFindings(fetchedReview.findings);
-      }
-      if (fetchedReport) {
-        setReport(fetchedReport);
-      }
-      if (fetchedTelemetry) {
-        setTelemetry(fetchedTelemetry);
-      }
-      if (fetchedDiff) {
-        setDiffDeltas({
-          route_deltas: fetchedDiff.route_deltas || [],
-          schema_deltas: fetchedDiff.schema_deltas || [],
-          dependency_deltas: fetchedDiff.dependency_deltas || [],
-          config_deltas: fetchedDiff.config_deltas || [],
-        });
-      }
-      if (fetchedPub) {
-        setPublication(fetchedPub);
-      }
-    } catch (err) {
-      console.error('Failed to load completed analysis artifacts:', err);
-    }
+    const missing: string[] = [];
+    const [impactsResult, reviewResult, reportResult, telemetryResult, diffResult, publicationResult] = outcomes;
+    if (impactsResult.status === 'fulfilled') setImpacts(impactsResult.value || []);
+    else missing.push('impacts');
+    if (reviewResult.status === 'fulfilled') setReviewFindings(reviewResult.value.findings || []);
+    else missing.push('review');
+    if (reportResult.status === 'fulfilled') setReport(reportResult.value);
+    else missing.push('report');
+    if (telemetryResult.status === 'fulfilled') setTelemetry(telemetryResult.value);
+    else missing.push('telemetry');
+    if (diffResult.status === 'fulfilled') {
+      const diff = diffResult.value;
+      setDiffDeltas({
+        route_deltas: diff.route_deltas || [],
+        schema_deltas: diff.schema_deltas || [],
+        dependency_deltas: diff.dependency_deltas || [],
+        config_deltas: diff.config_deltas || [],
+      });
+    } else missing.push('structural diff');
+    if (publicationResult.status === 'fulfilled') setPublication(publicationResult.value);
+    else missing.push('publication status');
+
+    setArtifactError(missing.length
+      ? `Analysis completed, but unavailable artifacts: ${missing.join(', ')}. Empty panels are not evidence of zero findings.`
+      : null);
   };
 
   const handleStartAnalysis = async (e: React.FormEvent) => {
     e.preventDefault();
     const generation = ++analysisGenerationRef.current;
     setErrorMsg(null);
+    setArtifactError(null);
     setIsSubmitting(true);
     setActiveAnalysis(null);
     setReport(null);
@@ -386,6 +387,10 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
           workflowEvents={workflowEvents}
           onDownloadMarkdown={handleDownloadMarkdown}
         />
+      )}
+
+      {activeAnalysis?.status === 'COMPLETED' && artifactError && (
+        <Alert variant="error" title="Incomplete analysis artifacts">{artifactError}</Alert>
       )}
 
       {/* Overview Metrics & Deterministic Risk */}
