@@ -742,3 +742,76 @@ def test_patch_verification_copy_allows_regular_files(tmp_path):
     PatchVerificationService()._copy_repo_to_temp(str(source), str(dest))
     assert (dest / "src" / "main.py").read_text(encoding="utf-8") == "answer = 42\n"
     assert not (dest / "node_modules").exists()
+
+
+@pytest.mark.parametrize("source_defect", ["symlink", "oversize", "too_many_files"])
+def test_patch_verification_copy_fails_closed_on_untrusted_source(tmp_path, monkeypatch, source_defect):
+    """No external symlink, enormous file, or file-count overflow is copied."""
+    from types import SimpleNamespace
+
+    source = tmp_path / "checkout"
+    destination = tmp_path / "verification"
+    source.mkdir()
+    destination.mkdir()
+    (source / "safe.py").write_text("x = 1\n", encoding="utf-8")
+    config = SimpleNamespace(MAX_REPO_FILES=2, MAX_FILE_SIZE_BYTES=12, MAX_TOTAL_SOURCE_BYTES=15)
+    monkeypatch.setattr("app.core.config.get_settings", lambda: config)
+    if source_defect == "symlink":
+        outside = tmp_path / "private-secret.txt"
+        outside.write_text("never-copy-private", encoding="utf-8")
+        try:
+            (source / "escape.py").symlink_to(outside)
+        except (OSError, NotImplementedError):
+            pytest.skip("Filesystem does not support symlinks")
+    elif source_defect == "oversize":
+        (source / "large.py").write_bytes(b"x" * 13)
+    else:
+        (source / "second.py").write_text("x\n", encoding="utf-8")
+        (source / "third.py").write_text("y\n", encoding="utf-8")
+
+    with pytest.raises((ValueError, OSError)):
+        PatchVerificationService()._copy_repo_to_temp(str(source), str(destination))
+    assert not (destination / "escape.py").exists()
+
+
+@pytest.mark.asyncio
+async def test_unsafe_patch_source_is_structured_failure_not_exception(tmp_path):
+    source = tmp_path / "checkout"
+    source.mkdir()
+    (source / "main.py").write_text("x = 1\n", encoding="utf-8")
+    manifest = build_manifest(str(source), "https://github.com/org/repo", "a" * 40)
+    finding = Finding(
+        id=uuid4(), scan_id=uuid4(), title="Source defect", description="Source defect",
+        severity=Severity.LOW, verification_verdict=VerificationVerdict.CONFIRMED,
+        evidences=[Evidence(file_path="main.py", start_line=1, end_line=1)],
+    )
+    plan = FixPlan(
+        finding_id=finding.id, root_cause="Source defect", objective="Fix source",
+        files_expected_to_change=["main.py"], ordered_changes=[
+            OrderedChangeStep(
+                step_number=1, target_file="main.py",
+                description="Change value", rationale="Fix source defect",
+            )
+        ], validation_plan=["inspect"],
+    )
+    proposal = PatchProposal(
+        finding_id=finding.id, plan_id=plan.id,
+        unified_diff="--- a/main.py\n+++ b/main.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n",
+        files_modified=["main.py"], explanation="Update", expected_behavior_change="Update",
+    )
+    outside = tmp_path / "outside.txt"
+    outside.write_text("PRIVATE_SOURCE_CANARY", encoding="utf-8")
+    try:
+        (source / "secret-link.txt").symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("Filesystem does not support symlinks")
+
+    result = await PatchVerificationService(scanner_adapters=[MockCompletedScannerAdapter()]).verify_patch(
+        proposal=proposal, finding=finding, fix_plan=plan,
+        original_repo_dir=str(source), manifest=manifest,
+    )
+    assert result.status == VerificationStatus.FAILED
+    assert not result.security_clean
+    assert len(result.checks) == 12
+    assert [check.status for check in result.checks[6:]] == [CheckStatus.NOT_EVALUATED] * 6
+    assert "PRIVATE_SOURCE_CANARY" not in str(result)

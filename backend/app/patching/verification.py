@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import tempfile
 from typing import Any, Dict, List, Optional, Set, Tuple
 from uuid import UUID
@@ -71,12 +72,24 @@ class PatchVerificationService:
         if os.path.islink(source_dir) or not os.path.isdir(source_dir):
             raise ValueError("Patch verification source workspace is not a regular directory.")
 
+        from app.core.config import get_settings
+
+        settings = get_settings()
+        max_files = int(settings.MAX_REPO_FILES)
+        max_file_bytes = int(settings.MAX_FILE_SIZE_BYTES)
+        max_total_bytes = int(settings.MAX_TOTAL_SOURCE_BYTES)
         skipped = frozenset({
             ".venv", "venv", "node_modules", ".git", "__pycache__",
             ".pytest_cache", ".next",
         })
+        file_count = 0
+        total_bytes = 0
+        # This is a defense-in-depth application copy budget. It does not
+        # replace the kernel-enforced workspace quota required in production.
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
 
         def copy_directory(source: str, destination: str) -> None:
+            nonlocal file_count, total_bytes
             with os.scandir(source) as entries:
                 for entry in entries:
                     if entry.name in skipped or entry.name.endswith(".pyc"):
@@ -89,7 +102,33 @@ class PatchVerificationService:
                         os.mkdir(target)
                         copy_directory(entry.path, target)
                     elif entry.is_file(follow_symlinks=False):
-                        shutil.copy2(entry.path, target, follow_symlinks=False)
+                        # Validate the opened file descriptor, not only the
+                        # earlier directory-entry check (which can race).
+                        fd = os.open(entry.path, flags)
+                        try:
+                            metadata = os.fstat(fd)
+                            if not stat.S_ISREG(metadata.st_mode):
+                                raise ValueError("Patch verification source is not a regular file.")
+                            file_count += 1
+                            if file_count > max_files or metadata.st_size > max_file_bytes:
+                                raise ValueError("Patch verification copy exceeded the source file budget.")
+                            if total_bytes + metadata.st_size > max_total_bytes:
+                                raise ValueError("Patch verification copy exceeded the source byte budget.")
+                            with os.fdopen(fd, "rb", closefd=False) as reader, open(target, "xb") as writer:
+                                copied = 0
+                                while True:
+                                    chunk = reader.read(min(64 * 1024, max_file_bytes - copied + 1))
+                                    if not chunk:
+                                        break
+                                    copied += len(chunk)
+                                    if copied > max_file_bytes or total_bytes + copied > max_total_bytes:
+                                        raise ValueError("Patch verification copy exceeded the source byte budget.")
+                                    writer.write(chunk)
+                                if copied != metadata.st_size:
+                                    raise ValueError("Patch verification source changed during copy.")
+                            total_bytes += copied
+                        finally:
+                            os.close(fd)
                     else:
                         raise ValueError("Patch verification workspace contains a non-regular filesystem entry.")
 
@@ -227,7 +266,39 @@ class PatchVerificationService:
 
         # Create isolated temporary sandbox workspace
         with tempfile.TemporaryDirectory() as temp_dir:
-            self._copy_repo_to_temp(original_repo_dir, temp_dir)
+            try:
+                self._copy_repo_to_temp(original_repo_dir, temp_dir)
+            except (OSError, ValueError) as exc:
+                # An untrusted linked/oversized workspace must fail the
+                # verification contract, not escape as an API 500 or produce
+                # fabricated downstream PASS checks.
+                logger.warning("Patch source copy rejected (%s).", type(exc).__name__)
+                record_check(
+                    "check_6_tree_sitter_parse", CheckStatus.FAILED,
+                    "Source workspace could not be safely copied for verification.",
+                )
+                for index, name in enumerate((
+                    "route_contracts", "dependency_changes", "secrets",
+                    "scanner_results", "target_finding_resolved",
+                    "no_new_critical_findings",
+                ), start=7):
+                    record_check(
+                        f"check_{index}_{name}", CheckStatus.NOT_EVALUATED,
+                        "Not evaluated because the source workspace copy failed.",
+                    )
+                return PatchVerificationResult(
+                    patch_id=proposal.id,
+                    finding_id=finding.id,
+                    status=VerificationStatus.FAILED,
+                    syntax_valid=False,
+                    security_clean=False,
+                    contract_aligned=False,
+                    target_finding_resolved=False,
+                    checks=checks,
+                    checks_passed=checks_passed,
+                    checks_failed=checks_failed,
+                    explanation="Patch verification failed: source workspace copy was unsafe or exceeded configured budgets.",
+                )
 
             # Apply candidate patch to temporary copy
             patched_contents: Dict[str, str] = {}
