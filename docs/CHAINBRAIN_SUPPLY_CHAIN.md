@@ -55,7 +55,9 @@ enabling this optional capability. AI enrichment remains off otherwise.
 ## Security and incomplete assessment
 
 Input files are read from the ingested manifest with size limits and
-SHA-256 matching. No source links are followed. The analyzer enforces
+SHA-256 matching. Skipped dependency metadata is treated as an incomplete
+assessment, while ordinary JavaScript inventory size does not consume the
+package metadata budget. No source links are followed. The analyzer enforces
 file, package and edge caps and emits \`INVALID_OUTPUT\` on unsupported,
 truncated or malformed dependency metadata rather than returning a false
 clean result. The UI explicitly displays assessment status.

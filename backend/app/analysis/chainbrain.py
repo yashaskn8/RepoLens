@@ -426,18 +426,27 @@ def analyze_supply_chain_repository(repo_dir: str, manifest: RepositoryManifest)
     try:
         if manifest.analysis_scope and manifest.analysis_scope.truncated:
             raise ChainBrainInputError("Repository manifest is incomplete")
+        def relevant_metadata(path: str) -> bool:
+            filename = PurePosixPath(path).name
+            return (
+                filename in {"package.json", "package-lock.json",
+                             "npm-shrinkwrap.json", "pyproject.toml"}
+                or (filename.startswith("requirements") and filename.endswith(".txt"))
+            )
+
+        # A skipped dependency declaration is not an assessment of that file.
+        # Ingestion may skip oversize, unsafe, binary or racing source entries.
+        if any(
+            relevant_metadata(item.path) and item.skipped_reason is not None
+            for item in manifest.files
+        ):
+            raise ChainBrainInputError("Dependency metadata was excluded from ingestion")
         files = {
             item.path: item
             for item in manifest.files
             if item.skipped_reason is None
         }
-        candidates = {
-            p for p in files
-            if p.endswith(("package.json", "package-lock.json", "npm-shrinkwrap.json",
-                           "requirements.txt", "pyproject.toml"))
-            or (PurePosixPath(p).name.startswith("requirements") and p.endswith(".txt"))
-            or p.endswith((".js", ".cjs", ".mjs", ".sh"))
-        }
+        candidates = {p for p in files if relevant_metadata(p)}
         if len(candidates) > MAX_PACKAGES:
             raise ChainBrainInputError("Metadata candidate budget exceeded")
         root = os.path.realpath(repo_dir)
@@ -446,9 +455,13 @@ def analyze_supply_chain_repository(repo_dir: str, manifest: RepositoryManifest)
             if entry is None:
                 raise ChainBrainInputError("Metadata is outside the ingested manifest")
             return _safe_read(root, path, entry.content_sha256)
-        _npm(read, {key: files[key] for key in candidates}, collector)
-        _locks(read, {key: files[key] for key in candidates}, collector)
-        _python(read, {key: files[key] for key in candidates}, collector)
+
+        # Local install scripts are looked up lazily in the complete bounded
+        # manifest. Counting every .js as metadata would reject ordinary repos.
+        _npm(read, files, collector)
+        metadata_files = {key: files[key] for key in candidates}
+        _locks(read, metadata_files, collector)
+        _python(read, metadata_files, collector)
         return ScannerResult(
             tool=TOOL, status=ToolStatus.COMPLETED, findings=collector.findings,
             execution_time_ms=(time.perf_counter() - start) * 1000,

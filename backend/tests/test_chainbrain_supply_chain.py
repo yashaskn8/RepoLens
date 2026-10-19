@@ -206,3 +206,49 @@ async def test_chainbrain_signals_flow_into_evidence_store(tmp_path):
     assert store.scanner_results["chainbrain"].findings
     assert not any(f.tool == "chainbrain" for f in store.all_findings)
     assert store.get_summary()["supply_chain_risk_signals"] >= 1
+
+
+
+def test_chainbrain_skipped_manifest_cannot_claim_clean(tmp_path):
+    from app.ingestion.schemas import FileEntry, RepositoryManifest
+
+    manifest = RepositoryManifest(
+        repository_url="https://github.com/owner/repo",
+        commit_hash="a" * 40,
+        total_files=1,
+        files=[
+            FileEntry(
+                path="package.json", size_bytes=2_000_000,
+                skipped_reason="exceeds_max_size",
+            )
+        ],
+    )
+    result = analyze_supply_chain_repository(str(tmp_path), manifest)
+    assert result.status.value == "INVALID_OUTPUT"
+    assert result.findings == []
+
+
+def test_chainbrain_large_javascript_inventory_does_not_trigger_metadata_limit(tmp_path, monkeypatch):
+    from app.analysis import chainbrain
+    from app.ingestion.schemas import FileEntry, RepositoryManifest
+
+    monkeypatch.setattr(chainbrain, "MAX_PACKAGES", 2)
+    source = '{"name":"safe-demo"}'
+    (tmp_path / "package.json").write_text(source, encoding="utf-8")
+    metadata = [
+        FileEntry(
+            path="package.json", size_bytes=len(source),
+            content_sha256=hashlib.sha256(source.encode()).hexdigest(),
+        ),
+    ]
+    metadata.extend(
+        FileEntry(path=f"src/module{i}.js", size_bytes=0)
+        for i in range(10)
+    )
+    manifest = RepositoryManifest(
+        repository_url="https://github.com/owner/repo",
+        commit_hash="a" * 40, files=metadata, total_files=len(metadata),
+    )
+    result = analyze_supply_chain_repository(str(tmp_path), manifest)
+    assert result.status.value == "COMPLETED"
+    assert result.findings == []
