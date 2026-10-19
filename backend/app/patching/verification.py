@@ -278,8 +278,8 @@ class PatchVerificationService:
                     "Source workspace could not be safely copied for verification.",
                 )
                 for index, name in enumerate((
-                    "route_contracts", "dependency_changes", "secrets",
-                    "scanner_results", "target_finding_resolved",
+                    "route_contracts", "graph_rebuild", "finding_remediation",
+                    "scanners_clean", "no_secrets_introduced",
                     "no_new_critical_findings",
                 ), start=7):
                     record_check(
