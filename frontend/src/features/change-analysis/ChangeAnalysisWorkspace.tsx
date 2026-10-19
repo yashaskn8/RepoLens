@@ -64,6 +64,9 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
   const [activeAnalysis, setActiveAnalysis] = useState<ChangeAnalysisResponse | null>(null);
   const analysisGenerationRef = useRef(0);
   const [artifactError, setArtifactError] = useState<string | null>(null);
+  const [artifactAvailability, setArtifactAvailability] = useState({
+    impacts: false, review: false, report: false, diff: false, telemetry: false,
+  });
   const [report, setReport] = useState<ChangeAnalysisReportResponse | null>(null);
   const [impacts, setImpacts] = useState<ChangeImpact[]>([]);
   const [reviewFindings, setReviewFindings] = useState<ChangeReviewFinding[]>([]);
@@ -154,13 +157,25 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
 
     const missing: string[] = [];
     const [impactsResult, reviewResult, reportResult, telemetryResult, diffResult, publicationResult] = outcomes;
-    if (impactsResult.status === 'fulfilled') setImpacts(impactsResult.value || []);
+    if (impactsResult.status === 'fulfilled') {
+      setImpacts(impactsResult.value || []);
+      setArtifactAvailability((state) => ({ ...state, impacts: true }));
+    }
     else missing.push('impacts');
-    if (reviewResult.status === 'fulfilled') setReviewFindings(reviewResult.value.findings || []);
+    if (reviewResult.status === 'fulfilled') {
+      setReviewFindings(reviewResult.value.findings || []);
+      setArtifactAvailability((state) => ({ ...state, review: true }));
+    }
     else missing.push('review');
-    if (reportResult.status === 'fulfilled') setReport(reportResult.value);
+    if (reportResult.status === 'fulfilled') {
+      setReport(reportResult.value);
+      setArtifactAvailability((state) => ({ ...state, report: true }));
+    }
     else missing.push('report');
-    if (telemetryResult.status === 'fulfilled') setTelemetry(telemetryResult.value);
+    if (telemetryResult.status === 'fulfilled') {
+      setTelemetry(telemetryResult.value);
+      setArtifactAvailability((state) => ({ ...state, telemetry: true }));
+    }
     else missing.push('telemetry');
     if (diffResult.status === 'fulfilled') {
       const diff = diffResult.value;
@@ -170,6 +185,7 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
         dependency_deltas: diff.dependency_deltas || [],
         config_deltas: diff.config_deltas || [],
       });
+      setArtifactAvailability((state) => ({ ...state, diff: true }));
     } else missing.push('structural diff');
     // Publication is optional and is normally 404 until an operator requests
     // a preview. It is not a required change-analysis artifact.
@@ -185,6 +201,9 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
     const generation = ++analysisGenerationRef.current;
     setErrorMsg(null);
     setArtifactError(null);
+    setArtifactAvailability({
+      impacts: false, review: false, report: false, diff: false, telemetry: false,
+    });
     setIsSubmitting(true);
     setActiveAnalysis(null);
     setReport(null);
@@ -468,7 +487,7 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
           </div>
 
           {/* TAB 1: Blast Radius Impact Explorer */}
-          {activeTab === 'IMPACTS' && (
+          {activeTab === 'IMPACTS' && (artifactAvailability.impacts ? (
             <ImpactExplorer
               impacts={impacts}
               severityFilter={severityFilter}
@@ -478,41 +497,41 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
               expandedImpactId={expandedImpactId}
               onToggleExpand={(id) => setExpandedImpactId(expandedImpactId === id ? null : id)}
             />
-          )}
+          ) : <Alert variant="warning">Impact evidence is not available; zero impacts cannot be concluded.</Alert>)}
 
           {/* TAB 2: Contract Changes */}
-          {activeTab === 'CONTRACTS' && (
+          {activeTab === 'CONTRACTS' && (artifactAvailability.diff ? (
             <ContractDeltasPanel
               routeDeltas={diffDeltas.route_deltas}
               schemaDeltas={diffDeltas.schema_deltas}
               dependencyDeltas={diffDeltas.dependency_deltas}
               configDeltas={diffDeltas.config_deltas}
             />
-          )}
+          ) : <Alert variant="warning">Structural diff evidence is not available; zero contract changes cannot be concluded.</Alert>)}
 
           {/* TAB 3: Verified AI Review */}
-          {activeTab === 'REVIEW' && (
+          {activeTab === 'REVIEW' && (artifactAvailability.review ? (
             <ChangeReviewPanel
               reviewFindings={reviewFindings}
               expandedFindingId={expandedFindingId}
               onToggleExpand={(id) => setExpandedFindingId(expandedFindingId === id ? null : id)}
             />
-          )}
+          ) : <Alert variant="warning">Verified review evidence is unavailable. No clean conclusion is possible.</Alert>)}
 
           {/* TAB 4: Executive Report & Markdown */}
-          {activeTab === 'REPORT' && (
+          {activeTab === 'REPORT' && (artifactAvailability.report ? (
             <ReviewReportPanel
               report={report}
               copiedReport={copiedReport}
               onCopyMarkdown={handleCopyMarkdown}
               onDownloadMarkdown={handleDownloadMarkdown}
             />
-          )}
+          ) : <Alert variant="warning">The report has not been loaded successfully.</Alert>)}
 
           {/* TAB 5: Telemetry */}
-          {activeTab === 'TELEMETRY' && (
+          {activeTab === 'TELEMETRY' && (artifactAvailability.telemetry ? (
             <ChangeTelemetryPanel telemetry={telemetry} />
-          )}
+          ) : <Alert variant="warning">Execution telemetry is not available.</Alert>)}
 
           {/* TAB 6: Safe GitHub PR Review Publication */}
           {activeTab === 'PUBLISH' && (

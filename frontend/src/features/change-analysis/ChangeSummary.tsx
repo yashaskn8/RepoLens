@@ -21,28 +21,32 @@ export const ChangeSummary: React.FC<ChangeSummaryProps> = ({ analysis }) => {
     }
   };
 
-  const riskStyle = getRiskBadgeColor(analysis.risk_level);
+  const complete = analysis.status === 'COMPLETED';
+  const risk = complete && analysis.risk_level ? analysis.risk_level : 'UNKNOWN';
+  const riskStyle = getRiskBadgeColor(risk);
+  const count = (value: number | null | undefined) =>
+    complete && value != null ? value : 'Not evaluated';
 
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
       <Card className="!p-5">
         <div className="metric-label">FILES CHANGED</div>
         <div className="text-2xl font-extrabold text-slate-100 mt-1">
-          {analysis.changed_files_count}
+          {count(analysis.changed_files_count)}
         </div>
       </Card>
 
       <Card className="!p-5">
         <div className="metric-label">SYMBOLS CHANGED</div>
         <div className="text-2xl font-extrabold text-sky-400 mt-1">
-          {analysis.changed_symbols_count}
+          {count(analysis.changed_symbols_count)}
         </div>
       </Card>
 
       <Card className="!p-5">
         <div className="metric-label">AFFECTED CALLERS</div>
         <div className="text-2xl font-extrabold text-orange-400 mt-1">
-          {analysis.impacted_symbols_count}
+          {count(analysis.impacted_symbols_count)}
         </div>
       </Card>
 
@@ -58,7 +62,7 @@ export const ChangeSummary: React.FC<ChangeSummaryProps> = ({ analysis }) => {
           className="text-2xl font-extrabold mt-1"
           style={{ color: riskStyle.text }}
         >
-          {analysis.risk_level || 'LOW'}
+          {risk}
         </div>
       </Card>
     </div>

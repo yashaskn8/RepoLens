@@ -36,8 +36,10 @@ export const FindingsList: React.FC<FindingsListProps> = ({
       {filteredFindings.length === 0 ? (
         <EmptyState
           icon="🛡️"
-          title="No findings matching filters"
-          description="Try selecting a different severity filter or scan a repository with known security findings."
+          title={findings.length === 0 ? 'No confirmed findings returned' : 'No findings matching filters'}
+          description={findings.length === 0
+            ? 'No confirmed finding was returned in the available scan coverage. This does not establish that the repository is free of defects.'
+            : 'Try selecting a different severity filter.'}
         />
       ) : (
         <div className="flex flex-col gap-5">
