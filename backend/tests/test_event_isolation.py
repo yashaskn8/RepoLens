@@ -458,3 +458,29 @@ class TestLegacyEmitBackwardCompatibility:
         # The independent session should have been used
         mock_session.add.assert_called_once()
         mock_session.commit.assert_called_once()
+
+
+def test_operational_event_failure_never_logs_secret_bearing_exception(caplog):
+    """Database connection errors may contain credentials; log only exception types."""
+    import logging
+    from app.services.workflow_event_service import WorkflowEventService
+
+    canary = "postgresql://private-user:private-secret@internal/production"
+
+    def broken_session_factory():
+        raise RuntimeError(canary)
+
+    with caplog.at_level(logging.WARNING):
+        result = WorkflowEventService.emit_operational(
+            WorkflowEventCreate(
+                event_type=WorkflowEventType.SCAN_STARTED,
+                scan_id=UUID(str(uuid4())),
+                message="Operational event",
+            ),
+            session_factory=broken_session_factory,
+        )
+
+    assert result is None
+    assert "RuntimeError" in caplog.text
+    assert canary not in caplog.text
+    assert "private-secret" not in caplog.text

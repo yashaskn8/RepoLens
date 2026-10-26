@@ -117,7 +117,7 @@ class WorkflowEventService:
             op_session.expunge(model)
             return model
         except Exception as exc:
-            logger.warning(f"Operational event emission failed for {event.event_type}: {exc}")
+            logger.warning("Operational event emission failed (%s).", type(exc).__name__)
             if op_session is not None:
                 try:
                     op_session.rollback()
