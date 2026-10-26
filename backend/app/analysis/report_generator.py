@@ -36,27 +36,55 @@ def _compute_risk_explanation(
     total_impacts: int,
     confirmed_findings: int,
 ) -> str:
-    """Generate deterministic explanation for the assigned risk level."""
+    """Explain stored risk without inventing impacts or treating missing data as LOW."""
+    if risk_level is None:
+        return (
+            "Risk assessment not available. The recorded change analysis does not "
+            "contain an authoritative risk rating; do not infer LOW risk."
+        )
+    if risk_level == ChangeRiskLevel.NONE:
+        return (
+            "NONE risk assessed by static analysis. This is not proof of safety "
+            "and does not establish that tests or runtime checks succeeded."
+        )
     if risk_level == ChangeRiskLevel.CRITICAL:
         return (
-            f"CRITICAL risk assessed: {contract_breaks} breaking contract change(s) or "
-            f"{security_impacts} security-sensitive impact(s) identified with direct caller blast radius."
+            f"CRITICAL risk assessed. Recorded impacts include {contract_breaks} "
+            f"contract/schema change(s) and {security_impacts} security-sensitive "
+            "change(s). Review source evidence; blast radius is not independently proven by the rating."
         )
-    elif risk_level == ChangeRiskLevel.HIGH:
+    if risk_level == ChangeRiskLevel.HIGH:
         return (
-            f"HIGH risk assessed: {total_impacts} impacted symbol(s) detected across caller dependencies "
-            f"or API contracts requiring immediate validation."
+            f"HIGH risk assessed. {total_impacts} impact record(s) and "
+            f"{confirmed_findings} retained review finding(s) were recorded. "
+            "Validate the relevant dependencies and contracts."
         )
-    elif risk_level == ChangeRiskLevel.MEDIUM:
+    if risk_level == ChangeRiskLevel.MEDIUM:
         return (
-            f"MEDIUM risk assessed: {total_impacts} affected downstream caller(s) or signature changes "
-            f"confined to internal repository symbols."
+            f"MEDIUM risk assessed. {total_impacts} impact record(s) were "
+            "recorded. Their downstream effects require evidence-based verification."
         )
-    else:
-        return (
-            f"LOW risk assessed: Structural changes appear isolated with no breaking contract deltas "
-            f"or high-severity blast radius."
-        )
+    return (
+        "LOW risk assessed by static analysis. The rating does not prove "
+        "the absence of breaking contracts, exploits, or runtime regressions."
+    )
+
+
+def _markdown_pr_label(raw: object) -> str:
+    """Escape untrusted pull request titles inside a Markdown link/table cell."""
+    if not isinstance(raw, str):
+        return ""
+    cleaned = " ".join(raw.split())[:180]
+    for char, replacement in (
+        ("\\", "\\\\"),
+        ("|", "\\|"),
+        ("[", "\\["),
+        ("]", "\\]"),
+        ("<", "&lt;"),
+        (">", "&gt;"),
+    ):
+        cleaned = cleaned.replace(char, replacement)
+    return cleaned
 
 
 def _render_markdown_report(
@@ -83,7 +111,7 @@ def _render_markdown_report(
     lines.append("")
     lines.append(f"> **Analysis ID**: `{analysis.id}`  ")
     lines.append(f"> **Generated**: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}  ")
-    lines.append(f"> **Status**: `{analysis.status}` | **Risk Rating**: `{analysis.risk_level or 'LOW'}`  ")
+    lines.append(f"> **Status**: `{analysis.status}` | **Risk Rating**: `{analysis.risk_level or 'NOT_ASSESSED'}`  ")
     lines.append("")
 
     # 1. Provenance
@@ -92,8 +120,11 @@ def _render_markdown_report(
     lines.append("| Property | Value |")
     lines.append("| :--- | :--- |")
     lines.append(f"| **Repository** | [{analysis.repository_url}]({analysis.repository_url}) |")
-    if pr_num:
-        lines.append(f"| **Pull Request** | [#{pr_num} {pr_title or ''}]({analysis.repository_url}/pull/{pr_num}) |")
+    if isinstance(pr_num, int) and not isinstance(pr_num, bool) and pr_num > 0:
+        lines.append(
+            f"| **Pull Request** | [#{pr_num} {_markdown_pr_label(pr_title)}]"
+            f"({analysis.repository_url}/pull/{pr_num}) |"
+        )
     lines.append(f"| **Base Revision** | `{analysis.base_commit_sha}` ({analysis.base_ref or 'base'}) |")
     lines.append(f"| **Head Revision** | `{analysis.head_commit_sha}` ({analysis.head_ref or 'head'}) |")
     lines.append(f"| **Created At** | `{analysis.created_at.isoformat() if analysis.created_at else 'N/A'}` |")
@@ -105,7 +136,7 @@ def _render_markdown_report(
     # 2. Executive Summary
     lines.append("## 📊 Change Metrics & Blast Radius Overview")
     lines.append("")
-    lines.append(f"**Risk Assessment**: `{analysis.risk_level or 'LOW'}`  ")
+    lines.append(f"**Risk Assessment**: `{analysis.risk_level or 'NOT_ASSESSED'}`  ")
     lines.append(f"*{risk_explanation}*")
     lines.append("")
     lines.append("| Metric | Count |")

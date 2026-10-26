@@ -220,3 +220,45 @@ def test_api_get_diff(client: TestClient, sample_completed_analysis):
 
     assert "route_deltas" in data
     assert len(data["route_deltas"]) == 1
+
+
+def test_missing_risk_is_not_misrepresented_as_low(sample_completed_analysis):
+    sample_completed_analysis.risk_level = None
+    report = generate_change_analysis_report(sample_completed_analysis)
+    assert report.risk_level is None
+    assert "Risk assessment not available" in report.risk_explanation
+    assert "NOT_ASSESSED" in report.markdown_report
+    assert "**Risk Assessment**: `LOW`" not in report.markdown_report
+
+
+def test_none_risk_is_distinct_from_low_and_unassessed():
+    from app.analysis.report_generator import _compute_risk_explanation
+
+    result = _compute_risk_explanation(
+        ChangeRiskLevel.NONE, contract_breaks=0, security_impacts=0,
+        total_impacts=0, confirmed_findings=0,
+    )
+    assert "NONE risk assessed" in result
+    assert "LOW risk assessed" not in result
+
+
+def test_critical_risk_does_not_invent_direct_caller_blast_radius():
+    from app.analysis.report_generator import _compute_risk_explanation
+
+    result = _compute_risk_explanation(
+        ChangeRiskLevel.CRITICAL, contract_breaks=0, security_impacts=0,
+        total_impacts=0, confirmed_findings=0,
+    )
+    assert "CRITICAL risk assessed" in result
+    assert "direct caller blast radius" not in result
+    assert "0 contract/schema" in result
+
+
+def test_pr_title_cannot_inject_markdown_report_table_rows(sample_completed_analysis):
+    sample_completed_analysis.model_metadata["pr_title"] = (
+        "Harmless] (https://attacker.example)\n| **Faked Metric** | 999 |"
+    )
+    report = generate_change_analysis_report(sample_completed_analysis)
+    assert "[#456 Harmless\\]" in report.markdown_report
+    assert "| **Faked Metric** | 999 |" not in report.markdown_report
+    assert report.markdown_report.count("| **Pull Request** |") == 1
