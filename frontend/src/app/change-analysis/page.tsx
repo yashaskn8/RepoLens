@@ -1,9 +1,11 @@
 'use client';
 
-import React, { useState, useEffect, Suspense } from 'react';
+import React, { useState, useEffect, useRef, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { AppShell } from '@/components/layout/AppShell';
+import { useAuth } from '@/context/AuthContext';
+import { isCurrentAccountResponse } from '@/lib/accountRequest';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
@@ -29,6 +31,14 @@ import {
 function ChangeAnalysisEntryContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { user, isLoading: authLoading } = useAuth();
+  const accountId = user?.id ?? null;
+  const activeAccountRef = useRef<string | null>(null);
+  activeAccountRef.current = authLoading ? null : accountId;
+  const listGeneration = useRef(0);
+  const submitGeneration = useRef(0);
+  const submitPending = useRef(false);
+  const [loadedForAccount, setLoadedForAccount] = useState<string | null>(null);
 
   const [mode, setMode] = useState<'pr' | 'commits'>('pr');
   const [prUrl, setPrUrl] = useState('https://github.com/yashaskn8/RepoLens/pull/1');
@@ -41,42 +51,83 @@ function ChangeAnalysisEntryContent() {
   const [isLoadingRecent, setIsLoadingRecent] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Recent analyses and in-flight submissions are private to one account.
+  // Clear state on every session transition and reject late old-account data.
   useEffect(() => {
-    async function loadRecent() {
+    const generation = ++listGeneration.current;
+    submitGeneration.current += 1;
+    submitPending.current = false;
+    setRecentAnalyses([]);
+    setLoadedForAccount(null);
+    setError(null);
+    setIsSubmitting(false);
+    setIsLoadingRecent(Boolean(accountId) && !authLoading);
+
+    if (!accountId || authLoading) {
+      return () => {
+        listGeneration.current += 1;
+        submitGeneration.current += 1;
+      };
+    }
+
+    void (async () => {
       try {
         const analyses = await listChangeAnalyses(undefined, 10, 0);
+        if (!isCurrentAccountResponse(accountId, activeAccountRef.current, generation, listGeneration.current)) return;
         setRecentAnalyses(analyses || []);
       } catch {
+        if (!isCurrentAccountResponse(accountId, activeAccountRef.current, generation, listGeneration.current)) return;
         setRecentAnalyses([]);
       } finally {
-        setIsLoadingRecent(false);
+        if (isCurrentAccountResponse(accountId, activeAccountRef.current, generation, listGeneration.current)) {
+          setLoadedForAccount(accountId);
+          setIsLoadingRecent(false);
+        }
       }
-    }
-    loadRecent();
-  }, []);
+    })();
+
+    return () => {
+      listGeneration.current += 1;
+      submitGeneration.current += 1;
+    };
+  }, [accountId, authLoading]);
+
+  const visibleRecentAnalyses = accountId && !authLoading && loadedForAccount === accountId
+    ? recentAnalyses : [];
+  const displayRecentLoading = authLoading
+    || Boolean(accountId && (isLoadingRecent || loadedForAccount !== accountId));
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!accountId || authLoading) {
+      setError('Sign in before starting a PR impact analysis.');
+      return;
+    }
+    // Ref guard closes the double-click window before React updates the button.
+    if (submitPending.current) return;
+    submitPending.current = true;
+    const generation = ++submitGeneration.current;
     setError(null);
     setIsSubmitting(true);
 
     try {
-      if (mode === 'pr') {
-        const result = await startChangeAnalysisFromPR({
-          pr_url: prUrl,
-        });
-        router.push(`/changes/${result.id}`);
-      } else {
-        const result = await startChangeAnalysis({
-          repository_url: repoUrl,
-          base_commit_sha: baseRef,
-          head_commit_sha: headRef,
-        });
-        router.push(`/changes/${result.id}`);
-      }
+      const result = mode === 'pr'
+        ? await startChangeAnalysisFromPR({ pr_url: prUrl })
+        : await startChangeAnalysis({
+            repository_url: repoUrl,
+            base_commit_sha: baseRef,
+            head_commit_sha: headRef,
+          });
+      if (!isCurrentAccountResponse(accountId, activeAccountRef.current, generation, submitGeneration.current)) return;
+      router.push(`/changes/${result.id}`);
     } catch (err: unknown) {
+      if (!isCurrentAccountResponse(accountId, activeAccountRef.current, generation, submitGeneration.current)) return;
       setError(getErrorMessage(err, 'Failed to initiate change analysis.'));
-      setIsSubmitting(false);
+    } finally {
+      if (isCurrentAccountResponse(accountId, activeAccountRef.current, generation, submitGeneration.current)) {
+        submitPending.current = false;
+        setIsSubmitting(false);
+      }
     }
   };
 
@@ -204,9 +255,10 @@ function ChangeAnalysisEntryContent() {
               variant="accent-cyan"
               size="lg"
               isLoading={isSubmitting}
+              disabled={authLoading || !accountId || isSubmitting}
               rightIcon={<ArrowRight size={16} />}
             >
-              {isSubmitting ? 'Analyzing PR Impact...' : 'Analyze PR Impact'}
+              {authLoading ? 'Checking session...' : !accountId ? 'Sign in to Analyze' : isSubmitting ? 'Analyzing PR Impact...' : 'Analyze PR Impact'}
             </Button>
           </div>
         </form>
@@ -226,12 +278,12 @@ function ChangeAnalysisEntryContent() {
           Recent PR & Commit Analyses
         </h3>
 
-        {isLoadingRecent ? (
+        {displayRecentLoading ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
             <Skeleton height="4rem" />
             <Skeleton height="4rem" />
           </div>
-        ) : recentAnalyses.length === 0 ? (
+        ) : visibleRecentAnalyses.length === 0 ? (
           <EmptyState
             icon={<GitPullRequest size={24} />}
             title="No past analyses"
@@ -239,7 +291,7 @@ function ChangeAnalysisEntryContent() {
           />
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-            {recentAnalyses.map((analysis) => (
+            {visibleRecentAnalyses.map((analysis) => (
               <Link
                 key={analysis.id}
                 href={`/changes/${analysis.id}`}
