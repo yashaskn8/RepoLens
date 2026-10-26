@@ -57,7 +57,7 @@ export const ChangeAnalysisInput: React.FC<ChangeAnalysisInputProps> = ({
             variant={inputMode === 'PR' ? 'filter-active' : 'filter'}
             size="sm"
             onClick={() => onInputModeChange('PR')}
-            disabled={isRunning}
+            disabled={isBusy}
             aria-pressed={inputMode === 'PR'}
           >
             Public PR URL
@@ -66,7 +66,7 @@ export const ChangeAnalysisInput: React.FC<ChangeAnalysisInputProps> = ({
             variant={inputMode === 'EXACT' ? 'filter-active' : 'filter'}
             size="sm"
             onClick={() => onInputModeChange('EXACT')}
-            disabled={isRunning}
+            disabled={isBusy}
             aria-pressed={inputMode === 'EXACT'}
           >
             Exact SHAs (Advanced)
