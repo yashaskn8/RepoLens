@@ -311,7 +311,7 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
                 }
                 size="md"
               >
-                {analysis?.risk_level ? `${analysis.risk_level} RISK` : 'Not assessed'}
+                {analysis?.risk_level && analysis.risk_level !== 'NONE' ? `${analysis.risk_level} RISK` : 'Not assessed'}
               </Badge>
             </div>
           </div>
@@ -550,7 +550,7 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
                     <EmptyState
                       icon={<CheckCircle2 size={24} style={{ color: 'var(--success-text)' }} />}
                       title="Zero breaking changes detected"
-                      description="All public routes and schemas maintain backward compatibility with current consumers."
+                      description="No route or schema deltas were detected in the available structural diff. This is not a compatibility guarantee."
                     />
                   ) : (
                     <>
@@ -619,7 +619,7 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
                     <EmptyState
                       icon={<CheckCircle2 size={24} style={{ color: 'var(--success-text)' }} />}
                       title="No downstream callers affected"
-                      description="Changes are internal to modified files and do not propagate to downstream consumers."
+                      description="No downstream caller impacts were returned by the available analysis. This is not proof that no consumers are affected."
                     />
                   ) : (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
@@ -685,7 +685,7 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
             {/* Review Findings Section */}
             <div>
               <div style={{ fontSize: '0.8125rem', fontWeight: 700, color: 'var(--text-primary)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '0.75rem' }}>
-                Review Findings ({review?.findings?.length || 0})
+                Review Findings ({review === null ? 'unavailable' : review.findings?.length ?? 0})
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
