@@ -240,6 +240,11 @@ class GitHubDeliveryProvider(RepositoryDeliveryProvider):
             or not isinstance(remote_base, dict)
         ):
             raise GitHubAPIError("Invalid GitHub pull request identity", status_code=502)
+        # An absent or unexpected state cannot be silently treated as an
+        # open PR and later persisted as a successful delivery.
+        remote_state = payload.get("state")
+        if remote_state not in ("open", "closed") or not isinstance(remote_state, str):
+            raise GitHubAPIError("Invalid GitHub pull request state", status_code=502)
         expected_repo = f"{owner}/{repo}".casefold()
         for section, expected_ref in ((remote_head, head), (remote_base, base)):
             repo_info = section.get("repo")
@@ -259,7 +264,7 @@ class GitHubDeliveryProvider(RepositoryDeliveryProvider):
             head_branch=head,
             base_branch=base,
             title=payload.get("title") if isinstance(payload.get("title"), str) else "",
-            state=payload.get("state") if isinstance(payload.get("state"), str) else "open",
+            state=remote_state,
         )
 
     async def find_existing_pull_request(
@@ -306,6 +311,9 @@ class GitHubDeliveryProvider(RepositoryDeliveryProvider):
             "base": clean_base,
         }
         data = await self._request("POST", f"/repos/{owner}/{repo}/pulls", json_data=payload, is_write=True)
-        return self._verified_pull_request(
+        verified = self._verified_pull_request(
             data, owner=owner, repo=repo, head=clean_head, base=clean_base,
         )
+        if verified.state != "open":
+            raise GitHubAPIError("New GitHub pull request did not return an open state", status_code=502)
+        return verified
