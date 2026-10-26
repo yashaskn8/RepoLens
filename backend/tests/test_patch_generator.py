@@ -594,3 +594,28 @@ async def test_patch_generator_direct_call_rejects_unconfirmed_finding():
             finding, plan, context, source_files={"src/main.py": "old"},
         )
     router.generate.assert_not_called()
+
+
+def test_patch_service_preserves_crlf_source_bytes(tmp_path):
+    """Patch generation context must reflect the exact source snapshot newlines."""
+    source = tmp_path / "src" / "main.py"
+    source.parent.mkdir()
+    source.write_bytes(b"first = 1\r\nsecond = 2\r\n")
+    result = PatchService()._read_target_files(str(tmp_path), ["src/main.py"])
+    assert result == {"src/main.py": "first = 1\r\nsecond = 2\r\n"}
+
+
+def test_patch_service_rejects_invalid_utf8_without_dropping_bytes(tmp_path):
+    """An undecodable source is unavailable, not a lossy source for AI edits."""
+    source = tmp_path / "invalid.py"
+    source.write_bytes(b"print('ok')\n\xff")
+    assert PatchService()._read_target_files(str(tmp_path), ["invalid.py"]) == {}
+
+
+def test_patch_service_bounds_source_read(tmp_path, monkeypatch):
+    """Approved source files cannot bypass the configured source-byte limit."""
+    from app.core import config
+    source = tmp_path / "large.py"
+    source.write_bytes(b"x" * 1024)
+    monkeypatch.setattr(config.get_settings(), "MAX_FILE_SIZE_BYTES", 32)
+    assert PatchService()._read_target_files(str(tmp_path), ["large.py"]) == {}

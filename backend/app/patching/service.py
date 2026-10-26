@@ -4,6 +4,7 @@ import os
 from typing import Dict, List, Optional
 
 from app.context.engine import ContextEngine
+from app.core.config import get_settings
 from app.ingestion.schemas import RepositoryManifest
 from app.patching.agent import PatchGeneratorAgent
 from app.patching.schemas import PatchProposal
@@ -38,9 +39,15 @@ class PatchService:
             clean_rel = rel_path.replace("\\", "/").lstrip("/")
             if os.path.exists(full_path) and os.path.isfile(full_path):
                 try:
-                    with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
-                        contents[clean_rel] = f.read()
-                except Exception:
+                    max_bytes = get_settings().MAX_FILE_SIZE_BYTES
+                    # Binary reads preserve CRLF, and strict UTF-8 prevents the
+                    # model from proposing a patch against silently lost bytes.
+                    with open(full_path, "rb") as f:
+                        data = f.read(max_bytes + 1)
+                    if len(data) > max_bytes:
+                        continue
+                    contents[clean_rel] = data.decode("utf-8")
+                except (OSError, UnicodeDecodeError):
                     continue
 
         return contents
