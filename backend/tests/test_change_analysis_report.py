@@ -305,3 +305,32 @@ def test_report_escapes_untrusted_review_finding_title(sample_completed_analysis
     report = generate_change_analysis_report(sample_completed_analysis)
     assert "## Forged section | ALERT" not in report.markdown_report
     assert "Safe title" in report.markdown_report
+
+
+def test_malformed_review_evidence_is_disclosed_without_logging_private_text(
+    sample_completed_analysis, monkeypatch,
+):
+    """An invalid finding cannot become a silently clean review or leak its data."""
+    import app.analysis.report_generator as generator
+
+    secret_marker = "private-model-finding-secret-canary"
+    sample_completed_analysis.model_metadata["review_report"]["findings"].append(
+        {"title": secret_marker, "evidence_refs": [secret_marker]}
+    )
+    logged = []
+    monkeypatch.setattr(generator.logger, "warning", lambda *args: logged.append(args))
+    report = generate_change_analysis_report(sample_completed_analysis)
+    assert len(report.review_findings) == 1
+    assert "Incomplete Review Evidence" in report.markdown_report
+    assert any("malformed persisted AI review" in lim for lim in report.limitations)
+    assert secret_marker not in str(logged)
+
+
+def test_nonarray_review_findings_are_marked_incomplete(sample_completed_analysis):
+    sample_completed_analysis.model_metadata["review_report"]["findings"] = {
+        "invalid": "not a list"
+    }
+    report = generate_change_analysis_report(sample_completed_analysis)
+    assert report.review_findings == []
+    assert "Incomplete Review Evidence" in report.markdown_report
+    assert "omitted" in report.markdown_report

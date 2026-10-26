@@ -101,6 +101,7 @@ def _render_markdown_report(
     llm_status: str = "AVAILABLE",
     is_llm_fallback: bool = False,
     has_review_data: bool = False,
+    invalid_review_count: int = 0,
 ) -> str:
     """Render deterministic, rich GitHub Flavored Markdown Change Analysis Report."""
     meta = analysis.model_metadata or {}
@@ -249,6 +250,11 @@ def _render_markdown_report(
     lines.append("### Limitations & Grounding Constraints")
     lines.append("- **Static Analysis Boundary**: Analysis operates purely on static source AST and repository dependency graphs. No repository code was executed in a sandbox.")
     lines.append("- **No Test Execution**: Repository test suites, integration tests, and CI/CD pipelines were **NOT executed**.")
+    if invalid_review_count:
+        lines.append(
+            f"- **Incomplete Review Evidence**: {invalid_review_count} malformed AI review record(s) "
+            "were omitted; this review result must not be treated as complete."
+        )
     lines.append("- **Dynamic Dispatch**: Dynamic reflection, runtime monkeypatching, and duck-typed method invocation cannot be completely proven via static traversal.")
     lines.append("")
 
@@ -340,15 +346,26 @@ def generate_change_analysis_report(model: ChangeAnalysisModel) -> ChangeAnalysi
         llm_status = "SUCCESS" if raw_review else "UNAVAILABLE"
 
     review_findings: List[ChangeReviewFinding] = []
-    for rf in review_data.get("findings", []):
+    raw_findings = review_data.get("findings", [])
+    invalid_review_count = 0
+    if not isinstance(raw_findings, list):
+        raw_findings = []
+        invalid_review_count += 1
+    for rf in raw_findings:
         try:
+            if not isinstance(rf, dict):
+                raise ValueError("Malformed review finding")
             parsed = ChangeReviewFinding(**rf)
             # Rejected candidates are diagnostics, never report findings.
             # Supported inferences remain explicitly labeled by their verdict.
             if parsed.verdict.value != "REJECTED":
                 review_findings.append(parsed)
-        except Exception as exc:
-            logger.warning(f"Failed to deserialize review finding in report: {str(exc)}")
+        except (TypeError, ValueError) as exc:
+            invalid_review_count += 1
+            # ValidationError includes untrusted source text. Log only type.
+            logger.warning(
+                "Failed to deserialize review finding (%s).", type(exc).__name__
+            )
 
     # Count contract breaks and security impacts
     contract_breaks = sum(
@@ -384,6 +401,7 @@ def generate_change_analysis_report(model: ChangeAnalysisModel) -> ChangeAnalysi
         llm_status=llm_status,
         is_llm_fallback=is_llm_fallback,
         has_review_data=bool(raw_review),
+        invalid_review_count=invalid_review_count,
     )
 
     tool_avail = {
@@ -400,6 +418,10 @@ def generate_change_analysis_report(model: ChangeAnalysisModel) -> ChangeAnalysi
         "Repository test suites and CI pipelines were NOT executed.",
         "Dynamic reflection and runtime duck-typing cannot be fully determined through static analysis alone.",
     ]
+    if invalid_review_count:
+        limitations.append(
+            f"{invalid_review_count} malformed persisted AI review record(s) were omitted; review coverage is incomplete."
+        )
 
     return ChangeAnalysisReportResponse(
         analysis_id=UUID(model.id),
