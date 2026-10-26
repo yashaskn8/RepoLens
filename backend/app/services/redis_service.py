@@ -113,13 +113,13 @@ class RedisService:
             return _deserialize(raw)
         except (RedisConnectionError, RedisTimeoutError) as exc:
             self._manager.mark_degraded()
-            logger.warning("Redis GET connectivity error on key %s (%s): %s", namespaced_key, type(exc).__name__, exc)
+            logger.warning("Redis GET connectivity failure (%s)", type(exc).__name__)
             return None
         except RedisError as exc:
-            logger.warning("Redis GET error on key %s (%s): %s", namespaced_key, type(exc).__name__, exc)
+            logger.warning("Redis GET failure (%s)", type(exc).__name__)
             return None
         except Exception as exc:
-            logger.warning("Unexpected error during Redis GET on %s: %s", namespaced_key, exc)
+            logger.warning("Unexpected Redis GET failure (%s)", type(exc).__name__)
             return None
 
     async def set(
@@ -162,13 +162,13 @@ class RedisService:
             return True
         except (RedisConnectionError, RedisTimeoutError) as exc:
             self._manager.mark_degraded()
-            logger.warning("Redis SET connectivity error on key %s (%s): %s", namespaced_key, type(exc).__name__, exc)
+            logger.warning("Redis SET connectivity failure (%s)", type(exc).__name__)
             return False
         except RedisError as exc:
-            logger.warning("Redis SET error on key %s (%s): %s", namespaced_key, type(exc).__name__, exc)
+            logger.warning("Redis SET failure (%s)", type(exc).__name__)
             return False
         except Exception as exc:
-            logger.warning("Unexpected error during Redis SET on %s: %s", namespaced_key, exc)
+            logger.warning("Unexpected Redis SET failure (%s)", type(exc).__name__)
             return False
 
     async def delete(self, key: str, namespace: str = "cache") -> bool:
@@ -183,13 +183,13 @@ class RedisService:
             return bool(deleted_count > 0)
         except (RedisConnectionError, RedisTimeoutError) as exc:
             self._manager.mark_degraded()
-            logger.warning("Redis DELETE connectivity error on %s (%s): %s", namespaced_key, type(exc).__name__, exc)
+            logger.warning("Redis DELETE connectivity failure (%s)", type(exc).__name__)
             return False
         except RedisError as exc:
-            logger.warning("Redis DELETE error on %s (%s): %s", namespaced_key, type(exc).__name__, exc)
+            logger.warning("Redis DELETE failure (%s)", type(exc).__name__)
             return False
         except Exception as exc:
-            logger.warning("Unexpected error during Redis DELETE on %s: %s", namespaced_key, exc)
+            logger.warning("Unexpected Redis DELETE failure (%s)", type(exc).__name__)
             return False
 
     async def exists(self, key: str, namespace: str = "cache") -> bool:
@@ -204,13 +204,13 @@ class RedisService:
             return bool(count > 0)
         except (RedisConnectionError, RedisTimeoutError) as exc:
             self._manager.mark_degraded()
-            logger.warning("Redis EXISTS connectivity error on %s (%s): %s", namespaced_key, type(exc).__name__, exc)
+            logger.warning("Redis EXISTS connectivity failure (%s)", type(exc).__name__)
             return False
         except RedisError as exc:
-            logger.warning("Redis EXISTS error on %s (%s): %s", namespaced_key, type(exc).__name__, exc)
+            logger.warning("Redis EXISTS failure (%s)", type(exc).__name__)
             return False
         except Exception as exc:
-            logger.warning("Unexpected error during Redis EXISTS on %s: %s", namespaced_key, exc)
+            logger.warning("Unexpected Redis EXISTS failure (%s)", type(exc).__name__)
             return False
 
     # --------------------------------------------------------------------------

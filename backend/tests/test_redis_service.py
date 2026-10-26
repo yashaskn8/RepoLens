@@ -544,3 +544,37 @@ async def test_live_redis_cloud_connectivity():
     finally:
         await manager.close()
 
+
+@pytest.mark.asyncio
+async def test_redis_connection_errors_do_not_log_request_keys_or_exception_secrets(caplog):
+    """Redis may reflect credentials, DSNs or request IDs in error text."""
+    secret = "redis-private-connection-canary-123"
+    key = "opaque-request-key-canary-456"
+
+    class LeakyRedis(MockAsyncRedis):
+        async def get(self, key):
+            raise RedisError(secret)
+
+        async def set(self, key, value, ex=None):
+            raise RedisError(secret)
+
+        async def delete(self, key):
+            raise RedisError(secret)
+
+        async def exists(self, key):
+            raise RedisError(secret)
+
+    manager = RedisManager()
+    manager.set_client(LeakyRedis(), available=True)
+    service = RedisService(manager=manager)
+    assert await service.get(key) is None
+    assert await service.set(key, {"value": 1}) is False
+    assert await service.delete(key) is False
+    assert await service.exists(key) is False
+
+    assert secret not in caplog.text
+    assert key not in caplog.text
+    assert "Redis GET failure" in caplog.text
+    assert "Redis SET failure" in caplog.text
+    assert "Redis DELETE failure" in caplog.text
+    assert "Redis EXISTS failure" in caplog.text
