@@ -112,6 +112,17 @@ def validate_workspace_safety(
     Raises:
         SymlinkEscapeError, ResourceLimitExceededError, SubmoduleExecutionError
     """
+    # os.walk(followlinks=False) still follows a symlink given as its root.
+    # Reject a replaced workspace root before inspecting source contents.
+    is_junction = getattr(os.path, "isjunction", None)
+    if (
+        not workspace_path
+        or os.path.islink(workspace_path)
+        or (is_junction is not None and is_junction(workspace_path))
+        or not os.path.isdir(workspace_path)
+    ):
+        raise SnapshotRehydrationError("Snapshot workspace root is not a regular directory.")
+
     cfg = settings or get_settings()
     max_files = getattr(cfg, "MAX_REPO_FILES", 5000)
     max_total_bytes = getattr(cfg, "MAX_TOTAL_SOURCE_BYTES", 52_428_800)  # 50 MB

@@ -573,3 +573,22 @@ def test_workspace_safety_rejects_internal_symlink_aliases(tmp_path, link_is_dir
         pytest.skip("Symlink creation is unavailable on this host")
     with pytest.raises(SymlinkEscapeError, match="workspace contains"):
         validate_workspace_safety(str(workspace))
+
+
+def test_workspace_safety_rejects_symlinked_root(tmp_path):
+    """os.walk follows a link when that link is the traversal root."""
+    outside = tmp_path / "external"
+    outside.mkdir()
+    (outside / "private.py").write_text("private", encoding="utf-8")
+    workspace = tmp_path / "snapshot"
+    try:
+        workspace.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlink creation unavailable")
+    with pytest.raises(SnapshotRehydrationError, match="root is not a regular directory"):
+        validate_workspace_safety(str(workspace))
+
+
+def test_workspace_safety_rejects_missing_root(tmp_path):
+    with pytest.raises(SnapshotRehydrationError, match="root is not a regular directory"):
+        validate_workspace_safety(str(tmp_path / "missing"))
