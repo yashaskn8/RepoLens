@@ -140,11 +140,16 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
         if (restoredPlan.status === 'fulfilled' && restoredPlan.value && !planActionRef.current) {
           setPlan(restoredPlan.value);
         }
-        if (restoredResearch.status === 'rejected' || restoredPlan.status === 'rejected') {
+        if (
+          (restoredResearch.status === 'rejected' && !researchActionRef.current) ||
+          (restoredPlan.status === 'rejected' && !planActionRef.current)
+        ) {
           setError('Some persisted remediation artifacts could not be restored.');
         }
       } catch {
-        if (active) setError('Remediation job history is unavailable or incomplete.');
+        if (active && !researchActionRef.current && !planActionRef.current) {
+          setError('Remediation job history is unavailable or incomplete.');
+        }
       }
     })();
     return () => { active = false; };
@@ -157,8 +162,10 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
     try {
       setError(null);
       setLoadingStep('research');
-      const res = await requestFindingResearch(finding.id);
+      // Invalidate an older persisted result as soon as a new request starts,
+      // not only after it completes. Recovery can resolve while this is pending.
       researchActionRef.current = true;
+      const res = await requestFindingResearch(finding.id);
       setResearch(res);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Research failed');
@@ -175,8 +182,9 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
     try {
       setError(null);
       setLoadingStep('plan');
-      const res = await requestFixPlan(finding.id);
+      // A pending new plan supersedes a late historical plan response.
       planActionRef.current = true;
+      const res = await requestFixPlan(finding.id);
       setPlan(res);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Fix plan generation failed');
