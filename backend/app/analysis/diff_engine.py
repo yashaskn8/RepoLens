@@ -236,6 +236,24 @@ def _read_bounded_snapshot_file(path: str, max_bytes: int) -> bytes:
     return content
 
 
+def _source_line_facts(path: str, filename: str, max_bytes: int) -> tuple[bool, int, str | None]:
+    """Compute truthful bounded text coverage for an added/deleted/renamed file."""
+    try:
+        candidate = os.stat(path, follow_symlinks=False)
+        if candidate.st_size > max_bytes:
+            return False, 0, "EXCEEDS_MAX_FILE_SIZE"
+        payload = _read_bounded_snapshot_file(path, max_bytes)
+        is_binary = _is_binary_file(filename, payload[:4096])
+        if is_binary:
+            return True, 0, "BINARY"
+        try:
+            return False, len(payload.decode("utf-8").splitlines()), None
+        except UnicodeDecodeError:
+            return False, 0, "INVALID_SOURCE_ENCODING"
+    except (OSError, ValueError):
+        return False, 0, "SOURCE_UNAVAILABLE_OR_CHANGED"
+
+
 class ChangeDiffEngine:
     """Deterministic structural diff engine comparing two repository workspaces."""
 
@@ -375,125 +393,60 @@ class ChangeDiffEngine:
 
         # Process Added Files
         for add_path in sorted(added_files):
-            abs_p = head_files[add_path]
-            is_bin = False
-            lines_count = 0
-            file_too_large = False
-            try:
-                st = os.stat(abs_p)
-                if st.st_size > max_file_size:
-                    file_too_large = True
-                else:
-                    with open(abs_p, "rb") as f:
-                        sample = f.read(4096)
-                        is_bin = _is_binary_file(add_path, sample)
-                    if not is_bin:
-                        with open(abs_p, "r", encoding="utf-8", errors="ignore") as f:
-                            lines_count = len(f.readlines())
-            except OSError:
-                pass
-
+            is_bin, lines_count, read_reason = _source_line_facts(
+                head_files[add_path], add_path, max_file_size
+            )
             lang = detect_language(add_path)
-            if file_too_large:
-                skipped_reason = "EXCEEDS_MAX_FILE_SIZE"
-            elif is_bin:
-                skipped_reason = "BINARY"
-            elif not lang:
-                skipped_reason = "UNSUPPORTED_LANGUAGE"
-            else:
-                skipped_reason = None
-
+            skipped_reason = read_reason or (None if lang else "UNSUPPORTED_LANGUAGE")
             changed_files.append(
                 FileDiffFact(
                     file_path=add_path,
                     old_path=None,
                     change_type=FileChangeType.ADDED,
                     is_binary=is_bin,
-                    is_parsed=lang is not None and not is_bin and not file_too_large,
+                    is_parsed=lang is not None and skipped_reason is None,
                     skipped_reason=skipped_reason,
                     language=lang,
-                    changed_line_ranges=[[1, max(1, lines_count)]] if not is_bin and not file_too_large and lines_count > 0 else [],
+                    changed_line_ranges=[[1, lines_count]] if not read_reason and lines_count > 0 else [],
                     base_line_ranges=[],
                 )
             )
 
         # Process Deleted Files
         for del_path in sorted(deleted_files):
-            abs_p = base_files[del_path]
-            is_bin = False
-            lines_count = 0
-            file_too_large = False
-            try:
-                st = os.stat(abs_p)
-                if st.st_size > max_file_size:
-                    file_too_large = True
-                else:
-                    with open(abs_p, "rb") as f:
-                        sample = f.read(4096)
-                        is_bin = _is_binary_file(del_path, sample)
-                    if not is_bin:
-                        with open(abs_p, "r", encoding="utf-8", errors="ignore") as f:
-                            lines_count = len(f.readlines())
-            except OSError:
-                pass
-
+            is_bin, lines_count, read_reason = _source_line_facts(
+                base_files[del_path], del_path, max_file_size
+            )
             lang = detect_language(del_path)
-            if file_too_large:
-                skipped_reason = "EXCEEDS_MAX_FILE_SIZE"
-            elif is_bin:
-                skipped_reason = "BINARY"
-            elif not lang:
-                skipped_reason = "UNSUPPORTED_LANGUAGE"
-            else:
-                skipped_reason = None
-
+            skipped_reason = read_reason or (None if lang else "UNSUPPORTED_LANGUAGE")
             changed_files.append(
                 FileDiffFact(
                     file_path=del_path,
                     old_path=None,
                     change_type=FileChangeType.DELETED,
                     is_binary=is_bin,
-                    is_parsed=lang is not None and not is_bin and not file_too_large,
+                    is_parsed=lang is not None and skipped_reason is None,
                     skipped_reason=skipped_reason,
                     language=lang,
                     changed_line_ranges=[],
-                    base_line_ranges=[[1, max(1, lines_count)]] if not is_bin and not file_too_large and lines_count > 0 else [],
+                    base_line_ranges=[[1, lines_count]] if not read_reason and lines_count > 0 else [],
                 )
             )
 
         # Process Renamed Files
         for old_p, new_p in sorted(renamed_pairs):
-            abs_head = head_files[new_p]
-            is_bin = False
-            file_too_large = False
-            try:
-                st = os.stat(abs_head)
-                if st.st_size > max_file_size:
-                    file_too_large = True
-                else:
-                    with open(abs_head, "rb") as f:
-                        sample = f.read(4096)
-                        is_bin = _is_binary_file(new_p, sample)
-            except OSError:
-                pass
-
+            is_bin, _, read_reason = _source_line_facts(
+                head_files[new_p], new_p, max_file_size
+            )
             lang = detect_language(new_p)
-            if file_too_large:
-                skipped_reason = "EXCEEDS_MAX_FILE_SIZE"
-            elif is_bin:
-                skipped_reason = "BINARY"
-            elif not lang:
-                skipped_reason = "UNSUPPORTED_LANGUAGE"
-            else:
-                skipped_reason = None
-
+            skipped_reason = read_reason or (None if lang else "UNSUPPORTED_LANGUAGE")
             changed_files.append(
                 FileDiffFact(
                     file_path=new_p,
                     old_path=old_p,
                     change_type=FileChangeType.RENAMED,
                     is_binary=is_bin,
-                    is_parsed=lang is not None and not is_bin and not file_too_large,
+                    is_parsed=lang is not None and skipped_reason is None,
                     skipped_reason=skipped_reason,
                     language=lang,
                     changed_line_ranges=[],

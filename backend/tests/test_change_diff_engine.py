@@ -577,3 +577,21 @@ def test_structural_diff_read_rejects_actual_oversized_bytes(tmp_path):
     ):
         with pytest.raises(ValueError, match="budget|size changed"):
             _read_bounded_snapshot_file(str(source), 16)
+
+@pytest.mark.parametrize("mode", ["added", "deleted"])
+def test_structural_diff_classifies_invalid_utf8_without_losing_file_change(tmp_path, mode):
+    base = tmp_path / "base"
+    head = tmp_path / "head"
+    base.mkdir()
+    head.mkdir()
+    target = head if mode == "added" else base
+    (target / "invalid.py").write_bytes(b"value = 1" + bytes([10, 255]))
+    result = ChangeDiffEngine().compute_structural_diff(
+        str(base), str(head), "a" * 40, "b" * 40, "https://github.com/org/repo",
+    )
+    fact = next(item for item in result.changed_files if item.file_path == "invalid.py")
+    assert fact.change_type == (FileChangeType.ADDED if mode == "added" else FileChangeType.DELETED)
+    assert not fact.is_parsed
+    assert fact.skipped_reason == "INVALID_SOURCE_ENCODING"
+    assert fact.changed_line_ranges == []
+    assert fact.base_line_ranges == []
