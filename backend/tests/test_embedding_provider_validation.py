@@ -1,7 +1,5 @@
 """Structured cloud-embedding responses must never be treated as complete if partial."""
 
-import math
-
 import pytest
 
 from app.indexing.embeddings import _validated_embedding_results
