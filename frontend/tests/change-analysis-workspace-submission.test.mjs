@@ -14,7 +14,7 @@ assert.ok(start > 0 && end > start);
 const js = ts.transpileModule(source.slice(start, end), {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
 }).outputText;
-const helperJs = ts.transpileModule(helper.replace('export function parseExactChangeCommits', 'function parseExactChangeCommits'), {
+const helperJs = ts.transpileModule(helper.replace('export interface ExactChangeCommits', 'interface ExactChangeCommits').replace('export function parseExactChangeCommits', 'function parseExactChangeCommits'), {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
 }).outputText;
 const parseExactChangeCommits = new Function(helperJs + '\nreturn parseExactChangeCommits;')();
