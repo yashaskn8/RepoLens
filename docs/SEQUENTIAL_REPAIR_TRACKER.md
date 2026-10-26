@@ -67,3 +67,10 @@ See [REPAIR_AUDIT_2026-10-26.md](REPAIR_AUDIT_2026-10-26.md) for historical CI e
 3. Verify tenant ownership, quota concurrency, durable recovery and rollback in deployment-equivalent integration tests.
 4. Integrate **independently enforced** acquisition filesystem/resource budgets and Git-only egress, plus externally isolated scanner workers, on an identified host. Until then keep production readiness fail-closed.
 5. Validate sacrificial GitHub writes only with explicit authorization and an appropriately scoped integration environment. Never substitute mocks for release certification.
+
+
+## Active PR-detail artifact recovery (2026-10-26)
+
+- `080537fbc74329457ca5fc7abf963c44793e14ec`: fixed the **active** `/changes/[id]` workspace. Completed analysis artifact failures were silently ignored after terminal polling stopped; users could see an unavailable diff/review without a retry path. The workspace now identifies missing required diff, impact and review evidence, distinguishes optional publication lookup, and provides a guarded retry that retains successfully loaded evidence. Failed analyses do not attempt completed-artifact fetches. The earlier `ChangeAnalysisWorkspace` retry is separate and does not cover this active route.
+- `ce17a28888f0fe83beb6b8f73a596b24eb0f0b6c`: added four regression tests in `frontend/tests/change-detail-artifact-recovery.test.mjs`.
+- Reproduced the original silent failure by executing the actual pre-fix effect with a rejected structural-diff request and completed analysis. **Four focused behavioral scenarios passed** when executed against the retrieved committed effect and retry handler in an isolated JavaScript harness (required/optional failures, successful retry, failed analysis, duplicate retry). The committed Node test file, full frontend test suite, TypeScript type-check/build, backend pytest and browser acceptance **were not executed**. Prompts 17, 18, 19 and 28 remain **PARTIAL**.
