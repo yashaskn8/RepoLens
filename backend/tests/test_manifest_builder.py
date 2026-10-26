@@ -300,3 +300,28 @@ def test_manifest_rejects_symlinked_repository_root(tmp_path):
         pytest.skip("Symlink creation unavailable")
     with pytest.raises(ValueError, match="root is missing or unsafe"):
         build_manifest(str(alias), "https://github.com/org/repo", "a" * 40)
+
+
+def test_direct_framework_detector_does_not_follow_repo_manifest_symlinks(tmp_path):
+    """Framework identification must not ingest arbitrary external manifest data."""
+    from app.ingestion.detector import detect_frameworks
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    outside = tmp_path / "external.json"
+    outside.write_text('{"dependencies":{"react":"19"}}', encoding="utf-8")
+    link = workspace / "package.json"
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlink creation is unavailable")
+    assert "React" not in {f.name for f in detect_frameworks(str(workspace))}
+
+
+def test_direct_framework_detector_reads_only_regular_manifests(tmp_path):
+    from app.ingestion.detector import detect_frameworks
+
+    (tmp_path / "package.json").write_text(
+        '{"dependencies":{"react":"19"}}', encoding="utf-8",
+    )
+    assert "React" in {f.name for f in detect_frameworks(str(tmp_path))}

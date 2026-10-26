@@ -2,6 +2,7 @@
 
 import json
 import os
+import stat
 import re
 from typing import Dict, List, Optional
 from app.ingestion.schemas import FrameworkDetected
@@ -91,11 +92,21 @@ def _bounded_manifest_bytes(
         return manifest_contents.get(filename)
     path = os.path.join(repo_dir, filename)
     try:
-        if os.stat(path).st_size > max_file_bytes:
+        # Framework detection is also exposed to callers without a prepared
+        # manifest. Do not follow a repository-controlled symlink out of the
+        # submitted workspace or past source-file admission limits.
+        initial = os.lstat(path)
+        if not stat.S_ISREG(initial.st_mode) or initial.st_size > max_file_bytes:
             return None
-        with open(path, "rb") as source:
+        descriptor = os.open(
+            path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+        )
+        with os.fdopen(descriptor, "rb") as source:
+            opened = os.fstat(source.fileno())
+            if not stat.S_ISREG(opened.st_mode) or opened.st_size > max_file_bytes:
+                return None
             content = source.read(max_file_bytes + 1)
-        if len(content) > max_file_bytes:
+        if len(content) > max_file_bytes or len(content) != opened.st_size:
             return None
         return content
     except OSError:
