@@ -224,3 +224,59 @@ def test_framework_detector_malformed_metadata_degrades_safely(tmp_path, payload
         commit_hash="d" * 40,
     )
     assert manifest.frameworks == []
+
+
+def test_manifest_marks_oversized_source_as_incomplete(tmp_path, monkeypatch):
+    """A silently skipped source file must never imply complete scan coverage."""
+    from types import SimpleNamespace
+
+    source = tmp_path / "oversized.py"
+    source.write_text("value = " + "x" * 200, encoding="utf-8")
+    monkeypatch.setattr(
+        "app.ingestion.manifest.get_settings",
+        lambda: SimpleNamespace(
+            MAX_REPO_FILES=100,
+            MAX_FILE_SIZE_BYTES=32,
+            MAX_TOTAL_SOURCE_BYTES=4096,
+        ),
+    )
+    manifest = build_manifest(str(tmp_path), "https://github.com/org/repo", "a" * 40)
+    assert manifest.analysis_scope.truncated
+    assert manifest.analysis_scope.reason == "source_file_exceeds_max_size"
+    assert manifest.files[0].skipped_reason == "exceeds_max_size"
+
+
+def test_manifest_file_read_failure_is_incomplete_and_does_not_leak_error(tmp_path, monkeypatch):
+    """Raw OS exception strings may contain credentials and host paths."""
+    source = tmp_path / "unreadable.py"
+    source.write_text("x = 1", encoding="utf-8")
+    marker = "private-credential-canary"
+    original_open = builtins.open
+
+    def deny_read(path, *args, **kwargs):
+        if os.fspath(path) == str(source) and args and args[0] == "rb":
+            raise OSError(marker)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", deny_read)
+    manifest = build_manifest(str(tmp_path), "https://github.com/org/repo", "a" * 40)
+    assert manifest.analysis_scope.truncated
+    assert manifest.analysis_scope.reason == "source_file_read_or_parse_error"
+    assert manifest.files[0].skipped_reason == "source_file_read_or_parse_error"
+    assert marker not in manifest.model_dump_json()
+
+
+def test_manifest_walker_error_is_reported_as_incomplete(tmp_path, monkeypatch):
+    """Unreadable directories cannot silently disappear from coverage."""
+    import app.ingestion.manifest as manifest_module
+
+    def failed_walk(root, *, topdown, followlinks, onerror):
+        assert onerror is not None
+        onerror(OSError("internal-directory-canary"))
+        yield str(tmp_path), [], []
+
+    monkeypatch.setattr(manifest_module.os, "walk", failed_walk)
+    manifest = build_manifest(str(tmp_path), "https://github.com/org/repo", "a" * 40)
+    assert manifest.analysis_scope.truncated
+    assert manifest.analysis_scope.reason == "source_directory_unreadable"
+    assert "internal-directory-canary" not in manifest.model_dump_json()

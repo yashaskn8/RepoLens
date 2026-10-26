@@ -102,8 +102,16 @@ def build_manifest(
     max_total_source_bytes = getattr(settings, "MAX_TOTAL_SOURCE_BYTES", 52_428_800)
     resolved_repo_root = os.path.realpath(os.path.abspath(repo_dir))
 
-    # 1. Walk directory tree safely
-    for root, dirs, files in os.walk(resolved_repo_root, topdown=True, followlinks=False):
+    # 1. Walk directory tree safely. By default, os.walk silently omits
+    # unreadable subdirectories, which would make incomplete findings appear clean.
+    def on_walk_error(_exc: OSError) -> None:
+        nonlocal is_truncated, truncation_reason
+        is_truncated = True
+        truncation_reason = truncation_reason or "source_directory_unreadable"
+
+    for root, dirs, files in os.walk(
+        resolved_repo_root, topdown=True, followlinks=False, onerror=on_walk_error
+    ):
         # Prune ignored directories in place
         safe_dirs = []
         for dirname in dirs:
@@ -123,6 +131,10 @@ def build_manifest(
             abs_path = os.path.join(root, filename)
             rel_path = os.path.relpath(abs_path, resolved_repo_root).replace("\\", "/")
             total_observed_files += 1
+            if total_observed_files > max_files:
+                is_truncated = True
+                truncation_reason = truncation_reason or f"exceeded_max_repo_files ({max_files})"
+                break
 
             # Never stat/open a repository-provided link. Even an in-root link
             # can change what a manifest path means between ingestion and use.
@@ -172,6 +184,8 @@ def build_manifest(
 
                 # Skip individual oversized files
                 if file_size > max_file_size:
+                    is_truncated = True
+                    truncation_reason = truncation_reason or "source_file_exceeds_max_size"
                     file_entries.append(
                         FileEntry(
                             path=rel_path,
@@ -191,6 +205,8 @@ def build_manifest(
                 # authority. Bound the read itself and fail closed on a
                 # concurrent file replacement/resize.
                 if len(content_bytes) > max_file_size:
+                    is_truncated = True
+                    truncation_reason = truncation_reason or "source_file_exceeds_max_size"
                     file_entries.append(
                         FileEntry(
                             path=rel_path,
@@ -202,6 +218,8 @@ def build_manifest(
                     )
                     continue
                 if len(content_bytes) != file_size:
+                    is_truncated = True
+                    truncation_reason = truncation_reason or "source_file_changed_during_read"
                     file_entries.append(
                         FileEntry(
                             path=rel_path,
@@ -253,14 +271,18 @@ def build_manifest(
                 processed_source_bytes += len(content_bytes)
                 processed_files_count += 1
 
-            except Exception as exc:
+            except Exception:
+                # Preserve evidence that this source file was not inspected,
+                # but never reflect filesystem/provider exception text in findings.
+                is_truncated = True
+                truncation_reason = truncation_reason or "source_file_read_or_parse_error"
                 file_entries.append(
                     FileEntry(
                         path=rel_path,
                         language=None,
                         size_bytes=0,
                         lines_count=0,
-                        skipped_reason=f"read_error: {str(exc)}",
+                        skipped_reason="source_file_read_or_parse_error",
                     )
                 )
 
