@@ -1469,7 +1469,7 @@ async def test_repo_read_file_inner_error_hides_windows_drive_path(mcp_server_fi
     """Verify that Windows drive letters and private paths are completely masked on file read error."""
     windows_err = PermissionError("D:\\Private\\Repositories\\RepoLens\\secret.py: Access is denied")
 
-    with patch("builtins.open", side_effect=windows_err):
+    with patch("app.mcp.server.os.open", side_effect=windows_err):
         res = await mcp_server_fixture.call_tool("repo_read_file", {"file_path": "main.py"})
 
     assert res.is_error is True
@@ -1486,7 +1486,7 @@ async def test_repo_read_file_inner_error_hides_linux_path(mcp_server_fixture):
     """Verify that Linux-style private paths are completely masked on file read error."""
     linux_err = OSError("/opt/private/repos/repolens/secret.py: I/O error 5")
 
-    with patch("builtins.open", side_effect=linux_err):
+    with patch("app.mcp.server.os.open", side_effect=linux_err):
         res = await mcp_server_fixture.call_tool("repo_read_file", {"file_path": "main.py"})
 
     assert res.is_error is True
@@ -1499,7 +1499,7 @@ async def test_repo_read_file_inner_error_hides_token_and_path(mcp_server_fixtur
     """Verify that exceptions containing secret API tokens and paths expose strictly generic error."""
     token_err = Exception("Auth failed for key Bearer eyJhbGciOiJIUzI1NiIsIn... on /mnt/data/secrets.env")
 
-    with patch("builtins.open", side_effect=token_err):
+    with patch("app.mcp.server.os.open", side_effect=token_err):
         res = await mcp_server_fixture.call_tool("repo_read_file", {"file_path": "main.py"})
 
     assert res.is_error is True

@@ -637,7 +637,9 @@ class MCPRepositoryServer:
                 matched_calls = [
                     c.model_dump() for c in calls
                     if normalize_route_path(c.details.get("url") or c.details.get("target", "")) == norm_path
-                    and str(c.details.get("http_method") or "").upper() == method
+                    # A bare fetch(url) is GET; use the same default as
+                    # the canonical contract matcher, never an unknown method.
+                    and str(c.details.get("http_method") or "GET").upper() == method
                 ]
 
                 backend_total = len(matched_routes)
