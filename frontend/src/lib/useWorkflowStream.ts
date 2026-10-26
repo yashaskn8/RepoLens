@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { WORKFLOW_EVENT_TYPES, WorkflowEvent, WorkflowEventType } from '@/types/domain';
 import { getApiBaseUrl } from '@/lib/api';
 import { WorkflowRetryBudget } from '@/lib/workflowRetry';
+import { isNewWorkflowEvent } from '@/lib/workflowEvent';
 
 export type StreamStatus = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'completed' | 'error';
 
@@ -65,12 +66,11 @@ export function useWorkflowStream(
 
       try {
         const parsed = JSON.parse(messageEvent.data) as WorkflowEvent;
-        if (parsed && typeof parsed.id === 'number') {
-          if (parsed.id > lastEventIdRef.current) {
-            lastEventIdRef.current = parsed.id;
-            // Only new persisted progress proves the connection is healthy.
-            retryBudget.recordProgress();
-          }
+        if (isNewWorkflowEvent(parsed, lastEventIdRef.current)) {
+          lastEventIdRef.current = parsed.id;
+          // Old/replayed/malformed event IDs must not reset retries or
+          // trigger terminal state transitions after an SSE reconnect.
+          retryBudget.recordProgress();
 
           setEvents((prev) => {
             if (prev.some((e) => e.id === parsed.id)) {
@@ -127,7 +127,7 @@ export function useWorkflowStream(
 
 
       es.onopen = () => {
-        if (!isMounted) return;
+        if (!isMounted || eventSourceRef.current !== es) return;
         setStatus('connected');
       };
 
@@ -140,7 +140,9 @@ export function useWorkflowStream(
       });
 
       es.onerror = () => {
-        if (!isMounted) return;
+        // A closed/obsolete EventSource may still deliver a queued error.
+        // Only the active socket can spend the bounded retry budget.
+        if (!isMounted || eventSourceRef.current !== es) return;
 
         es.close();
         if (eventSourceRef.current === es) {
