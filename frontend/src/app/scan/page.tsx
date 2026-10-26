@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, Suspense, useSyncExternalStore } from 'react';
+import React, { useState, useEffect, useRef, Suspense, useSyncExternalStore } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { AppShell } from '@/components/layout/AppShell';
@@ -90,7 +90,9 @@ function getFriendlyEventLabel(eventType: string): string {
 function ScanWorkspaceContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { isAuthenticated, isLoading: isAuthLoading } = useAuth();
+  const { user, isAuthenticated, isLoading: isAuthLoading } = useAuth();
+  const accountId = user?.id ?? null;
+  const scanRequestGeneration = useRef(0);
   // This component can hydrate after the auth provider has already refreshed.
   // Keep its server and first client render identical, then reveal session-aware
   // controls once hydration is complete.
@@ -119,10 +121,14 @@ function ScanWorkspaceContent() {
   useEffect(() => {
     let cancelled = false;
     if (isAuthLoading) return () => { cancelled = true; };
-    if (!isAuthenticated) {
-      setRecentScans([]);
-      return () => { cancelled = true; };
-    }
+    // Invalidate in-flight submissions and remove the previous tenant's scan
+    // immediately, before fetching the next account's history.
+    scanRequestGeneration.current += 1;
+    setActiveScan(null);
+    setRecentScans([]);
+    setError(null);
+    setIsSubmitting(false);
+    if (!accountId) return () => { cancelled = true; };
 
     void listScans(10)
       .then((scans) => {
@@ -132,7 +138,7 @@ function ScanWorkspaceContent() {
         if (!cancelled) setRecentScans([]);
       });
     return () => { cancelled = true; };
-  }, [isAuthenticated, isAuthLoading]);
+  }, [accountId, isAuthLoading]);
 
   // Sequential, cancel-safe polling avoids stale responses regressing terminal
   // status or replacing the scan selected after this request started.
@@ -185,6 +191,7 @@ function ScanWorkspaceContent() {
       return;
     }
 
+    const generation = ++scanRequestGeneration.current;
     setError(null);
     setIsSubmitting(true);
 
@@ -193,6 +200,7 @@ function ScanWorkspaceContent() {
         repository_url: repoUrl,
         branch: branch || 'main',
       });
+      if (generation !== scanRequestGeneration.current) return;
       setActiveScan(scanResult);
 
       setRecentScans((current) => [
@@ -200,13 +208,14 @@ function ScanWorkspaceContent() {
         ...current.filter((scan) => scan.id !== scanResult.id),
       ].slice(0, 10));
     } catch (err: unknown) {
+      if (generation !== scanRequestGeneration.current) return;
       if (err instanceof Error) {
         setError(err.message);
       } else {
         setError('Failed to initiate repository scan.');
       }
     } finally {
-      setIsSubmitting(false);
+      if (generation === scanRequestGeneration.current) setIsSubmitting(false);
     }
   };
 
