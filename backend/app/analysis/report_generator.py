@@ -102,6 +102,8 @@ def _render_markdown_report(
     is_llm_fallback: bool = False,
     has_review_data: bool = False,
     invalid_review_count: int = 0,
+    ast_recorded: bool = False,
+    graph_recorded: bool = False,
 ) -> str:
     """Render deterministic, rich GitHub Flavored Markdown Change Analysis Report."""
     meta = analysis.model_metadata or {}
@@ -228,8 +230,16 @@ def _render_markdown_report(
     lines.append("")
     lines.append("| Engine / Capability | Availability | Mode |")
     lines.append("| :--- | :--- | :--- |")
-    lines.append("| **Tree-sitter AST Parser** | ✅ Available | Deterministic Structural Facts |")
-    lines.append("| **Repository Graph Traversal** | ✅ Available | Bounded Blast Radius Traversal |")
+    lines.append(
+        "| **Tree-sitter AST Parser** | "
+        + ("✅ Evidence Recorded" if ast_recorded else "⚠️ Execution Not Attested")
+        + " | Deterministic Structural Facts |"
+    )
+    lines.append(
+        "| **Repository Graph Traversal** | "
+        + ("✅ Evidence Recorded" if graph_recorded else "⚠️ Execution Not Attested")
+        + " | Bounded Blast Radius Traversal |"
+    )
     lines.append("| **Static Security Scanners** | ℹ️ Not Executed | Dedicated Scan Phase Only |")
 
     if not has_review_data:
@@ -306,7 +316,15 @@ def generate_change_analysis_report(model: ChangeAnalysisModel) -> ChangeAnalysi
     pr_title = meta.get("pr_title")
 
     # Extract deltas from diff_result if available
-    diff_data = meta.get("diff_result") or {}
+    raw_diff = meta.get("diff_result")
+    diff_data = raw_diff if isinstance(raw_diff, dict) else {}
+    ast_recorded = (
+        isinstance(raw_diff, dict)
+        and isinstance(raw_diff.get("base_commit_sha"), str)
+        and isinstance(raw_diff.get("head_commit_sha"), str)
+    )
+    raw_blast = meta.get("blast_radius")
+    graph_recorded = isinstance(raw_blast, dict) and bool(raw_blast)
     route_deltas = [RouteContractDelta(**r) for r in diff_data.get("route_deltas", [])]
     schema_deltas = [SchemaModelDelta(**s) for s in diff_data.get("schema_deltas", [])]
     dependency_deltas = [DependencyDelta(**d) for d in diff_data.get("dependency_deltas", [])]
@@ -402,11 +420,13 @@ def generate_change_analysis_report(model: ChangeAnalysisModel) -> ChangeAnalysi
         is_llm_fallback=is_llm_fallback,
         has_review_data=bool(raw_review),
         invalid_review_count=invalid_review_count,
+        ast_recorded=ast_recorded,
+        graph_recorded=graph_recorded,
     )
 
     tool_avail = {
-        "tree_sitter_ast": True,
-        "repository_graph": True,
+        "tree_sitter_ast": ast_recorded,
+        "repository_graph": graph_recorded,
         "semgrep_scanner": False,
         "osv_scanner": False,
         "llm_reviewer": bool(raw_review and not is_llm_fallback and llm_status == "SUCCESS"),

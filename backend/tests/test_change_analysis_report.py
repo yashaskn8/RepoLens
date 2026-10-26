@@ -334,3 +334,23 @@ def test_nonarray_review_findings_are_marked_incomplete(sample_completed_analysi
     assert report.review_findings == []
     assert "Incomplete Review Evidence" in report.markdown_report
     assert "omitted" in report.markdown_report
+
+
+def test_report_never_claims_graph_analysis_when_no_graph_artifact_exists(
+    sample_completed_analysis,
+):
+    report = generate_change_analysis_report(sample_completed_analysis)
+    assert report.tool_availability["tree_sitter_ast"] is True
+    assert report.tool_availability["repository_graph"] is False
+    assert "| **Repository Graph Traversal** | ⚠️ Execution Not Attested" in report.markdown_report
+    assert "| **Tree-sitter AST Parser** | ✅ Evidence Recorded" in report.markdown_report
+
+
+def test_report_degrades_safely_when_diff_metadata_is_malformed(
+    sample_completed_analysis,
+):
+    sample_completed_analysis.model_metadata["diff_result"] = "invalid persisted diff"
+    report = generate_change_analysis_report(sample_completed_analysis)
+    assert report.tool_availability["tree_sitter_ast"] is False
+    assert report.route_deltas == []
+    assert "| **Tree-sitter AST Parser** | ⚠️ Execution Not Attested" in report.markdown_report
