@@ -63,3 +63,15 @@ def test_public_health_does_not_log_database_connection_secret(caplog):
     assert response["status"] == "degraded"
     assert canary not in caplog.text
     assert "private-password" not in caplog.text
+
+
+def test_telemetry_uses_configured_sqlite_checkpoint_directory(client, monkeypatch, tmp_path):
+    """Do not report writable checkpoints by checking a nonexistent default path."""
+    from app.api.routes import health
+
+    missing_dir = tmp_path / "missing-checkpoint-volume"
+    monkeypatch.setattr(health.settings, "CHECKPOINT_DB_FILE", str(missing_dir / "checkpoints.db"))
+
+    response = client.get("/health/telemetry")
+    assert response.status_code == 200
+    assert response.json()["storage"]["checkpointer_storage_accessible"] is False

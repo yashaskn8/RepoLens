@@ -179,7 +179,7 @@ def _build_telemetry_report(db: Session) -> TelemetryReport:
     # 3. Storage filesystem capability (booleans only, no host paths)
     temp_dir = tempfile.gettempdir()
     snapshot_writable = os.access(temp_dir, os.W_OK)
-    checkpointer_path = getattr(settings, "CHECKPOINTER_DB_PATH", "repolens_checkpoints.db")
+    checkpointer_path = settings.CHECKPOINT_DB_FILE
     checkpointer_dir = os.path.dirname(os.path.abspath(checkpointer_path)) or "."
     checkpointer_accessible = os.access(checkpointer_dir, os.W_OK)
 
