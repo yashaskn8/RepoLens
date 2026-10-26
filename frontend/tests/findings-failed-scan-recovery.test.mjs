@@ -121,3 +121,11 @@ test('retry does not overlap older-scan pagination', async () => {
   await ctx.retry();
   assert.equal(calls, 0);
 });
+
+test('findings explorer TSX parses and scopes errors to the active account', () => {
+  const parsed = ts.createSourceFile('page.tsx', pageSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  assert.deepEqual(parsed.parseDiagnostics.map((diagnostic) => diagnostic.messageText), []);
+  assert.match(pageSource, /accountId && loadedForAccount === accountId && error/);
+  assert.match(pageSource, /missingEvidenceCount > 0 \? 'Some scan findings are unavailable'/);
+  assert.match(pageSource, /onClick=\{\(\) => void retryFailedFindings\(\)\}/);
+});
