@@ -1058,3 +1058,23 @@ def test_projection_amplification_rolls_back_incomplete_facts(indexed_repository
     assert db.scalar(select(func.count()).select_from(IndexProjectionModel)) == 0
     assert index.stats["extraction_partial"]
     assert not manifest.analysis_scope.truncated
+
+def test_immutable_index_rejects_undecodable_blob_without_dropping_source_bytes():
+    from app.ingestion.git_inventory import InventoryBound
+    from app.indexing.persistent import decode_indexed_source
+
+    with pytest.raises(InventoryBound, match="projection_source_encoding_invalid"):
+        decode_indexed_source(b"safe = True\\n\\xff")
+    assert decode_indexed_source(b"safe = True\\n") == "safe = True\\n"
+
+
+def test_projection_facts_reject_invalid_utf8_instead_of_indexing_changed_text():
+    from app.ingestion.git_inventory import InventoryBound
+    from app.ingestion.schemas import FileEntry
+    from app.indexing.facts import persist_facts
+
+    indexed = SimpleNamespace(repository_url="https://github.com/example/repo")
+    projection = SimpleNamespace(id="projection", payload={"component": {"component_id": "x"}})
+    entry = FileEntry(path="src/main.py", language="python", size_bytes=1, lines_count=1)
+    with pytest.raises(InventoryBound, match="projection_source_encoding_invalid"):
+        persist_facts(indexed, projection, entry, bytes([255]))

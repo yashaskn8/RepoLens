@@ -34,6 +34,14 @@ def identity(*values: str) -> str:
     return hashlib.sha256(json.dumps(values, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
 
+def decode_indexed_source(source: bytes) -> str:
+    """Do not silently transform attested Git bytes into different source text."""
+    try:
+        return source.decode("utf-8")
+    except UnicodeDecodeError:
+        raise InventoryBound("projection_source_encoding_invalid") from None
+
+
 class ProjectionRedactionMemo:
     """Bound repeated canonical redaction to one projected source object."""
 
@@ -728,7 +736,7 @@ class PersistentIndex:
         if hashlib.sha256(payload).hexdigest() != projection.content_hash:
             raise InventoryBound("source_projection_digest_mismatch")
         return chunk_file(FileEntry.model_validate(projection.payload["file"]), self.commit_sha,
-                          payload.decode("utf-8", errors="ignore"))
+                          decode_indexed_source(payload))
 
     def load_chunk(self, chunk_id: str) -> CodeChunk | None:
         from app.models.intelligence import IndexFactModel
@@ -747,7 +755,7 @@ class PersistentIndex:
         if hashlib.sha256(source).hexdigest() != projection.content_hash:
             raise InventoryBound("source_projection_digest_mismatch")
         payload = fact.payload
-        lines = source.decode("utf-8", errors="ignore").split("\n")
+        lines = decode_indexed_source(source).split("\n")
         content = "\n".join(lines[payload["start_line"] - 1:payload["end_line"]])
         from app.indexing.schemas import content_hash
         if content_hash(content) != payload["content_hash"]:

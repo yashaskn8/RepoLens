@@ -43,7 +43,7 @@ def _behavior_value(value):
 def persist_facts(index, projection, file, source: bytes, *, redactor=None) -> dict:
     """Runs once per compatible projection, with bounded amplification."""
     from app.specialist_candidates import build_bug_candidates, build_security_flow_candidates
-    from app.indexing.persistent import ProjectionRedactionMemo, redact_projection
+    from app.indexing.persistent import ProjectionRedactionMemo, redact_projection, decode_indexed_source
     from app.ingestion.git_inventory import InventoryBound
     redactor = redactor or ProjectionRedactionMemo()
     redact = redactor.redact_text
@@ -58,7 +58,8 @@ def persist_facts(index, projection, file, source: bytes, *, redactor=None) -> d
             raise InventoryBound("projection_fact_byte_limit")
         rows.append(row)
     manifest = RepositoryManifest(repository_url=index.repository_url, commit_hash=ZERO_REVISION, files=[file])
-    chunks = chunk_file(file, ZERO_REVISION, source.decode("utf-8", errors="ignore"),
+    source_text = decode_indexed_source(source)
+    chunks = chunk_file(file, ZERO_REVISION, source_text,
         max_chunks=MAX_FILE_CHUNKS + 1, max_content_bytes=index.limits.max_projection_bytes)
     from app.indexing.chunker import _CHUNKABLE_KINDS
     truncated = len(chunks) > MAX_FILE_CHUNKS or sum(s.kind in _CHUNKABLE_KINDS for s in file.symbols) > len(chunks)
@@ -80,7 +81,7 @@ def persist_facts(index, projection, file, source: bytes, *, redactor=None) -> d
     from app.graph.imports import import_paths
     from app.indexing.schemas import CodeChunk, ChunkSymbolKind, content_hash
     from app.ingestion.schemas import SymbolKind
-    lines = source.decode("utf-8", errors="ignore").split("\n")
+    lines = source_text.split("\n")
     import_targets = {}
     import_spans = set()
     imports = [symbol for symbol in file.symbols if symbol.kind == SymbolKind.IMPORT]
