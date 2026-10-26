@@ -144,3 +144,46 @@ def test_evidence_store_summary_aggregation(sample_evidence_store):
     assert summary["findings_by_severity"][Severity.CRITICAL.value] == 1
     assert summary["findings_by_severity"][Severity.HIGH.value] == 1
     assert summary["scanners_executed"]["semgrep"] == ToolStatus.COMPLETED.value
+
+
+def test_evidence_store_replacing_scanner_results_does_not_duplicate_findings(
+    sample_evidence_store,
+):
+    """Repeated successful scanner updates must not double-count one finding."""
+    old_result = sample_evidence_store.scanner_results["semgrep"]
+    sample_evidence_store.add_scanner_result(old_result)
+    sample_evidence_store.add_scanner_result(old_result)
+
+    matches = sample_evidence_store.get_findings(tool="semgrep")
+    assert len(matches) == 1
+    assert sample_evidence_store.get_summary()["total_findings"] == 2
+
+
+def test_evidence_store_removes_stale_findings_when_scanner_becomes_unavailable(
+    sample_evidence_store,
+):
+    """A failed rerun cannot leave earlier Semgrep findings presented as current."""
+    sample_evidence_store.add_scanner_result(
+        ScannerResult(
+            tool="semgrep",
+            status=ToolStatus.UNAVAILABLE,
+            error_message="Scanner boundary unavailable",
+        )
+    )
+    assert sample_evidence_store.get_findings(tool="semgrep") == []
+    assert len(sample_evidence_store.get_findings(tool="trivy")) == 1
+    assert sample_evidence_store.get_summary()["total_findings"] == 1
+    assert sample_evidence_store.get_summary()["scanners_executed"]["semgrep"] == "UNAVAILABLE"
+
+
+def test_evidence_store_replacement_uses_only_latest_successful_result(
+    sample_evidence_store,
+):
+    """A recovered scanner replaces, rather than merges, its old result."""
+    old_result = sample_evidence_store.scanner_results["semgrep"]
+    sample_evidence_store.add_scanner_result(
+        ScannerResult(tool="semgrep", status=ToolStatus.COMPLETED, findings=[])
+    )
+    assert sample_evidence_store.get_findings(tool="semgrep") == []
+    sample_evidence_store.add_scanner_result(old_result)
+    assert len(sample_evidence_store.get_findings(tool="semgrep")) == 1

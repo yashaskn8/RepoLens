@@ -22,14 +22,7 @@ class EvidenceStore:
         self.persistent_index = None
         self.scanner_results: Dict[str, ScannerResult] = scanner_results or {}
         self._findings: List[StaticFinding] = []
-
-        # Flatten and index all static findings
-        for result in self.scanner_results.values():
-            if result.status == ToolStatus.COMPLETED and result.tool != "chainbrain":
-                # ChainBrain flags unverified package-risk signals. They must
-                # not become confirmed SAST findings or influence downstream
-                # agent candidate ranking.
-                self._findings.extend(result.findings)
+        self._refresh_findings()
 
         # Index files by normalized path
         self._files_by_path: Dict[str, FileEntry] = {
@@ -41,11 +34,19 @@ class EvidenceStore:
         """All normalized static findings collected across all scanners."""
         return self._findings
 
+    def _refresh_findings(self) -> None:
+        """Index only findings from the latest completed result for each tool."""
+        self._findings = [
+            finding
+            for result in self.scanner_results.values()
+            if result.status == ToolStatus.COMPLETED and result.tool != "chainbrain"
+            for finding in result.findings
+        ]
+
     def add_scanner_result(self, result: ScannerResult) -> None:
-        """Add or update a scanner result in the evidence store."""
+        """Replace a scanner result without retaining stale findings on reruns."""
         self.scanner_results[result.tool] = result
-        if result.status == ToolStatus.COMPLETED and result.tool != "chainbrain":
-            self._findings.extend(result.findings)
+        self._refresh_findings()
 
     def get_findings(
         self,
