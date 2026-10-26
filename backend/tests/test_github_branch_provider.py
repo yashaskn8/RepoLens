@@ -13,6 +13,7 @@ from app.delivery.schemas import GitHubAPIError
     "feature@{old}",
     "main?access_token=secret",
     "main#fragment",
+    "release%2Fother",
     "-option",
     "bad\\backslash",
     "bad\nref",

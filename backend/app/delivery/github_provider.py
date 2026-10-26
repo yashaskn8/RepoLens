@@ -89,7 +89,9 @@ class GitHubDeliveryProvider(RepositoryDeliveryProvider):
     def _checked_branch_ref(branch: str) -> str:
         """Validate refs before creating an outbound credentialed GitHub request."""
         try:
-            if not isinstance(branch, str):
+            if not isinstance(branch, str) or any(char in branch for char in ("#", "%")):
+                # Git permits fragments/percent signs in refs, but these can
+                # be reinterpreted as URL syntax or encoded path components.
                 raise IngestionError("Invalid Git branch name.")
             # Remove only one conventional prefix, never every occurrence
             # within a legitimate nested branch name.
