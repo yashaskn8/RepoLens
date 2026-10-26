@@ -107,6 +107,7 @@ export function RepositoryScanWorkspace({
     scanSubmissionPendingRef.current = true;
 
     const generation = ++scanGenerationRef.current;
+    let scanStillRunning = false;
     setErrorMsg(null);
     setIsSubmitting(true);
     setActiveScan(null);
@@ -120,13 +121,17 @@ export function RepositoryScanWorkspace({
         repository_url: repoUrl.trim(),
         branch: branch.trim() || 'main',
       });
-      if (generation === scanGenerationRef.current) setActiveScan(scan);
+      if (generation === scanGenerationRef.current) {
+        // Keep the synchronous guard until React observes the running scan.
+        scanStillRunning = scan.status === 'PENDING' || scan.status === 'RUNNING';
+        setActiveScan(scan);
+      }
     } catch (err: unknown) {
       if (generation === scanGenerationRef.current) {
         setErrorMsg(err instanceof Error ? err.message : 'Failed to initiate scan.');
       }
     } finally {
-      scanSubmissionPendingRef.current = false;
+      scanSubmissionPendingRef.current = scanStillRunning;
       if (generation === scanGenerationRef.current) setIsSubmitting(false);
     }
   };
@@ -134,6 +139,11 @@ export function RepositoryScanWorkspace({
   const isScanRunning = Boolean(
     activeScan && (activeScan.status === 'PENDING' || activeScan.status === 'RUNNING')
   );
+
+  useEffect(() => {
+    // A terminal scan releases the guard; another scan may then be requested.
+    if (!isScanRunning) scanSubmissionPendingRef.current = false;
+  }, [isScanRunning]);
 
   return (
     <div className="page-view-enter">
