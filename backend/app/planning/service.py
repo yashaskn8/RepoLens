@@ -66,6 +66,8 @@ class FixPlanningService:
         max_concurrent: int = 3,
     ) -> List[FixPlan]:
         """Execute bounded concurrent fix planning across multiple confirmed findings."""
+        if not isinstance(max_concurrent, int) or isinstance(max_concurrent, bool) or max_concurrent < 1:
+            raise ValueError("max_concurrent must be a positive integer")
         sem = asyncio.Semaphore(max_concurrent)
 
         async def _bounded_plan(f: Finding) -> FixPlan:

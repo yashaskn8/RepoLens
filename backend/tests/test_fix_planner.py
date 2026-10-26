@@ -606,3 +606,16 @@ async def test_fix_planner_ignores_model_supplied_finding_identity_and_validatio
     )
     assert plan.finding_id == finding.id
     assert plan.validation_report.is_valid
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_concurrent", [0, -1, None])
+async def test_batch_planning_rejects_zero_or_invalid_concurrency(max_concurrent):
+    """A zero-capacity semaphore must not deadlock the remediation workflow."""
+    service = FixPlanningService(agent=AsyncMock())
+    with pytest.raises(ValueError, match="positive integer"):
+        await service.batch_plan_fixes(
+            findings=[],
+            context_engine=AsyncMock(),
+            max_concurrent=max_concurrent,
+        )
