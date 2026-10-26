@@ -175,6 +175,29 @@ def match_route_contract(
             )
             continue
 
+        # Unknown methods (e.g. fetch(url, {method: runtimeValue})) cannot
+        # prove either compatibility or a definite method mismatch. Preserve
+        # candidate provenance while marking the result ambiguous.
+        if req_method == "UNKNOWN":
+            report.ambiguous_count += 1
+            report.matches.append(
+                RouteContractMatch(
+                    frontend_request_id=req.id,
+                    frontend_method=req_method,
+                    frontend_url=raw_url,
+                    frontend_file=req_file,
+                    frontend_line=req_line,
+                    status=ContractMatchStatus.AMBIGUOUS_MATCH,
+                    matched_route_ids=[route.id for route in candidate_routes],
+                    matched_backend_paths=[route.metadata.get("path", "") for route in candidate_routes],
+                    matched_backend_methods=[
+                        str(route.metadata.get("http_method", "")) for route in candidate_routes
+                    ],
+                    details="Client HTTP method is dynamic or unresolved; route compatibility cannot be confirmed.",
+                )
+            )
+            continue
+
         # Check HTTP method match among candidates
         exact_method_matches = [
             r for r in candidate_routes

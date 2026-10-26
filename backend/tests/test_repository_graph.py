@@ -352,3 +352,26 @@ def test_cross_layer_path_case_does_not_create_false_contract_match():
     assert result.matched_count == 0
     assert result.unmatched_count == 1
     assert result.matches[0].status == ContractMatchStatus.UNMATCHED_FRONTEND_REQUEST
+
+
+def test_unresolved_client_method_is_ambiguous_not_a_confirmed_mismatch():
+    """Dynamic request methods cannot be labeled incompatible without evidence."""
+    backend = GraphNode(
+        id="route:get:items",
+        kind=NodeKind.ROUTE,
+        label="GET /api/items",
+        metadata={"http_method": "GET", "path": "/api/items"},
+    )
+    frontend = GraphNode(
+        id="request:dynamic:items",
+        kind=NodeKind.FRONTEND_REQUEST,
+        label="fetch /api/items with runtime method",
+        file_path="src/client.ts",
+        metadata={"http_method": "UNKNOWN", "url": "/api/items"},
+    )
+    report = match_route_contract([frontend], [backend])
+    assert report.matched_count == 0
+    assert report.method_mismatch_count == 0
+    assert report.ambiguous_count == 1
+    assert report.matches[0].status == ContractMatchStatus.AMBIGUOUS_MATCH
+    assert report.matches[0].matched_route_ids == [backend.id]
