@@ -15,6 +15,8 @@ import {
   fetchDeliveryByPatch,
   fetchDeliveryPreview,
   fetchScanPatches,
+  fetchJobResult,
+  listJobs,
   rejectPatch,
   requestDelivery,
   requestFindingResearch,
@@ -29,6 +31,7 @@ import { HumanReviewControls } from './HumanReviewControls';
 import { DeliveryPreviewModal } from './DeliveryPreviewModal';
 import { Alert } from '@/components/ui/Alert';
 import { useAuth } from '@/context/AuthContext';
+import { findLatestRemediationJobs } from '@/lib/remediationHistory';
 
 export interface RemediationLifecycleProps {
   finding: Finding;
@@ -62,11 +65,15 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
   const [showDeliveryModal, setShowDeliveryModal] = useState<boolean>(false);
   const [deliveryNotes, setDeliveryNotes] = useState<string>('');
   const localPatchActionRef = useRef(false);
+  const researchActionRef = useRef(false);
+  const planActionRef = useRef(false);
 
   // Reset state whenever the selected finding changes. Do not carry a
   // previous finding's patch or delivery approval to another resource.
   useEffect(() => {
     localPatchActionRef.current = false;
+    researchActionRef.current = false;
+    planActionRef.current = false;
     setResearch(null);
     setPlan(null);
     setWorkflowResult(null);
@@ -106,12 +113,47 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
     return () => { active = false; };
   }, [finding.id, finding.scan_id, initialPatch?.id]);
 
+  // Restore previously completed research and planning artifacts from the
+  // tenant-owned durable jobs. Never replay provider work just to recover UI.
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const latest = await findLatestRemediationJobs(
+          finding.id, (cursor) => listJobs(100, cursor),
+        );
+        const [restoredResearch, restoredPlan] = await Promise.allSettled([
+          latest.research?.state === 'SUCCEEDED'
+            ? fetchJobResult<ResearchResult>(latest.research.id)
+            : Promise.resolve(null),
+          latest.plan?.state === 'SUCCEEDED'
+            ? fetchJobResult<FixPlan>(latest.plan.id)
+            : Promise.resolve(null),
+        ]);
+        if (!active) return;
+        if (restoredResearch.status === 'fulfilled' && restoredResearch.value && !researchActionRef.current) {
+          setResearch(restoredResearch.value);
+        }
+        if (restoredPlan.status === 'fulfilled' && restoredPlan.value && !planActionRef.current) {
+          setPlan(restoredPlan.value);
+        }
+        if (restoredResearch.status === 'rejected' || restoredPlan.status === 'rejected') {
+          setError('Some persisted remediation artifacts could not be restored.');
+        }
+      } catch {
+        if (active) setError('Remediation job history is unavailable or incomplete.');
+      }
+    })();
+    return () => { active = false; };
+  }, [finding.id]);
+
   // Step 1: Request Research
   const handleRequestResearch = async () => {
     try {
       setError(null);
       setLoadingStep('research');
       const res = await requestFindingResearch(finding.id);
+      researchActionRef.current = true;
       setResearch(res);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Research failed');
@@ -126,6 +168,7 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
       setError(null);
       setLoadingStep('plan');
       const res = await requestFixPlan(finding.id);
+      planActionRef.current = true;
       setPlan(res);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Fix plan generation failed');

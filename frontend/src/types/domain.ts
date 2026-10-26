@@ -487,6 +487,11 @@ export interface JobFailure {
   created_at: string;
 }
 
+export interface JobCollection {
+  items: JobResource[];
+  next_cursor?: string | null;
+}
+
 export interface JobResource {
   id: string;
   work_kind: string;

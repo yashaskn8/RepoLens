@@ -21,6 +21,7 @@ import {
   Finding,
   HealthResponse,
   JobResource,
+  JobCollection,
   PatchProposal,
   PatchRejectRequest,
   PatchResponse,
@@ -462,6 +463,14 @@ function isRemediationAccepted(value: unknown): value is RemediationAccepted {
       'job_id' in value &&
       typeof (value as RemediationAccepted).job_id === 'string'
   );
+}
+
+export async function listJobs(limit = 100, cursor?: string): Promise<JobCollection> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (cursor) params.set('cursor', cursor);
+  const response = await apiFetch(`/api/v1/jobs?${params.toString()}`, { cache: 'no-store' });
+  if (!response.ok) throw await apiErrorFromResponse(response, 'Failed to restore job history');
+  return response.json();
 }
 
 export async function fetchJob(jobId: string): Promise<JobResource> {
