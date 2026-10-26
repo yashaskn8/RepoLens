@@ -128,6 +128,9 @@ class OllamaAdapter(BaseLLMAdapter):
             prompt_tokens = self._nonnegative_int(data.get("prompt_eval_count"))
             completion_tokens = self._nonnegative_int(data.get("eval_count"))
         except Exception as exc:
+            # A responding local endpoint can still return unusable data.
+            # Treat repeated malformed replies as a provider outage.
+            self._begin_cooldown()
             raise LLMResponseValidationError(
                 "Ollama returned an invalid chat response.",
                 provider=self.provider,

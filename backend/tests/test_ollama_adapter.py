@@ -223,3 +223,21 @@ async def test_ollama_never_uses_ambient_proxy_for_loopback(monkeypatch) -> None
     assert response.content == "local reply"
     assert options["trust_env"] is False
     assert options["follow_redirects"] is False
+
+
+@pytest.mark.asyncio
+async def test_ollama_malformed_response_enters_cooldown() -> None:
+    from app.llm.exceptions import LLMResponseValidationError
+
+    adapter = OllamaAdapter(enabled=True, failure_cooldown_seconds=15)
+    reply = MagicMock(status_code=200)
+    reply.json.return_value = {"message": {}}
+    request = LLMRequest(messages=[LLMMessage(role="user", content="Summarize facts")])
+    with patch("httpx.AsyncClient.post", new=AsyncMock(return_value=reply)) as post:
+        with pytest.raises(LLMResponseValidationError):
+            await adapter.generate(request)
+        with pytest.raises(LLMError, match="failure cooldown"):
+            await adapter.generate(request)
+
+    assert post.await_count == 1
+
