@@ -29,6 +29,7 @@ import {
   startChangeAnalysisFromPR,
 } from '@/lib/api';
 import { useWorkflowStream } from '@/lib/useWorkflowStream';
+import { parseExactChangeCommits } from '@/lib/exactChangeCommits';
 import { Card } from '@/components/ui/Card';
 import { Alert } from '@/components/ui/Alert';
 import { Button } from '@/components/ui/Button';
@@ -63,6 +64,7 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
   // Active Analysis state
   const [activeAnalysis, setActiveAnalysis] = useState<ChangeAnalysisResponse | null>(null);
   const analysisGenerationRef = useRef(0);
+  const submitPendingRef = useRef(false);
   const [artifactError, setArtifactError] = useState<string | null>(null);
   const [isRetryingArtifacts, setIsRetryingArtifacts] = useState(false);
   const [artifactAvailability, setArtifactAvailability] = useState({
@@ -210,6 +212,17 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
 
   const handleStartAnalysis = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitPendingRef.current) return;
+    let exactCommits: ReturnType<typeof parseExactChangeCommits> | null = null;
+    if (inputMode === 'EXACT') {
+      try {
+        exactCommits = parseExactChangeCommits(baseSha, headSha);
+      } catch (err: unknown) {
+        setErrorMsg(err instanceof Error ? err.message : 'Enter two distinct exact commit SHAs.');
+        return;
+      }
+    }
+    submitPendingRef.current = true;
     const generation = ++analysisGenerationRef.current;
     setErrorMsg(null);
     setArtifactError(null);
@@ -235,13 +248,13 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
         }
         res = await startChangeAnalysisFromPR({ pr_url: prUrl.trim() });
       } else {
-        if (!repoUrl.trim() || !baseSha.trim() || !headSha.trim()) {
-          throw new Error('Repository URL, Base commit SHA, and Head commit SHA are all required.');
+        if (!repoUrl.trim()) {
+          throw new Error('Repository URL is required.');
         }
         res = await startChangeAnalysis({
           repository_url: repoUrl.trim(),
-          base_commit_sha: baseSha.trim(),
-          head_commit_sha: headSha.trim(),
+          base_commit_sha: exactCommits!.baseSha,
+          head_commit_sha: exactCommits!.headSha,
           base_ref: baseRef.trim() || undefined,
           head_ref: headRef.trim() || undefined,
         });
@@ -252,7 +265,10 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
         setErrorMsg(err instanceof Error ? err.message : 'Failed to initiate change analysis.');
       }
     } finally {
-      if (generation === analysisGenerationRef.current) setIsSubmitting(false);
+      if (generation === analysisGenerationRef.current) {
+        submitPendingRef.current = false;
+        setIsSubmitting(false);
+      }
     }
   };
 
