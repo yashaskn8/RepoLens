@@ -126,8 +126,8 @@ class GitHubPRResolver:
                 ) from exc
             elif status_code in (401, 403):
                 if "rate limit" in msg.lower():
-                    raise GitHubPRRateLimitError(f"GitHub API rate limit exceeded: {msg}") from exc
-                raise GitHubPRForbiddenError(f"Access to GitHub PR #{pr_number} on '{owner}/{repo}' forbidden: {msg}") from exc
+                    raise GitHubPRRateLimitError("GitHub API rate limit exceeded") from exc
+                raise GitHubPRForbiddenError(f"Access to GitHub PR #{pr_number} on '{owner}/{repo}' forbidden.") from exc
             elif status_code == 429:
                 raise GitHubPRRateLimitError("GitHub API rate limit exceeded") from exc
             elif status_code == 504:
@@ -138,10 +138,13 @@ class GitHubPRResolver:
                     status_code=status_code,
                 ) from exc
             else:
-                raise GitHubPRAPIError(f"GitHub API error: {msg}", status_code=status_code or 502) from exc
+                raise GitHubPRAPIError("GitHub API returned an unexpected error.", status_code=status_code or 502) from exc
         except Exception as exc:
-            logger.error(f"Network error resolving GitHub PR {owner}/{repo}#{pr_number}: {str(exc)}")
-            raise GitHubPRAPIError(f"Network error communicating with GitHub API: {str(exc)}") from exc
+            logger.error(
+                "Network error resolving GitHub PR %s/%s#%s (%s).",
+                owner, repo, pr_number, type(exc).__name__,
+            )
+            raise GitHubPRAPIError("Network error communicating with GitHub API.") from exc
 
         if not isinstance(data, dict):
             raise GitHubPRAPIError(f"Malformed non-dictionary response returned by GitHub API for PR #{pr_number}")

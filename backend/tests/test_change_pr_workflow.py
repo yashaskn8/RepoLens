@@ -414,3 +414,26 @@ def test_missing_review_and_diff_evidence_fail_closed(client: TestClient, db_ses
     assert review.json()["detail"]["error_code"] == "CHANGE_REVIEW_UNAVAILABLE"
     assert diff.status_code == 409
     assert diff.json()["detail"]["error_code"] == "CHANGE_DIFF_UNAVAILABLE"
+
+@pytest.mark.asyncio
+async def test_pr_provider_failures_do_not_expose_secret_bearing_exception_text(caplog):
+    """Network and HTTP provider diagnostics can contain credential-bearing URLs."""
+    from unittest.mock import AsyncMock
+    from app.delivery.schemas import GitHubAPIError
+
+    canary = "ghp_example-secret-credential"
+    pr_url = "https://github.com/owner/repo/pull/7"
+    fake_transport = type("FakeTransport", (), {})()
+    fake_transport.request = AsyncMock(side_effect=RuntimeError(canary))
+    resolver = GitHubPRResolver(transport=fake_transport)
+
+    with pytest.raises(GitHubPRAPIError) as exc:
+        await resolver.resolve_pr(pr_url)
+    assert canary not in str(exc.value)
+    assert canary not in caplog.text
+
+    fake_transport.request = AsyncMock(side_effect=GitHubAPIError(canary, status_code=403))
+    resolver = GitHubPRResolver(transport=fake_transport)
+    with pytest.raises(GitHubPRForbiddenError) as exc:
+        await resolver.resolve_pr(pr_url)
+    assert canary not in str(exc.value)
