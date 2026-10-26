@@ -147,6 +147,8 @@ class RetrievalService:
     def _search_exact(self, query: str) -> List[Tuple[str, float]]:
         """Find exact or prefix matches against symbol names and file paths."""
         q_clean = query.strip().lower()
+        if not q_clean:
+            return []
         if self.persistent_index is not None:
             from app.indexing.facts import chunk_id
             from app.models.intelligence import IndexFactModel

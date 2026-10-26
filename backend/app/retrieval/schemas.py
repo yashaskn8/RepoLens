@@ -2,7 +2,7 @@
 
 from enum import Enum
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.indexing.schemas import CodeChunk
 
@@ -20,6 +20,13 @@ class RetrievalQuery(BaseModel):
     """Query parameter payload for RetrievalService."""
 
     query: str = Field(..., min_length=1, description="Natural language or code search query")
+    @field_validator("query")
+    @classmethod
+    def reject_empty_search_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Retrieval query must contain non-whitespace text.")
+        return value
+
     top_k: int = Field(default=10, ge=1, le=100, description="Maximum number of fused results to return")
     use_reranker: bool = Field(default=True, description="Whether to apply neural reranking if available")
     analysis_intent: str = Field(
