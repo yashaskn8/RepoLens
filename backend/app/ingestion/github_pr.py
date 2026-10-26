@@ -17,6 +17,7 @@ import httpx
 
 from app.core.config import Settings, get_settings
 from app.delivery.github_client import GitHubAPIError, GitHubHttpTransport
+from app.ingestion.clone import InvalidRepositoryURLError, validate_github_url
 from app.schemas.change_analysis import ResolvedPullRequest, _normalize_and_validate_github_pr_url
 
 logger = logging.getLogger(__name__)
@@ -191,7 +192,25 @@ class GitHubPRResolver:
             raise GitHubPRAPIError("GitHub PR base repository does not match the requested repository")
 
         is_fork = (head_full_name != base_full_name) or bool(head_repo.get("fork", False))
-        head_repo_url = head_repo.get("html_url")
+        head_repo_url = None
+        raw_head_url = head_repo.get("html_url")
+        if raw_head_url is not None:
+            if not isinstance(raw_head_url, str):
+                raise GitHubPRAPIError("Invalid head repository URL in GitHub PR response")
+            try:
+                validated_head_url = validate_github_url(raw_head_url)
+                canonical_head_url = validate_github_url(
+                    f"https://github.com/{head_full_name}"
+                )
+            except InvalidRepositoryURLError:
+                raise GitHubPRAPIError(
+                    "Invalid head repository URL in GitHub PR response"
+                ) from None
+            if validated_head_url != canonical_head_url:
+                raise GitHubPRAPIError(
+                    "Head repository URL does not match the PR repository identity"
+                )
+            head_repo_url = canonical_head_url.removesuffix(".git")
 
         # 3. Branch refs
         base_branch_raw = base_info.get("ref")

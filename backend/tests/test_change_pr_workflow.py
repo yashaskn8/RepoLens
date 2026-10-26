@@ -524,3 +524,47 @@ async def test_pr_resolver_does_not_reflect_untrusted_provider_fields(mock_pr_pa
 
     assert canary not in str(failure.value)
     transport.request.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "head_url",
+    [
+        "http://github.com/fastapi/fastapi",
+        "https://evil.example/fastapi/fastapi",
+        "https://github.com/other/repo",
+        "https://github.com/fastapi/fastapi/extra",
+        "https://github.com/fastapi/fastapi@evil.example/",
+        12,
+    ],
+)
+async def test_pr_resolver_rejects_untrusted_head_repository_urls(
+    mock_pr_payload, head_url,
+):
+    """Public PR metadata cannot introduce a foreign or inconsistent checkout URL."""
+    import copy
+    from unittest.mock import AsyncMock, MagicMock
+
+    payload = copy.deepcopy(mock_pr_payload)
+    payload["head"]["repo"]["html_url"] = head_url
+    transport = MagicMock()
+    transport.request = AsyncMock(return_value=payload)
+    resolver = GitHubPRResolver(transport=transport)
+    with pytest.raises(GitHubPRAPIError):
+        await resolver.resolve_pr("https://github.com/fastapi/fastapi/pull/456")
+    transport.request.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_pr_resolver_canonicalizes_approved_head_repository_url(mock_pr_payload):
+    import copy
+    from unittest.mock import AsyncMock, MagicMock
+
+    payload = copy.deepcopy(mock_pr_payload)
+    payload["head"]["repo"]["html_url"] = "https://github.com/fastapi/fastapi.git/"
+    transport = MagicMock()
+    transport.request = AsyncMock(return_value=payload)
+    resolved = await GitHubPRResolver(transport=transport).resolve_pr(
+        "https://github.com/fastapi/fastapi/pull/456",
+    )
+    assert resolved.head_repo_url == "https://github.com/fastapi/fastapi"
