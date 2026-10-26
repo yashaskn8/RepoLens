@@ -26,6 +26,7 @@ export default function FindingsPage() {
   const requestGeneration = useRef(0);
   // React state does not synchronously lock out two rapid clicks.
   const olderPagePending = useRef(false);
+  const failedFindingsRetryPending = useRef(false);
   const [loadedForAccount, setLoadedForAccount] = useState<string | null>(null);
   const [findings, setFindings] = useState<Finding[]>([]);
   const [search, setSearch] = useState('');
@@ -35,11 +36,16 @@ export default function FindingsPage() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadedScanCount, setLoadedScanCount] = useState(0);
   const [hasOlderScans, setHasOlderScans] = useState(false);
+  const [failedScanIds, setFailedScanIds] = useState<string[]>([]);
+  const [retryingFailedFindings, setRetryingFailedFindings] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const loadFindings = useCallback(async () => {
     const generation = ++requestGeneration.current;
     olderPagePending.current = false;
+    failedFindingsRetryPending.current = false;
+    setRetryingFailedFindings(false);
+    setFailedScanIds([]);
     setLoading(true);
     setLoadingMore(false);
     setError(null);
@@ -57,10 +63,8 @@ export default function FindingsPage() {
       setFindings(page.findings);
       setLoadedScanCount(page.scanCount);
       setHasOlderScans(page.hasOlderScans);
+      setFailedScanIds(page.failedScanIds);
       setLoadedForAccount(accountId);
-      if (page.failedCount > 0) {
-        setError(`${page.failedCount} scan result${page.failedCount === 1 ? '' : 's'} could not be loaded. The findings shown are incomplete.`);
-      }
     } catch (caught: unknown) {
       if (generation !== requestGeneration.current) return;
       setFindings([]);
@@ -78,6 +82,9 @@ export default function FindingsPage() {
     // switch to another tenant; invalidate every older in-flight response.
     requestGeneration.current += 1;
     olderPagePending.current = false;
+    failedFindingsRetryPending.current = false;
+    setRetryingFailedFindings(false);
+    setFailedScanIds([]);
     setFindings([]);
     setLoadedForAccount(null);
     setLoadedScanCount(0);
@@ -93,7 +100,7 @@ export default function FindingsPage() {
   }, [accountId, authLoading, loadFindings]);
 
   const loadOlderScans = useCallback(async () => {
-    if (olderPagePending.current || authLoading || !accountId || loadedForAccount !== accountId || loading || loadingMore || !hasOlderScans) return;
+    if (olderPagePending.current || failedFindingsRetryPending.current || authLoading || !accountId || loadedForAccount !== accountId || loading || loadingMore || !hasOlderScans) return;
     // Acquire before awaiting: a second click can run before React re-renders.
     olderPagePending.current = true;
     const generation = requestGeneration.current;
@@ -109,12 +116,7 @@ export default function FindingsPage() {
       });
       setLoadedScanCount((count) => count + page.scanCount);
       setHasOlderScans(page.hasOlderScans);
-      if (page.failedCount > 0) {
-        setError((previous) => [
-          previous,
-          `${page.failedCount} older scan result${page.failedCount === 1 ? '' : 's'} could not be loaded. Findings are incomplete.`,
-        ].filter(Boolean).join(' '));
-      }
+      setFailedScanIds((current) => [...new Set([...current, ...page.failedScanIds])]);
     } catch (caught: unknown) {
       if (generation !== requestGeneration.current) return;
       setError((previous) => [
@@ -129,8 +131,37 @@ export default function FindingsPage() {
     }
   }, [accountId, user?.id, authLoading, loadedForAccount, hasOlderScans, loadedScanCount, loading, loadingMore]);
 
+  // An individual scan's findings can fail after its scan page succeeds.
+  // Retain those scan IDs so advancing the scan offset never loses evidence.
+  const retryFailedFindings = useCallback(async () => {
+    if (failedFindingsRetryPending.current || olderPagePending.current || authLoading ||
+        !accountId || loadedForAccount !== accountId || loading || loadingMore ||
+        failedScanIds.length === 0) return;
+    failedFindingsRetryPending.current = true;
+    const generation = requestGeneration.current;
+    const retryIds = [...failedScanIds];
+    setRetryingFailedFindings(true);
+    try {
+      const results = await Promise.allSettled(retryIds.map((id) => fetchScanFindings(id)));
+      if (!isCurrentAccountResponse(accountId, user?.id ?? null, generation, requestGeneration.current)) return;
+      const recovered = results.flatMap((result) => result.status === 'fulfilled' ? result.value : []);
+      setFindings((current) => {
+        const seen = new Set(current.map((finding) => finding.id));
+        return [...current, ...recovered.filter((finding) => !seen.has(finding.id))];
+      });
+      const stillFailed = new Set(retryIds.filter((_, index) => results[index].status === 'rejected'));
+      setFailedScanIds((current) => current.filter((id) => !retryIds.includes(id) || stillFailed.has(id)));
+    } finally {
+      if (generation === requestGeneration.current) {
+        failedFindingsRetryPending.current = false;
+        setRetryingFailedFindings(false);
+      }
+    }
+  }, [accountId, user?.id, authLoading, loadedForAccount, loading, loadingMore, failedScanIds]);
+
   const visibleFindings = loadedForAccount === accountId && accountId ? findings : [];
   const displayLoading = authLoading || (Boolean(accountId) && (loading || loadedForAccount !== accountId));
+  const missingEvidenceCount = loadedForAccount === accountId ? failedScanIds.length : 0;
 
   const filteredFindings = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -177,13 +208,29 @@ export default function FindingsPage() {
             size="sm"
             leftIcon={<RefreshCw size={14} />}
             onClick={() => void loadFindings()}
-            disabled={loading || loadingMore}
+            disabled={loading || loadingMore || retryingFailedFindings}
           >
             Refresh
           </Button>
         </div>
 
         {accountId && error && <Alert variant="warning" title="Findings data is incomplete">{error}</Alert>}
+        {accountId && missingEvidenceCount > 0 && (
+          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+            <Alert variant="warning" title="Scan evidence unavailable">
+              {missingEvidenceCount} scan result{missingEvidenceCount === 1 ? '' : 's'} could not be loaded.
+              Findings are incomplete until those scan results are recovered.
+            </Alert>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => void retryFailedFindings()}
+              disabled={loading || loadingMore || retryingFailedFindings}
+            >
+              {retryingFailedFindings ? 'Retrying missing findings...' : 'Retry missing findings'}
+            </Button>
+          </div>
+        )
 
         {displayLoading ? (
           <><CardSkeleton /><CardSkeleton /></>
@@ -227,7 +274,7 @@ export default function FindingsPage() {
               variant="secondary"
               size="sm"
               onClick={() => void loadOlderScans()}
-              disabled={loadingMore}
+              disabled={loadingMore || retryingFailedFindings}
             >
               {loadingMore ? 'Loading older scans...' : 'Load older scan findings'}
             </Button>
