@@ -248,9 +248,13 @@ class AIResponseCache:
         for value in vector:
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 return False
-            if not math.isfinite(value):
+            try:
+                finite_value = float(value)
+            except (ValueError, OverflowError):
                 return False
-            norm += value * value
+            if not math.isfinite(finite_value):
+                return False
+            norm += finite_value * finite_value
             if not math.isfinite(norm):
                 return False
         return norm > 0.0

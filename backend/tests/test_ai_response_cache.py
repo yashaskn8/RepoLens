@@ -526,7 +526,7 @@ async def test_semantic_cache_ignores_corrupt_vectors_without_losing_valid_hits(
 
 @pytest.mark.parametrize("vector", [
     [], [True, 0.0], ["0.1", 1.0], [float("nan")],
-    [float("inf")], [1e308, 1e308],
+    [float("inf")], [1e308, 1e308], [10 ** 1000, 1.0],
 ])
 def test_semantic_cache_rejects_invalid_vectors(vector) -> None:
     assert AIResponseCache._valid_embedding_vector(vector) is False
