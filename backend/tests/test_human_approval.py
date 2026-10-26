@@ -394,3 +394,45 @@ async def test_end_to_end_db_and_langgraph_state_identical_after_resume():
             assert not final_checkpoint.next
             assert final_checkpoint.values["patch_status"] == PatchStatus.APPROVED.value
             assert final_checkpoint.values["approved_by"] == "security-lead@company.com"
+
+
+@pytest.mark.parametrize(
+    "patch_status,machine_verdict,expected_status",
+    [
+        (PatchStatus.DRAFT.value, None, 409),
+        (PatchStatus.DRAFT.value, "PASSED", 409),
+        (PatchStatus.VERIFIED.value, "REJECTED", 422),
+        (PatchStatus.NEEDS_REVIEW.value, "REJECTED", 422),
+    ],
+)
+def test_patch_approval_rejects_unsafe_machine_or_lifecycle_states(
+    client, db_session, patch_status, machine_verdict, expected_status
+):
+    """Human approval cannot upgrade an unfinished or machine-rejected proposal."""
+    scan_id, finding_id, patch_id = str(uuid4()), str(uuid4()), str(uuid4())
+    db_session.add(ScanModel(
+        id=scan_id,
+        repository_url="https://github.com/example/repo",
+        commit_hash="a" * 40,
+        status=ScanStatus.COMPLETED.value,
+    ))
+    db_session.add(FindingModel(
+        id=finding_id, scan_id=scan_id,
+        title="Candidate issue", description="Pending deterministic verification",
+        severity=Severity.HIGH.value, status=FindingStatus.OPEN.value,
+    ))
+    db_session.add(PatchModel(
+        id=patch_id, scan_id=scan_id, finding_id=finding_id,
+        status=patch_status, machine_verdict=machine_verdict,
+        unified_diff="--- a/main.py\n+++ b/main.py\n@@ -1 +1 @@\n-old\n+new\n",
+        files_modified=["main.py"], explanation="Proposed fix",
+        expected_behavior_change="Change behavior",
+    ))
+    db_session.commit()
+    response = client.post(f"/api/v1/patches/{patch_id}/approve", json={})
+    assert response.status_code == expected_status
+    db_session.expire_all()
+    result = db_session.get(PatchModel, patch_id)
+    assert result.status == patch_status
+    assert result.approved_by is None
+    assert result.approval_digest is None

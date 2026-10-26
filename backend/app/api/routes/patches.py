@@ -100,6 +100,20 @@ async def approve_patch(
             detail="Patch proposal is already APPROVED.",
         )
 
+    if patch_model.status not in {
+        PatchStatus.VERIFIED.value,
+        PatchStatus.NEEDS_REVIEW.value,
+    }:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only verified or review-ready patch proposals may be approved.",
+        )
+    if patch_model.machine_verdict == "REJECTED":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Machine-rejected patch proposals cannot receive human approval.",
+        )
+
     scan_model = db.query(ScanModel).filter(
         ScanModel.id == str(patch_model.scan_id),
         ScanModel.owner_user_id == current_user.id,
