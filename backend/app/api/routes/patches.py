@@ -333,6 +333,11 @@ async def request_patch_revision(
         raise HTTPException(status_code=400, detail="Cannot request revision on an already APPROVED patch.")
     if patch_model.status == PatchStatus.REJECTED.value:
         raise HTTPException(status_code=400, detail="Cannot request revision on a REJECTED patch. Generate a new revision from the finding instead.")
+    if patch_model.status not in {PatchStatus.VERIFIED.value, PatchStatus.NEEDS_REVIEW.value}:
+        raise HTTPException(
+            status_code=409,
+            detail="A patch must finish generation and reach human review before revision.",
+        )
     if (patch_model.revision_number or 0) >= 1:
         raise HTTPException(status_code=400, detail="Maximum of 1 human revision allowed per patch lineage. Cannot revise a child revision.")
 

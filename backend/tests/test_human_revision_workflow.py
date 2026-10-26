@@ -240,3 +240,16 @@ def test_revise_race_condition_returns_409(client, db_session):
 
 
 
+
+
+def test_draft_patch_cannot_request_revision(client, db_session):
+    """A draft cannot enqueue human-feedback revision before initial verification."""
+    _scan, _finding, parent = _setup_scan_finding_patch(
+        db_session, status=PatchStatus.DRAFT.value,
+    )
+    response = client.post(
+        f"/api/v1/patches/{parent.id}/revise",
+        json={"user_feedback": "Make it safer"},
+    )
+    assert response.status_code == 409
+    assert "finish generation" in response.json()["detail"]
