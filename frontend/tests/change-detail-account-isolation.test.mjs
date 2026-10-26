@@ -69,3 +69,84 @@ test('unavailable PR risk cannot appear as LOW or a success badge', () => {
   assert.match(workspace, /analysis\?\.risk_level === 'LOW'\s*\? 'success'\s*: 'warning'/);
   assert.match(workspace, /: 'Not assessed'/);
 });
+
+const actionSource = source.slice(
+  source.indexOf('  const handleGeneratePreview ='),
+  source.indexOf('  const currentFileDiff'),
+);
+const actionJs = ts.transpileModule(actionSource, {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+}).outputText;
+
+function makeActions({ confirmed = true, operator = true } = {}) {
+  const actionGeneration = { current: 0 };
+  const publishingRef = { current: false };
+  const recorded = { approvals: 0, publishes: 0, previews: [], messages: [] };
+  let resolveApproval;
+  let resolvePreview;
+  const approveReviewPublication = () => {
+    recorded.approvals += 1;
+    return new Promise(resolve => { resolveApproval = resolve; });
+  };
+  const generateReviewPublicationPreview = () => new Promise(resolve => { resolvePreview = resolve; });
+  const publishReviewPublication = async () => {
+    recorded.publishes += 1;
+    return { github_review_id: '100' };
+  };
+  const actions = new Function(
+    'actionGeneration', 'publishingRef', 'publication', 'isOperator', 'confirmedPublish',
+    'setIsPublishing', 'setPublishMessage', 'approveReviewPublication', 'publishReviewPublication',
+    'fetchReviewPublication', 'setPublication', 'generateReviewPublicationPreview',
+    'getErrorMessage', 'analysisId',
+    actionJs + '\nreturn {handleGeneratePreview,handleApproveAndPublish};',
+  )(
+    actionGeneration, publishingRef, { preview_digest: 'approved-digest' }, operator, confirmed,
+    () => {}, message => recorded.messages.push(message),
+    approveReviewPublication, publishReviewPublication, async () => ({ preview_digest: 'new' }),
+    preview => recorded.previews.push(preview), generateReviewPublicationPreview,
+    () => 'failed', 'analysis-one',
+  );
+  return {
+    actions, actionGeneration, recorded,
+    resolveApproval: () => resolveApproval(),
+    resolvePreview: value => resolvePreview(value),
+  };
+}
+
+test('publication requires operator role and explicit human confirmation even on direct handler calls', async () => {
+  for (const opts of [{ confirmed: false }, { operator: false }]) {
+    const { actions, recorded } = makeActions(opts);
+    await actions.handleApproveAndPublish();
+    assert.equal(recorded.approvals, 0);
+    assert.equal(recorded.publishes, 0);
+  }
+});
+
+test('account switch during approval prevents a subsequent GitHub publish call', async () => {
+  const run = makeActions();
+  const pending = run.actions.handleApproveAndPublish();
+  assert.equal(run.recorded.approvals, 1);
+  run.actionGeneration.current += 1; // keyed workspace unmounted on account switch
+  run.resolveApproval();
+  await pending;
+  assert.equal(run.recorded.publishes, 0);
+});
+
+test('double-click cannot submit two approval and publication requests', async () => {
+  const run = makeActions();
+  const first = run.actions.handleApproveAndPublish();
+  await run.actions.handleApproveAndPublish();
+  assert.equal(run.recorded.approvals, 1);
+  run.resolveApproval();
+  await first;
+  assert.equal(run.recorded.publishes, 1);
+});
+
+test('late preview response cannot restore old tenant publication state', async () => {
+  const run = makeActions();
+  const pending = run.actions.handleGeneratePreview();
+  run.actionGeneration.current += 1;
+  run.resolvePreview({ preview_digest: 'stale-preview' });
+  await pending;
+  assert.deepEqual(run.recorded.previews, []);
+});
