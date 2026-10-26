@@ -292,3 +292,49 @@ def test_pgvector_connection_errors_cannot_echo_database_credentials():
     with pytest.raises(ValueError, match="requires a PostgreSQL database URL") as invalid:
         PgVectorIndex(db_url=f"mysql://admin:{secret}@db.example/repolens")
     assert secret not in str(invalid.value)
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [[0.0, 0.0, 0.0], [float("nan"), 0.0, 1.0],
+     [float("inf"), 0.0, 1.0], [10 ** 1000, 0.0, 1.0]],
+)
+def test_pgvector_rejects_invalid_embedding_before_sql(invalid):
+    engine = MagicMock(spec=Engine)
+    index = PgVectorIndex(
+        db_url="postgresql://localhost/db", dimensions=3,
+        engine=engine, auto_create_table=False,
+    )
+    with pytest.raises(ValueError, match="finite nonzero"):
+        index.upsert("bad", invalid)
+    with pytest.raises(ValueError, match="finite nonzero"):
+        index.upsert_batch([("good", [1.0, 0.0, 0.0], {}), ("bad", invalid, {})])
+    with pytest.raises(ValueError, match="finite nonzero"):
+        index.query(invalid)
+    engine.begin.assert_not_called()
+
+
+def test_pgvector_query_ignores_nan_inf_and_null_similarity_rows():
+    engine = MagicMock(spec=Engine)
+    conn = engine.begin.return_value.__enter__.return_value
+    conn.execute.return_value.fetchall.return_value = [
+        ("good", 0.8),
+        ("nan", float("nan")),
+        ("inf", float("inf")),
+        ("missing", None),
+    ]
+    index = PgVectorIndex(
+        db_url="postgresql://localhost/db", dimensions=2,
+        engine=engine, auto_create_table=False,
+    )
+    assert index.query([1.0, 0.0], top_k=10) == [("good", 0.9)]
+
+
+def test_vector_factory_rejects_unsupported_url_without_secret_echo():
+    secret = "factory-connection-secret-456"
+    with pytest.raises(ValueError, match="not PostgreSQL") as error:
+        create_vector_index(
+            db_url=f"mysql://private:{secret}@db.example/database",
+            enable_pgvector=True,
+        )
+    assert secret not in str(error.value)

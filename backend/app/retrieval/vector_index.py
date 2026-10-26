@@ -325,6 +325,8 @@ class PgVectorIndex(VectorIndex):
         self._validate_chunk_id(chunk_id)
         if len(vector) != self.dimensions:
             raise ValueError(f"Vector dimension mismatch: expected {self.dimensions}, got {len(vector)}")
+        if not _valid_vector(vector):
+            raise ValueError("Embedding vector must contain finite nonzero numeric values.")
 
         upsert_sql = f"""
         INSERT INTO {self.table_name} (id, namespace, dimensions, model_name, index_version, embedding, metadata, updated_at)
@@ -358,6 +360,8 @@ class PgVectorIndex(VectorIndex):
             self._validate_chunk_id(chunk_id)
             if len(vector) != self.dimensions:
                 raise ValueError(f"Vector dimension mismatch for '{chunk_id}': expected {self.dimensions}, got {len(vector)}")
+            if not _valid_vector(vector):
+                raise ValueError("Embedding vector must contain finite nonzero numeric values.")
 
         upsert_sql = f"""
         INSERT INTO {self.table_name} (id, namespace, dimensions, model_name, index_version, embedding, metadata, updated_at)
@@ -390,6 +394,8 @@ class PgVectorIndex(VectorIndex):
     def query(self, vector: List[float], top_k: int = 10) -> List[Tuple[str, float]]:
         if len(vector) != self.dimensions:
             raise ValueError(f"Query vector dimension mismatch: expected {self.dimensions}, got {len(vector)}")
+        if not _valid_vector(vector):
+            raise ValueError("Query vector must contain finite nonzero numeric values.")
         if top_k <= 0:
             return []
 
@@ -419,7 +425,16 @@ class PgVectorIndex(VectorIndex):
         results: List[Tuple[str, float]] = []
         for row in rows:
             chunk_id = str(row[0])
-            raw_sim = float(row[1]) if row[1] is not None else 0.0
+            # NULL/NaN/Inf distances represent unavailable similarity, not
+            # an innocuous neutral 0.5 result.
+            if row[1] is None:
+                continue
+            try:
+                raw_sim = float(row[1])
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if not math.isfinite(raw_sim):
+                continue
             # Normalize [-1.0, 1.0] to [0.0, 1.0]
             norm_sim = max(0.0, min(1.0, (raw_sim + 1.0) / 2.0))
             results.append((chunk_id, norm_sim))
@@ -502,7 +517,7 @@ def create_vector_index(
         norm_url = target_url.lower()
         if not (norm_url.startswith("postgresql") or norm_url.startswith("postgres")):
             raise ValueError(
-                f"Cannot initialize PgVectorIndex: configured database URL '{target_url}' is not PostgreSQL."
+                "Cannot initialize PgVectorIndex: configured database URL is not PostgreSQL."
             )
         return PgVectorIndex(
             db_url=target_url,
