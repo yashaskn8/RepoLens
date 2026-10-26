@@ -703,3 +703,46 @@ async def test_scanner_exception_does_not_echo_secret_to_result(monkeypatch, tmp
     result = await scanner.scan(str(tmp_path))
     assert result.status.value == "FAILED"
     assert "SECRET_MUST_NEVER_BE_LOGGED" not in (result.error_message or "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "adapter_type,payload",
+    [
+        (TrivyAdapter, {"Results": [None]}),
+        (TrivyAdapter, {"Results": [{"Target": "requirements.txt", "Vulnerabilities": {}}]}),
+        (TrivyAdapter, {"Results": [{"Target": "source.py", "Secrets": [None]}]}),
+        (OSVScannerAdapter, {"results": [None]}),
+        (OSVScannerAdapter, {"results": [{"source": {}, "packages": {}}]}),
+        (OSVScannerAdapter, {"results": [{"source": {}, "packages": [{"vulnerabilities": [None]}]}]}),
+    ],
+)
+async def test_malformed_nested_scanner_output_is_invalid_not_execution_failure(adapter_type, payload):
+    """Nested malformed JSON is rejected explicitly and cannot report clean coverage."""
+    adapter = adapter_type()
+    with patch.object(adapter, "is_available", return_value=True), patch.object(
+        adapter, "_execute_command", _make_execute_mock(0, json.dumps(payload))
+    ):
+        result = await adapter.scan("/tmp/repo")
+
+    assert result.status == ToolStatus.INVALID_OUTPUT
+    assert result.findings == []
+
+
+@pytest.mark.asyncio
+async def test_trivy_null_vulnerability_sections_are_valid_empty_results():
+    """Trivy uses JSON null for sections with no vulnerability/secret matches."""
+    adapter = TrivyAdapter()
+    payload = {"Results": [{
+        "Target": "requirements.txt",
+        "Vulnerabilities": None,
+        "Secrets": None,
+        "Misconfigurations": None,
+    }]}
+    with patch.object(adapter, "is_available", return_value=True), patch.object(
+        adapter, "_execute_command", _make_execute_mock(0, json.dumps(payload))
+    ):
+        result = await adapter.scan("/tmp/repo")
+
+    assert result.status == ToolStatus.COMPLETED
+    assert result.findings == []

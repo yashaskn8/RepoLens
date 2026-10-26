@@ -62,18 +62,36 @@ class OSVScannerAdapter(BaseScannerAdapter):
         if "results" not in data or not isinstance(data["results"], list):
             raise ScannerOutputError(self.tool_name, "Expected 'results' to be a JSON array")
         results = data["results"]
-        for entry in results:
-            source_info = entry.get("source", {})
+        for entry_index, entry in enumerate(results):
+            if not isinstance(entry, dict):
+                raise ScannerOutputError(self.tool_name, f"Malformed result entry at index {entry_index}")
+            source_info = entry.get("source") or {}
+            if not isinstance(source_info, dict):
+                raise ScannerOutputError(self.tool_name, f"Malformed result entry at index {entry_index}: source")
             raw_path = source_info.get("path", "")
+            if not isinstance(raw_path, str):
+                raise ScannerOutputError(self.tool_name, f"Malformed result entry at index {entry_index}: path")
             rel_path = os.path.relpath(raw_path, repo_dir).replace("\\", "/") if os.path.isabs(raw_path) else raw_path.replace("\\", "/")
 
-            for pkg_entry in entry.get("packages", []):
-                pkg = pkg_entry.get("package", {})
+            package_entries = entry.get("packages")
+            if package_entries is None:
+                package_entries = []
+            if not isinstance(package_entries, list) or any(not isinstance(item, dict) for item in package_entries):
+                raise ScannerOutputError(self.tool_name, f"Malformed result entry at index {entry_index}: packages")
+            for pkg_entry in package_entries:
+                pkg = pkg_entry.get("package") or {}
+                if not isinstance(pkg, dict):
+                    raise ScannerOutputError(self.tool_name, "Malformed result entry: package")
                 pkg_name = pkg.get("name", "package")
                 pkg_ver = pkg.get("version", "unknown")
                 ecosystem = pkg.get("ecosystem", "")
 
-                for vuln in pkg_entry.get("vulnerabilities", []):
+                vulnerabilities = pkg_entry.get("vulnerabilities")
+                if vulnerabilities is None:
+                    vulnerabilities = []
+                if not isinstance(vulnerabilities, list) or any(not isinstance(item, dict) for item in vulnerabilities):
+                    raise ScannerOutputError(self.tool_name, "Malformed result entry: vulnerabilities")
+                for vuln in vulnerabilities:
                     vuln_id = vuln.get("id", "UNKNOWN-OSV")
                     summary = vuln.get("summary") or vuln.get("details", "")
                     title = f"{vuln_id} in {pkg_name}@{pkg_ver}"

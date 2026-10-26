@@ -68,12 +68,26 @@ class TrivyAdapter(BaseScannerAdapter):
         else:
             raise ScannerOutputError(self.tool_name, f"Expected JSON object or array, got {type(data).__name__}")
 
-        for target_res in results:
+        for target_index, target_res in enumerate(results):
+            if not isinstance(target_res, dict):
+                raise ScannerOutputError(self.tool_name, f"Malformed result entry at index {target_index}")
+            # Trivy legitimately emits null for absent vulnerability sections.
+            # Malformed non-array sections must never become an apparent clean scan.
+            for section in ("Vulnerabilities", "Secrets", "Misconfigurations"):
+                value = target_res.get(section)
+                if value is not None and (
+                    not isinstance(value, list) or any(not isinstance(item, dict) for item in value)
+                ):
+                    raise ScannerOutputError(
+                        self.tool_name, f"Malformed result entry at index {target_index}: {section}"
+                    )
             raw_target = target_res.get("Target", "repository")
+            if not isinstance(raw_target, str) or not raw_target:
+                raise ScannerOutputError(self.tool_name, f"Malformed result entry at index {target_index}: Target")
             rel_target = os.path.relpath(raw_target, repo_dir).replace("\\", "/") if os.path.isabs(raw_target) else raw_target.replace("\\", "/")
 
             # 1. Process Vulnerabilities
-            for vuln in target_res.get("Vulnerabilities", []):
+            for vuln in target_res.get("Vulnerabilities") or []:
                 vuln_id = vuln.get("VulnerabilityID", "UNKNOWN-CVE")
                 pkg_name = vuln.get("PkgName", "package")
                 installed_ver = vuln.get("InstalledVersion", "")
@@ -113,13 +127,18 @@ class TrivyAdapter(BaseScannerAdapter):
                 )
 
             # 2. Process Secrets
-            for secret in target_res.get("Secrets", []):
+            for secret in target_res.get("Secrets") or []:
                 rule_id = secret.get("RuleID", "exposed-secret")
                 title = secret.get("Title", f"Exposed Secret: {rule_id}")
                 raw_sev = secret.get("Severity", "CRITICAL")
                 start_line = secret.get("StartLine")
                 end_line = secret.get("EndLine")
-                code_lines = secret.get("Code", {}).get("Lines", [])
+                code = secret.get("Code") or {}
+                if not isinstance(code, dict):
+                    raise ScannerOutputError(self.tool_name, "Malformed result entry: Secrets.Code")
+                code_lines = code.get("Lines") or []
+                if not isinstance(code_lines, list) or any(not isinstance(line, dict) for line in code_lines):
+                    raise ScannerOutputError(self.tool_name, "Malformed result entry: Secrets.Code.Lines")
                 snippet = "\n".join([line.get("Content", "") for line in code_lines]) if code_lines else secret.get("Match")
 
                 evidence = Evidence(
@@ -148,7 +167,7 @@ class TrivyAdapter(BaseScannerAdapter):
                 )
 
             # 3. Process Misconfigurations
-            for misconf in target_res.get("Misconfigurations", []):
+            for misconf in target_res.get("Misconfigurations") or []:
                 rule_id = misconf.get("ID", "misconfiguration")
                 title = misconf.get("Title", f"Misconfiguration: {rule_id}")
                 desc = misconf.get("Description") or misconf.get("Message", "")
