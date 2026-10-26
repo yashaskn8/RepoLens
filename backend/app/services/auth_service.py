@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from sqlalchemy.orm import Session
 from sqlalchemy import inspect
+from sqlalchemy.exc import IntegrityError
 
 from app.core.config import Settings, get_settings
 from app.models.user import UserModel, UserSessionModel
@@ -132,7 +133,16 @@ class AuthService:
             resource_type="USER",
             resource_id=user.id,
         )
-        self.db.commit()
+        try:
+            self.db.commit()
+        except IntegrityError:
+            # Two requests may pass the initial duplicate query before either
+            # inserts. Resolve uniqueness after rollback and preserve the
+            # duplicate-email API contract without masking unrelated DB errors.
+            self.db.rollback()
+            if self.db.query(UserModel).filter(UserModel.email == normalized_email).first():
+                raise DuplicateEmailError() from None
+            raise
         self.db.refresh(user)
         return user
 

@@ -286,3 +286,44 @@ def test_registration_error_logs_never_include_exception_secrets(client, monkeyp
     assert response.json()["detail"]["error_code"] == "REGISTRATION_FAILED"
     assert secret not in caplog.text
     assert secret not in response.text
+
+
+def test_concurrent_registration_unique_conflict_returns_duplicate_email(
+    db_session, monkeypatch,
+):
+    """Commit-time email uniqueness races must map to a stable 409-compatible error."""
+    from types import SimpleNamespace
+    from app.services.auth_service import DuplicateEmailError
+
+    email = "concurrent-race@example.com"
+    db_session.add(UserModel(
+        email=email,
+        password_hash="existing-hash",
+        role=UserRole.USER.value,
+        is_active=True,
+    ))
+    db_session.commit()
+
+    query = db_session.query
+    lookups = 0
+
+    def race_query(model, *args, **kwargs):
+        nonlocal lookups
+        if model is UserModel:
+            lookups += 1
+            if lookups == 1:
+                # Another registration commits the same email after the
+                # application's optimistic existence check.
+                return SimpleNamespace(first=lambda: None)
+        return query(model, *args, **kwargs)
+
+    monkeypatch.setattr(db_session, "query", race_query)
+    monkeypatch.setattr("app.services.auth_service.hash_password", lambda _password: "new-hash")
+    monkeypatch.setattr("app.services.auth_service._append_auth_audit", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(DuplicateEmailError):
+        AuthService(db_session).register_user(email, "ValidStrongPassword12345!")
+
+    assert query(UserModel).filter(UserModel.email == email).count() == 1
+    # Rolling back is required or the SQLAlchemy session becomes unusable.
+    assert query(UserModel).filter(UserModel.email == email).one().email == email
