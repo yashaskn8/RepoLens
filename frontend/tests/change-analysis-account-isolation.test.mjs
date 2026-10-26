@@ -13,7 +13,7 @@ const jsxStart = source.indexOf('  return (', handlerStart);
 assert.ok(effectStart >= 0 && handlerStart > effectStart && jsxStart > handlerStart);
 
 const effectSource = source.slice(effectStart, handlerStart);
-const effectBody = effectSource.match(/useEffect\\(\\(\\) => \\{([\\s\\S]*?)\\}, \\[accountId, authLoading\\]\\);/);
+const effectBody = effectSource.match(/useEffect\(\(\) => \{([\s\S]*?)\}, \[accountId, authLoading\]\);/);
 assert.ok(effectBody, 'private history must reload on account and session changes');
 
 function deferred() {
@@ -103,7 +103,7 @@ function submitFixture() {
     'accountId', 'authLoading', 'submitGeneration', 'submitPending', 'activeAccountRef',
     'setError', 'setIsSubmitting', 'mode', 'prUrl', 'repoUrl', 'baseRef', 'headRef',
     'startChangeAnalysisFromPR', 'startChangeAnalysis', 'isCurrentAccountResponse', 'router', 'getErrorMessage',
-    submitJs + '\\nreturn handleSubmit;',
+    submitJs + '\nreturn handleSubmit;',
   )(
     state.account, false, submitGeneration, submitPending, activeAccountRef,
     value => { state.errors.push(value); }, value => { state.submitting = value; },
@@ -141,7 +141,7 @@ test('duplicate submissions are blocked before React re-renders', async () => {
 
 test('UI never displays prior account history while a new account loads', () => {
   assert.match(source, /loadedForAccount === accountId/);
-  assert.match(source, /visibleRecentAnalyses\\.map/);
+  assert.match(source, /visibleRecentAnalyses\.map/);
   assert.match(source, /displayRecentLoading/);
-  assert.match(source, /disabled=\\{authLoading \\|\\| !accountId \\|\\| isSubmitting\\}/);
+  assert.match(source, /disabled=\{authLoading \|\| !accountId \|\| isSubmitting\}/);
 });
