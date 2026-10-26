@@ -341,11 +341,13 @@ class RemediationExecutionService:
             if result.verification_result is not None
             else None
         )
+        # A passing sandbox check does not override a rejecting critic or
+        # an explicit machine review verdict. Failed verification always wins.
         patch_status = (
-            PatchStatus.VERIFIED
-            if result.machine_verdict == "PASSED" or verification_status == "PASSED"
-            else PatchStatus.REJECTED
+            PatchStatus.REJECTED
             if result.machine_verdict == "REJECTED" or verification_status == "FAILED"
+            else PatchStatus.VERIFIED
+            if result.machine_verdict == "PASSED" and verification_status == "PASSED"
             else PatchStatus.NEEDS_REVIEW
         )
         revision_number = (parent.revision_number or 0) + 1 if parent is not None else 0
