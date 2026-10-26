@@ -253,6 +253,19 @@ async def get_analysis_checkpointer(
 
     if selected == CheckpointBackend.SQLITE:
         target_path = db_path if db_path is not None else settings.CHECKPOINT_DB_FILE
+        # sqlite3.connect("") succeeds but creates a temporary database that
+        # disappears when closed. A blank configured path must never silently
+        # discard the checkpoints needed for durable restart recovery.
+        if not isinstance(target_path, str) or not target_path.strip():
+            raise CheckpointerConfigurationError(
+                "SQLite checkpoint storage requires a non-empty database file path."
+            )
+        # The explicit :memory: override remains supported for unit tests.
+        # An implicit configured default must be a persisted file.
+        if db_path is None and target_path == ":memory:":
+            raise CheckpointerConfigurationError(
+                "Configured SQLite checkpoint storage must be persistent; use a file path."
+            )
         async with aiosqlite.connect(target_path) as conn:
             saver = AsyncSqliteSaver(conn, serde=serde)
             await saver.setup()

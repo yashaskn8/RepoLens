@@ -546,3 +546,25 @@ async def test_postgres_pending_parallel_write_survives_real_saver_reopen():
     assert right_runs == 2
     assert sorted(resumed["events"]) == ["left", "right"]
     assert sorted(saved.values["events"]) == ["left", "right"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["", "   "])
+async def test_sqlite_checkpoint_rejects_ephemeral_empty_database_path(path):
+    """SQLite accepts an empty filename as a temporary DB; do not lose state on close."""
+    with pytest.raises(CheckpointerConfigurationError, match="non-empty database file path"):
+        async with get_analysis_checkpointer(db_path=path):
+            pytest.fail("Blank checkpoint path must not create ephemeral storage")
+
+
+@pytest.mark.asyncio
+async def test_default_sqlite_checkpoint_cannot_be_implicitly_memory_only():
+    """A misconfigured default checkpointer must not silently lose saved work."""
+    with patch(
+        "app.agents.checkpointer.get_settings",
+        return_value=_settings(CHECKPOINT_DB_FILE=":memory:"),
+    ):
+        with pytest.raises(CheckpointerConfigurationError, match="must be persistent"):
+            async with get_analysis_checkpointer():
+                pytest.fail("Implicit in-memory checkpoint storage must be rejected")
+
