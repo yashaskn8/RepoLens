@@ -489,7 +489,7 @@ async def test_reranker_rejects_duplicate_candidate_indexes(adapter_name):
 def test_hybrid_retrieval_rejects_whitespace_only_query_before_search():
     from pydantic import ValidationError
 
-    for source in ["", " ", "\\t\\n"]:
+    for source in ["", " ", chr(9) + chr(10)]:
         with pytest.raises(ValidationError):
             RetrievalQuery(query=source)
     service = RetrievalService(chunks=[], reranker=None)
