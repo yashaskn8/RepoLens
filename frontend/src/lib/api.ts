@@ -70,7 +70,23 @@ export function getApiBaseUrl(): string {
     }
     return apiOrigin.origin;
   }
-  if (configured) return configured;
+  if (configured) {
+    if (typeof window !== 'undefined') {
+      // Host-only cookies are not shared between localhost and 127.0.0.1.
+      // Align explicitly configured loopback API URLs with the browser's
+      // loopback hostname; leave remote development API origins unchanged.
+      const browserHost = window.location.hostname.toLowerCase();
+      if (browserHost === 'localhost' || browserHost === '127.0.0.1') {
+        const loopbackOrigin = configured.match(
+          /^(https?:\/\/)(localhost|127\.0\.0\.1)(?=[:/]|$)/i,
+        );
+        if (loopbackOrigin) {
+          return `${loopbackOrigin[1]}${browserHost}${configured.slice(loopbackOrigin[0].length)}`;
+        }
+      }
+    }
+    return configured;
+  }
   if (typeof window !== 'undefined') {
     // Keep localhost/127.0.0.1 consistent with the page host. Cookies are
     // host-scoped, so mixing the two names creates a false logged-in state.

@@ -175,6 +175,11 @@ jobs:
           cd frontend
           npm run lint
 
+      - name: Frontend API origin regression tests
+        run: |
+          cd frontend
+          npm run test:unit
+
       - name: Production Build
         env:
           NEXT_PUBLIC_API_BASE_URL: https://api.example.com

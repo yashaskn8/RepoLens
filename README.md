@@ -105,7 +105,7 @@ For complete threat evaluations and defense-in-depth matrices, see [Security & T
 
 ### Prerequisites
 - Python 3.11+
-- Node.js 18+ and `npm`
+- Node.js 20+ and `npm`
 - Git
 
 ### 1. Backend Setup
@@ -178,6 +178,13 @@ npm ci
 npm run dev
 ```
 Frontend application will be available at `http://localhost:3000`.
+
+For local development, you may omit `NEXT_PUBLIC_API_BASE_URL` from
+`frontend/.env.local`; the frontend defaults to port 8000 on the current
+browser hostname. When an explicit localhost/127.0.0.1 API origin is configured,
+the development client aligns that loopback hostname with the frontend to keep
+host-scoped authentication and CSRF cookies consistent. Remote API origins are
+left unchanged.
 
 ---
 
