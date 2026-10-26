@@ -538,15 +538,42 @@ export async function fetchPatch(patchId: string): Promise<PatchResponse> {
 }
 
 export async function fetchScanPatches(scanId: string): Promise<PatchResponse[]> {
-  const response = await apiFetch(`/api/v1/patches/scan/${scanId}`, {
-    cache: 'no-store',
-  });
-
-  if (!response.ok) {
-    throw await apiErrorFromResponse(response, 'Failed to fetch scan patches');
+  // The patch list is paginated server-side. Recover the complete supported
+  // history instead of silently treating the first 100 rows as all patches.
+  const pageSize = 500;
+  const maxPages = 20;
+  const patches: PatchResponse[] = [];
+  const seen = new Set<string>();
+  for (let page = 0; page < maxPages; page += 1) {
+    const params = new URLSearchParams({
+      limit: String(pageSize),
+      offset: String(page * pageSize),
+    });
+    const response = await apiFetch(
+      `/api/v1/patches/scan/${encodeURIComponent(scanId)}?${params}`,
+      { cache: 'no-store' },
+    );
+    if (!response.ok) {
+      throw await apiErrorFromResponse(response, 'Failed to fetch scan patches');
+    }
+    const batch: unknown = await response.json();
+    if (!Array.isArray(batch) || batch.length > pageSize) {
+      throw new ApiError('Invalid patch history pagination response.', 502, 'PATCH_PAGE_INVALID');
+    }
+    for (const patch of batch) {
+      if (!patch || typeof patch.id !== 'string' || seen.has(patch.id)) {
+        throw new ApiError('Inconsistent patch history pagination.', 502, 'PATCH_PAGE_INCONSISTENT');
+      }
+      seen.add(patch.id);
+      patches.push(patch as PatchResponse);
+    }
+    if (batch.length < pageSize) return patches;
   }
-
-  return response.json();
+  throw new ApiError(
+    'Patch history exceeds the supported display limit; results are incomplete.',
+    413,
+    'PATCH_PAGE_LIMIT',
+  );
 }
 
 export async function approvePatch(
