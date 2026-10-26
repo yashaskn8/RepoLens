@@ -90,6 +90,7 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
   const [analysis, setAnalysis] = useState<ChangeAnalysisResponse | null>(null);
   const [diff, setDiff] = useState<StructuralDiffResult | null>(null);
   const [impacts, setImpacts] = useState<ChangeImpact[]>([]);
+  const [impactsLoaded, setImpactsLoaded] = useState(false);
   const [review, setReview] = useState<ChangeReviewReport | null>(null);
   const [publication, setPublication] = useState<ReviewPublicationPreviewResponse | null>(null);
 
@@ -112,6 +113,7 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
       setAnalysis(null);
       setDiff(null);
       setImpacts([]);
+      setImpactsLoaded(false);
       setReview(null);
       setPublication(null);
       setSelectedFile(null);
@@ -141,8 +143,10 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
               setSelectedFile(diffRes.value.changed_files[0].file_path);
             }
           } else missing.push('structural diff');
-          if (impactsRes.status === 'fulfilled') setImpacts(impactsRes.value || []);
-          else missing.push('downstream impacts');
+          if (impactsRes.status === 'fulfilled') {
+            setImpacts(impactsRes.value || []);
+            setImpactsLoaded(true);
+          } else missing.push('downstream impacts');
           if (reviewRes.status === 'fulfilled') setReview(reviewRes.value);
           else missing.push('review evidence');
           // Publication is optional; its absence is not a failed analysis.
@@ -217,7 +221,7 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
   const criticalFindingsCount = review?.findings?.filter((f) => f.severity === 'CRITICAL' || f.severity === 'HIGH').length || 0;
 
   // Missing or failed evidence is UNKNOWN, never an implicit clean review.
-  const assessmentAvailable = analysis?.status === 'COMPLETED' && diff !== null && review !== null;
+  const assessmentAvailable = analysis?.status === 'COMPLETED' && diff !== null && impactsLoaded && review !== null;
   let recommendation: {
     status: 'Assessment unavailable' | 'Needs review' | 'Blocking issues' | 'No blockers detected';
     variant: 'success' | 'warning' | 'critical';
@@ -343,7 +347,7 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
             </span>
             <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
               <Badge variant="default" size="sm">
-                {diff?.changed_files?.length || 0} files
+                {diff === null ? 'Files unavailable' : `${diff.changed_files?.length ?? 0} files`}
               </Badge>
               {diff === null ? (
                 <Badge variant="default" size="sm">Diff unavailable</Badge>
@@ -448,8 +452,8 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
                 <div>• Total Files Touched: {diff?.changed_files?.length || 0}</div>
-                <div>• Breaking Changes: {breakingChangesCount}</div>
-                <div>• Downstream Callers: {impacts.length}</div>
+                <div>• Breaking Changes: {diff === null ? 'unavailable' : breakingChangesCount}</div>
+                <div>• Downstream Callers: {impactsLoaded ? impacts.length : 'unavailable'}</div>
               </div>
             </div>
           </div>
@@ -477,7 +481,7 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
                 tabs={[
                   { id: 'diff', label: 'File Diff', icon: <FileDiff size={14} /> },
                   { id: 'contracts', label: 'Breaking Changes', count: breakingChangesCount, icon: <Layers size={14} /> },
-                  { id: 'callers', label: 'Affected Callers', count: impacts.length, icon: <Network size={14} /> },
+                  { id: 'callers', label: 'Affected Callers', count: impactsLoaded ? impacts.length : undefined, icon: <Network size={14} /> },
                   { id: 'report', label: 'Review Summary', icon: <FileCode size={14} /> },
                 ]}
                 activeTab={centerTab}
@@ -536,7 +540,13 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
                     )}
                   </div>
 
-                  {breakingChangesCount === 0 ? (
+                  {diff === null ? (
+                    <EmptyState
+                      icon={<AlertTriangle size={24} />}
+                      title="Structural diff unavailable"
+                      description="Contract compatibility cannot be assessed until structural diff evidence loads successfully."
+                    />
+                  ) : breakingChangesCount === 0 ? (
                     <EmptyState
                       icon={<CheckCircle2 size={24} style={{ color: 'var(--success-text)' }} />}
                       title="Zero breaking changes detected"
@@ -596,10 +606,16 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
               {centerTab === 'callers' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                   <h4 style={{ fontSize: '0.9375rem', fontWeight: 700, color: '#ffffff' }}>
-                    Affected Downstream Callers &amp; Dependencies ({impacts.length})
+                    Affected Downstream Callers &amp; Dependencies ({impactsLoaded ? impacts.length : 'unavailable'})
                   </h4>
 
-                  {impacts.length === 0 ? (
+                  {!impactsLoaded ? (
+                    <EmptyState
+                      icon={<AlertTriangle size={24} />}
+                      title="Downstream impact evidence unavailable"
+                      description="Caller impact cannot be assessed until downstream impact evidence loads successfully."
+                    />
+                  ) : impacts.length === 0 ? (
                     <EmptyState
                       icon={<CheckCircle2 size={24} style={{ color: 'var(--success-text)' }} />}
                       title="No downstream callers affected"
