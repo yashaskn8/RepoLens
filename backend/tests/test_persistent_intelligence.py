@@ -1064,8 +1064,8 @@ def test_immutable_index_rejects_undecodable_blob_without_dropping_source_bytes(
     from app.indexing.persistent import decode_indexed_source
 
     with pytest.raises(InventoryBound, match="projection_source_encoding_invalid"):
-        decode_indexed_source(b"safe = True\\n\\xff")
-    assert decode_indexed_source(b"safe = True\\n") == "safe = True\\n"
+        decode_indexed_source(b"safe = True" + bytes([10, 255]))
+    assert decode_indexed_source(b"safe = True" + bytes([10])) == "safe = True" + chr(10)
 
 
 def test_projection_facts_reject_invalid_utf8_instead_of_indexing_changed_text():
