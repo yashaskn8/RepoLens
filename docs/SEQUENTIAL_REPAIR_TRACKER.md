@@ -55,6 +55,11 @@ The original stale PR-history effect was reproduced: a previous account's pendin
 
 See [REPAIR_AUDIT_2026-10-26.md](REPAIR_AUDIT_2026-10-26.md) for historical CI evidence tied to earlier commits, not the current HEAD.
 
+## Additional verified application repair (2026-10-26)
+
+- `cd8f19a4732d2e5259c882752ff2715e502c1e85`: fixed the PR-analysis **exact revision** launcher. Previously its “Compare Branches / Commits” form defaulted to `main` and `feature/auth-contracts`, then submitted those branch names as `base_commit_sha` and `head_commit_sha`. The backend `ChangeAnalysisRequest` contract requires two distinct, exact 40-character hexadecimal SHAs, so the default UI request failed with HTTP 422. The interface now explicitly requests immutable commit IDs, starts with empty fields, validates and normalizes them before enqueue, and rejects equal revisions. PR URL mode remains unchanged.
+- Regression coverage committed: `frontend/tests/change-analysis-exact-commits.test.mjs` (7 tests). The original mismatch was reproduced from the actual frontend and backend schemas before editing. **17 focused behavioral assertions were executed and passed** against the retrieved committed helper and submit-handler source, with TypeScript-only annotations stripped for isolated JavaScript execution. The repository Node test file itself, full frontend suite, type-check, build, backend pytest, and live browser acceptance **were not executed**. Prompt 16/17/28 acceptance remains **PARTIAL**; this is a contract/UI correctness fix, not a claim of branch-ref resolution support.
+
 ## Non-bypassable next gates
 
 1. Run full current-HEAD frontend/backend tests and a local API/browser startup; correct any failures.
