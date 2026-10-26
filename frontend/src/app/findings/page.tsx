@@ -24,6 +24,8 @@ export default function FindingsPage() {
   const { user, isLoading: authLoading } = useAuth();
   const accountId = user?.id ?? null;
   const requestGeneration = useRef(0);
+  // React state does not synchronously lock out two rapid clicks.
+  const olderPagePending = useRef(false);
   const [loadedForAccount, setLoadedForAccount] = useState<string | null>(null);
   const [findings, setFindings] = useState<Finding[]>([]);
   const [search, setSearch] = useState('');
@@ -37,6 +39,7 @@ export default function FindingsPage() {
 
   const loadFindings = useCallback(async () => {
     const generation = ++requestGeneration.current;
+    olderPagePending.current = false;
     setLoading(true);
     setLoadingMore(false);
     setError(null);
@@ -74,6 +77,7 @@ export default function FindingsPage() {
     // Account-scoped data cannot survive session restoration, logout, or a
     // switch to another tenant; invalidate every older in-flight response.
     requestGeneration.current += 1;
+    olderPagePending.current = false;
     setFindings([]);
     setLoadedForAccount(null);
     setLoadedScanCount(0);
@@ -89,7 +93,9 @@ export default function FindingsPage() {
   }, [accountId, authLoading, loadFindings]);
 
   const loadOlderScans = useCallback(async () => {
-    if (authLoading || !accountId || loadedForAccount !== accountId || loading || loadingMore || !hasOlderScans) return;
+    if (olderPagePending.current || authLoading || !accountId || loadedForAccount !== accountId || loading || loadingMore || !hasOlderScans) return;
+    // Acquire before awaiting: a second click can run before React re-renders.
+    olderPagePending.current = true;
     const generation = requestGeneration.current;
     setLoadingMore(true);
     try {
@@ -116,7 +122,10 @@ export default function FindingsPage() {
         caught instanceof Error ? caught.message : 'Failed to load older scan findings',
       ].filter(Boolean).join(' '));
     } finally {
-      if (generation === requestGeneration.current) setLoadingMore(false);
+      if (generation === requestGeneration.current) {
+        olderPagePending.current = false;
+        setLoadingMore(false);
+      }
     }
   }, [accountId, user?.id, authLoading, loadedForAccount, hasOlderScans, loadedScanCount, loading, loadingMore]);
 
