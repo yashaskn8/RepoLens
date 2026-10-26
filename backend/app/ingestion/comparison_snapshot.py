@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.core.database import SessionLocal
-from app.ingestion.clone import InvalidRepositoryURLError, validate_github_url
+from app.ingestion.clone import IngestionError, InvalidRepositoryURLError, validate_git_branch_name, validate_github_url
 from app.ingestion.manifest import BINARY_EXTENSIONS, DEFAULT_IGNORE_DIRS, _is_binary_file
 from app.ingestion.snapshot import (
     RepositorySnapshotService,
@@ -244,11 +244,22 @@ class ComparisonSnapshotService:
                 f"Base commit SHA and head commit SHA must be distinct revisions: '{base_sha_clean}'"
             )
 
-        # 3. Sanitize ref strings against injection
-        if base_ref and (_MALICIOUS_REF_CHARS.search(base_ref) or base_ref.startswith("-")):
-            raise InvalidRevisionError(f"Malicious or invalid base_ref string: '{base_ref}'")
-        if head_ref and (_MALICIOUS_REF_CHARS.search(head_ref) or head_ref.startswith("-")):
-            raise InvalidRevisionError(f"Malicious or invalid head_ref string: '{head_ref}'")
+        # 3. Optional references must be canonical Git branch names. Their
+        # values are untrusted provider metadata and must not be echoed back
+        # in exceptions, logs, or user-visible job errors.
+        for label, branch_ref in (("base", base_ref), ("head", head_ref)):
+            if branch_ref is None:
+                continue
+            try:
+                validate_git_branch_name(branch_ref)
+            except IngestionError:
+                raise InvalidRevisionError(
+                    f"Invalid {label} Git branch reference for comparison."
+                ) from None
+            if branch_ref == "HEAD" or _HEX_40_REGEX.fullmatch(branch_ref):
+                raise InvalidRevisionError(
+                    f"Invalid {label} Git branch reference for comparison."
+                )
 
         base_workspace: Optional[str] = None
         head_workspace: Optional[str] = None

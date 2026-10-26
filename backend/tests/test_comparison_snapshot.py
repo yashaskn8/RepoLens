@@ -592,3 +592,41 @@ def test_workspace_safety_rejects_symlinked_root(tmp_path):
 def test_workspace_safety_rejects_missing_root(tmp_path):
     with pytest.raises(SnapshotRehydrationError, match="root is not a regular directory"):
         validate_workspace_safety(str(tmp_path / "missing"))
+
+
+@pytest.mark.parametrize(
+    "invalid_ref",
+    [
+        "main..bad",
+        "refs//heads/main",
+        "branch.lock",
+        "feature@{old}",
+        "main~1",
+        "HEAD",
+        "a" * 40,
+    ],
+)
+def test_comparison_rejects_invalid_git_refs_without_starting_acquisition(invalid_ref):
+    """Malformed revision refs must fail before either Git workspace is created."""
+    service = ComparisonSnapshotService()
+    with pytest.raises(InvalidRevisionError, match="Invalid base Git branch reference"):
+        service.acquire_comparison_workspaces_from_metadata(
+            repository_url=REPO_URL,
+            base_commit_sha=BASE_SHA,
+            head_commit_sha=HEAD_SHA,
+            base_ref=invalid_ref,
+        )
+
+
+def test_comparison_invalid_ref_errors_do_not_echo_untrusted_values():
+    service = ComparisonSnapshotService()
+    payload = "sensitive-provider-canary; echo secret"
+    with pytest.raises(InvalidRevisionError) as failure:
+        service.acquire_comparison_workspaces_from_metadata(
+            repository_url=REPO_URL,
+            base_commit_sha=BASE_SHA,
+            head_commit_sha=HEAD_SHA,
+            head_ref=payload,
+        )
+    assert payload not in str(failure.value)
+    assert "sensitive-provider-canary" not in str(failure.value)
