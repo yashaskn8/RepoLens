@@ -139,8 +139,8 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
     try {
       setError(null);
       setLoadingStep('patch');
-      localPatchActionRef.current = true;
       const res = await requestPatchGeneration(finding.id);
+      localPatchActionRef.current = true;
       setWorkflowResult(res);
       setPatchId(res.proposal.id);
       setRevisionNumber(0);
@@ -199,8 +199,8 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
     try {
       setError(null);
       setLoadingStep('revise');
-      localPatchActionRef.current = true;
       const updated = await revisePatch(patchId, { user_feedback: revisionFeedback });
+      localPatchActionRef.current = true;
       // A revision is a different persisted patch. The old ID/diff and
       // verifier result must not remain actionable as the child proposal.
       setPatchId(updated.id);

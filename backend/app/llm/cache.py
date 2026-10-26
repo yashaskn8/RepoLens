@@ -403,7 +403,11 @@ class SingleFlight(Generic[T]):
                         )
                     )
         if bypass:
-            return await factory(), False
+            # A saturated flight table must not create unbounded-lifetime
+            # provider calls outside the timeout applied to shared tasks.
+            return await asyncio.wait_for(
+                factory(), timeout=self.task_timeout_seconds
+            ), False
         assert task is not None
         return await asyncio.shield(task), shared
 

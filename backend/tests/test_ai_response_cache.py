@@ -561,3 +561,23 @@ def test_singleflight_rejects_invalid_timeout() -> None:
     for invalid in [0, -1, float("inf"), float("nan")]:
         with pytest.raises(ValueError, match="finite and positive"):
             SingleFlight(task_timeout_seconds=invalid)
+
+
+@pytest.mark.asyncio
+async def test_singleflight_capacity_bypass_is_also_time_bounded() -> None:
+    flight: SingleFlight[str] = SingleFlight(max_entries=1, task_timeout_seconds=0.02)
+    started = asyncio.Event()
+
+    async def hanging() -> str:
+        started.set()
+        await asyncio.Event().wait()
+        return "unreachable"
+
+    first = asyncio.create_task(flight.run("occupied", hanging))
+    await started.wait()
+    with pytest.raises(asyncio.TimeoutError):
+        await flight.run("different", hanging)
+    with pytest.raises(asyncio.TimeoutError):
+        await first
+    await asyncio.sleep(0)
+    assert flight.active_count == 0
