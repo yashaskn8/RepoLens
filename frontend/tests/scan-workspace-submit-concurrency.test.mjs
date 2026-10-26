@@ -52,7 +52,7 @@ test('two rapid submissions create exactly one scan and preserve its response', 
   assert.equal(f.scanSubmissionPendingRef.current, true);
   f.deferred[0].resolve({ id: 'scan-1', status: 'PENDING' });
   await Promise.all([first, second]);
-  assert.equal(f.scanSubmissionPendingRef.current, false);
+  assert.equal(f.scanSubmissionPendingRef.current, true);
   assert.deepEqual(f.active.at(-1), { id: 'scan-1', status: 'PENDING' });
 });
 
@@ -91,4 +91,28 @@ test('empty branch retains the existing main fallback', async () => {
   assert.equal(f.requests[0].branch, 'main');
   f.deferred[0].resolve({ id: 'scan-3', status: 'COMPLETED' });
   await started;
+});
+
+test('resolved pending scan remains guarded before the next React render', async () => {
+  const f = fixture();
+  const first = f.submit();
+  f.deferred[0].resolve({ id: 'scan-1', status: 'PENDING' });
+  await first;
+  assert.equal(f.scanSubmissionPendingRef.current, true);
+  await f.submit();
+  assert.equal(f.requests.length, 1, 'same-render callback must not start a second scan');
+});
+
+test('terminal scan state releases the guard and permits a new scan', async () => {
+  // The real effect observes the terminal state after React commits the update.
+  assert.match(source, /if \(!isScanRunning\) scanSubmissionPendingRef\.current = false/);
+  const f = fixture();
+  const first = f.submit();
+  f.deferred[0].resolve({ id: 'scan-1', status: 'COMPLETED' });
+  await first;
+  assert.equal(f.scanSubmissionPendingRef.current, false);
+  const second = f.submit();
+  assert.equal(f.requests.length, 2);
+  f.deferred[1].resolve({ id: 'scan-2', status: 'COMPLETED' });
+  await second;
 });
