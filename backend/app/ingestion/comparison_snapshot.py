@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import tempfile
 from typing import AsyncIterator, Iterator, List, Optional, Set, Tuple
 from uuid import UUID
@@ -119,7 +120,12 @@ def validate_workspace_safety(
     total_files = 0
     total_bytes = 0
 
-    for root, dirs, files in os.walk(workspace_path, followlinks=False):
+    def _walk_failed(exc: OSError) -> None:
+        # os.walk normally skips unreadable directories and can falsely certify
+        # a partial snapshot as complete. Fail closed instead.
+        raise SnapshotRehydrationError("Snapshot workspace directory is inaccessible.") from exc
+
+    for root, dirs, files in os.walk(workspace_path, followlinks=False, onerror=_walk_failed):
         # Prune ignored directory trees from traversal
         dirs[:] = [d for d in dirs if d not in DEFAULT_IGNORE_DIRS]
 
@@ -158,14 +164,17 @@ def validate_workspace_safety(
                 )
 
             try:
-                st = os.stat(file_path)
-                total_bytes += st.st_size
-                if total_bytes > max_total_bytes:
-                    raise ResourceLimitExceededError(
-                        f"Repository total size ({total_bytes} bytes) exceeds maximum budget ({max_total_bytes} bytes)"
-                    )
-            except OSError:
-                pass
+                # Do not follow a link swapped in after the islink check.
+                st = os.stat(file_path, follow_symlinks=False)
+            except OSError as exc:
+                raise SnapshotRehydrationError("Snapshot workspace file is inaccessible.") from exc
+            if not stat.S_ISREG(st.st_mode):
+                raise SnapshotRehydrationError("Snapshot workspace contains a non-regular file.")
+            total_bytes += st.st_size
+            if total_bytes > max_total_bytes:
+                raise ResourceLimitExceededError(
+                    f"Repository total size ({total_bytes} bytes) exceeds maximum budget ({max_total_bytes} bytes)"
+                )
 
 
 class ComparisonSnapshotService:

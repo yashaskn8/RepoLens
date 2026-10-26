@@ -499,3 +499,55 @@ def test_singleton_accessor():
     s2 = get_comparison_snapshot_service()
     assert s1 is s2
     assert isinstance(s1, ComparisonSnapshotService)
+
+
+def test_workspace_safety_fails_closed_when_file_stat_fails(tmp_path):
+    """Unreadable entries cannot disappear from the snapshot resource budget."""
+    file_path = tmp_path / "included.py"
+    file_path.write_text("trusted-looking data", encoding="utf-8")
+    real_stat = os.stat
+
+    def deny_file_stat(path, *args, **kwargs):
+        if os.fspath(path) == str(file_path):
+            raise OSError("secret-sentinel-path")
+        return real_stat(path, *args, **kwargs)
+
+    with patch("app.ingestion.comparison_snapshot.os.stat", side_effect=deny_file_stat):
+        with pytest.raises(SnapshotRehydrationError, match="file is inaccessible") as exc:
+            validate_workspace_safety(str(tmp_path))
+    assert "secret-sentinel-path" not in str(exc.value)
+
+
+def test_workspace_safety_never_follows_swapped_file_symlinks(tmp_path):
+    """A file that changes to a symlink during stat must fail validation."""
+    import stat
+
+    file_path = tmp_path / "swapped.py"
+    file_path.write_text("x = 1", encoding="utf-8")
+    real_stat = os.stat
+
+    def swapped_stat(path, *args, **kwargs):
+        if os.fspath(path) == str(file_path) and kwargs.get("follow_symlinks") is False:
+            original = real_stat(path, *args, **kwargs)
+            return os.stat_result((stat.S_IFLNK | 0o777, *tuple(original)[1:]))
+        return real_stat(path, *args, **kwargs)
+
+    with patch("app.ingestion.comparison_snapshot.os.stat", side_effect=swapped_stat):
+        with pytest.raises(SnapshotRehydrationError, match="non-regular file"):
+            validate_workspace_safety(str(tmp_path))
+
+
+def test_workspace_safety_rejects_unreadable_subdirectories(tmp_path):
+    """The os.walk error hook must reject a partial recursive traversal."""
+    import app.ingestion.comparison_snapshot as snapshot
+
+    def failed_walk(_path, *, followlinks=False, onerror=None):
+        assert onerror is not None
+        onerror(OSError("unreadable-subtree-secret"))
+        yield "", [], []
+
+    with patch.object(snapshot.os, "walk", side_effect=failed_walk):
+        with pytest.raises(SnapshotRehydrationError, match="directory is inaccessible") as exc:
+            validate_workspace_safety(str(tmp_path))
+    assert "unreadable-subtree-secret" not in str(exc.value)
+
