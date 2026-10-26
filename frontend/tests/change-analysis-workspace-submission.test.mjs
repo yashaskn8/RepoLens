@@ -112,7 +112,7 @@ test('a rejected request releases the synchronous guard for retry', async () => 
 
 test('mode selector remains disabled during an in-flight submission', () => {
   const input = readFileSync(join(root, 'src/features/change-analysis/ChangeAnalysisInput.tsx'), 'utf8');
-  assert.match(input, /const isBusy = isSubmitting \\|\\| isRunning/);
-  assert.equal((input.match(/disabled=\\{isBusy\\}/g) || []).length >= 2, true);
-  assert.doesNotMatch(input, /disabled=\\{isRunning\\}/);
+  assert.match(input, /const isBusy = isSubmitting \|\| isRunning/);
+  assert.equal((input.match(/disabled=\{isBusy\}/g) || []).length >= 2, true);
+  assert.doesNotMatch(input, /disabled=\{isRunning\}/);
 });
