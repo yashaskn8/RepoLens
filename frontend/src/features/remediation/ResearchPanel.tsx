@@ -5,12 +5,14 @@ import { Button } from '@/components/ui/Button';
 export interface ResearchPanelProps {
   research: ResearchResult | null;
   isLoading: boolean;
+  disabled?: boolean;
   onRequestResearch: () => void;
 }
 
 export const ResearchPanel: React.FC<ResearchPanelProps> = ({
   research,
   isLoading,
+  disabled = false,
   onRequestResearch,
 }) => {
   return (
@@ -23,7 +25,7 @@ export const ResearchPanel: React.FC<ResearchPanelProps> = ({
           variant="filter"
           size="sm"
           onClick={onRequestResearch}
-          disabled={isLoading}
+          disabled={isLoading || disabled}
           isLoading={isLoading}
         >
           {isLoading

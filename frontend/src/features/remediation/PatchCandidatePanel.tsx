@@ -9,6 +9,7 @@ export interface PatchCandidatePanelProps {
   patchStatus: string;
   workflowResult: PatchWorkflowResult | null;
   isLoading: boolean;
+  disabled?: boolean;
   onRequestPatch: () => void;
 }
 
@@ -18,6 +19,7 @@ export const PatchCandidatePanel: React.FC<PatchCandidatePanelProps> = ({
   patchStatus,
   workflowResult,
   isLoading,
+  disabled = false,
   onRequestPatch,
 }) => {
   return (
@@ -30,7 +32,7 @@ export const PatchCandidatePanel: React.FC<PatchCandidatePanelProps> = ({
           variant="filter"
           size="sm"
           onClick={onRequestPatch}
-          disabled={isLoading}
+          disabled={isLoading || disabled}
           isLoading={isLoading}
           className="bg-sky-900/80 hover:bg-sky-800 text-sky-200 border-sky-700"
         >

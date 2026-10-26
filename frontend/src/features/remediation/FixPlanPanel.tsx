@@ -5,12 +5,14 @@ import { Button } from '@/components/ui/Button';
 export interface FixPlanPanelProps {
   plan: FixPlan | null;
   isLoading: boolean;
+  disabled?: boolean;
   onRequestPlan: () => void;
 }
 
 export const FixPlanPanel: React.FC<FixPlanPanelProps> = ({
   plan,
   isLoading,
+  disabled = false,
   onRequestPlan,
 }) => {
   return (
@@ -23,7 +25,7 @@ export const FixPlanPanel: React.FC<FixPlanPanelProps> = ({
           variant="filter"
           size="sm"
           onClick={onRequestPlan}
-          disabled={isLoading}
+          disabled={isLoading || disabled}
           isLoading={isLoading}
         >
           {isLoading

@@ -67,6 +67,8 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
   const localPatchActionRef = useRef(false);
   const researchActionRef = useRef(false);
   const planActionRef = useRef(false);
+  // One lifecycle action at a time: an old approval must not authorize a new patch.
+  const actionInFlightRef = useRef(false);
 
   // Reset state whenever the selected finding changes. Do not carry a
   // previous finding's patch or delivery approval to another resource.
@@ -149,6 +151,8 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
 
   // Step 1: Request Research
   const handleRequestResearch = async () => {
+    if (actionInFlightRef.current) return;
+    actionInFlightRef.current = true;
     try {
       setError(null);
       setLoadingStep('research');
@@ -158,12 +162,15 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Research failed');
     } finally {
+      actionInFlightRef.current = false;
       setLoadingStep(null);
     }
   };
 
   // Step 2: Request Fix Plan
   const handleRequestPlan = async () => {
+    if (actionInFlightRef.current) return;
+    actionInFlightRef.current = true;
     try {
       setError(null);
       setLoadingStep('plan');
@@ -173,12 +180,15 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Fix plan generation failed');
     } finally {
+      actionInFlightRef.current = false;
       setLoadingStep(null);
     }
   };
 
   // Step 3: Request Safe Patch Generation & Sandbox Verification
   const handleRequestPatch = async () => {
+    if (actionInFlightRef.current) return;
+    actionInFlightRef.current = true;
     try {
       setError(null);
       setLoadingStep('patch');
@@ -201,6 +211,7 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Patch generation failed');
     } finally {
+      actionInFlightRef.current = false;
       setLoadingStep(null);
     }
   };
@@ -208,6 +219,8 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
   // Step 4: Human Approval
   const handleApprove = async () => {
     if (!patchId) return;
+    if (actionInFlightRef.current) return;
+    actionInFlightRef.current = true;
     try {
       setError(null);
       setLoadingStep('approve');
@@ -216,6 +229,7 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Approval failed');
     } finally {
+      actionInFlightRef.current = false;
       setLoadingStep(null);
     }
   };
@@ -223,6 +237,8 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
   // Step 5: Human Rejection
   const handleReject = async () => {
     if (!patchId || !rejectReason.trim()) return;
+    if (actionInFlightRef.current) return;
+    actionInFlightRef.current = true;
     try {
       setError(null);
       setLoadingStep('reject');
@@ -232,6 +248,7 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Rejection failed');
     } finally {
+      actionInFlightRef.current = false;
       setLoadingStep(null);
     }
   };
@@ -239,6 +256,8 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
   // Step 6: Human Requested Revision
   const handleRevise = async () => {
     if (!patchId || !revisionFeedback.trim()) return;
+    if (actionInFlightRef.current) return;
+    actionInFlightRef.current = true;
     try {
       setError(null);
       setLoadingStep('revise');
@@ -259,6 +278,7 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Revision request failed');
     } finally {
+      actionInFlightRef.current = false;
       setLoadingStep(null);
     }
   };
@@ -298,6 +318,8 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
       setError('GitHub delivery requires an authorized operator and a confirmed eligible preview.');
       return;
     }
+    if (actionInFlightRef.current) return;
+    actionInFlightRef.current = true;
     try {
       setError(null);
       setLoadingStep('deliver');
@@ -310,6 +332,7 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Pull request delivery failed');
     } finally {
+      actionInFlightRef.current = false;
       setLoadingStep(null);
     }
   };
@@ -370,6 +393,7 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
         <ResearchPanel
           research={research}
           isLoading={loadingStep === 'research'}
+          disabled={loadingStep !== null}
           onRequestResearch={handleRequestResearch}
         />
 
@@ -377,6 +401,7 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
         <FixPlanPanel
           plan={plan}
           isLoading={loadingStep === 'plan'}
+          disabled={loadingStep !== null}
           onRequestPlan={handleRequestPlan}
         />
 
@@ -387,6 +412,7 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
           patchStatus={patchStatus}
           workflowResult={workflowResult}
           isLoading={loadingStep === 'patch'}
+          disabled={loadingStep !== null}
           onRequestPatch={handleRequestPatch}
         />
 
@@ -438,7 +464,7 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
                   type="button"
                   onClick={() => setShowDeliveryModal(true)}
                   disabled={
-                    loadingStep === 'deliver' ||
+                    loadingStep !== null ||
                     !isOperator ||
                     !deliveryPreview?.eligible ||
                     !deliveryPreview.github_delivery_configured ||
