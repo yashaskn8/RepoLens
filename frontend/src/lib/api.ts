@@ -626,11 +626,51 @@ export async function revisePatch(
     body: JSON.stringify(payload),
   });
 
+  if (response.status === 503) {
+    const error = await apiErrorFromResponse(response, 'Failed to request patch revision');
+    if (error.errorCode !== 'REVISION_QUEUED') throw error;
+    const location = response.headers.get('Location') || '';
+    const jobMatch = /^\/api\/v1\/jobs\/([0-9a-f-]{36})$/i.exec(location);
+    if (!jobMatch) {
+      throw new ApiError('Queued revision has no valid job reference.', 502, 'REVISION_JOB_INVALID');
+    }
+    const jobId = jobMatch[1];
+    for (let attempt = 0; attempt < REMEDIATION_POLL_ATTEMPTS; attempt += 1) {
+      const job = await fetchJob(jobId);
+      if (job.state === 'SUCCEEDED') {
+        const childId = job.outcome_detail?.patch_id;
+        if (typeof childId !== 'string' || !childId) {
+          throw new ApiError('Completed revision has no persisted child patch.', 502, 'REVISION_RESULT_INVALID');
+        }
+        const child = await fetchPatch(childId);
+        if (child.id !== childId || child.parent_patch_id !== patchId) {
+          throw new ApiError('Completed revision does not match the requested patch.', 502, 'REVISION_PROVENANCE_MISMATCH');
+        }
+        return child;
+      }
+      if (TERMINAL_JOB_STATES.has(job.state)) {
+        throw new Error(
+          job.failures.at(-1)?.message || `Patch revision ended in ${job.state.toLowerCase()}.`
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, REMEDIATION_POLL_INTERVAL_MS));
+    }
+    throw new ApiError(
+      'Revision remains queued; inspect its durable job status before retrying.',
+      504,
+      'REVISION_STILL_QUEUED',
+    );
+  }
+
   if (!response.ok) {
     throw await apiErrorFromResponse(response, 'Failed to request patch revision');
   }
 
-  return response.json();
+  const patch: PatchResponse = await response.json();
+  if (patch.parent_patch_id !== patchId) {
+    throw new ApiError('Revision does not belong to the requested parent patch.', 502, 'REVISION_PROVENANCE_MISMATCH');
+  }
+  return patch;
 }
 
 /* ========================================================================= */
