@@ -1,8 +1,10 @@
 """Canonical ScanIntelligenceRuntime assembling full Phase 2 repository intelligence from EvidenceStore."""
 
 from dataclasses import dataclass
+import hashlib
 import logging
 import os
+import stat
 from typing import Any, Dict, List, Optional
 
 from app.analysis.store import EvidenceStore
@@ -111,21 +113,42 @@ def _read_file_contents_from_workspace(manifest: RepositoryManifest, repo_dir: s
         if file_entry.is_binary or file_entry.skipped_reason:
             continue
 
-        clean_path = file_entry.path.replace("\\", "/").lstrip("/")
+        clean_path = file_entry.path.replace("\\", "/")
+        if clean_path.startswith("/") or not clean_path:
+            continue
         try:
             full_path_obj = resolve_safe_path(repo_dir, clean_path)
             full_path = str(full_path_obj)
         except PathTraversalError:
             continue
 
-        if os.path.exists(full_path) and os.path.isfile(full_path):
-            try:
-                with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
-                    content = f.read()
-                    file_contents[file_entry.path] = content
-                    file_contents[clean_path] = content
-            except Exception as exc:
-                logger.warning("Failed to read file '%s' for indexing: %s", file_entry.path, str(exc))
+        if os.path.islink(full_path):
+            continue
+        try:
+            maximum = get_settings().MAX_FILE_SIZE_BYTES
+            if file_entry.size_bytes > maximum:
+                continue
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+            fd = os.open(full_path, flags)
+            with os.fdopen(fd, "rb") as source_file:
+                opened = os.fstat(source_file.fileno())
+                if not stat.S_ISREG(opened.st_mode) or opened.st_size > maximum:
+                    continue
+                if file_entry.content_sha256 and opened.st_size != file_entry.size_bytes:
+                    continue
+                raw = source_file.read(maximum + 1)
+            if len(raw) > maximum or len(raw) != opened.st_size:
+                continue
+            if file_entry.content_sha256 and hashlib.sha256(raw).hexdigest() != file_entry.content_sha256:
+                continue
+            if b"\\x00" in raw:
+                continue
+            content = raw.decode("utf-8")
+            file_contents[file_entry.path] = content
+            file_contents[clean_path] = content
+        except (OSError, UnicodeError, ValueError) as exc:
+            # Host paths and exception messages may disclose credentials.
+            logger.warning("Indexing source read unavailable (%s)", type(exc).__name__)
 
     return file_contents
 

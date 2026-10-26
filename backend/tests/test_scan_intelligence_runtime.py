@@ -462,3 +462,48 @@ async def test_scan_intelligence_runtime_build_from_directory(tmp_path):
     )
     assert len(bundle.relevant_chunks) >= 1
     assert any("connection.py" in c.chunk.file_path for c in bundle.relevant_chunks)
+
+def test_runtime_workspace_reader_rejects_same_size_source_drift(tmp_path):
+    import hashlib
+    from app.context.runtime import _read_file_contents_from_workspace
+
+    source = tmp_path / "main.py"
+    approved = b"pass = 1"
+    changed = b"fail = 1"
+    assert len(approved) == len(changed)
+    source.write_bytes(changed)
+    manifest = RepositoryManifest(
+        repository_url="https://github.com/example/repo",
+        commit_hash="a" * 40,
+        files=[FileEntry(
+            path="main.py", language="python", size_bytes=len(approved),
+            content_sha256=hashlib.sha256(approved).hexdigest(),
+        )],
+    )
+    assert _read_file_contents_from_workspace(manifest, str(tmp_path)) == {}
+
+
+def test_runtime_workspace_reader_rejects_invalid_utf8_and_source_links(tmp_path):
+    import hashlib
+    from app.context.runtime import _read_file_contents_from_workspace
+
+    payload = b"x = 1" + bytes([10, 255])
+    source = tmp_path / "main.py"
+    source.write_bytes(payload)
+    entry = FileEntry(
+        path="main.py", language="python", size_bytes=len(payload),
+        content_sha256=hashlib.sha256(payload).hexdigest(),
+    )
+    manifest = RepositoryManifest(
+        repository_url="https://github.com/example/repo",
+        commit_hash="a" * 40, files=[entry],
+    )
+    assert _read_file_contents_from_workspace(manifest, str(tmp_path)) == {}
+    source.unlink()
+    outside = tmp_path / "outside.py"
+    outside.write_bytes(payload)
+    try:
+        source.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlink creation unavailable")
+    assert _read_file_contents_from_workspace(manifest, str(tmp_path)) == {}
