@@ -32,23 +32,37 @@ from app.ingestion.schemas import FileEntry, ParsedCall, ParsedSymbol, Repositor
 
 
 def _extract_and_normalize_symbol_lines(file_path: Optional[str], start_line: int, end_line: int) -> str:
-    """Read and normalize symbol source lines, ignoring comments and surrounding whitespace."""
-    if not file_path or not os.path.exists(file_path):
-        return ""
+    """Read a bounded, strict UTF-8 symbol region or fail rather than claiming no change."""
+    if not file_path or start_line < 1 or end_line < start_line:
+        raise ValueError("Structural diff source locator is unavailable or invalid.")
+    limit = int(get_settings().MAX_FILE_SIZE_BYTES)
+    if limit < 1:
+        raise ValueError("Structural diff source byte limit is invalid.")
     try:
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
-        selected = lines[max(0, start_line - 1):end_line]
-        normalized = []
-        for l in selected:
-            l_clean = re.sub(r"#.*$", "", l)
-            l_clean = re.sub(r"//.*$", "", l_clean)
-            l_clean = l_clean.strip()
-            if l_clean:
-                normalized.append(l_clean)
-        return "\n".join(normalized)
-    except OSError:
-        return ""
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        descriptor = os.open(file_path, flags)
+        with os.fdopen(descriptor, "rb") as source:
+            size = os.fstat(source.fileno())
+            if not stat.S_ISREG(size.st_mode) or size.st_size > limit:
+                raise ValueError("Structural diff source cannot be read within its byte budget.")
+            contents = source.read(limit + 1)
+            if len(contents) > limit or len(contents) != size.st_size:
+                raise ValueError("Structural diff source changed during comparison.")
+        lines = contents.decode("utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        raise ValueError("Structural diff source could not be read exactly.") from None
+
+    if end_line > len(lines):
+        raise ValueError("Structural diff symbol range exceeds the source file.")
+    selected = lines[start_line - 1:end_line]
+    normalized = []
+    for line in selected:
+        line = re.sub(r"#.*$", "", line)
+        line = re.sub(r"//.*$", "", line)
+        stripped = line.strip()
+        if stripped:
+            normalized.append(stripped)
+    return "\n".join(normalized)
 from app.schemas.change_analysis import (
     ConfigDelta,
     DependencyDelta,

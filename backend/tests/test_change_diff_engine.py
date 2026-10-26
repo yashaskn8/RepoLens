@@ -513,3 +513,33 @@ def test_rename_hash_rejects_symlinked_source(tmp_path):
     assert ChangeDiffEngine()._compute_file_sha256_bounded(
         str(link), max_size=1024,
     ) is None
+
+
+def test_symbol_diff_fallback_preserves_strict_bounded_source(tmp_path, monkeypatch):
+    """The fallback must not treat a corrupt or unreadable source as unchanged."""
+    from types import SimpleNamespace
+    from app.analysis.diff_engine import _extract_and_normalize_symbol_lines
+
+    corrupt = tmp_path / "corrupt.py"
+    corrupt.write_bytes(b"ok = 1\n\xff\n")
+    with pytest.raises(ValueError, match="could not be read exactly"):
+        _extract_and_normalize_symbol_lines(str(corrupt), 1, 1)
+
+    monkeypatch.setattr(
+        "app.analysis.diff_engine.get_settings",
+        lambda: SimpleNamespace(MAX_FILE_SIZE_BYTES=8),
+    )
+    valid = tmp_path / "large.py"
+    valid.write_bytes(b"x = 1\ny = 2\n")
+    with pytest.raises(ValueError, match="byte budget"):
+        _extract_and_normalize_symbol_lines(str(valid), 1, 2)
+
+
+def test_symbol_diff_fallback_checks_actual_line_range(tmp_path):
+    from app.analysis.diff_engine import _extract_and_normalize_symbol_lines
+
+    source = tmp_path / "main.py"
+    source.write_text("x = 1\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="exceeds the source file"):
+        _extract_and_normalize_symbol_lines(str(source), 1, 12)
+    assert _extract_and_normalize_symbol_lines(str(source), 1, 1) == "x = 1"
