@@ -141,7 +141,7 @@ def _read_file_contents_from_workspace(manifest: RepositoryManifest, repo_dir: s
                 continue
             if file_entry.content_sha256 and hashlib.sha256(raw).hexdigest() != file_entry.content_sha256:
                 continue
-            if b"\\x00" in raw:
+            if b"\x00" in raw:
                 continue
             content = raw.decode("utf-8")
             file_contents[file_entry.path] = content
