@@ -99,17 +99,24 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
   const [isPublishing, setIsPublishing] = useState(false);
   const [confirmedPublish, setConfirmedPublish] = useState(false);
   const [publishMessage, setPublishMessage] = useState<string | null>(null);
+  const [missingArtifacts, setMissingArtifacts] = useState<string[]>([]);
+  const [artifactRetryToken, setArtifactRetryToken] = useState(0);
+  const retryPendingRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
-    setAnalysis(null);
-    setDiff(null);
-    setImpacts([]);
-    setReview(null);
-    setPublication(null);
-    setSelectedFile(null);
+    // Keep already-loaded evidence visible while retrying transient failures.
+    if (artifactRetryToken === 0) {
+      setAnalysis(null);
+      setDiff(null);
+      setImpacts([]);
+      setReview(null);
+      setPublication(null);
+      setSelectedFile(null);
+      setMissingArtifacts([]);
+    }
     setIsLoading(true);
 
     async function loadData() {
@@ -119,7 +126,7 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
         if (cancelled) return;
         setAnalysis(current);
         terminal = current.status === 'COMPLETED' || current.status === 'FAILED';
-        if (terminal) {
+        if (current.status === 'COMPLETED') {
           const [diffRes, impactsRes, reviewRes, pubRes] = await Promise.allSettled([
             fetchChangeAnalysisDiff(analysisId),
             fetchChangeAnalysisImpacts(analysisId),
@@ -127,21 +134,27 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
             fetchReviewPublication(analysisId),
           ]);
           if (cancelled) return;
+          const missing: string[] = [];
           if (diffRes.status === 'fulfilled') {
             setDiff(diffRes.value);
             if (diffRes.value.changed_files?.length > 0) {
               setSelectedFile(diffRes.value.changed_files[0].file_path);
             }
-          }
+          } else missing.push('structural diff');
           if (impactsRes.status === 'fulfilled') setImpacts(impactsRes.value || []);
+          else missing.push('downstream impacts');
           if (reviewRes.status === 'fulfilled') setReview(reviewRes.value);
+          else missing.push('review evidence');
+          // Publication is optional; its absence is not a failed analysis.
           if (pubRes.status === 'fulfilled') setPublication(pubRes.value);
+          setMissingArtifacts(missing);
         }
       } catch {
         // Do not infer zero findings or a clean diff from a failed request.
       } finally {
         if (!cancelled) {
           setIsLoading(false);
+          retryPendingRef.current = false;
           if (!terminal) retryTimer = setTimeout(loadData, 2000);
         }
       }
@@ -152,7 +165,13 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
       cancelled = true;
       if (retryTimer) clearTimeout(retryTimer);
     };
-  }, [analysisId]);
+  }, [analysisId, artifactRetryToken]);
+
+  const retryMissingArtifacts = () => {
+    if (analysis?.status !== 'COMPLETED' || missingArtifacts.length === 0 || retryPendingRef.current) return;
+    retryPendingRef.current = true;
+    setArtifactRetryToken((value) => value + 1);
+  };
 
   const handleGeneratePreview = async () => {
     const generation = actionGeneration.current;
@@ -341,6 +360,17 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
           </div>
         </div>
 
+        {analysis?.status === 'COMPLETED' && missingArtifacts.length > 0 && (
+          <div role="alert" className="glass-panel" style={{ padding: '0.9rem 1.25rem', display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+            <span style={{ flex: 1, color: 'var(--warning-text)' }}>
+              Unavailable analysis artifacts: {missingArtifacts.join(', ')}. Missing evidence does not mean zero findings.
+            </span>
+            <Button type="button" variant="secondary" size="sm" disabled={isLoading} onClick={retryMissingArtifacts}>
+              {isLoading ? 'Retrying artifacts...' : 'Retry missing artifacts'}
+            </Button>
+          </div>
+        )}
+
         {/* 3-PANE ENGINEERING REVIEW LAYOUT */}
         <div
           style={{
@@ -363,7 +393,7 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
             }}
           >
             <div style={{ fontSize: '0.8125rem', fontWeight: 700, color: 'var(--text-primary)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-              Changed Files ({diff?.changed_files?.length || 0})
+              Changed Files ({diff === null ? 'unavailable' : diff.changed_files?.length ?? 0})
             </div>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
