@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { AppShell } from '@/components/layout/AppShell';
@@ -34,32 +34,63 @@ import {
 } from 'lucide-react';
 
 export default function DashboardPage() {
-  const { user, isOperator } = useAuth();
+  const { user, isOperator, isLoading: authLoading } = useAuth();
+  const accountId = user?.id ?? null;
+  const requestGeneration = useRef(0);
+  const [loadedForAccount, setLoadedForAccount] = useState<string | null>(null);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [changeAnalyses, setChangeAnalyses] = useState<ChangeAnalysisSummary[]>([]);
   const [recentScans, setRecentScans] = useState<Scan[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const router = useRouter();
 
+  // Public health is independent of tenant data.
   useEffect(() => {
-    async function loadDashboardData() {
+    let active = true;
+    void fetchHealth().then((result) => {
+      if (active) setHealth(result);
+    }).catch(() => {
+      if (active) setHealth(null);
+    });
+    return () => { active = false; };
+  }, []);
+
+  // Private dashboard summaries must be scoped to the active account. A
+  // previous account's in-flight requests cannot populate the next session.
+  useEffect(() => {
+    const generation = ++requestGeneration.current;
+    setChangeAnalyses([]);
+    setRecentScans([]);
+    setLoadedForAccount(null);
+    setIsLoading(Boolean(accountId) && !authLoading);
+    if (!accountId || authLoading) {
+      return () => { requestGeneration.current += 1; };
+    }
+
+    void (async () => {
       try {
-        const [healthRes, changesRes, scansRes] = await Promise.allSettled([
-          fetchHealth(),
+        const [changesRes, scansRes] = await Promise.allSettled([
           listChangeAnalyses(undefined, 10, 0),
           listScans(10),
         ]);
-
-        if (healthRes.status === 'fulfilled') setHealth(healthRes.value);
+        if (generation !== requestGeneration.current) return;
         if (changesRes.status === 'fulfilled') setChangeAnalyses(changesRes.value || []);
         if (scansRes.status === 'fulfilled') setRecentScans(scansRes.value || []);
       } finally {
-        setIsLoading(false);
+        if (generation === requestGeneration.current) {
+          setLoadedForAccount(accountId);
+          setIsLoading(false);
+        }
       }
-    }
+    })();
 
-    loadDashboardData();
-  }, []);
+    return () => { requestGeneration.current += 1; };
+  }, [accountId, authLoading]);
+
+  // Mask old account data synchronously during render, before effects run.
+  const visibleChangeAnalyses = accountId && loadedForAccount === accountId ? changeAnalyses : [];
+  const visibleRecentScans = accountId && loadedForAccount === accountId ? recentScans : [];
+  const displayLoading = authLoading || Boolean(accountId && (isLoading || loadedForAccount !== accountId));
 
   return (
     <AppShell breadcrumbs={[{ label: 'Dashboard' }]} title="Product Overview">
@@ -145,7 +176,7 @@ export default function DashboardPage() {
           />
           <StatCard
             label="PR Impact Analyses"
-            value={changeAnalyses.length}
+            value={visibleChangeAnalyses.length}
             subtext="Pull request risk evaluations"
             icon={<GitPullRequest size={18} />}
             glow="cyan"
@@ -153,7 +184,7 @@ export default function DashboardPage() {
           />
           <StatCard
             label="Findings Tracked"
-            value={recentScans.reduce((total, scan) => total + scan.findings_count, 0)}
+            value={visibleRecentScans.reduce((total, scan) => total + scan.findings_count, 0)}
             subtext="Issues identified in recent scans"
             icon={<ShieldCheck size={18} />}
             badge={<Badge variant="cyan" size="sm">Verified</Badge>}
@@ -201,13 +232,13 @@ export default function DashboardPage() {
               </Link>
             </div>
 
-            {isLoading ? (
+            {displayLoading ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
                 <Skeleton height="4rem" />
                 <Skeleton height="4rem" />
                 <Skeleton height="4rem" />
               </div>
-            ) : changeAnalyses.length === 0 ? (
+            ) : visibleChangeAnalyses.length === 0 ? (
               <EmptyState
                 icon={<GitPullRequest size={24} />}
                 title="No PR analyses yet"
@@ -217,7 +248,7 @@ export default function DashboardPage() {
               />
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
-                {changeAnalyses.map((analysis) => (
+                {visibleChangeAnalyses.map((analysis) => (
                   <Link
                     key={analysis.id}
                     href={`/changes/${analysis.id}`}
