@@ -196,6 +196,57 @@ class GitHubDeliveryProvider(RepositoryDeliveryProvider):
             raise GitHubAPIError(f"Failed to create branch '{clean_branch}': no ref returned", status_code=500)
         return str(ref)
 
+
+    @staticmethod
+    def _verified_pull_request(
+        payload: Dict[str, Any],
+        *,
+        owner: str,
+        repo: str,
+        head: str,
+        base: str,
+    ) -> GitPullRequestInfo:
+        """Verify remote PR identity before it can satisfy delivery reconciliation.
+
+        GitHub's search filters are advisory to the client: never treat the first
+        returned row as proof that our intended repository/branch was used.
+        Do not reflect untrusted response fields into diagnostic messages.
+        """
+        if not isinstance(payload, dict):
+            raise GitHubAPIError("Invalid GitHub pull request response", status_code=502)
+        number = payload.get("number")
+        remote_head = payload.get("head")
+        remote_base = payload.get("base")
+        if (
+            isinstance(number, bool)
+            or not isinstance(number, int)
+            or number < 1
+            or not isinstance(remote_head, dict)
+            or not isinstance(remote_base, dict)
+        ):
+            raise GitHubAPIError("Invalid GitHub pull request identity", status_code=502)
+        expected_repo = f"{owner}/{repo}".casefold()
+        for section, expected_ref in ((remote_head, head), (remote_base, base)):
+            repo_info = section.get("repo")
+            if (
+                section.get("ref") != expected_ref
+                or not isinstance(repo_info, dict)
+                or not isinstance(repo_info.get("full_name"), str)
+                or repo_info["full_name"].casefold() != expected_repo
+            ):
+                raise GitHubAPIError(
+                    "GitHub pull request identity does not match intended delivery",
+                    status_code=409,
+                )
+        return GitPullRequestInfo(
+            number=number,
+            html_url=f"https://github.com/{owner}/{repo}/pull/{number}",
+            head_branch=head,
+            base_branch=base,
+            title=payload.get("title") if isinstance(payload.get("title"), str) else "",
+            state=payload.get("state") if isinstance(payload.get("state"), str) else "open",
+        )
+
     async def find_existing_pull_request(
         self,
         owner: str,
@@ -213,20 +264,13 @@ class GitHubDeliveryProvider(RepositoryDeliveryProvider):
             "state": "all",
         }
         data = await self._request("GET", f"/repos/{owner}/{repo}/pulls", params=params)
-        if isinstance(data, list) and len(data) > 0:
-            pr = data[0]
-            pr_num = pr.get("number")
-            if pr_num is not None:
-                canonical_url = f"https://github.com/{owner}/{repo}/pull/{pr_num}"
-                return GitPullRequestInfo(
-                    number=int(pr_num),
-                    html_url=canonical_url,
-                    head_branch=clean_head,
-                    base_branch=clean_base,
-                    title=pr.get("title", ""),
-                    state=pr.get("state", "open"),
-                )
-        return None
+        if not isinstance(data, list):
+            raise GitHubAPIError("Invalid GitHub pull request search response", status_code=502)
+        if not data:
+            return None
+        return self._verified_pull_request(
+            data[0], owner=owner, repo=repo, head=clean_head, base=clean_base,
+        )
 
     async def create_pull_request(
         self,
@@ -247,16 +291,6 @@ class GitHubDeliveryProvider(RepositoryDeliveryProvider):
             "base": clean_base,
         }
         data = await self._request("POST", f"/repos/{owner}/{repo}/pulls", json_data=payload, is_write=True)
-        pr_number = data.get("number")
-        if pr_number is None:
-            raise GitHubAPIError("Pull request creation response did not contain a PR number", status_code=500)
-
-        canonical_url = f"https://github.com/{owner}/{repo}/pull/{pr_number}"
-        return GitPullRequestInfo(
-            number=int(pr_number),
-            html_url=canonical_url,
-            head_branch=clean_head,
-            base_branch=clean_base,
-            title=str(data.get("title", title)),
-            state=str(data.get("state", "open")),
+        return self._verified_pull_request(
+            data, owner=owner, repo=repo, head=clean_head, base=clean_base,
         )
