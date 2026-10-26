@@ -99,7 +99,12 @@ def parse_unified_diff(unified_diff: str) -> List[FilePatch]:
             raise PatchApplyError(f"Binary file patch rejected: '{clean_target}'", file_path=clean_target)
 
         is_new_file = (orig_file == "/dev/null" or orig_file.startswith("/dev/null"))
-        is_deleted_file = (new_file == "/dev/null" or new_file.startswith("/dev/null"))
+        is_deleted_file = (new_file == "/dev/null")
+        if not is_new_file and not is_deleted_file and orig_file != new_file:
+            raise PatchApplyError(
+                "Renaming files in unified diffs is not supported; original and target must match.",
+                file_path=clean_target,
+            )
 
         # Parse hunks within this file section
         hunks: List[DiffHunk] = []
@@ -149,7 +154,9 @@ def parse_unified_diff(unified_diff: str) -> List[FilePatch]:
             _validate_hunk_internal_counts(current_hunk, clean_target)
             hunks.append(current_hunk)
 
-        if not hunks and not is_deleted_file:
+        if not hunks:
+            # In particular, --- a/file +++ /dev/null without any hunk
+            # must never authorize deleting an arbitrary existing file.
             raise PatchApplyError(f"No valid diff hunks found for file '{clean_target}'", file_path=clean_target)
 
         # Check for overlapping hunks
@@ -253,20 +260,28 @@ def apply_unified_diff_to_directory(unified_diff: str, target_dir: str) -> Dict[
         # 3. Strict deleted-file semantics: validate all deletion hunks before deleting
         if fp.is_deleted_file:
             if fp.hunks:
+                # A deletion must cover every original line; a partial hunk
+                # that only verifies one matching line cannot erase the rest.
                 # Validate all hunks against original_lines
                 sorted_del_hunks = sorted(fp.hunks, key=lambda h: h.orig_start)
                 del_orig_idx = 0
                 for hunk in sorted_del_hunks:
                     h_start_0 = max(0, hunk.orig_start - 1) if hunk.orig_start > 0 else 0
-                    if h_start_0 < del_orig_idx:
+                    if h_start_0 != del_orig_idx:
                         raise PatchApplyError(
-                            f"Overlapping deletion hunks in '{target_rel}' at hunk {hunk.hunk_index}",
+                            f"Deletion hunks must cover every original line in '{target_rel}' (gap or overlap).",
+                            file_path=target_rel,
+                            hunk_index=hunk.hunk_index,
+                        )
+                    if hunk.new_count != 0:
+                        raise PatchApplyError(
+                            f"Deleted-file hunk for '{target_rel}' cannot preserve or add lines.",
                             file_path=target_rel,
                             hunk_index=hunk.hunk_index,
                         )
                     del_orig_idx = h_start_0
                     for prefix, content in hunk.lines:
-                        if prefix in (" ", "-"):
+                        if prefix == "-":
                             if del_orig_idx >= len(original_lines):
                                 raise PatchApplyError(
                                     f"Deletion hunk mismatch in '{target_rel}' at hunk {hunk.hunk_index} line {del_orig_idx + 1}: expected line {repr(content)}, found <EOF>",
@@ -282,12 +297,17 @@ def apply_unified_diff_to_directory(unified_diff: str, target_dir: str) -> Dict[
                                     line_number=del_orig_idx + 1,
                                 )
                             del_orig_idx += 1
-                        elif prefix == "+":
+                        else:
                             raise PatchApplyError(
-                                f"Deleted-file diff for '{target_rel}' cannot contain addition lines (+)",
+                                f"Deleted-file diff for '{target_rel}' cannot contain context or addition lines.",
                                 file_path=target_rel,
                                 hunk_index=hunk.hunk_index,
                             )
+                if del_orig_idx != len(original_lines):
+                    raise PatchApplyError(
+                        f"Deletion hunks do not cover the entire source file '{target_rel}'.",
+                        file_path=target_rel,
+                    )
 
             # File content strictly verified; now safe to delete temporary sandbox copy
             if os.path.exists(full_path):

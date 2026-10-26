@@ -91,3 +91,45 @@ def test_new_file_creation_rejected_if_already_exists():
         # Verify existing file was not overwritten
         with open(existing_path, "r", encoding="utf-8") as f:
             assert f.read() == "# existing content\n"
+
+
+@pytest.mark.parametrize(
+    "diff",
+    [
+        "--- a/review.py\n+++ /dev/null\n",
+        "--- a/review.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-first\n",
+        "--- a/review.py\n+++ /dev/null\n@@ -2 +0,0 @@\n-second\n",
+        "--- a/review.py\n+++ /dev/null\n@@ -1,2 +0,1 @@\n-first\n second\n",
+        "--- a/review.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-first\n@@ -3 +0,0 @@\n-third\n",
+    ],
+)
+def test_deletion_requires_a_complete_source_match(diff):
+    """An incomplete deletion diff cannot erase lines that were not verified."""
+    with tempfile.TemporaryDirectory() as root:
+        target = os.path.join(root, "review.py")
+        with open(target, "w", encoding="utf-8") as file:
+            file.write("first\nsecond\nthird\n")
+        with pytest.raises(PatchApplyError):
+            apply_unified_diff_to_directory(diff, root)
+        with open(target, encoding="utf-8") as file:
+            assert file.read() == "first\nsecond\nthird\n"
+
+
+def test_file_rename_headers_rejected_by_strict_applier():
+    """A diff cannot claim to read one path but actually modify a different path."""
+    with tempfile.TemporaryDirectory() as root:
+        target = os.path.join(root, "other.py")
+        with open(target, "w", encoding="utf-8") as file:
+            file.write("old\n")
+        diff = (
+            "--- a/approved.py\n"
+            "+++ b/other.py\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            "+new\n"
+        )
+        with pytest.raises(PatchApplyError, match="Renaming files"):
+            apply_unified_diff_to_directory(diff, root)
+        with open(target, encoding="utf-8") as file:
+            assert file.read() == "old\n"
+
