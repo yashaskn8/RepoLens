@@ -411,3 +411,77 @@ async def test_graph_expansion_uses_lexical_seed_and_intent_weight():
     assert expanded.provenance["graph_distance"] == 1
     assert expanded.provenance["graph_edge_type"] == "IMPORTS"
     assert expanded.provenance["effective_graph_weight"] == 0.95
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("adapter_name", ["qwen", "cohere"])
+async def test_neural_reranker_does_not_log_provider_secrets_or_rank_nan(
+    adapter_name, caplog,
+):
+    from app.retrieval.reranker import CohereReranker
+
+    secret = "secret-provider-response-canary"
+    candidates = [
+        RerankCandidate(chunk_id="a", content="a", initial_score=0.04),
+        RerankCandidate(chunk_id="b", content="b", initial_score=0.03),
+    ]
+    if adapter_name == "qwen":
+        adapter = QwenReranker(api_key="configured")
+    else:
+        adapter = CohereReranker(api_key="configured", min_candidates=1)
+    mocked_response = MagicMock()
+    mocked_response.status_code = 200
+    mocked_response.json.return_value = {
+        "results": [{"index": 0, "relevance_score": float("nan")}]
+    }
+    with patch("app.retrieval.reranker.httpx.AsyncClient") as client_class:
+        client = AsyncMock()
+        client.post.return_value = mocked_response
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=None)
+        client_class.return_value = client
+        ranked = await adapter.rerank("query", candidates)
+    assert ranked == [("a", None), ("b", None)]
+
+    mocked_response.status_code = 503
+    mocked_response.text = secret
+    with patch("app.retrieval.reranker.httpx.AsyncClient") as client_class:
+        client = AsyncMock()
+        client.post.return_value = mocked_response
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=None)
+        client_class.return_value = client
+        ranked = await adapter.rerank("query", candidates)
+    assert ranked == [("a", None), ("b", None)]
+    assert secret not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("adapter_name", ["qwen", "cohere"])
+async def test_reranker_rejects_duplicate_candidate_indexes(adapter_name):
+    from app.retrieval.reranker import CohereReranker
+
+    candidates = [
+        RerankCandidate(chunk_id="a", content="a", initial_score=0.04),
+        RerankCandidate(chunk_id="b", content="b", initial_score=0.03),
+    ]
+    adapter = (
+        QwenReranker(api_key="configured")
+        if adapter_name == "qwen"
+        else CohereReranker(api_key="configured", min_candidates=1)
+    )
+    response = MagicMock(status_code=200)
+    response.json.return_value = {
+        "results": [
+            {"index": 0, "relevance_score": 0.7},
+            {"index": 0, "relevance_score": 0.9},
+        ]
+    }
+    with patch("app.retrieval.reranker.httpx.AsyncClient") as client_class:
+        client = AsyncMock()
+        client.post.return_value = response
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=None)
+        client_class.return_value = client
+        assert await adapter.rerank("query", candidates) == [
+            ("a", None), ("b", None)
+        ]

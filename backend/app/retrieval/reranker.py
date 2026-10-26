@@ -1,6 +1,7 @@
 """Qwen3-Reranker neural cross-encoder client with clean RRF fallback."""
 
 import logging
+import math
 from typing import List, Optional, Tuple
 import httpx
 
@@ -67,9 +68,8 @@ class QwenReranker:
 
             if response.status_code != 200:
                 logger.warning(
-                    "Reranker returned HTTP %d: %s. Falling back to RRF.",
+                    "Reranker returned HTTP %d; falling back to RRF.",
                     response.status_code,
-                    response.text[:200],
                 )
                 return [(c.chunk_id, None) for c in candidates]
 
@@ -81,11 +81,18 @@ class QwenReranker:
                 return [(c.chunk_id, None) for c in candidates]
 
             scored_candidates: List[Tuple[str, float]] = []
+            seen_indexes: set[int] = set()
             for item in results:
+                if not isinstance(item, dict):
+                    raise ValueError("Invalid reranker result item")
                 idx = item.get("index")
+                if type(idx) is not int or not 0 <= idx < len(candidates) or idx in seen_indexes:
+                    raise ValueError("Invalid or duplicated reranker index")
                 score = float(item.get("relevance_score", item.get("score", 0.0)))
-                if idx is not None and 0 <= idx < len(candidates):
-                    scored_candidates.append((candidates[idx].chunk_id, score))
+                if not math.isfinite(score):
+                    raise ValueError("Nonfinite reranker score")
+                seen_indexes.add(idx)
+                scored_candidates.append((candidates[idx].chunk_id, score))
 
             if not scored_candidates:
                 return [(c.chunk_id, None) for c in candidates]
@@ -95,7 +102,7 @@ class QwenReranker:
             return [(cid, score) for cid, score in scored_candidates]
 
         except Exception as exc:
-            logger.warning("Neural reranking failed with error: %s. Falling back cleanly to RRF.", str(exc))
+            logger.warning("Neural reranking failed (%s); falling back to RRF.", type(exc).__name__)
             return [(c.chunk_id, None) for c in candidates]
 
 
@@ -167,9 +174,8 @@ class CohereReranker:
 
             if response.status_code != 200:
                 logger.warning(
-                    "Cohere reranker returned HTTP %d: %s. Falling back to candidate order.",
+                    "Cohere reranker returned HTTP %d; falling back to candidate order.",
                     response.status_code,
-                    response.text[:200],
                 )
                 return [(c.chunk_id, None) for c in candidates]
 
@@ -180,11 +186,18 @@ class CohereReranker:
                 return [(c.chunk_id, None) for c in candidates]
 
             scored_candidates: List[Tuple[str, float]] = []
+            seen_indexes: set[int] = set()
             for item in results:
+                if not isinstance(item, dict):
+                    raise ValueError("Invalid reranker result item")
                 idx = item.get("index")
+                if type(idx) is not int or not 0 <= idx < len(candidates) or idx in seen_indexes:
+                    raise ValueError("Invalid or duplicated reranker index")
                 score = float(item.get("relevance_score", 0.0))
-                if idx is not None and 0 <= idx < len(candidates):
-                    scored_candidates.append((candidates[idx].chunk_id, score))
+                if not math.isfinite(score):
+                    raise ValueError("Nonfinite reranker score")
+                seen_indexes.add(idx)
+                scored_candidates.append((candidates[idx].chunk_id, score))
 
             if not scored_candidates:
                 return [(c.chunk_id, None) for c in candidates]
@@ -193,5 +206,5 @@ class CohereReranker:
             return [(cid, score) for cid, score in scored_candidates]
 
         except Exception as exc:
-            logger.warning("Cohere neural reranking failed with error: %s. Falling back cleanly.", str(exc))
+            logger.warning("Cohere neural reranking failed (%s); falling back to candidate order.", type(exc).__name__)
             return [(c.chunk_id, None) for c in candidates]
