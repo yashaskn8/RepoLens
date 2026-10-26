@@ -61,8 +61,10 @@ export function useWorkflowStream(
     let isMounted = true;
     const retryBudget = new WorkflowRetryBudget(10);
 
-    function handleEvent(messageEvent: MessageEvent) {
-      if (!isMounted || terminalReceivedRef.current) return;
+    function handleEvent(messageEvent: MessageEvent, source: EventSource) {
+      // A closed socket can still dispatch queued messages after reconnect.
+      // Its terminal events must never close the newer active stream.
+      if (!isMounted || terminalReceivedRef.current || eventSourceRef.current !== source) return;
 
       try {
         const parsed = JSON.parse(messageEvent.data) as WorkflowEvent;
@@ -131,12 +133,13 @@ export function useWorkflowStream(
         setStatus('connected');
       };
 
-      // Register shared event handler for generic messages
-      es.onmessage = handleEvent;
+      // Bind every callback to the socket that registered it, including
+      // named events. A stale socket must not update the shared event cursor.
+      const handleActiveEvent = (event: MessageEvent) => handleEvent(event, es);
+      es.onmessage = handleActiveEvent;
 
-      // Register shared event handler for all canonical named SSE events
       WORKFLOW_EVENT_TYPES.forEach((eventType) => {
-        es.addEventListener(eventType, handleEvent as EventListener);
+        es.addEventListener(eventType, handleActiveEvent as EventListener);
       });
 
       es.onerror = () => {
