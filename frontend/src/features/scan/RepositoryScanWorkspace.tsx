@@ -37,6 +37,8 @@ export function RepositoryScanWorkspace({
   const [findingsLoaded, setFindingsLoaded] = useState(false);
   const [artifactError, setArtifactError] = useState<string | null>(null);
   const scanGenerationRef = useRef(0);
+  // React state cannot synchronously prevent a second submit in the same render.
+  const scanSubmissionPendingRef = useRef(false);
 
   // Sync initialRepoUrl / initialBranch when changed externally (e.g. from preset click)
   useEffect(() => {
@@ -101,7 +103,8 @@ export function RepositoryScanWorkspace({
 
   const handleStartScan = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!repoUrl.trim()) return;
+    if (!repoUrl.trim() || scanSubmissionPendingRef.current || isScanRunning) return;
+    scanSubmissionPendingRef.current = true;
 
     const generation = ++scanGenerationRef.current;
     setErrorMsg(null);
@@ -123,6 +126,7 @@ export function RepositoryScanWorkspace({
         setErrorMsg(err instanceof Error ? err.message : 'Failed to initiate scan.');
       }
     } finally {
+      scanSubmissionPendingRef.current = false;
       if (generation === scanGenerationRef.current) setIsSubmitting(false);
     }
   };
