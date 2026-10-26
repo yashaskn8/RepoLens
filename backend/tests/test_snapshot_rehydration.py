@@ -388,3 +388,25 @@ def test_singleton_accessor():
     s2 = get_snapshot_service()
     assert s1 is s2
     assert isinstance(s1, RepositorySnapshotService)
+
+
+def test_snapshot_rehydration_does_not_fetch_malformed_fallback_ref():
+    """Persisted Git refs are untrusted and must not bypass scan branch validation."""
+    service = RepositorySnapshotService()
+    executed = []
+
+    def fake_git(args, **kwargs):
+        executed.append(list(args))
+        if args[0] == "fetch":
+            return 1, "", "GitHub refused this commit"
+        return 0, "", ""
+
+    with patch.object(service, "_run_git_cmd", side_effect=fake_git):
+        with pytest.raises(SnapshotRehydrationError, match="Could not fetch the exact requested commit"):
+            service.materialize_snapshot_from_metadata(
+                repository_url="https://github.com/fastapi/fastapi",
+                commit_hash="a" * 40,
+                branch="feature..invalid",
+            )
+    assert len([cmd for cmd in executed if cmd[0] == "fetch"]) == 1
+

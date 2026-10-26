@@ -30,10 +30,12 @@ from app.core.database import SessionLocal
 from app.ingestion.acquisition_boundary import require_acquisition_boundary
 from app.ingestion.clone import (
     CloneTimeoutError,
+    IngestionError,
     InvalidRepositoryURLError,
     RepositoryResourceLimitError,
     _run_clone_with_object_budget,
     safe_git_environment,
+    validate_git_branch_name,
     validate_github_url,
     validate_repository_tree_budget,
 )
@@ -238,8 +240,11 @@ class RepositorySnapshotService:
                 )
                 fallback_code = 1
                 if branch:
-                    cleaned_branch = branch.strip()
-                    if not re.search(r"[\s;&|`$\n\r\t<>\\*?]", cleaned_branch) and not cleaned_branch.startswith("-"):
+                    try:
+                        cleaned_branch = validate_git_branch_name(branch)
+                    except IngestionError:
+                        cleaned_branch = None
+                    if cleaned_branch is not None:
                         fallback_code, _, _ = run_git(
                             ["fetch", "--filter=blob:none", "--depth=50", "--no-recurse-submodules", "origin", cleaned_branch],
                             cwd=workspace_path,
