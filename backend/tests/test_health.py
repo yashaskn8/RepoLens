@@ -75,3 +75,25 @@ def test_telemetry_uses_configured_sqlite_checkpoint_directory(client, monkeypat
     response = client.get("/health/telemetry")
     assert response.status_code == 200
     assert response.json()["storage"]["checkpointer_storage_accessible"] is False
+
+
+def test_completed_scan_sse_emits_state_based_terminal_signal_if_event_missing(
+    client, db_session,
+):
+    from uuid import uuid4
+    from app.models.scan import ScanModel
+    from app.schemas.enums import ScanStatus
+
+    scan_id = str(uuid4())
+    db_session.add(ScanModel(
+        id=scan_id,
+        repository_url="https://github.com/example/repo",
+        status=ScanStatus.COMPLETED.value,
+    ))
+    db_session.commit()
+
+    response = client.get(f"/api/v1/scans/{scan_id}/events")
+    assert response.status_code == 200
+    assert "event: SCAN_COMPLETED" in response.text
+    assert '"status_source": "persisted_resource_state"' in response.text
+

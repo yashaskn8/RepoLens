@@ -682,20 +682,34 @@ async def get_change_analysis_events(
                 finally:
                     poll_db.close()
 
+                from app.schemas.workflow_event import WorkflowEventResponse
+                terminal_types = {"CHANGE_ANALYSIS_COMPLETED", "CHANGE_ANALYSIS_FAILED"}
+                saw_terminal_event = False
                 for ev in events:
                     current_id = max(current_id, ev.id)
-                    ev_data = {
-                        "id": str(ev.id),
-                        "event_type": ev.event_type,
-                        "stage": ev.stage,
-                        "message": ev.message,
-                        "metadata_payload": ev.metadata_payload,
-                        "created_at": ev.created_at.isoformat() if ev.created_at else None,
-                    }
-                    yield f"event: workflow_event\ndata: {json.dumps(ev_data)}\n\n"
+                    saw_terminal_event = saw_terminal_event or ev.event_type in terminal_types
+                    payload = WorkflowEventResponse.model_validate(ev).model_dump(mode="json")
+                    yield f"id: {ev.id}\nevent: {ev.event_type}\ndata: {json.dumps(payload)}\n\n"
 
                 if is_terminal:
-                    yield f"event: completed\ndata: {json.dumps({'status': curr_model.status})}\n\n"
+                    if not saw_terminal_event:
+                        # Operational event persistence is best effort. Report
+                        # the actual terminal database state rather than leaving
+                        # the UI reconnecting when its event was not recorded.
+                        terminal_type = (
+                            "CHANGE_ANALYSIS_COMPLETED"
+                            if curr_model.status == ChangeAnalysisStatus.COMPLETED.value
+                            else "CHANGE_ANALYSIS_FAILED"
+                        )
+                        payload = {
+                            "id": current_id,
+                            "event_type": terminal_type,
+                            "change_analysis_id": str(analysis_id),
+                            "message": "Change analysis reached its persisted terminal state.",
+                            "metadata_payload": {"status_source": "persisted_resource_state"},
+                            "created_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        yield f"event: {terminal_type}\ndata: {json.dumps(payload)}\n\n"
                     break
 
                 await asyncio.sleep(0.5)

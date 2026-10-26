@@ -1220,18 +1220,37 @@ async def stream_scan_events(
             finally:
                 poll_db.close()
 
+            saw_terminal_event = False
             if events:
                 for evt in events:
                     current_id = evt.id
+                    saw_terminal_event = saw_terminal_event or evt.event_type in {"SCAN_COMPLETED", "SCAN_FAILED"}
                     payload = WorkflowEventResponse.model_validate(evt).model_dump(mode="json")
                     data_str = json.dumps(payload)
                     yield f"id: {evt.id}\nevent: {evt.event_type}\ndata: {data_str}\n\n"
                 heartbeat_ticks = 0
-            else:
-                if is_terminal:
-                    # All events for completed/failed scan have been delivered
-                    break
 
+            if is_terminal:
+                if not saw_terminal_event:
+                    # Audit the database state, not an assumed operational event:
+                    # emit an explicitly sourced terminal UI signal if persistence
+                    # of the optional event was unavailable.
+                    terminal_type = (
+                        "SCAN_COMPLETED" if current_scan.status == ScanStatus.COMPLETED.value
+                        else "SCAN_FAILED"
+                    )
+                    payload = {
+                        "id": current_id,
+                        "event_type": terminal_type,
+                        "scan_id": str(scan_id),
+                        "message": "Scan reached its persisted terminal state.",
+                        "metadata_payload": {"status_source": "persisted_resource_state"},
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                    yield f"event: {terminal_type}\ndata: {json.dumps(payload)}\n\n"
+                break
+
+            if not events:
                 heartbeat_ticks += 1
                 if heartbeat_ticks >= 15:  # Every ~7.5s on 0.5s poll
                     yield ": heartbeat\n\n"

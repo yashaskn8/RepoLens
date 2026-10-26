@@ -437,3 +437,62 @@ async def test_pr_provider_failures_do_not_expose_secret_bearing_exception_text(
     with pytest.raises(GitHubPRForbiddenError) as exc:
         await resolver.resolve_pr(pr_url)
     assert canary not in str(exc.value)
+
+def test_change_analysis_sse_uses_canonical_events_and_numeric_ids(client: TestClient, db_session: Session):
+    """Browser EventSource receives the same envelope and event names as scan SSE."""
+    from app.models.workflow_event import WorkflowEventModel
+
+    analysis_id = str(uuid4())
+    db_session.add(ChangeAnalysisModel(
+        id=analysis_id,
+        repository_url="https://github.com/example/repo",
+        repository_owner="example",
+        repository_name="repo",
+        base_commit_sha="1" * 40,
+        head_commit_sha="2" * 40,
+        status="COMPLETED",
+    ))
+    db_session.flush()
+    event = WorkflowEventModel(
+        change_analysis_id=analysis_id,
+        event_type=WorkflowEventType.CHANGE_ANALYSIS_COMPLETED.value,
+        message="Analysis completed",
+    )
+    db_session.add(event)
+    db_session.commit()
+
+    response = client.get(
+        f"/api/v1/change-analyses/{analysis_id}/events",
+        headers={"Accept": "text/event-stream"},
+    )
+    assert response.status_code == 200
+    assert "event: CHANGE_ANALYSIS_COMPLETED" in response.text
+    assert f"id: {event.id}\\n" in response.text
+    assert '"event_type": "CHANGE_ANALYSIS_COMPLETED"' in response.text
+    assert '"id": "' not in response.text
+    assert "event: workflow_event" not in response.text
+
+
+def test_change_analysis_sse_uses_persisted_terminal_state_when_event_missing(
+    client: TestClient, db_session: Session,
+):
+    """Optional event loss cannot force infinite browser reconnects after completion."""
+    analysis_id = str(uuid4())
+    db_session.add(ChangeAnalysisModel(
+        id=analysis_id,
+        repository_url="https://github.com/example/repo",
+        repository_owner="example",
+        repository_name="repo",
+        base_commit_sha="1" * 40,
+        head_commit_sha="2" * 40,
+        status="FAILED",
+    ))
+    db_session.commit()
+    response = client.get(
+        f"/api/v1/change-analyses/{analysis_id}/events",
+        headers={"Accept": "text/event-stream"},
+    )
+    assert response.status_code == 200
+    assert "event: CHANGE_ANALYSIS_FAILED" in response.text
+    assert '"status_source": "persisted_resource_state"' in response.text
+
