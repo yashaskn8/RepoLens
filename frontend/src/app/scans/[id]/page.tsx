@@ -93,6 +93,7 @@ function ScanDetailWorkspace({ scanId }: { scanId: string }) {
   const [chainbrainAiBusy, setChainbrainAiBusy] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [findingsLoaded, setFindingsLoaded] = useState(false);
+  const [findingsRetryKey, setFindingsRetryKey] = useState(0);
 
   // Filters for findings tab
   const [searchQuery, setSearchQuery] = useState('');
@@ -154,7 +155,7 @@ function ScanDetailWorkspace({ scanId }: { scanId: string }) {
       cancelled = true;
       if (retryTimer) clearTimeout(retryTimer);
     };
-  }, [scanId]);
+  }, [scanId, findingsRetryKey]);
 
   // Tab definitions conforming to task requirements
   const tabs = [
@@ -380,20 +381,26 @@ function ScanDetailWorkspace({ scanId }: { scanId: string }) {
             <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600, letterSpacing: '0.04em' }}>
               Findings by Severity
             </span>
-            <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', alignItems: 'center' }}>
-              <Badge variant="critical" size="sm">
-                Critical: {criticalCount}
-              </Badge>
-              <Badge variant="high" size="sm">
-                High: {highCount}
-              </Badge>
-              <Badge variant="medium" size="sm">
-                Medium: {mediumCount}
-              </Badge>
-              <Badge variant="default" size="sm">
-                Low: {lowCount}
-              </Badge>
-            </div>
+            {findingsLoaded && scan?.status === 'COMPLETED' ? (
+              <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                <Badge variant="critical" size="sm">
+                  Critical: {criticalCount}
+                </Badge>
+                <Badge variant="high" size="sm">
+                  High: {highCount}
+                </Badge>
+                <Badge variant="medium" size="sm">
+                  Medium: {mediumCount}
+                </Badge>
+                <Badge variant="default" size="sm">
+                  Low: {lowCount}
+                </Badge>
+              </div>
+            ) : (
+              <span role="status" style={{ color: 'var(--warning-text)', fontSize: '0.8125rem' }}>
+                Findings not verified — severity counts unknown
+              </span>
+            )}
           </div>
         </div>
 
@@ -450,6 +457,10 @@ function ScanDetailWorkspace({ scanId }: { scanId: string }) {
                   : scan?.status === 'COMPLETED'
                     ? 'The analysis reached completion, but the findings endpoint did not return usable results. Check service health and retry.'
                     : 'Analysis is still pending, or its status could not be retrieved. No findings conclusion is available.'}
+                actionLabel={scan?.status === 'COMPLETED' ? 'Retry loading findings' : undefined}
+                onAction={scan?.status === 'COMPLETED'
+                  ? () => setFindingsRetryKey((current) => current + 1)
+                  : undefined}
               />
             ) : filteredFindings.length === 0 ? (
               <EmptyState
