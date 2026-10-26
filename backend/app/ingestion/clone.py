@@ -686,6 +686,27 @@ def validate_github_url(url: str) -> str:
     return f"https://github.com/{owner}/{repo}.git"
 
 
+def validate_git_branch_name(branch: str) -> str:
+    """Validate a Git branch ref before creating any acquisition workspace."""
+    if not isinstance(branch, str) or not branch or branch != branch.strip():
+        raise IngestionError("Invalid Git branch name.")
+    if (
+        branch.startswith(("-", "/"))
+        or branch.endswith(("/", "."))
+        or branch == "@"
+        or ".." in branch
+        or "@{" in branch
+        or "//" in branch
+        or re.search(r"[\s;&|\x60$<>\\*?~^:\[\]\x00-\x1f\x7f]", branch)
+        or any(
+            part.startswith(".") or part.endswith(".lock")
+            for part in branch.split("/")
+        )
+    ):
+        raise IngestionError("Invalid Git branch name.")
+    return branch
+
+
 def clone_repository(
     repo_url: str,
     branch: Optional[str] = None,
@@ -704,6 +725,9 @@ def clone_repository(
     # quota. Never silently use it for production repository acquisition.
     require_acquisition_boundary(settings)
 
+    # A bad branch must fail before workspace allocation, otherwise the
+    # exception escapes the clone cleanup block and leaks a temp directory.
+    checked_branch = validate_git_branch_name(branch) if branch else None
     dest_dir = target_dir or tempfile.mkdtemp(prefix="repolens_repo_")
 
     cmd = [
@@ -726,12 +750,8 @@ def clone_repository(
         "credential.helper=",
     ]
 
-    if branch:
-        # Validate branch name doesn't start with dash or contain shell characters
-        cleaned_branch = branch.strip()
-        if re.search(r"[\s;&|`$\n\r\t<>\\*?]", cleaned_branch) or cleaned_branch.startswith("-"):
-            raise IngestionError(f"Invalid branch name: '{branch}'")
-        cmd.extend(["--branch", cleaned_branch, "--single-branch"])
+    if checked_branch:
+        cmd.extend(["--branch", checked_branch, "--single-branch"])
 
     cmd.extend(["--", normalized_url, dest_dir])
 

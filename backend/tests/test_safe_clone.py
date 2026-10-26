@@ -502,3 +502,46 @@ def test_production_git_environment_does_not_inherit_proxy_credentials(monkeypat
     assert not any(key.upper().endswith("_PROXY") for key in env)
     assert "HOME" not in env
     assert secret not in str(env)
+
+
+@pytest.mark.parametrize(
+    "invalid_branch",
+    [
+        "feature..bad",
+        "main.lock",
+        "release//candidate",
+        "refs/.hidden",
+        "feature@{old}",
+        "branch/",
+        "/branch",
+        "feature~old",
+        "ref^2",
+        "  main",
+        "main  ",
+        " ",
+        "-h",
+        "bad;option",
+    ],
+)
+def test_invalid_git_branch_never_allocates_a_clone_workspace(invalid_branch):
+    """Invalid Git refs must fail before any filesystem or process allocation."""
+    from app.ingestion.clone import validate_git_branch_name
+
+    with pytest.raises(IngestionError, match="Invalid Git branch"):
+        validate_git_branch_name(invalid_branch)
+    with patch("app.ingestion.clone.tempfile.mkdtemp") as create, patch(
+        "app.ingestion.clone._run_clone_with_object_budget"
+    ) as launch:
+        with pytest.raises(IngestionError, match="Invalid Git branch"):
+            clone_repository("https://github.com/fastapi/fastapi", branch=invalid_branch)
+    create.assert_not_called()
+    launch.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "valid_branch",
+    ["main", "feature/fix-auth", "release/v1.2.3", "bugfix_123", "team/module-2"],
+)
+def test_git_branch_validator_accepts_ordinary_names(valid_branch):
+    from app.ingestion.clone import validate_git_branch_name
+    assert validate_git_branch_name(valid_branch) == valid_branch
