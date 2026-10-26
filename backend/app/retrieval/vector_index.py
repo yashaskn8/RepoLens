@@ -113,7 +113,9 @@ class InMemoryVectorIndex(VectorIndex):
         self.namespace = namespace
         self.model_name = model_name
         self.index_version = index_version
-        self._entries: Dict[str, Dict[str, Any]] = {}
+        # Composite identity prevents two namespaces using the same
+        # chunk ID from overwriting each other in a shared memory store.
+        self._entries: Dict[tuple[str, str], Dict[str, Any]] = {}
 
     def upsert(self, chunk_id: str, vector: List[float], metadata: Optional[Dict[str, Any]] = None) -> None:
         if self.dimensions is not None and len(vector) != self.dimensions:
@@ -122,7 +124,7 @@ class InMemoryVectorIndex(VectorIndex):
             raise ValueError("Embedding vector must contain finite nonzero numeric values.")
         if self.dimensions is None:
             self.dimensions = len(vector)
-        self._entries[chunk_id] = {
+        self._entries[(self.namespace, chunk_id)] = {
             "vector": vector,
             "metadata": metadata or {},
             "namespace": self.namespace,
@@ -143,8 +145,8 @@ class InMemoryVectorIndex(VectorIndex):
             return []
 
         scored: List[Tuple[str, float]] = []
-        for chunk_id, entry in self._entries.items():
-            if entry.get("namespace", "default") != self.namespace:
+        for (entry_namespace, chunk_id), entry in self._entries.items():
+            if entry_namespace != self.namespace or entry.get("namespace", "default") != self.namespace:
                 continue
             # Legacy or corrupted entries must not receive the neutral 0.5
             # score for a dimension mismatch or nonfinite embedding.
@@ -160,7 +162,7 @@ class InMemoryVectorIndex(VectorIndex):
         return scored[:top_k]
 
     def get(self, chunk_id: str) -> Optional[Dict[str, Any]]:
-        entry = self._entries.get(chunk_id)
+        entry = self._entries.get((self.namespace, chunk_id))
         if entry and entry.get("namespace", "default") == self.namespace:
             return entry
         return None

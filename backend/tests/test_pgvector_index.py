@@ -266,12 +266,12 @@ def test_memory_vector_index_never_ranks_corrupt_dimensions_or_entries():
     assert index.dimensions == 2
     with pytest.raises(ValueError, match="Vector dimension mismatch"):
         index.upsert("bad-dimension", [1.0, 0.0, 0.0])
-    index._entries["corrupted"] = {
+    index._entries[(index.namespace, "corrupted")] = {
         "vector": [1.0, 0.0, 0.0],
         "metadata": {},
         "namespace": index.namespace,
     }
-    index._entries["nan"] = {
+    index._entries[(index.namespace, "nan")] = {
         "vector": [float("nan"), 1.0],
         "metadata": {},
         "namespace": index.namespace,
@@ -338,3 +338,21 @@ def test_vector_factory_rejects_unsupported_url_without_secret_echo():
             enable_pgvector=True,
         )
     assert secret not in str(error.value)
+
+def test_in_memory_shared_backing_store_never_overwrites_same_chunk_in_another_namespace():
+    first = InMemoryVectorIndex(dimensions=2, namespace="tenant-one")
+    second = InMemoryVectorIndex(dimensions=2, namespace="tenant-two")
+    second._entries = first._entries
+
+    first.upsert("same-chunk", [1.0, 0.0], {"owner": "one"})
+    second.upsert("same-chunk", [0.0, 1.0], {"owner": "two"})
+    assert first.count() == second.count() == 1
+    assert first.get("same-chunk")["metadata"]["owner"] == "one"
+    assert second.get("same-chunk")["metadata"]["owner"] == "two"
+    assert first.query([1.0, 0.0]) == [("same-chunk", 1.0)]
+    assert second.query([0.0, 1.0]) == [("same-chunk", 1.0)]
+
+    first.clear()
+    assert first.count() == 0
+    assert second.count() == 1
+    assert second.get("same-chunk")["metadata"]["owner"] == "two"
