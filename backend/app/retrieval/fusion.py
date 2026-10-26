@@ -22,8 +22,17 @@ def reciprocal_rank_fusion(
     rrf_scores: Dict[str, float] = defaultdict(float)
     contributing_channels: Dict[str, List[RetrievalChannel]] = defaultdict(list)
 
+    if k < 0:
+        raise ValueError("RRF smoothing constant must not be negative.")
+
     for channel, ranked_items in channel_rankings.items():
+        seen_in_channel: set[str] = set()
         for rank_idx, (chunk_id, _channel_score) in enumerate(ranked_items):
+            if chunk_id in seen_in_channel:
+                # A duplicate vector/lexical posting must not earn another
+                # vote from the same evidence channel.
+                continue
+            seen_in_channel.add(chunk_id)
             rank = rank_idx + 1  # 1-indexed rank
             rrf_score = 1.0 / (k + rank)
             rrf_scores[chunk_id] += rrf_score

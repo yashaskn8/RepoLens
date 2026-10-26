@@ -494,3 +494,21 @@ def test_hybrid_retrieval_rejects_whitespace_only_query_before_search():
             RetrievalQuery(query=source)
     service = RetrievalService(chunks=[], reranker=None)
     assert service._search_exact("  ") == []
+
+def test_rrf_deduplicates_replayed_ids_within_one_channel():
+    rankings = {
+        RetrievalChannel.EXACT: [
+            ("one", 1.0), ("one", 1.0), ("two", 0.8)
+        ],
+        RetrievalChannel.DENSE: [("one", 0.95)],
+    }
+    fused = reciprocal_rank_fusion(rankings, k=60)
+    indexed = {chunk_id: (score, channels) for chunk_id, score, channels in fused}
+    assert indexed["one"][0] == pytest.approx(2.0 / 61.0)
+    assert indexed["one"][1] == [RetrievalChannel.EXACT, RetrievalChannel.DENSE]
+    assert indexed["two"][0] == pytest.approx(1.0 / 63.0)
+
+
+def test_rrf_rejects_negative_smoothing_constants():
+    with pytest.raises(ValueError, match="must not be negative"):
+        reciprocal_rank_fusion({RetrievalChannel.EXACT: [("one", 1.0)]}, k=-1)
