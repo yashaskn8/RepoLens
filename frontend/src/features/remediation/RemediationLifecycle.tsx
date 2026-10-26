@@ -28,6 +28,7 @@ import { PatchCandidatePanel } from './PatchCandidatePanel';
 import { HumanReviewControls } from './HumanReviewControls';
 import { DeliveryPreviewModal } from './DeliveryPreviewModal';
 import { Alert } from '@/components/ui/Alert';
+import { useAuth } from '@/context/AuthContext';
 
 export interface RemediationLifecycleProps {
   finding: Finding;
@@ -38,6 +39,7 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
   finding,
   initialPatch = null,
 }) => {
+  const { isOperator, user } = useAuth();
   const [research, setResearch] = useState<ResearchResult | null>(null);
   const [plan, setPlan] = useState<FixPlan | null>(null);
   const [workflowResult, setWorkflowResult] = useState<PatchWorkflowResult | null>(null);
@@ -58,7 +60,6 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
   const [delivery, setDelivery] = useState<DeliveryResponse | null>(null);
   const [showDeliveryModal, setShowDeliveryModal] = useState<boolean>(false);
   const [deliveryNotes, setDeliveryNotes] = useState<string>('');
-  const [deliveryRequestedBy, setDeliveryRequestedBy] = useState<string>('lead-engineer');
   const localPatchActionRef = useRef(false);
 
   // Reset state whenever the selected finding changes. Do not carry a
@@ -163,7 +164,7 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
     try {
       setError(null);
       setLoadingStep('approve');
-      const updated = await approvePatch(patchId, { approved_by: 'lead-engineer' });
+      const updated = await approvePatch(patchId, {});
       setPatchStatus(updated.status);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Approval failed');
@@ -222,15 +223,18 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
     const loadDeliveryData = async () => {
       try {
         const [prev, del] = await Promise.all([
-          fetchDeliveryPreview(patchId).catch(() => null),
+          fetchDeliveryPreview(patchId),
           fetchDeliveryByPatch(patchId).catch(() => null),
         ]);
         if (isMounted) {
-          if (prev) setDeliveryPreview(prev);
-          if (del) setDelivery(del);
+          setDeliveryPreview(prev);
+          setDelivery(del);
         }
-      } catch (err: unknown) {
-        console.error('Failed to load delivery data:', err);
+      } catch {
+        if (isMounted) {
+          setDeliveryPreview(null);
+          setError('Delivery preview is unavailable. GitHub delivery remains blocked until the server confirms eligibility.');
+        }
       }
     };
 
@@ -242,12 +246,15 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
 
   // Step 8: Execute Safe GitHub Delivery
   const handleDeliver = async () => {
-    if (!patchId) return;
+    if (!patchId || !user?.id || !isOperator || !deliveryPreview?.eligible || !deliveryPreview.github_delivery_configured) {
+      setError('GitHub delivery requires an authorized operator and a confirmed eligible preview.');
+      return;
+    }
     try {
       setError(null);
       setLoadingStep('deliver');
       const res = await requestDelivery(patchId, {
-        requested_by: deliveryRequestedBy.trim() || 'user',
+        requested_by: user.id,
         notes: deliveryNotes.trim() || undefined,
       });
       setDelivery(res);
@@ -383,7 +390,9 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
                   onClick={() => setShowDeliveryModal(true)}
                   disabled={
                     loadingStep === 'deliver' ||
-                    (deliveryPreview !== null && (!deliveryPreview.eligible || !deliveryPreview.github_delivery_configured)) ||
+                    !isOperator ||
+                    !deliveryPreview?.eligible ||
+                    !deliveryPreview.github_delivery_configured ||
                     delivery?.status === 'BLOCKED'
                   }
                   className="px-4 py-1.5 text-xs font-semibold bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded border border-emerald-600 shadow-sm transition inline-flex items-center gap-1.5"
@@ -399,6 +408,14 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
                 </button>
               )}
             </div>
+
+            {!isOperator && (
+              <Alert variant="warning">GitHub delivery requires an operator account. You may review the approved patch without publishing it.</Alert>
+            )}
+
+            {deliveryPreview && !deliveryPreview.eligible && (
+              <Alert variant="warning">{deliveryPreview.blocking_reason || 'The server did not approve this delivery preview.'}</Alert>
+            )}
 
             {/* Unconfigured GitHub Delivery Warning */}
             {deliveryPreview && !deliveryPreview.github_delivery_configured && (
@@ -487,8 +504,6 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
         isOpen={showDeliveryModal}
         onClose={() => setShowDeliveryModal(false)}
         deliveryPreview={deliveryPreview}
-        deliveryRequestedBy={deliveryRequestedBy}
-        onDeliveryRequestedByChange={setDeliveryRequestedBy}
         deliveryNotes={deliveryNotes}
         onDeliveryNotesChange={setDeliveryNotes}
         onConfirmDelivery={handleDeliver}

@@ -6,8 +6,6 @@ export interface DeliveryPreviewModalProps {
   isOpen: boolean;
   onClose: () => void;
   deliveryPreview: DeliveryPreviewResponse | null;
-  deliveryRequestedBy: string;
-  onDeliveryRequestedByChange: (val: string) => void;
   deliveryNotes: string;
   onDeliveryNotesChange: (val: string) => void;
   onConfirmDelivery: () => void;
@@ -18,8 +16,6 @@ export const DeliveryPreviewModal: React.FC<DeliveryPreviewModalProps> = ({
   isOpen,
   onClose,
   deliveryPreview,
-  deliveryRequestedBy,
-  onDeliveryRequestedByChange,
   deliveryNotes,
   onDeliveryNotesChange,
   onConfirmDelivery,
@@ -62,7 +58,7 @@ export const DeliveryPreviewModal: React.FC<DeliveryPreviewModalProps> = ({
             </div>
             <div className="flex justify-between">
               <span className="text-neutral-400">Target Base Branch:</span>
-              <span className="font-mono text-sky-400">{deliveryPreview?.base_branch || 'main'}</span>
+              <span className="font-mono text-sky-400">{deliveryPreview?.base_branch || 'Unavailable'}</span>
             </div>
             <div className="flex justify-between">
               <span className="text-neutral-400">New Dedicated Branch:</span>
@@ -91,18 +87,6 @@ export const DeliveryPreviewModal: React.FC<DeliveryPreviewModalProps> = ({
           <div className="space-y-2 pt-1">
             <div>
               <label className="block text-[11px] font-medium text-neutral-300 mb-1">
-                Requested By (User Identifier):
-              </label>
-              <input
-                type="text"
-                value={deliveryRequestedBy}
-                onChange={(e) => onDeliveryRequestedByChange(e.target.value)}
-                placeholder="e.g. lead-engineer"
-                className="w-full bg-neutral-900 border border-neutral-700 rounded px-3 py-1.5 text-xs text-neutral-200 focus:outline-none focus:border-sky-500"
-              />
-            </div>
-            <div>
-              <label className="block text-[11px] font-medium text-neutral-300 mb-1">
                 Optional Delivery Notes / Sign-off:
               </label>
               <textarea
@@ -129,7 +113,7 @@ export const DeliveryPreviewModal: React.FC<DeliveryPreviewModalProps> = ({
             variant="primary"
             size="sm"
             onClick={onConfirmDelivery}
-            disabled={isDelivering}
+            disabled={isDelivering || !deliveryPreview?.eligible || !deliveryPreview.github_delivery_configured}
             isLoading={isDelivering}
             className="bg-emerald-700 hover:bg-emerald-600 border-emerald-600"
           >

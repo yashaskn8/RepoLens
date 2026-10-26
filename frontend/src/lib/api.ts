@@ -578,7 +578,7 @@ export async function fetchScanPatches(scanId: string): Promise<PatchResponse[]>
 
 export async function approvePatch(
   patchId: string,
-  payload: PatchReviewRequest = { approved_by: 'user' }
+  payload: PatchReviewRequest = {}
 ): Promise<PatchResponse> {
   const response = await apiFetch(`/api/v1/patches/${patchId}/approve`, {
     method: 'POST',
