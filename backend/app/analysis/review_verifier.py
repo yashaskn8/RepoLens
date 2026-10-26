@@ -73,14 +73,18 @@ def _read_file_lines_safe(
         from app.core.path_confinement import PathTraversalError, resolve_safe_path
         abs_path = str(resolve_safe_path(repo_dir, rel_path))
         if os.path.exists(abs_path) and os.path.isfile(abs_path):
-            st = os.stat(abs_path)
+            st = os.stat(abs_path, follow_symlinks=False)
             if st.st_size > max_file_size:
-                logger.warning(
-                    f"Verifier skipped reading '{rel_path}': size ({st.st_size} bytes) exceeds MAX_FILE_SIZE_BYTES ({max_file_size})"
-                )
+                logger.warning("Verifier skipped an oversized source file.")
                 return None
-            with open(abs_path, "r", encoding="utf-8", errors="ignore") as f:
-                return f.readlines()
+            # The early stat is not sufficient against a source-file resize;
+            # bound the actual read and reject undecodable bytes instead of
+            # silently dropping them with errors="ignore".
+            with open(abs_path, "rb") as source:
+                data = source.read(max_file_size + 1)
+            if len(data) > max_file_size or len(data) != st.st_size or b"\\x00" in data:
+                return None
+            return data.decode("utf-8").splitlines(keepends=True)
     except Exception:
         pass
     return None

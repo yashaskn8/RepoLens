@@ -691,3 +691,32 @@ def test_singleton_accessors():
     assert v1 is v2
     assert isinstance(r1, ChangeReviewAgent)
     assert isinstance(v1, ChangeReviewVerifier)
+
+
+def test_review_verifier_does_not_silently_decode_malformed_source(tmp_path):
+    """An invalid source byte cannot disappear from supposedly verified line evidence."""
+    from app.analysis.review_verifier import _read_file_lines_safe
+
+    source = tmp_path / "malformed.py"
+    source.write_bytes(b"x = 1\n\xff\n")
+    assert _read_file_lines_safe(str(tmp_path), "malformed.py") is None
+
+
+def test_review_verifier_bounds_source_bytes_when_reading(tmp_path):
+    """A source file over the byte budget is never supplied as line evidence."""
+    from app.analysis.review_verifier import _read_file_lines_safe
+
+    source = tmp_path / "large.py"
+    source.write_bytes(b"x" * 65)
+    assert _read_file_lines_safe(str(tmp_path), "large.py", max_file_size=64) is None
+
+
+def test_review_verifier_preserves_exact_source_newlines(tmp_path):
+    from app.analysis.review_verifier import _read_file_lines_safe
+
+    source = tmp_path / "windows.py"
+    source.write_bytes(b"first = 1\r\nsecond = 2\r\n")
+    assert _read_file_lines_safe(str(tmp_path), "windows.py") == [
+        "first = 1\r\n",
+        "second = 2\r\n",
+    ]
