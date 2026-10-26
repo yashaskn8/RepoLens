@@ -257,18 +257,30 @@ class ChangeDiffEngine:
         guaranteeing that large files are never read into memory during
         rename detection.
         """
+        if not isinstance(max_size, int) or max_size < 1:
+            return None
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         try:
-            st = os.stat(abs_path)
-            if st.st_size > max_size:
-                return None
-            h = hashlib.sha256()
-            with open(abs_path, "rb") as f:
+            # Check the opened descriptor, not a separate pre-open stat that
+            # an untrusted workspace can swap between calls.
+            descriptor = os.open(abs_path, flags)
+            with os.fdopen(descriptor, "rb") as source:
+                st = os.fstat(source.fileno())
+                if not stat.S_ISREG(st.st_mode) or st.st_size > max_size:
+                    return None
+                h = hashlib.sha256()
+                consumed = 0
                 while True:
-                    chunk = f.read(65536)
+                    chunk = source.read(min(65536, max_size - consumed + 1))
                     if not chunk:
                         break
+                    consumed += len(chunk)
+                    if consumed > max_size:
+                        return None
                     h.update(chunk)
-            return h.hexdigest()
+                if consumed != st.st_size:
+                    return None
+                return h.hexdigest()
         except OSError:
             return None
 

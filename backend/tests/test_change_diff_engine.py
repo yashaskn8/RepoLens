@@ -473,3 +473,43 @@ def test_structural_diff_rejects_symlinked_workspace_root(tmp_path):
         pytest.skip("Symlink creation unavailable")
     with pytest.raises(ValueError, match="root is unavailable or unsafe"):
         ChangeDiffEngine()._discover_files(str(alias))
+
+
+def test_rename_hash_skips_files_over_the_actual_read_budget(tmp_path):
+    """File size changes cannot evade the bounded reader for rename detection."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    import stat
+
+    source = tmp_path / "large.py"
+    source.write_bytes(b"x" * 128)
+    engine = ChangeDiffEngine()
+    with patch(
+        "app.analysis.diff_engine.os.fstat",
+        return_value=SimpleNamespace(st_size=8, st_mode=stat.S_IFREG),
+    ):
+        assert engine._compute_file_sha256_bounded(str(source), max_size=16) is None
+
+
+def test_rename_hash_uses_exact_source_bytes(tmp_path):
+    import hashlib
+
+    source = tmp_path / "source.py"
+    payload = b"first = 1\r\nsecond = 2\r\n"
+    source.write_bytes(payload)
+    assert ChangeDiffEngine()._compute_file_sha256_bounded(
+        str(source), max_size=len(payload),
+    ) == hashlib.sha256(payload).hexdigest()
+
+
+def test_rename_hash_rejects_symlinked_source(tmp_path):
+    real = tmp_path / "real.py"
+    real.write_bytes(b"safe = True\n")
+    link = tmp_path / "alias.py"
+    try:
+        link.symlink_to(real)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlink creation unavailable")
+    assert ChangeDiffEngine()._compute_file_sha256_bounded(
+        str(link), max_size=1024,
+    ) is None
