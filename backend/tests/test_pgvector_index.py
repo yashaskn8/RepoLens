@@ -252,7 +252,7 @@ def test_pgvector_real_postgres_integration():
 
 def test_memory_vector_index_rejects_nonfinite_and_zero_vectors():
     index = InMemoryVectorIndex(dimensions=2)
-    for vector in [[0.0, 0.0], [float("nan"), 1.0], [float("inf"), 1.0], [True, 1.0]]:
+    for vector in [[0.0, 0.0], [float("nan"), 1.0], [float("inf"), 1.0], [True, 1.0], [10 ** 1000, 1.0]]:
         with pytest.raises(ValueError, match="finite nonzero"):
             index.upsert("bad", vector)
         with pytest.raises(ValueError, match="finite nonzero"):

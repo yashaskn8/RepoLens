@@ -48,9 +48,15 @@ def _valid_vector(vector: object, expected_dimensions: int | None = None) -> boo
         return False
     norm = 0.0
     for value in vector:
-        if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value):
+        if isinstance(value, bool) or not isinstance(value, (float, int)):
             return False
-        norm += value * value
+        try:
+            finite_value = float(value)
+        except (ValueError, OverflowError):
+            return False
+        if not math.isfinite(finite_value):
+            return False
+        norm += finite_value * finite_value
         if not math.isfinite(norm):
             return False
     return norm > 0.0
@@ -217,10 +223,12 @@ class PgVectorIndex(VectorIndex):
                 raise RuntimeError(
                     "PostgreSQL database driver is not installed. Please install psycopg or psycopg2."
                 ) from exc
-            except Exception as exc:
+            except Exception:
+                # Driver exceptions may embed the full credential-bearing DSN.
+                # Hide the cause as well as the public error message.
                 raise RuntimeError(
                     "Failed to initialize PostgreSQL engine. Check the driver and connection configuration."
-                ) from exc
+                ) from None
         else:
             self.engine = engine
 
