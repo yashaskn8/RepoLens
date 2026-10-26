@@ -463,7 +463,7 @@ def test_fix_plan_rejects_unbound_or_unsafe_changes(invalid_kind):
 
 def test_fix_plan_requires_manifest_membership_even_when_context_lists_other_file():
     """Context retrieval cannot override the authoritative repository manifest."""
-    from unittest.mock import SimpleNamespace
+    from types import SimpleNamespace
     finding = Finding(
         id=uuid4(),
         scan_id=uuid4(),
