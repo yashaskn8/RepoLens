@@ -357,6 +357,10 @@ if settings.CORS_ORIGINS:
             "X-CSRF-Token",
             "X-Request-ID",
         ],
+        # Read-only exposure of durable job navigation headers is required
+        # for an approved cross-origin frontend to resume queued revisions.
+        # This does not expand allowed origins, credentials, or CSRF bypasses.
+        expose_headers=["Location", "X-Job-Location", "Idempotency-Replayed"],
     )
 
 # Include health check directly at /health as well as under /api/v1/health

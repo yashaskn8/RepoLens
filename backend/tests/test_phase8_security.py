@@ -725,3 +725,20 @@ def test_auth_errors_contain_no_secrets():
     assert "SecretInputPassword123!" not in resp.text
     assert "argon2" not in resp.text
     assert "hash" not in resp.text
+
+
+def test_credentialed_frontend_can_read_queued_job_navigation_headers(client):
+    """A permitted browser origin must be able to resume queued remediation."""
+    from app.main import settings
+
+    origin = settings.CORS_ORIGINS[0]
+    response = client.get("/health", headers={"Origin": origin})
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == origin
+    assert response.headers["access-control-allow-credentials"] == "true"
+    exposed = {
+        header.strip().lower()
+        for header in response.headers["access-control-expose-headers"].split(",")
+    }
+    assert {"location", "x-job-location", "idempotency-replayed"} <= exposed
+    assert response.headers["access-control-allow-origin"] != "*"
