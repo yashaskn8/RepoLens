@@ -138,3 +138,67 @@ def test_evidence_registry_builder():
     assert registry.get("symbol:start_app") is None
     assert registry.get("config:APP_PORT") is None
     assert registry.get("dependency:pydantic") is None
+
+
+def test_evidence_registry_replacement_revokes_stale_file_and_symbol_membership():
+    """Replacing an exact evidence ID must revoke the previous descriptor's authority."""
+    registry = EvidenceRegistry()
+    registry.register(EvidenceDescriptor(
+        evidence_id="symbol:shared",
+        evidence_type="SYMBOL",
+        file_path="src/old.py",
+        symbol_name="old_handler",
+    ))
+    registry.register(EvidenceDescriptor(
+        evidence_id="symbol:shared",
+        evidence_type="SYMBOL",
+        file_path="src/new.py",
+        symbol_name="new_handler",
+    ))
+    assert registry.get("symbol:shared").file_path == "src/new.py"
+    assert not registry.contains_file("src/old.py")
+    assert not registry.contains_symbol("old_handler")
+    assert not registry.contains_symbol("old_handler", "src/old.py")
+    assert registry.get_descriptors_for_file("src/old.py") == []
+    assert registry.contains_file("src/new.py")
+    assert registry.contains_symbol("new_handler", "src/new.py")
+
+
+def test_evidence_registry_replacement_preserves_other_descriptors():
+    """An index refresh must not lose evidence registered under different IDs."""
+    registry = EvidenceRegistry()
+    registry.register(EvidenceDescriptor(
+        evidence_id="file:other.py",
+        evidence_type="FILE",
+        file_path="other.py",
+    ))
+    registry.register(EvidenceDescriptor(
+        evidence_id="file:shared.py",
+        evidence_type="FILE",
+        file_path="old.py",
+    ))
+    registry.register(EvidenceDescriptor(
+        evidence_id="file:shared.py",
+        evidence_type="FILE",
+        file_path="new.py",
+    ))
+    assert registry.contains_file("other.py")
+    assert registry.contains_file("new.py")
+    assert not registry.contains_file("old.py")
+    assert len(registry.all_descriptors) == 2
+
+
+def test_evidence_registry_replacement_revokes_obsolete_impact_id():
+    registry = EvidenceRegistry()
+    registry.register(EvidenceDescriptor(
+        evidence_id="impact:shared",
+        evidence_type="IMPACT",
+        impact_id="11111111-1111-1111-1111-111111111111",
+    ))
+    registry.register(EvidenceDescriptor(
+        evidence_id="impact:shared",
+        evidence_type="IMPACT",
+        impact_id="22222222-2222-2222-2222-222222222222",
+    ))
+    assert "11111111-1111-1111-1111-111111111111" not in registry._impacts_by_id
+    assert "22222222-2222-2222-2222-222222222222" in registry._impacts_by_id

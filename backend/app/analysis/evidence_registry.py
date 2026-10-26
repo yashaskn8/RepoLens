@@ -79,9 +79,24 @@ class EvidenceRegistry:
         self._impacts_by_id: Dict[str, EvidenceDescriptor] = {}
 
     def register(self, descriptor: EvidenceDescriptor) -> None:
-        """Register a canonical evidence descriptor into the registry."""
+        """Register one canonical descriptor and keep every derived index exact."""
+        replacing = descriptor.evidence_id in self._descriptors
         self._descriptors[descriptor.evidence_id] = descriptor
+        if replacing:
+            # Replacements are uncommon, but can occur when base and head
+            # evidence share an ID. Never retain file/symbol membership from
+            # an obsolete descriptor under the same authoritative ID.
+            self._known_files.clear()
+            self._known_symbols.clear()
+            self._symbols_by_file.clear()
+            self._impacts_by_id.clear()
+            for current in self._descriptors.values():
+                self._index_descriptor(current)
+        else:
+            self._index_descriptor(descriptor)
 
+    def _index_descriptor(self, descriptor: EvidenceDescriptor) -> None:
+        """Index one descriptor (only called after its ID is registered)."""
         if descriptor.file_path:
             norm_f = normalize_path(descriptor.file_path)
             self._known_files.add(norm_f)
