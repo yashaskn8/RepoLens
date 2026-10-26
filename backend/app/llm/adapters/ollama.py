@@ -99,7 +99,13 @@ class OllamaAdapter(BaseLLMAdapter):
 
         started = time.perf_counter()
         try:
-            async with httpx.AsyncClient(timeout=request.timeout_seconds or self.timeout) as client:
+            # Local inference must not inherit ambient HTTP(S)_PROXY settings:
+            # a proxy could redirect nominally loopback traffic to a remote host.
+            async with httpx.AsyncClient(
+                timeout=request.timeout_seconds or self.timeout,
+                trust_env=False,
+                follow_redirects=False,
+            ) as client:
                 response = await client.post(f"{self.base_url}/api/chat", json=payload)
         except (httpx.HTTPError, TimeoutError) as exc:
             self._begin_cooldown()

@@ -184,3 +184,42 @@ def test_sensitive_simple_prompt_is_not_local_model_eligible() -> None:
     from app.llm.classifier import TaskClassifier
 
     assert TaskClassifier.local_model_eligible(request) is False
+
+
+@pytest.mark.asyncio
+async def test_ollama_never_uses_ambient_proxy_for_loopback(monkeypatch) -> None:
+    """A local-only model request cannot be silently forwarded via a proxy."""
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid:3128")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:3128")
+    options = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            options.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, *, json):
+            assert url.startswith("http://localhost:")
+            return MagicMock(
+                status_code=200,
+                json=lambda: {
+                    "model": "local-test",
+                    "message": {"content": "local reply"},
+                    "prompt_eval_count": 1,
+                    "eval_count": 1,
+                },
+            )
+
+    monkeypatch.setattr("app.llm.adapters.ollama.httpx.AsyncClient", FakeClient)
+    adapter = OllamaAdapter(enabled=True, model="local-test")
+    response = await adapter.generate(
+        LLMRequest(messages=[LLMMessage(role="user", content="Summarize a comment")])
+    )
+    assert response.content == "local reply"
+    assert options["trust_env"] is False
+    assert options["follow_redirects"] is False
