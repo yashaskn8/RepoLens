@@ -40,7 +40,7 @@ const PRESET_CARDS = [
   },
   {
     name: 'FastAPI',
-    url: 'https://github.com/tiangolo/fastapi',
+    url: 'https://github.com/fastapi/fastapi',
     branch: 'master',
     stack: 'Python + Pydantic',
     desc: 'Python web framework',
@@ -354,7 +354,7 @@ function ScanWorkspaceContent() {
                 >
                   <span style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
                     <CheckCircle2 size={13} style={{ color: 'var(--accent-cyan)' }} />
-                    4 Active Analysis Engines (Code Relationships, Syntax, Security Rules, Dependencies)
+                    Analysis capabilities (external security scanners may be unavailable)
                   </span>
                   <ChevronDown
                     size={14}
@@ -451,15 +451,19 @@ function ScanWorkspaceContent() {
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.75rem' }}>
               {PRESET_CARDS.map((preset) => (
-                <div
+                <button
                   key={preset.name}
+                  type="button"
+                  disabled={isScanning}
+                  aria-pressed={repoUrl === preset.url && branch === preset.branch}
                   onClick={() => {
-                    if (!isScanning) {
-                      setRepoUrl(preset.url);
-                      setBranch(preset.branch);
-                    }
+                    setRepoUrl(preset.url);
+                    setBranch(preset.branch);
                   }}
                   style={{
+                    textAlign: 'left',
+                    fontFamily: 'inherit',
+                    width: '100%',
                     padding: '0.85rem 1rem',
                     borderRadius: 'var(--radius-md)',
                     background: repoUrl === preset.url ? 'rgba(99, 102, 241, 0.15)' : 'rgba(4, 7, 17, 0.7)',
@@ -480,7 +484,7 @@ function ScanWorkspaceContent() {
                   </div>
                   <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{preset.stack}</span>
                   <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>{preset.desc}</span>
-                </div>
+                </button>
               ))}
             </div>
           </div>
