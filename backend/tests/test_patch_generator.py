@@ -1,5 +1,6 @@
 """Tests for Phase 3C: Evidence-Constrained Safe Patch Generation."""
 
+import hashlib
 import os
 import tempfile
 from unittest.mock import AsyncMock, patch
@@ -326,7 +327,7 @@ async def test_patch_service_read_only_isolation():
             total_size_bytes=len(original_content),
             languages={"python": 1},
             frameworks=[],
-            files=[FileEntry(path="app/calc.py", language="python", size_bytes=len(original_content), lines_count=2, symbols=[])],
+            files=[FileEntry(path="app/calc.py", language="python", size_bytes=len(original_content), content_sha256=hashlib.sha256(original_content.encode("utf-8")).hexdigest(), lines_count=2, symbols=[])],
         )
         evidence_store = EvidenceStore(manifest=manifest)
         context_engine = ContextEngine(evidence_store=evidence_store)
@@ -666,3 +667,76 @@ def test_patch_validator_accepts_scoped_file_deletion():
     assert report.is_valid
     assert report.parsed_files == ["src/obsolete.py"]
 
+
+
+@pytest.mark.asyncio
+async def test_patch_service_rejects_same_size_snapshot_drift_before_model_call(tmp_path):
+    """A changed source file cannot inherit a manifest's original SHA-256 authority."""
+    source = tmp_path / "src" / "main.py"
+    source.parent.mkdir()
+    admitted = b"safe = True\n"
+    tampered = b"evil = True\n"
+    assert len(admitted) == len(tampered)
+    source.write_bytes(tampered)
+    finding = Finding(
+        id=uuid4(), scan_id=uuid4(), title="Bug", description="Fix bug",
+        severity=Severity.HIGH, verification_verdict=VerificationVerdict.CONFIRMED,
+        evidences=[Evidence(file_path="src/main.py", start_line=1)],
+    )
+    plan = FixPlan(
+        finding_id=finding.id, root_cause="Bug", objective="Fix",
+        files_expected_to_change=["src/main.py"],
+        ordered_changes=[OrderedChangeStep(
+            step_number=1, target_file="src/main.py",
+            description="Fix code", rationale="Resolve issue",
+        )], validation_plan=["pytest"],
+    )
+    manifest = RepositoryManifest(
+        repository_url="https://github.com/example/repo",
+        commit_hash="a" * 40,
+        files=[FileEntry(
+            path="src/main.py", size_bytes=len(admitted),
+            content_sha256=hashlib.sha256(admitted).hexdigest(),
+        )],
+    )
+    context = AsyncMock()
+    generator = AsyncMock()
+    service = PatchService(agent=generator)
+    with pytest.raises(ValueError, match="differs from the approved repository snapshot"):
+        await service.generate_patch_proposal(
+            finding, plan, context, str(tmp_path), manifest=manifest,
+        )
+    context.build_context_bundle.assert_not_called()
+    generator.generate_patch.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_patch_service_rejects_unattested_manifest_target(tmp_path):
+    """A real file not admitted into the source manifest remains out of scope."""
+    source = tmp_path / "src" / "main.py"
+    source.parent.mkdir()
+    source.write_bytes(b"x = 1\n")
+    finding = Finding(
+        id=uuid4(), scan_id=uuid4(), title="Bug", description="Fix bug",
+        severity=Severity.HIGH, verification_verdict=VerificationVerdict.CONFIRMED,
+        evidences=[Evidence(file_path="src/main.py", start_line=1)],
+    )
+    plan = FixPlan(
+        finding_id=finding.id, root_cause="Bug", objective="Fix",
+        files_expected_to_change=["src/main.py"],
+        ordered_changes=[OrderedChangeStep(
+            step_number=1, target_file="src/main.py",
+            description="Fix", rationale="Resolve issue",
+        )], validation_plan=["pytest"],
+    )
+    manifest = RepositoryManifest(
+        repository_url="https://github.com/example/repo",
+        commit_hash="a" * 40,
+        files=[FileEntry(path="other.py", size_bytes=6)],
+    )
+    context = AsyncMock()
+    with pytest.raises(ValueError, match="not attested"):
+        await PatchService().generate_patch_proposal(
+            finding, plan, context, str(tmp_path), manifest=manifest,
+        )
+    context.build_context_bundle.assert_not_called()

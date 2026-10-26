@@ -1,5 +1,7 @@
 """PatchService coordinating evidence retrieval and safe patch generation."""
 
+import hashlib
+import hmac
 import os
 from typing import Dict, List, Optional
 
@@ -79,6 +81,36 @@ class PatchService:
         if set(source_files) != normalized_targets:
             # A missing or unreadable source file cannot be silently filled by AI.
             raise ValueError("Patch generation rejected: approved source files are unavailable.")
+
+        if manifest is not None:
+            # The manifest is the immutable byte-level snapshot authority. A
+            # readable file may have changed after ingestion, and its path
+            # alone does not prove that it is the original approved source.
+            admitted = {
+                entry.path.replace("\\", "/"): entry for entry in manifest.files
+            }
+            for path, source in source_files.items():
+                entry = admitted.get(path)
+                if (
+                    entry is None
+                    or entry.is_binary
+                    or entry.skipped_reason is not None
+                    or not entry.content_sha256
+                ):
+                    raise ValueError(
+                        "Patch generation rejected: source is not attested by the repository manifest."
+                    )
+                source_bytes = source.encode("utf-8")
+                if (
+                    len(source_bytes) != entry.size_bytes
+                    or not hmac.compare_digest(
+                        hashlib.sha256(source_bytes).hexdigest(),
+                        entry.content_sha256,
+                    )
+                ):
+                    raise ValueError(
+                        "Patch generation rejected: source differs from the approved repository snapshot."
+                    )
 
         # 2. Retrieve targeted ContextBundle
         query = f"Patch remediation for {finding.title} in {', '.join(fix_plan.files_expected_to_change)}"
