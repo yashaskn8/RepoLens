@@ -1,5 +1,6 @@
 """Tests for Phase 3B: Root-Cause Fix Planner and Adversarial Plan Validation."""
 
+import json
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 import pytest
@@ -496,3 +497,112 @@ def test_fix_plan_requires_manifest_membership_even_when_context_lists_other_fil
     report = validate_fix_plan(plan, finding, manifest=manifest, context_bundle=context)
     assert report.status == PlanValidationStatus.REJECTED
     assert any("invented file" in reason for reason in report.rejection_reasons)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content",
+    [
+        "this is not JSON",
+        "{}",
+        '{"root_cause": "Why", "objective": "Fix"}',
+        '{"root_cause": "", "objective": "Fix", "files_expected_to_change": ["src/real.py"], "ordered_changes": [{"step_number": 1, "target_file": "src/real.py", "description": "Fix it", "rationale": "Needed"}], "validation_plan": ["pytest"]}',
+        '{"root_cause": "Why", "objective": "Fix", "files_expected_to_change": ["src/real.py"], "ordered_changes": [], "validation_plan": ["pytest"]}',
+        '{"root_cause": "Why", "objective": "Fix", "files_expected_to_change": ["src/real.py"], "ordered_changes": [{"step_number": "malformed", "target_file": "src/real.py", "description": "Fix it", "rationale": "Needed"}], "validation_plan": ["pytest"]}',
+    ],
+)
+async def test_fix_planner_rejects_partial_or_invalid_llm_json(content):
+    """Malformed AI output must not turn into a fabricated valid repair plan."""
+    finding = Finding(
+        id=uuid4(), scan_id=uuid4(), title="Unsafe input",
+        description="Input not validated", severity=Severity.HIGH,
+        verification_verdict=VerificationVerdict.CONFIRMED,
+        evidences=[Evidence(file_path="src/real.py", start_line=1)],
+    )
+    context = ContextBundle(
+        scan_id=str(finding.scan_id), query="Unsafe input",
+        analysis_intent="fix_planning", relevant_chunks=[],
+    )
+    model_response = LLMResponse(
+        content=content,
+        model="mock-model",
+        provider=LLMProvider.GEMINI,
+        metadata=ModelExecutionMetadata(
+            model_name="mock-model", provider="gemini", execution_time_ms=1.0
+        ),
+    )
+    router = AsyncMock()
+    router.generate.return_value = model_response
+    agent = FixPlannerAgent(router=router)
+    manifest = RepositoryManifest(
+        repository_url="https://github.com/org/repo",
+        commit_hash="1" * 40,
+        files=[FileEntry(path="src/real.py", size_bytes=20)],
+    )
+    with pytest.raises(ValueError, match="invalid FixPlan"):
+        await agent.plan(finding=finding, context_bundle=context, manifest=manifest)
+
+
+@pytest.mark.asyncio
+async def test_direct_fix_planner_agent_rejects_unconfirmed_findings():
+    """Direct callers cannot bypass FixPlanningService's eligibility guard."""
+    finding = Finding(
+        id=uuid4(), scan_id=uuid4(), title="Unverified claim",
+        description="Missing evidence", severity=Severity.MEDIUM,
+        verification_verdict=VerificationVerdict.POSSIBLE,
+        evidences=[Evidence(file_path="src/real.py", start_line=1)],
+    )
+    context = ContextBundle(
+        scan_id=str(finding.scan_id), query="Unverified claim",
+        analysis_intent="fix_planning", relevant_chunks=[],
+    )
+    router = AsyncMock()
+    with pytest.raises(ValueError, match="verified, confirmed"):
+        await FixPlannerAgent(router=router).plan(finding=finding, context_bundle=context)
+    router.generate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_fix_planner_ignores_model_supplied_finding_identity_and_validation_status():
+    """Untrusted model data cannot forge the finding or mark its own plan valid."""
+    finding = Finding(
+        id=uuid4(), scan_id=uuid4(), title="Validation defect",
+        description="Input is not validated", severity=Severity.HIGH,
+        verification_verdict=VerificationVerdict.CONFIRMED,
+        evidences=[Evidence(file_path="src/main.py", start_line=1)],
+    )
+    context = ContextBundle(
+        scan_id=str(finding.scan_id), query="Validation defect",
+        analysis_intent="fix_planning", relevant_chunks=[],
+    )
+    response = LLMResponse(
+        content=json.dumps({
+            "finding_id": str(uuid4()),
+            "validation_report": {"status": "VALID", "is_valid": True},
+            "root_cause": "Input is unvalidated",
+            "objective": "Validate input",
+            "files_expected_to_change": ["src/main.py"],
+            "ordered_changes": [{
+                "step_number": 1, "target_file": "src/main.py",
+                "description": "Add validation", "rationale": "Prevents invalid input",
+            }],
+            "validation_plan": ["Run unit tests"],
+        }),
+        model="mock-model",
+        provider=LLMProvider.GEMINI,
+        metadata=ModelExecutionMetadata(
+            model_name="mock-model", provider="gemini", execution_time_ms=1.0
+        ),
+    )
+    router = AsyncMock()
+    router.generate.return_value = response
+    manifest = RepositoryManifest(
+        repository_url="https://github.com/org/repo",
+        commit_hash="1" * 40,
+        files=[FileEntry(path="src/main.py", size_bytes=20)],
+    )
+    plan = await FixPlannerAgent(router=router).plan(
+        finding=finding, context_bundle=context, manifest=manifest
+    )
+    assert plan.finding_id == finding.id
+    assert plan.validation_report.is_valid

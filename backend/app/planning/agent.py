@@ -1,9 +1,7 @@
 """FixPlannerAgent generating structured remediation plans for verified findings."""
 
 import json
-import logging
-from typing import Any, Dict, List, Optional
-from uuid import UUID
+from typing import Optional
 
 from app.agents.helpers import extract_json_block
 from app.context.schemas import ContextBundle
@@ -12,20 +10,11 @@ from app.ingestion.schemas import RepositoryManifest
 from app.llm.router import get_llm_router
 from app.llm.types import LLMMessage, LLMRequest, ModelCapability, TaskPolicy
 from app.llm.workflow_contracts import OBJECT_OUTPUT_SCHEMA, lineage_for_finding
-from app.planning.schemas import (
-    FixPlan,
-    FixScope,
-    OrderedChangeStep,
-    PlanValidationReport,
-    PlanValidationStatus,
-)
+from app.planning.schemas import FixPlan
 from app.planning.validator import validate_fix_plan
 from app.research.schemas import ResearchResult
 from app.schemas.enums import VerificationVerdict
 from app.schemas.finding import Finding
-
-logger = logging.getLogger(__name__)
-
 
 class FixPlannerAgent:
     """Specialized AI agent generating structured, minimal-scope remediation plans for confirmed findings.
@@ -136,26 +125,9 @@ class FixPlannerAgent:
         manifest: Optional[RepositoryManifest] = None,
     ) -> FixPlan:
         """Generate and validate a structured FixPlan for a verified finding."""
-        # Guard: Check if finding is not CONFIRMED
+        # Both the service and direct agent callers must fail closed.
         if finding.verification_verdict != VerificationVerdict.CONFIRMED:
-            verdict_str = finding.verification_verdict.value if finding.verification_verdict else "NONE"
-            validation_rep = PlanValidationReport(
-                status=PlanValidationStatus.REJECTED,
-                is_valid=False,
-                rejection_reasons=[
-                    f"Cannot plan remediation for non-CONFIRMED finding '{finding.id}' (current verdict: '{verdict_str}'). "
-                    "Only findings with verification_verdict == CONFIRMED may produce a FixPlan."
-                ],
-            )
-            return FixPlan(
-                finding_id=finding.id,
-                root_cause=f"Finding not eligible for remediation planning (verdict: {verdict_str}).",
-                objective=f"N/A ({verdict_str} finding)",
-                files_expected_to_change=[finding.evidences[0].file_path] if finding.evidences else ["unknown"],
-                ordered_changes=[],
-                validation_plan=["Eligibility check failure"],
-                validation_report=validation_rep,
-            )
+            raise ValueError("Only verified, confirmed findings may receive a remediation plan.")
 
         system_prompt = self._build_system_prompt()
         user_prompt = self._build_user_prompt(finding, context_bundle, repository_graph, research_result)
@@ -194,83 +166,45 @@ class FixPlannerAgent:
         response = await self.router.generate(request)
         json_str = extract_json_block(response.content)
 
-        root_cause = "Analysis in progress"
-        objective = f"Remediate {finding.title}"
-        files_expected = [finding.evidences[0].file_path] if finding.evidences else ["app/main.py"]
-        symbols_expected: List[str] = []
-        ordered_changes: List[OrderedChangeStep] = []
-        interfaces_affected: List[str] = []
-        migration_impact: Optional[str] = None
-        regression_risks: List[str] = []
-        validation_plan: List[str] = ["Run existing test suite"]
-        scope = FixScope.FILE
-        assumptions: List[str] = []
-
+        # A malformed or partial model response is NOT a remediation plan.
+        # Do not silently fill required fields with model-independent defaults.
         try:
             data = json.loads(json_str)
-            if isinstance(data, dict):
-                root_cause = data.get("root_cause", root_cause)
-                objective = data.get("objective", objective)
-                files_expected = data.get("files_expected_to_change", files_expected)
-                symbols_expected = data.get("symbols_expected_to_change", symbols_expected)
-                interfaces_affected = data.get("interfaces_affected", interfaces_affected)
-                migration_impact = data.get("migration_config_impact")
-                regression_risks = data.get("regression_risks", regression_risks)
-                validation_plan = data.get("validation_plan", validation_plan)
-                assumptions = data.get("assumptions", assumptions)
+            required = {
+                "root_cause",
+                "objective",
+                "files_expected_to_change",
+                "ordered_changes",
+                "validation_plan",
+            }
+            if not isinstance(data, dict) or not required.issubset(data):
+                raise ValueError("Missing required FixPlan fields")
+            if any(
+                not isinstance(data[field], str) or not data[field].strip()
+                for field in ("root_cause", "objective")
+            ):
+                raise ValueError("Empty FixPlan explanation")
+            # Never accept model-supplied record identity, approval state,
+            # validation verdict or execution telemetry as authority.
+            payload = {
+                key: value
+                for key, value in data.items()
+                if key in FixPlan.model_fields
+                and key not in {
+                    "id",
+                    "finding_id",
+                    "validation_report",
+                    "model_metadata",
+                    "created_at",
+                }
+            }
+            payload["finding_id"] = finding.id
+            payload["model_metadata"] = response.metadata
+            plan_instance = FixPlan.model_validate(payload)
+        except (ValueError, TypeError):
+            # Do not leak potentially sensitive model output into API errors.
+            raise ValueError("Model returned an invalid FixPlan; no remediation plan was created.") from None
 
-                raw_scope = str(data.get("estimated_scope", "file")).lower()
-                scope = FixScope(raw_scope) if raw_scope in FixScope._value2member_map_ else FixScope.FILE
-
-                for idx, step_data in enumerate(data.get("ordered_changes", []), start=1):
-                    if isinstance(step_data, dict):
-                        ordered_changes.append(
-                            OrderedChangeStep(
-                                step_number=step_data.get("step_number", idx),
-                                target_file=step_data.get("target_file", files_expected[0] if files_expected else "unknown"),
-                                target_symbol=step_data.get("target_symbol"),
-                                description=step_data.get("description", "Apply targeted remediation"),
-                                rationale=step_data.get("rationale", "Resolves root cause"),
-                            )
-                        )
-        except Exception as exc:
-            logger.warning("Failed to parse FixPlan JSON from model response: %s", str(exc))
-            ordered_changes.append(
-                OrderedChangeStep(
-                    step_number=1,
-                    target_file=files_expected[0] if files_expected else "unknown",
-                    description=response.content[:200],
-                    rationale="Fallback parsed description",
-                )
-            )
-
-        if not ordered_changes:
-            ordered_changes.append(
-                OrderedChangeStep(
-                    step_number=1,
-                    target_file=files_expected[0] if files_expected else "unknown",
-                    description=f"Resolve {finding.title}",
-                    rationale="Direct root cause fix",
-                )
-            )
-
-        plan_instance = FixPlan(
-            finding_id=finding.id,
-            root_cause=root_cause,
-            objective=objective,
-            files_expected_to_change=files_expected,
-            symbols_expected_to_change=symbols_expected,
-            ordered_changes=ordered_changes,
-            interfaces_affected=interfaces_affected,
-            migration_config_impact=migration_impact,
-            regression_risks=regression_risks,
-            validation_plan=validation_plan,
-            estimated_scope=scope,
-            assumptions=assumptions,
-            model_metadata=response.metadata,
-        )
-
-        # Execute deterministic validation
         validation_report = validate_fix_plan(
             plan=plan_instance,
             finding=finding,
