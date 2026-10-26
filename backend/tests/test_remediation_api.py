@@ -236,7 +236,8 @@ def test_request_patch_generation_endpoint(client, db_session):
         verification_result=mock_verif,
         critic_escalated=False,
         revision_count=0,
-        final_verdict="APPROVED",
+        machine_verdict="PASSED",
+        final_verdict="PASSED",
     )
 
     with patch("app.ingestion.snapshot.RepositorySnapshotService.open_snapshot", side_effect=_mock_open_snapshot_ctx), \
@@ -249,7 +250,7 @@ def test_request_patch_generation_endpoint(client, db_session):
         res = client.post(f"/api/v1/findings/{finding_id}/patch")
         assert res.status_code == 200
         data = res.json()
-        assert data["final_verdict"] == "APPROVED"
+        assert data["final_verdict"] == "PASSED"
         assert data["proposal"]["files_modified"] == ["app/auth/cookie.py"]
         assert data["verification_result"]["status"] == "PASSED"
 
@@ -386,7 +387,8 @@ def test_remediation_eligibility_enforced_across_all_endpoints(client, db_sessio
         verification_result=mock_verif,
         critic_escalated=False,
         revision_count=0,
-        final_verdict="APPROVED",
+        machine_verdict="PASSED",
+        final_verdict="PASSED",
     )
     mock_research = ResearchResult(
         target_framework="FastAPI",
