@@ -26,7 +26,7 @@ class EvidenceStore:
 
         # Index files by normalized path
         self._files_by_path: Dict[str, FileEntry] = {
-            f.path: f for f in self.manifest.files
+            f.path.replace("\\", "/"): f for f in self.manifest.files
         }
 
     @property
@@ -59,7 +59,10 @@ class EvidenceStore:
         results = self._findings
         if file_path:
             norm_path = file_path.replace("\\", "/")
-            results = [f for f in results if f.evidence.file_path == norm_path]
+            results = [
+                f for f in results
+                if f.evidence.file_path.replace("\\", "/") == norm_path
+            ]
         if severity:
             results = [f for f in results if f.severity == severity]
         if category:

@@ -187,3 +187,39 @@ def test_evidence_store_replacement_uses_only_latest_successful_result(
     assert sample_evidence_store.get_findings(tool="semgrep") == []
     sample_evidence_store.add_scanner_result(old_result)
     assert len(sample_evidence_store.get_findings(tool="semgrep")) == 1
+
+
+def test_evidence_store_normalizes_persisted_windows_source_paths():
+    """Windows path separators must not prevent evidence retrieval after persistence."""
+    manifest = RepositoryManifest(
+        repository_url="https://github.com/org/repo",
+        commit_hash="a" * 40,
+        files=[
+            FileEntry(
+                path="backend\\main.py",
+                language="python",
+                size_bytes=12,
+                lines_count=3,
+            )
+        ],
+    )
+    finding = StaticFinding(
+        tool="semgrep",
+        rule_id="rule",
+        title="Risk",
+        description="Source issue",
+        severity=Severity.HIGH,
+        category="security",
+        evidence=Evidence(file_path="backend\\main.py", start_line=1, end_line=1),
+    )
+    store = EvidenceStore(
+        manifest,
+        {"semgrep": ScannerResult(
+            tool="semgrep", status=ToolStatus.COMPLETED, findings=[finding],
+        )},
+    )
+    assert store.get_file_entry("backend/main.py") is not None
+    assert len(store.get_findings(file_path="backend/main.py")) == 1
+    context = store.get_evidence_context("backend/main.py", start_line=1, end_line=1)
+    assert len(context["findings"]) == 1
+    assert context["lines_count"] == 3
