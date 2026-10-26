@@ -356,3 +356,23 @@ def test_in_memory_shared_backing_store_never_overwrites_same_chunk_in_another_n
     assert first.count() == 0
     assert second.count() == 1
     assert second.get("same-chunk")["metadata"]["owner"] == "two"
+
+def test_memory_batch_rollback_is_implicit_on_late_invalid_embedding():
+    index = InMemoryVectorIndex()
+    with pytest.raises(ValueError, match="finite nonzero"):
+        index.upsert_batch([
+            ("good", [1.0, 0.0], None),
+            ("bad", [float("nan"), 1.0], None),
+        ])
+    assert index.count() == 0
+    assert index.dimensions is None
+    assert index.get("good") is None
+
+    index.upsert_batch([("good", [1.0, 0.0], None)])
+    with pytest.raises(ValueError, match="dimension mismatch"):
+        index.upsert_batch([
+            ("next", [0.0, 1.0], None),
+            ("wrong", [0.0, 1.0, 2.0], None),
+        ])
+    assert index.count() == 1
+    assert index.get("next") is None

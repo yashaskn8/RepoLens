@@ -133,6 +133,16 @@ class InMemoryVectorIndex(VectorIndex):
         }
 
     def upsert_batch(self, items: List[Tuple[str, List[float], Optional[Dict[str, Any]]]]) -> None:
+        # Validate the complete batch before the first write. A corrupt later
+        # embedding cannot leave a partially applied memory index behind.
+        expected = self.dimensions
+        for _, vector, _ in items:
+            if expected is None:
+                expected = len(vector)
+            if len(vector) != expected:
+                raise ValueError(f"Vector dimension mismatch: expected {expected}, got {len(vector)}")
+            if not _valid_vector(vector):
+                raise ValueError("Embedding vector must contain finite nonzero numeric values.")
         for chunk_id, vector, metadata in items:
             self.upsert(chunk_id, vector, metadata)
 
@@ -168,10 +178,16 @@ class InMemoryVectorIndex(VectorIndex):
         return None
 
     def count(self) -> int:
-        return sum(1 for e in self._entries.values() if e.get("namespace", "default") == self.namespace)
+        return sum(
+            1 for (ns, _), e in self._entries.items()
+            if ns == self.namespace and e.get("namespace", "default") == self.namespace
+        )
 
     def clear(self) -> None:
-        to_delete = [k for k, v in self._entries.items() if v.get("namespace", "default") == self.namespace]
+        to_delete = [
+            key for key, value in self._entries.items()
+            if key[0] == self.namespace and value.get("namespace", "default") == self.namespace
+        ]
         for k in to_delete:
             del self._entries[k]
 
