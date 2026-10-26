@@ -93,6 +93,8 @@ function ScanWorkspaceContent() {
   const { user, isAuthenticated, isLoading: isAuthLoading } = useAuth();
   const accountId = user?.id ?? null;
   const scanRequestGeneration = useRef(0);
+  // React state updates do not lock same-render submit events synchronously.
+  const scanSubmissionPendingRef = useRef(false);
   // This component can hydrate after the auth provider has already refreshed.
   // Keep its server and first client render identical, then reveal session-aware
   // controls once hydration is complete.
@@ -124,6 +126,7 @@ function ScanWorkspaceContent() {
     // Invalidate in-flight submissions and remove the previous tenant's scan
     // immediately, before fetching the next account's history.
     scanRequestGeneration.current += 1;
+    scanSubmissionPendingRef.current = false;
     setActiveScan(null);
     setRecentScans([]);
     setError(null);
@@ -190,8 +193,11 @@ function ScanWorkspaceContent() {
       window.dispatchEvent(new Event('repolens:open-auth'));
       return;
     }
+    if (isAuthLoading || !isHydrated || isScanning || scanSubmissionPendingRef.current) return;
+    scanSubmissionPendingRef.current = true;
 
     const generation = ++scanRequestGeneration.current;
+    let scanStillRunning = false;
     setError(null);
     setIsSubmitting(true);
 
@@ -201,6 +207,8 @@ function ScanWorkspaceContent() {
         branch: branch || 'main',
       });
       if (generation !== scanRequestGeneration.current) return;
+      // Hold the lock until React renders the pending/running scan.
+      scanStillRunning = scanResult.status === 'PENDING' || scanResult.status === 'RUNNING';
       setActiveScan(scanResult);
 
       setRecentScans((current) => [
@@ -215,11 +223,19 @@ function ScanWorkspaceContent() {
         setError('Failed to initiate repository scan.');
       }
     } finally {
-      if (generation === scanRequestGeneration.current) setIsSubmitting(false);
+      if (generation === scanRequestGeneration.current) {
+        scanSubmissionPendingRef.current = scanStillRunning;
+        setIsSubmitting(false);
+      }
     }
   };
 
   const isScanning = activeScan?.status === 'RUNNING' || activeScan?.status === 'PENDING';
+
+  useEffect(() => {
+    // Only a terminal scan or session reset permits another submission.
+    if (!isScanning) scanSubmissionPendingRef.current = false;
+  }, [isScanning]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
