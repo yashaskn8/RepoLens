@@ -87,6 +87,53 @@ def _bound_stderr(stderr: Optional[str]) -> Optional[str]:
     return bounded
 
 
+
+def confined_scanner_path(tool: str, raw_path: str, repository_dir: str) -> str:
+    """Accept only paths under the scanned root; never trust scanner-reported names.
+
+    This is lexical and filesystem confinement, not evidence verification:
+    the evidence verifier separately checks that the file/line actually exists
+    in the pinned snapshot. Keep malformed scanner coverage non-authoritative.
+    """
+    import ntpath
+    import posixpath
+
+    if (
+        not isinstance(raw_path, str)
+        or not raw_path
+        or any(ord(char) < 32 or ord(char) == 127 for char in raw_path)
+    ):
+        raise ScannerOutputError(tool, "Invalid scanner evidence path")
+
+    normalized = raw_path.replace("\\", "/")
+    if ".." in normalized.split("/") or ntpath.splitdrive(raw_path)[0] and os.name != "nt":
+        raise ScannerOutputError(tool, "Scanner evidence path escapes repository")
+
+    # os.path.isabs recognizes the host platform. Reject foreign absolute
+    # paths rather than interpreting Windows roots as relative paths on Linux.
+    if ntpath.isabs(raw_path) and not os.path.isabs(raw_path):
+        raise ScannerOutputError(tool, "Scanner evidence path escapes repository")
+
+    root = os.path.realpath(repository_dir)
+    if os.path.isabs(raw_path):
+        candidate = os.path.realpath(raw_path)
+    else:
+        relative = posixpath.normpath(normalized)
+        if relative in {".", ""} or relative.startswith("/"):
+            raise ScannerOutputError(tool, "Invalid scanner evidence path")
+        candidate = os.path.realpath(os.path.join(root, relative.replace("/", os.sep)))
+
+    try:
+        if os.path.commonpath((root, candidate)) != root:
+            raise ScannerOutputError(tool, "Scanner evidence path escapes repository")
+    except ValueError:
+        raise ScannerOutputError(tool, "Scanner evidence path escapes repository") from None
+
+    relative = os.path.relpath(candidate, root).replace("\\", "/")
+    if relative in {".", ".."} or relative.startswith("../"):
+        raise ScannerOutputError(tool, "Scanner evidence path escapes repository")
+    return relative
+
 class BaseScannerAdapter(ABC):
     """Abstract interface and safe command execution base for deterministic scanners."""
 

@@ -3,7 +3,7 @@
 import json
 import os
 from typing import FrozenSet, List
-from app.analysis.base import BaseScannerAdapter, ScannerOutputError
+from app.analysis.base import BaseScannerAdapter, ScannerOutputError, confined_scanner_path
 from app.analysis.schemas import StaticFinding
 from app.core.config import get_settings
 from app.schemas.evidence import Evidence
@@ -84,7 +84,7 @@ class TrivyAdapter(BaseScannerAdapter):
             raw_target = target_res.get("Target", "repository")
             if not isinstance(raw_target, str) or not raw_target:
                 raise ScannerOutputError(self.tool_name, f"Malformed result entry at index {target_index}: Target")
-            rel_target = os.path.relpath(raw_target, repo_dir).replace("\\", "/") if os.path.isabs(raw_target) else raw_target.replace("\\", "/")
+            rel_target = confined_scanner_path(self.tool_name, raw_target, repo_dir)
 
             # 1. Process Vulnerabilities
             for vuln in target_res.get("Vulnerabilities") or []:

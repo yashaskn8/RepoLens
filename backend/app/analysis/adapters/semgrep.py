@@ -3,7 +3,7 @@
 import json
 import os
 from typing import FrozenSet, List
-from app.analysis.base import BaseScannerAdapter, ScannerOutputError
+from app.analysis.base import BaseScannerAdapter, ScannerOutputError, confined_scanner_path
 from app.analysis.schemas import StaticFinding
 from app.core.config import get_settings
 from app.schemas.evidence import Evidence
@@ -103,7 +103,7 @@ class SemgrepAdapter(BaseScannerAdapter):
                     or raw_end["line"] < raw_start["line"]
                 ):
                     raise TypeError("result entry is missing required fields")
-                rel_path = os.path.relpath(raw_path, repo_dir).replace("\\", "/") if os.path.isabs(raw_path) else raw_path.replace("\\", "/")
+                rel_path = confined_scanner_path(self.tool_name, raw_path, repo_dir)
 
                 start_line = raw_start["line"]
                 end_line = raw_end["line"]

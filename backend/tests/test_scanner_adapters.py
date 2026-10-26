@@ -746,3 +746,46 @@ async def test_trivy_null_vulnerability_sections_are_valid_empty_results():
 
     assert result.status == ToolStatus.COMPLETED
     assert result.findings == []
+
+@pytest.mark.parametrize(
+    "adapter,output",
+    [
+        (SemgrepAdapter, {"results": [{"check_id": "rule", "path": "../../etc/passwd", "start": {"line": 1}, "end": {"line": 1}, "extra": {"message": "bad"}}], "errors": []}),
+        (TrivyAdapter, {"Results": [{"Target": "../../etc/passwd", "Vulnerabilities": []}]}),
+        (OSVScannerAdapter, {"results": [{"source": {"path": "../../etc/passwd"}, "packages": []}]}),
+        (TrivyAdapter, {"Results": [{"Target": "C:\\\\Windows\\\\system.ini", "Vulnerabilities": []}]}),
+    ],
+)
+def test_scanner_rejects_repository_escape_paths(adapter, output, tmp_path):
+    """Scanner JSON is untrusted; findings must never reference host paths."""
+    with pytest.raises(ScannerOutputError):
+        adapter().parse_output(json.dumps(output), str(tmp_path))
+
+
+def test_scanner_rejects_absolute_path_outside_snapshot(tmp_path):
+    from app.analysis.base import confined_scanner_path
+    outside = str(tmp_path.parent / "outside-source.py")
+    with pytest.raises(ScannerOutputError):
+        confined_scanner_path("semgrep", outside, str(tmp_path))
+
+
+def test_scanner_normalizes_ordinary_nested_evidence_path(tmp_path):
+    from app.analysis.base import confined_scanner_path
+    assert confined_scanner_path("semgrep", "src/components/example.py", str(tmp_path)) == "src/components/example.py"
+    assert confined_scanner_path("trivy", str(tmp_path / "requirements.txt"), str(tmp_path)) == "requirements.txt"
+
+
+def test_scanner_rejects_internal_symlink_to_outside(tmp_path):
+    from app.analysis.base import confined_scanner_path
+    outside = tmp_path.parent / ("outside-for-" + tmp_path.name)
+    outside.mkdir()
+    try:
+        link = tmp_path / "external"
+        try:
+            link.symlink_to(outside, target_is_directory=True)
+        except (NotImplementedError, OSError):
+            pytest.skip("Symlink creation not supported by test environment")
+        with pytest.raises(ScannerOutputError):
+            confined_scanner_path("semgrep", "external/secret.py", str(tmp_path))
+    finally:
+        outside.rmdir()
