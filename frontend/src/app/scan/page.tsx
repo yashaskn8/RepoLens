@@ -734,11 +734,20 @@ function ScanWorkspaceContent() {
   );
 }
 
+// Key the entire private workspace to the authenticated account. Clearing state
+// in an effect alone permits a render of the previous tenant's scan history
+// during logout, session restoration, or account switching.
+function AccountBoundScanWorkspace() {
+  const { user, isLoading } = useAuth();
+  const workspaceKey = isLoading ? 'session-loading' : user?.id ?? 'signed-out';
+  return <ScanWorkspaceContent key={workspaceKey} />;
+}
+
 export default function ScanPage() {
   return (
     <AppShell breadcrumbs={[{ label: 'Scans', href: '/scan' }, { label: 'Scan Repository' }]} title="Scan Repository">
       <Suspense fallback={<div>Loading workspace...</div>}>
-        <ScanWorkspaceContent />
+        <AccountBoundScanWorkspace />
       </Suspense>
     </AppShell>
   );
