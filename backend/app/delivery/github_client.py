@@ -134,49 +134,52 @@ class GitHubHttpTransport:
                     is_err = True
 
                 if is_err:
-                    raw_text = response.text[:512] if response.text else ""
-                    safe_msg = redact_secrets(raw_text)
-                    try:
-                        resp_data = response.json() if response.content else {}
-                        if isinstance(resp_data, dict) and "message" in resp_data:
-                            safe_msg = redact_secrets(str(resp_data["message"]))[:512]
-                    except Exception:
-                        resp_data = {}
-
+                    # GitHub/provider responses can echo caller-supplied secret
+                    # text in arbitrary nested JSON fields. HTTP status is
+                    # sufficient for error routing; never retain raw payloads
+                    # or messages on an exception that reaches logs or clients.
                     raise GitHubAPIError(
-                        message=f"GitHub API error ({response.status_code}): {safe_msg}",
+                        message=f"GitHub API returned HTTP {response.status_code}.",
                         status_code=response.status_code,
-                        response_data=resp_data if isinstance(resp_data, dict) else {},
+                        response_data={},
                     )
 
                 if response.status_code == 204:
                     return {}
-                return response.json()
+                try:
+                    return response.json()
+                except ValueError:
+                    raise GitHubAPIError(
+                        "GitHub API returned invalid JSON.",
+                        status_code=502,
+                    ) from None
 
-            except (httpx.TimeoutException, TimeoutError) as exc:
+            except (httpx.TimeoutException, TimeoutError):
                 if not is_write and attempt < max_attempts:
                     delay = 0.5 * (2 ** (attempt - 1))
                     logger.warning(
-                        f"GitHub API timeout for {method} {path}. Retrying in {delay}s (attempt {attempt}/{max_attempts})"
+                        "GitHub API read timed out; retrying attempt %s/%s.",
+                        attempt, max_attempts,
                     )
                     await asyncio.sleep(min(delay, 5.0))
                     continue
-                safe_exc = redact_secrets(str(exc))[:500]
                 raise GitHubAPIError(
-                    message=f"GitHub API request timed out for {method} {path}: {safe_exc}",
+                    "GitHub API request timed out.",
                     status_code=504,
-                ) from exc
+                ) from None
 
-            except httpx.NetworkError as exc:
+            except httpx.RequestError:
+                # Protocol errors (e.g. truncated HTTP responses) are request
+                # failures too, not just NetworkError subclasses.
                 if not is_write and attempt < max_attempts:
                     delay = 0.5 * (2 ** (attempt - 1))
                     logger.warning(
-                        f"GitHub API network error for {method} {path}. Retrying in {delay}s (attempt {attempt}/{max_attempts})"
+                        "GitHub API read transport failure; retrying attempt %s/%s.",
+                        attempt, max_attempts,
                     )
                     await asyncio.sleep(min(delay, 5.0))
                     continue
-                safe_exc = redact_secrets(str(exc))[:500]
                 raise GitHubAPIError(
-                    message=f"GitHub API network error for {method} {path}: {safe_exc}",
+                    "GitHub API transport failure.",
                     status_code=502,
-                ) from exc
+                ) from None
