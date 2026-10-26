@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 import os
 import time
 from typing import Any, Dict, Optional
+from unittest.mock import patch
 
 import pytest
 from pydantic import BaseModel
@@ -546,7 +547,7 @@ async def test_live_redis_cloud_connectivity():
 
 
 @pytest.mark.asyncio
-async def test_redis_connection_errors_do_not_log_request_keys_or_exception_secrets(caplog):
+async def test_redis_connection_errors_do_not_log_request_keys_or_exception_secrets():
     """Redis may reflect credentials, DSNs or request IDs in error text."""
     secret = "redis-private-connection-canary-123"
     key = "opaque-request-key-canary-456"
@@ -567,14 +568,21 @@ async def test_redis_connection_errors_do_not_log_request_keys_or_exception_secr
     manager = RedisManager()
     manager.set_client(LeakyRedis(), available=True)
     service = RedisService(manager=manager)
-    assert await service.get(key) is None
-    assert await service.set(key, {"value": 1}) is False
-    assert await service.delete(key) is False
-    assert await service.exists(key) is False
+    # Capture calls at the logger boundary: unrelated test logging
+    # configuration must not hide redaction failures or erase assertions.
+    with patch("app.services.redis_service.logger.warning") as warning:
+        assert await service.get(key) is None
+        assert await service.set(key, {"value": 1}) is False
+        assert await service.delete(key) is False
+        assert await service.exists(key) is False
 
-    assert secret not in caplog.text
-    assert key not in caplog.text
-    assert "Redis GET failure" in caplog.text
-    assert "Redis SET failure" in caplog.text
-    assert "Redis DELETE failure" in caplog.text
-    assert "Redis EXISTS failure" in caplog.text
+    emitted = [call.args for call in warning.call_args_list]
+    assert [args[0] for args in emitted] == [
+        "Redis GET failure (%s)",
+        "Redis SET failure (%s)",
+        "Redis DELETE failure (%s)",
+        "Redis EXISTS failure (%s)",
+    ]
+    assert all(args[1:] == ("RedisError",) for args in emitted)
+    assert secret not in repr(emitted)
+    assert key not in repr(emitted)

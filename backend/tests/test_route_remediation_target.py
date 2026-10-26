@@ -20,8 +20,8 @@ def _create_route_mismatch_repo(tmpdir: str):
     with open(os.path.join(fe_dir, "api.ts"), "w", encoding="utf-8") as f:
         f.write(
             "// Frontend API client\n"
-            "export async function fetchUserProfile(userId: string) {\n"
-            "    return fetch(`/api/v1/users/${userId}/profile`, { method: 'GET' });\n"
+            "export async function fetchUserProfile() {\n"
+            "    return fetch('/api/v1/users/profile', { method: 'GET' });\n"
             "}\n"
         )
 
@@ -32,9 +32,9 @@ def _create_route_mismatch_repo(tmpdir: str):
             "from fastapi import APIRouter\n\n"
             "router = APIRouter()\n\n"
             "# Route Mismatch: Frontend calls GET, backend registers POST\n"
-            "@router.post('/api/v1/users/{user_id}/profile')\n"
-            "def get_user_profile(user_id: str):\n"
-            "    return {'user_id': user_id, 'name': 'Alice'}\n"
+            "@router.post('/api/v1/users/profile')\n"
+            "def get_user_profile():\n"
+            "    return {'user_id': 'me', 'name': 'Alice'}\n"
         )
 
 
@@ -48,14 +48,14 @@ async def test_route_verification_passes_when_target_route_fixed():
         finding = Finding(
             id=uuid4(),
             scan_id=uuid4(),
-            title="Route Contract Mismatch: /api/v1/users/{userId}/profile",
+            title="Route Contract Mismatch: /api/v1/users/profile",
             description="Frontend requests GET but backend registers POST",
             severity=Severity.HIGH,
             category="route_mismatch",
             source_tool="route_contract",
-            detector_id="route_contract:frontend/src/api.ts:GET:/api/v1/users/{param}/profile",
+            detector_id="route_contract:frontend/src/api.ts:GET:/api/v1/users/profile",
             detector_kind="contract_matcher",
-            evidences=[Evidence(file_path="frontend/src/api.ts", start_line=3, end_line=3, code_snippet="return fetch(`/api/v1/users/${userId}/profile`, { method: 'GET' });")],
+            evidences=[Evidence(file_path="frontend/src/api.ts", start_line=3, end_line=3, code_snippet="return fetch('/api/v1/users/profile', { method: 'GET' });")],
         )
 
         from app.planning.schemas import OrderedChangeStep
@@ -80,8 +80,8 @@ async def test_route_verification_passes_when_target_route_fixed():
             "--- a/frontend/src/api.ts\n"
             "+++ b/frontend/src/api.ts\n"
             "@@ -3,1 +3,1 @@\n"
-            "-    return fetch(`/api/v1/users/${userId}/profile`, { method: 'GET' });\n"
-            "+    return fetch(`/api/v1/users/${userId}/profile`, { method: 'POST' });\n"
+            "-    return fetch('/api/v1/users/profile', { method: 'GET' });\n"
+            "+    return fetch('/api/v1/users/profile', { method: 'POST' });\n"
         )
 
         proposal = PatchProposal(
