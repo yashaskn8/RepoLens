@@ -3,6 +3,8 @@
  * Includes credentials by default and automatically attaches X-CSRF-Token on state-modifying requests.
  */
 
+import { buildApiRequestUrl } from '@/lib/apiRequestUrl';
+
 import {
   ChangeAnalysisPRRequest,
   ChangeAnalysisReportResponse,
@@ -194,7 +196,7 @@ export function getCsrfToken(): string | null {
  * Standard fetch wrapper attaching credentials and CSRF tokens.
  */
 export async function apiFetch(input: string, init?: RequestInit): Promise<Response> {
-  const url = input.startsWith('http') ? input : `${getApiBaseUrl()}${input}`;
+  const url = buildApiRequestUrl(getApiBaseUrl(), input);
   const method = (init?.method || 'GET').toUpperCase();
   const headers = new Headers(init?.headers || {});
 
