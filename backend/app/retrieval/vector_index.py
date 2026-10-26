@@ -40,6 +40,22 @@ def cosine_similarity(v1: List[float], v2: List[float]) -> float:
     return max(-1.0, min(1.0, sim))
 
 
+def _valid_vector(vector: object, expected_dimensions: int | None = None) -> bool:
+    """Reject nonfinite/zero vectors before they can contaminate ranking."""
+    if not isinstance(vector, list) or not vector:
+        return False
+    if expected_dimensions is not None and len(vector) != expected_dimensions:
+        return False
+    norm = 0.0
+    for value in vector:
+        if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value):
+            return False
+        norm += value * value
+        if not math.isfinite(norm):
+            return False
+    return norm > 0.0
+
+
 class VectorIndex(ABC):
     """Abstract vector index interface."""
 
@@ -96,6 +112,10 @@ class InMemoryVectorIndex(VectorIndex):
     def upsert(self, chunk_id: str, vector: List[float], metadata: Optional[Dict[str, Any]] = None) -> None:
         if self.dimensions is not None and len(vector) != self.dimensions:
             raise ValueError(f"Vector dimension mismatch: expected {self.dimensions}, got {len(vector)}")
+        if not _valid_vector(vector):
+            raise ValueError("Embedding vector must contain finite nonzero numeric values.")
+        if self.dimensions is None:
+            self.dimensions = len(vector)
         self._entries[chunk_id] = {
             "vector": vector,
             "metadata": metadata or {},
@@ -111,12 +131,18 @@ class InMemoryVectorIndex(VectorIndex):
     def query(self, vector: List[float], top_k: int = 10) -> List[Tuple[str, float]]:
         if self.dimensions is not None and len(vector) != self.dimensions:
             raise ValueError(f"Query vector dimension mismatch: expected {self.dimensions}, got {len(vector)}")
+        if not _valid_vector(vector):
+            raise ValueError("Query vector must contain finite nonzero numeric values.")
         if not self._entries or top_k <= 0:
             return []
 
         scored: List[Tuple[str, float]] = []
         for chunk_id, entry in self._entries.items():
             if entry.get("namespace", "default") != self.namespace:
+                continue
+            # Legacy or corrupted entries must not receive the neutral 0.5
+            # score for a dimension mismatch or nonfinite embedding.
+            if not _valid_vector(entry.get("vector"), len(vector)):
                 continue
             sim = cosine_similarity(vector, entry["vector"])
             # Normalize [-1.0, 1.0] to [0.0, 1.0]
@@ -178,7 +204,7 @@ class PgVectorIndex(VectorIndex):
                 or normalized_url.startswith("postgres")
             ):
                 raise ValueError(
-                    f"PgVectorIndex requires a PostgreSQL database URL (e.g. 'postgresql://...'), but received: '{db_url}'"
+                    "PgVectorIndex requires a PostgreSQL database URL; received an unsupported scheme."
                 )
             try:
                 driver_url = db_url
@@ -189,11 +215,11 @@ class PgVectorIndex(VectorIndex):
                 self.engine = create_engine(driver_url, pool_pre_ping=True, pool_timeout=5)
             except (ModuleNotFoundError, ImportError) as exc:
                 raise RuntimeError(
-                    f"PostgreSQL database driver is not installed: {str(exc)}. Please install psycopg or psycopg2."
+                    "PostgreSQL database driver is not installed. Please install psycopg or psycopg2."
                 ) from exc
             except Exception as exc:
                 raise RuntimeError(
-                    f"Failed to initialize PostgreSQL engine for '{db_url}': {str(exc)}"
+                    "Failed to initialize PostgreSQL engine. Check the driver and connection configuration."
                 ) from exc
         else:
             self.engine = engine

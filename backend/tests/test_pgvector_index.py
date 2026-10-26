@@ -248,3 +248,47 @@ def test_pgvector_real_postgres_integration():
         assert res[0][0] == "c1"
     finally:
         index.clear()
+
+
+def test_memory_vector_index_rejects_nonfinite_and_zero_vectors():
+    index = InMemoryVectorIndex(dimensions=2)
+    for vector in [[0.0, 0.0], [float("nan"), 1.0], [float("inf"), 1.0], [True, 1.0]]:
+        with pytest.raises(ValueError, match="finite nonzero"):
+            index.upsert("bad", vector)
+        with pytest.raises(ValueError, match="finite nonzero"):
+            index.query(vector)
+    assert index.count() == 0
+
+
+def test_memory_vector_index_never_ranks_corrupt_dimensions_or_entries():
+    index = InMemoryVectorIndex()
+    index.upsert("legitimate", [1.0, 0.0])
+    assert index.dimensions == 2
+    with pytest.raises(ValueError, match="Vector dimension mismatch"):
+        index.upsert("bad-dimension", [1.0, 0.0, 0.0])
+    index._entries["corrupted"] = {
+        "vector": [1.0, 0.0, 0.0],
+        "metadata": {},
+        "namespace": index.namespace,
+    }
+    index._entries["nan"] = {
+        "vector": [float("nan"), 1.0],
+        "metadata": {},
+        "namespace": index.namespace,
+    }
+    assert index.query([1.0, 0.0], top_k=5) == [("legitimate", 1.0)]
+
+
+def test_pgvector_connection_errors_cannot_echo_database_credentials():
+    secret = "credential_canary_123456"
+    url = f"postgresql://admin:{secret}@db.example/repolens"
+    with patch(
+        "app.retrieval.vector_index.create_engine",
+        side_effect=RuntimeError(f"Cannot connect to {url}"),
+    ):
+        with pytest.raises(RuntimeError, match="Failed to initialize PostgreSQL engine") as exc:
+            PgVectorIndex(db_url=url, auto_create_table=False)
+    assert secret not in str(exc.value)
+    with pytest.raises(ValueError, match="requires a PostgreSQL database URL") as invalid:
+        PgVectorIndex(db_url=f"mysql://admin:{secret}@db.example/repolens")
+    assert secret not in str(invalid.value)
