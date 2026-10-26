@@ -10,10 +10,12 @@ import { SearchInput } from '@/components/ui/Input';
 import { CardSkeleton } from '@/components/ui/Skeleton';
 import { FindingCard } from '@/features/findings/FindingCard';
 import { fetchScanFindings, listScans } from '@/lib/api';
+import { loadScanFindingsPage } from '@/lib/findingsPagination';
 import { Finding, Severity } from '@/types/domain';
 import { RefreshCw, Scan as ScanIcon, ShieldCheck } from 'lucide-react';
 
 const SEVERITIES: Array<'ALL' | Severity> = ['ALL', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO'];
+const SCAN_PAGE_SIZE = 25;
 
 export default function FindingsPage() {
   const router = useRouter();
@@ -22,22 +24,26 @@ export default function FindingsPage() {
   const [severity, setSeverity] = useState<'ALL' | Severity>('ALL');
   const [expandedFindingId, setExpandedFindingId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadedScanCount, setLoadedScanCount] = useState(0);
+  const [hasOlderScans, setHasOlderScans] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const loadFindings = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const scans = await listScans(25);
-      const results = await Promise.allSettled(scans.map((scan) => fetchScanFindings(scan.id)));
-      const loaded = results.flatMap((result) => (result.status === 'fulfilled' ? result.value : []));
-      const failedCount = results.filter((result) => result.status === 'rejected').length;
-      setFindings(loaded);
-      if (failedCount > 0) {
-        setError(`${failedCount} scan result${failedCount === 1 ? '' : 's'} could not be loaded. The findings shown are incomplete.`);
+      const page = await loadScanFindingsPage(0, SCAN_PAGE_SIZE, listScans, fetchScanFindings);
+      setFindings(page.findings);
+      setLoadedScanCount(page.scanCount);
+      setHasOlderScans(page.hasOlderScans);
+      if (page.failedCount > 0) {
+        setError(`${page.failedCount} scan result${page.failedCount === 1 ? '' : 's'} could not be loaded. The findings shown are incomplete.`);
       }
     } catch (caught: unknown) {
       setFindings([]);
+      setLoadedScanCount(0);
+      setHasOlderScans(false);
       setError(caught instanceof Error ? caught.message : 'Failed to load findings');
     } finally {
       setLoading(false);
@@ -47,6 +53,35 @@ export default function FindingsPage() {
   useEffect(() => {
     void loadFindings();
   }, [loadFindings]);
+
+  const loadOlderScans = useCallback(async () => {
+    if (loading || loadingMore || !hasOlderScans) return;
+    setLoadingMore(true);
+    try {
+      const page = await loadScanFindingsPage(
+        loadedScanCount, SCAN_PAGE_SIZE, listScans, fetchScanFindings
+      );
+      setFindings((current) => {
+        const seen = new Set(current.map((finding) => finding.id));
+        return [...current, ...page.findings.filter((finding) => !seen.has(finding.id))];
+      });
+      setLoadedScanCount((count) => count + page.scanCount);
+      setHasOlderScans(page.hasOlderScans);
+      if (page.failedCount > 0) {
+        setError((previous) => [
+          previous,
+          `${page.failedCount} older scan result${page.failedCount === 1 ? '' : 's'} could not be loaded. Findings are incomplete.`,
+        ].filter(Boolean).join(' '));
+      }
+    } catch (caught: unknown) {
+      setError((previous) => [
+        previous,
+        caught instanceof Error ? caught.message : 'Failed to load older scan findings',
+      ].filter(Boolean).join(' '));
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [hasOlderScans, loadedScanCount, loading, loadingMore]);
 
   const filteredFindings = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -93,7 +128,7 @@ export default function FindingsPage() {
             size="sm"
             leftIcon={<RefreshCw size={14} />}
             onClick={() => void loadFindings()}
-            disabled={loading}
+            disabled={loading || loadingMore}
           >
             Refresh
           </Button>
@@ -106,8 +141,10 @@ export default function FindingsPage() {
         ) : findings.length === 0 ? (
           <EmptyState
             icon={<ScanIcon size={24} />}
-            title="No verified findings yet"
-            description="Run a repository scan. Only tenant-owned findings that pass RepoLens evidence verification are shown here."
+            title={hasOlderScans ? 'No verified findings in loaded scans' : 'No verified findings yet'}
+            description={hasOlderScans
+              ? 'Load older scans to look for verified findings, or start a new repository scan.'
+              : 'Run a repository scan. Only tenant-owned findings that pass RepoLens evidence verification are shown here.'}
             actionLabel="Start a repository scan"
             onAction={() => router.push('/scan')}
           />
@@ -120,7 +157,7 @@ export default function FindingsPage() {
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
             <p style={{ color: 'var(--text-secondary)', fontSize: '0.8125rem' }}>
-              Showing {filteredFindings.length} of {findings.length} persisted, evidence-grounded finding{findings.length === 1 ? '' : 's'}.
+              Showing {filteredFindings.length} of {findings.length} persisted, evidence-grounded finding{findings.length === 1 ? '' : 's'} across {loadedScanCount} loaded scan{loadedScanCount === 1 ? '' : 's'}.
             </p>
             {filteredFindings.map((finding) => (
               <FindingCard
@@ -130,6 +167,21 @@ export default function FindingsPage() {
                 onToggleExpand={() => setExpandedFindingId(expandedFindingId === finding.id ? null : finding.id)}
               />
             ))}
+          </div>
+        )}
+        {!loading && hasOlderScans && (
+          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '0.8125rem' }}>
+              Older scans have not been loaded yet; this is not a complete findings history.
+            </p>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => void loadOlderScans()}
+              disabled={loadingMore}
+            >
+              {loadingMore ? 'Loading older scans...' : 'Load older scan findings'}
+            </Button>
           </div>
         )}
       </div>
