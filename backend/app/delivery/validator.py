@@ -52,8 +52,18 @@ def sanitize_branch_name(finding_id: str, patch_id: str) -> str:
 
 
 def _normalize_path(p: str) -> str:
-    """Normalize file path to canonical relative forward-slash format."""
-    return p.replace("\\", "/").strip().lstrip("./")
+    """Preserve canonical repository-relative file identity without hiding traversal."""
+    if not isinstance(p, str) or not p or p != p.strip():
+        raise ValueError("Invalid repository-relative patch file path")
+    normalized = p.replace("\\", "/")
+    if (
+        normalized.startswith("/")
+        or re.match(r"^[A-Za-z]:", normalized)
+        or any(part in {"", ".", ".."} for part in normalized.split("/"))
+        or any(ord(char) < 32 or ord(char) == 127 for char in normalized)
+    ):
+        raise ValueError("Invalid repository-relative patch file path")
+    return normalized
 
 
 @dataclass
@@ -266,8 +276,15 @@ class DeliveryValidator:
             )
 
         # 13. Exact set equality for modified files
-        persisted_files: Set[str] = {_normalize_path(f) for f in (patch.files_modified or [])}
-        diff_files: Set[str] = {_normalize_path(f) for f in parsed_diff}
+        try:
+            persisted_files: Set[str] = {_normalize_path(f) for f in (patch.files_modified or [])}
+            diff_files: Set[str] = {_normalize_path(f) for f in parsed_diff}
+        except ValueError:
+            return DeliveryValidationResult(
+                eligible=False,
+                blocking_reason="Patch contains an unsafe or malformed repository-relative file path.",
+                failure_code="UNSAFE_PATCH_PATH",
+            )
         if persisted_files != diff_files:
             return DeliveryValidationResult(
                 eligible=False,

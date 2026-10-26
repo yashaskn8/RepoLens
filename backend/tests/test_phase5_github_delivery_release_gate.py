@@ -860,3 +860,31 @@ async def test_delivery_preview_rejects_invalid_remote_sha_without_crash(
     assert result.failure_code == "REMOTE_BRANCH_INVALID_SHA"
     assert result.observed_base_sha is None
     provider.get_branch_head.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    [
+        "../secret.py",
+        "./../secret.py",
+        "/var/private.py",
+        "C:/private.py",
+        "src//module.py",
+        "src/./module.py",
+        "src/../module.py",
+        "",
+    ],
+)
+def test_delivery_path_normalization_rejects_unsafe_or_ambiguous_names(unsafe):
+    from app.delivery.validator import _normalize_path
+
+    with pytest.raises(ValueError, match="Invalid repository-relative"):
+        _normalize_path(unsafe)
+
+
+def test_delivery_path_normalization_preserves_dotfiles_and_nested_source():
+    from app.delivery.validator import _normalize_path
+
+    assert _normalize_path(".env") == ".env"
+    assert _normalize_path("src/.env") == "src/.env"
+    assert _normalize_path("src\\code.py") == "src/code.py"
