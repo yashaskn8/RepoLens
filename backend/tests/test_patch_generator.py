@@ -363,3 +363,83 @@ async def test_patch_service_read_only_isolation():
             with open(calc_path, "r", encoding="utf-8") as f:
                 current_disk_content = f.read()
             assert current_disk_content == original_content
+
+
+@pytest.mark.asyncio
+async def test_patch_service_rejects_plan_for_different_finding_before_reading(tmp_path):
+    finding = Finding(
+        id=uuid4(), scan_id=uuid4(), title="Bug", description="Bug description",
+        severity=Severity.HIGH, verification_verdict=VerificationVerdict.CONFIRMED,
+        evidences=[Evidence(file_path="src/main.py", start_line=1)],
+    )
+    plan = FixPlan(
+        finding_id=uuid4(), root_cause="Bug", objective="Fix",
+        files_expected_to_change=["src/main.py"],
+        ordered_changes=[OrderedChangeStep(
+            step_number=1, target_file="src/main.py",
+            description="Fix the bug", rationale="Resolve the root cause",
+        )], validation_plan=["pytest"],
+    )
+    with pytest.raises(ValueError, match="different finding"):
+        await PatchService().generate_patch_proposal(
+            finding, plan, AsyncMock(), str(tmp_path),
+        )
+
+
+@pytest.mark.asyncio
+async def test_patch_service_rejects_missing_approved_source_file(tmp_path):
+    """A partial source bundle must never produce an ungrounded candidate patch."""
+    finding = Finding(
+        id=uuid4(), scan_id=uuid4(), title="Bug", description="Bug description",
+        severity=Severity.HIGH, verification_verdict=VerificationVerdict.CONFIRMED,
+        evidences=[Evidence(file_path="src/main.py", start_line=1)],
+    )
+    plan = FixPlan(
+        finding_id=finding.id, root_cause="Bug", objective="Fix",
+        files_expected_to_change=["src/main.py", "src/missing.py"],
+        ordered_changes=[
+            OrderedChangeStep(
+                step_number=1, target_file="src/main.py",
+                description="Fix the bug", rationale="Resolve the root cause",
+            ),
+            OrderedChangeStep(
+                step_number=2, target_file="src/missing.py",
+                description="Update dependency", rationale="Maintain API",
+            ),
+        ], validation_plan=["pytest"],
+    )
+    target = tmp_path / "src" / "main.py"
+    target.parent.mkdir()
+    target.write_text("x = 1", encoding="utf-8")
+    engine = AsyncMock()
+    with pytest.raises(ValueError, match="source files are unavailable"):
+        await PatchService().generate_patch_proposal(
+            finding, plan, engine, str(tmp_path),
+        )
+    engine.build_context_bundle.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_patch_service_rejects_existing_invalid_plan(tmp_path):
+    from app.planning.schemas import PlanValidationReport, PlanValidationStatus
+    finding = Finding(
+        id=uuid4(), scan_id=uuid4(), title="Bug", description="Bug description",
+        severity=Severity.HIGH, verification_verdict=VerificationVerdict.CONFIRMED,
+        evidences=[Evidence(file_path="src/main.py", start_line=1)],
+    )
+    plan = FixPlan(
+        finding_id=finding.id, root_cause="Bug", objective="Fix",
+        files_expected_to_change=["src/main.py"],
+        ordered_changes=[OrderedChangeStep(
+            step_number=1, target_file="src/main.py",
+            description="Fix the bug", rationale="Resolve the root cause",
+        )], validation_plan=["pytest"],
+        validation_report=PlanValidationReport(
+            status=PlanValidationStatus.REJECTED, is_valid=False,
+            rejection_reasons=["File outside approved repository scope"],
+        ),
+    )
+    with pytest.raises(ValueError, match="failed deterministic validation"):
+        await PatchService().generate_patch_proposal(
+            finding, plan, AsyncMock(), str(tmp_path),
+        )

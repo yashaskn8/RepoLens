@@ -61,8 +61,17 @@ class PatchService:
                 f"Only findings with verification_verdict == 'CONFIRMED' can produce a patch (current verdict: '{verdict_str}')."
             )
 
+        if fix_plan.finding_id != finding.id:
+            raise ValueError("Patch generation rejected: fix plan belongs to a different finding.")
+        if fix_plan.validation_report is not None and not fix_plan.validation_report.is_valid:
+            raise ValueError("Patch generation rejected: fix plan failed deterministic validation.")
+
         # 1. Read source files targeted by FixPlan safely
         source_files = self._read_target_files(repo_dir, fix_plan.files_expected_to_change)
+        normalized_targets = {path.replace("\\", "/") for path in fix_plan.files_expected_to_change}
+        if set(source_files) != normalized_targets:
+            # A missing or unreadable source file cannot be silently filled by AI.
+            raise ValueError("Patch generation rejected: approved source files are unavailable.")
 
         # 2. Retrieve targeted ContextBundle
         query = f"Patch remediation for {finding.title} in {', '.join(fix_plan.files_expected_to_change)}"
