@@ -817,3 +817,46 @@ async def test_phase5_e2e_full_route_level_lifecycle_gate(client: TestClient, db
 
     finally:
         app.dependency_overrides.pop(get_delivery_service, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("observed", [None, "", "not-a-sha", 123])
+async def test_delivery_preview_rejects_invalid_remote_sha_without_crash(
+    db_session, observed,
+):
+    """An invalid provider reply must fail closed before any GitHub write."""
+    from unittest.mock import AsyncMock
+    from app.delivery.validator import DeliveryValidator
+
+    scan_id, finding_id, patch_id = str(uuid4()), str(uuid4()), str(uuid4())
+    db_session.add(ScanModel(
+        id=scan_id,
+        repository_url="https://github.com/example/repo",
+        branch="main",
+        commit_hash="a" * 40,
+        status=ScanStatus.COMPLETED.value,
+    ))
+    db_session.add(FindingModel(
+        id=finding_id, scan_id=scan_id,
+        title="Missing validation", description="Unsafe input",
+        severity=Severity.HIGH.value,
+        status=FindingStatus.OPEN.value,
+    ))
+    db_session.add(PatchModel(
+        id=patch_id, scan_id=scan_id, finding_id=finding_id,
+        status=PatchStatus.APPROVED.value,
+        unified_diff="--- a/main.py\n+++ b/main.py\n@@ -1 +1 @@\n-old\n+new\n",
+        files_modified=["main.py"],
+        explanation="Fix", expected_behavior_change="Safe input",
+    ))
+    db_session.commit()
+    provider = MagicMock()
+    provider.get_branch_head = AsyncMock(return_value=observed)
+    provider.is_configured = True
+    result = await DeliveryValidator.validate(
+        db_session, patch_id, provider, check_remote_head=True,
+    )
+    assert not result.eligible
+    assert result.failure_code == "REMOTE_BRANCH_INVALID_SHA"
+    assert result.observed_base_sha is None
+    provider.get_branch_head.assert_awaited_once()

@@ -221,7 +221,22 @@ class DeliveryValidator:
                     proposed_pr_title=proposed_title,
                 )
 
-            if observed_sha != scan.commit_hash:
+            if not isinstance(observed_sha, str) or not _HEX_40_PATTERN.fullmatch(observed_sha):
+                return DeliveryValidationResult(
+                    eligible=False,
+                    blocking_reason="GitHub returned an invalid remote base commit SHA.",
+                    failure_code="REMOTE_BRANCH_INVALID_SHA",
+                    repository_url=norm_repo_url,
+                    repository_owner=owner,
+                    repository_name=repo,
+                    base_branch=base_branch,
+                    scanned_base_sha=scan.commit_hash,
+                    patch_status=PatchStatus.APPROVED,
+                    machine_verdict=patch.machine_verdict,
+                    human_approved=True,
+                )
+
+            if observed_sha.lower() != scan.commit_hash.lower():
                 return DeliveryValidationResult(
                     eligible=False,
                     blocking_reason=f"Remote base branch '{base_branch}' has drifted from scanned commit {scan.commit_hash[:8]} to {observed_sha[:8]}. A new scan is required before delivery.",
