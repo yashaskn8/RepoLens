@@ -70,36 +70,68 @@ def validate_patch_proposal(
         rejection_reasons.append("Malformed diff: contains headers but no actual line additions (+) or deletions (-).")
 
     # =========================================================================
-    # Rule 2 & 3: Fabricated File Paths & FixPlan Scope Confinement
+    # Rule 2 & 3: Repository evidence and exact FixPlan authority
     # =========================================================================
     parsed_files = parse_diff_files(diff_text)
     known_repo_files: Set[str] = set()
+    if repo_files is not None:
+        known_repo_files.update(f.replace("\\", "/") for f in repo_files)
+    if manifest is not None:
+        known_repo_files.update(f.path.replace("\\", "/") for f in manifest.files)
 
-    if repo_files:
-        known_repo_files.update(f.replace("\\", "/").lstrip("/") for f in repo_files)
-    if manifest:
-        known_repo_files.update(f.path.replace("\\", "/").lstrip("/") for f in manifest.files)
+    if fix_plan is not None:
+        if proposal.finding_id != fix_plan.finding_id:
+            rejection_reasons.append("Patch proposal targets a different finding than its FixPlan.")
+        if proposal.plan_id != fix_plan.id:
+            rejection_reasons.append("Patch proposal references a different FixPlan.")
+        if fix_plan.validation_report is not None and not fix_plan.validation_report.is_valid:
+            rejection_reasons.append("Patch proposal references a rejected FixPlan.")
 
-    allowed_plan_files: Set[str] = set()
-    if fix_plan:
-        allowed_plan_files = set(f.replace("\\", "/").lstrip("/") for f in fix_plan.files_expected_to_change)
-        for step in fix_plan.ordered_changes:
-            allowed_plan_files.add(step.target_file.replace("\\", "/").lstrip("/"))
+    # Target files are approved exclusively by the declared plan scope. Step
+    # targets cannot silently enlarge it.
+    allowed_plan_files: Set[str] = (
+        {f.replace("\\", "/") for f in fix_plan.files_expected_to_change}
+        if fix_plan is not None else set()
+    )
 
-    if known_repo_files:
-        for f in parsed_files:
-            if f not in known_repo_files and f not in allowed_plan_files:
-                rejection_reasons.append(
-                    f"Patch modifies fabricated file not present in repository: '{f}'"
-                )
+    # Both old and new diff headers are attack-controlled. A legitimate new
+    # target cannot conceal an unrelated or absolute source-file edit.
+    header_files: Set[str] = set()
+    for line in diff_text.splitlines():
+        if not (line.startswith("--- ") or line.startswith("+++ ")):
+            continue
+        raw_path = line[4:].split("\t", 1)[0].strip()
+        if raw_path == "/dev/null":
+            continue
+        if raw_path.startswith(("a/", "b/")):
+            raw_path = raw_path[2:]
+        normalized = raw_path.replace("\\", "/")
+        if (
+            not normalized
+            or normalized.startswith("/")
+            or re.match(r"^[A-Za-z]:", normalized)
+            or any(part in {"", ".", ".."} for part in normalized.split("/"))
+            or any(ord(char) < 32 or ord(char) == 127 for char in normalized)
+        ):
+            rejection_reasons.append("Patch diff header contains an unsafe file path.")
+            continue
+        header_files.add(normalized)
 
-    if fix_plan:
-        for f in parsed_files:
-            if f not in allowed_plan_files:
-                rejection_reasons.append(
-                    f"Patch modifies unauthorized file '{f}' outside approved FixPlan. "
-                    f"Approved files: {sorted(list(allowed_plan_files))}"
-                )
+    if set(proposal.files_modified) != set(parsed_files):
+        rejection_reasons.append("Patch files_modified do not match the actual diff targets.")
+
+    if not parsed_files:
+        rejection_reasons.append("Patch diff does not identify a modified repository file.")
+
+    for path in sorted(header_files | set(parsed_files)):
+        if fix_plan is not None and path not in allowed_plan_files:
+            rejection_reasons.append(
+                f"Patch modifies unauthorized file '{path}' outside approved FixPlan."
+            )
+        if (repo_files is not None or manifest is not None) and path not in known_repo_files:
+            rejection_reasons.append(
+                f"Patch modifies fabricated file not present in repository: '{path}'"
+            )
 
 
     is_valid = len(rejection_reasons) == 0

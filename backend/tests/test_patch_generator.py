@@ -443,3 +443,83 @@ async def test_patch_service_rejects_existing_invalid_plan(tmp_path):
         await PatchService().generate_patch_proposal(
             finding, plan, AsyncMock(), str(tmp_path),
         )
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["wrong_finding", "wrong_plan", "wrong_files_modified", "unapproved_original", "missing_source"],
+)
+def test_patch_validator_rejects_identity_and_source_scope_bypasses(case):
+    """Diff headers and model-supplied identities cannot grant patch authority."""
+    plan = FixPlan(
+        finding_id=uuid4(), root_cause="Unsafe input", objective="Validate",
+        files_expected_to_change=["src/main.py"],
+        ordered_changes=[OrderedChangeStep(
+            step_number=1, target_file="src/main.py",
+            description="Validate input", rationale="Prevents injection",
+        )],
+        validation_plan=["pytest"],
+    )
+    original = "src/main.py"
+    modified = ["src/main.py"]
+    finding_id = plan.finding_id
+    plan_id = plan.id
+    known = {"src/main.py"}
+    if case == "wrong_finding":
+        finding_id = uuid4()
+    elif case == "wrong_plan":
+        plan_id = uuid4()
+    elif case == "wrong_files_modified":
+        modified = ["src/other.py"]
+    elif case == "unapproved_original":
+        original = "../../host-secret.txt"
+    elif case == "missing_source":
+        known = {"src/other.py"}
+
+    proposal = PatchProposal(
+        finding_id=finding_id,
+        plan_id=plan_id,
+        unified_diff=(
+            f"--- a/{original}\n"
+            "+++ b/src/main.py\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            "+new\n"
+        ),
+        files_modified=modified,
+        explanation="Fix unsafe input",
+        expected_behavior_change="Input is validated",
+    )
+    report = validate_patch_proposal(proposal, fix_plan=plan, repo_files=known)
+    assert report.status == PatchValidationStatus.REJECTED
+    assert not report.is_valid
+
+
+def test_patch_validator_rejects_undeclared_step_file_even_if_file_is_real():
+    """An OrderedChangeStep cannot secretly expand approved plan scope."""
+    plan = FixPlan(
+        finding_id=uuid4(), root_cause="Bug", objective="Fix",
+        files_expected_to_change=["src/main.py"],
+        ordered_changes=[OrderedChangeStep(
+            step_number=1, target_file="src/unapproved.py",
+            description="Change helper", rationale="Fix",
+        )], validation_plan=["pytest"],
+    )
+    proposal = PatchProposal(
+        finding_id=plan.finding_id, plan_id=plan.id,
+        unified_diff=(
+            "--- a/src/unapproved.py\n"
+            "+++ b/src/unapproved.py\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            "+new\n"
+        ),
+        files_modified=["src/unapproved.py"],
+        explanation="Fix", expected_behavior_change="Fixes bug",
+    )
+    report = validate_patch_proposal(
+        proposal, fix_plan=plan,
+        repo_files={"src/main.py", "src/unapproved.py"},
+    )
+    assert not report.is_valid
+    assert any("outside approved FixPlan" in reason for reason in report.rejection_reasons)
