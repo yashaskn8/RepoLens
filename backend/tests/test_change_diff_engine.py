@@ -437,3 +437,39 @@ def test_singleton_accessor():
     assert e1 is e2
     assert isinstance(e1, ChangeDiffEngine)
 
+
+
+@pytest.mark.parametrize("directory_link", [False, True])
+def test_structural_diff_rejects_source_symlinks(tmp_path, directory_link):
+    """Untrusted source links cannot be silently followed or excluded."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    external = outside / "secret.py"
+    external.write_text("private = True", encoding="utf-8")
+    destination = outside if directory_link else external
+    link = workspace / ("linked_source" if directory_link else "linked.py")
+    try:
+        link.symlink_to(destination, target_is_directory=directory_link)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlink creation unavailable")
+    with pytest.raises(ValueError, match="linked directory|non-regular file"):
+        ChangeDiffEngine()._discover_files(str(workspace))
+
+
+def test_structural_diff_rejects_missing_workspace_root(tmp_path):
+    with pytest.raises(ValueError, match="root is unavailable or unsafe"):
+        ChangeDiffEngine()._discover_files(str(tmp_path / "missing"))
+
+
+def test_structural_diff_rejects_symlinked_workspace_root(tmp_path):
+    source = tmp_path / "actual"
+    source.mkdir()
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(source, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlink creation unavailable")
+    with pytest.raises(ValueError, match="root is unavailable or unsafe"):
+        ChangeDiffEngine()._discover_files(str(alias))

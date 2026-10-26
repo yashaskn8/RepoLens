@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.core.config import Settings, get_settings
@@ -211,12 +212,40 @@ class ChangeDiffEngine:
         self.settings = settings or get_settings()
 
     def _discover_files(self, workspace_path: str) -> Dict[str, str]:
-        """Walk workspace and return map of normalized_rel_path -> absolute_path."""
+        """Enumerate only regular files, rejecting incomplete or linked source trees."""
+        is_junction = getattr(os.path, "isjunction", None)
+        if (
+            not workspace_path
+            or os.path.islink(workspace_path)
+            or (is_junction is not None and is_junction(workspace_path))
+            or not os.path.isdir(workspace_path)
+        ):
+            raise ValueError("Structural diff workspace root is unavailable or unsafe.")
+
+        def on_walk_error(_exc: OSError) -> None:
+            raise ValueError("Structural diff workspace could not be completely inspected.")
+
         files_map: Dict[str, str] = {}
-        for root, dirs, files in os.walk(workspace_path, followlinks=False):
-            dirs[:] = [d for d in dirs if d not in DEFAULT_IGNORE_DIRS]
-            for f in files:
-                abs_path = os.path.join(root, f)
+        for root, dirs, files in os.walk(
+            workspace_path, followlinks=False, onerror=on_walk_error
+        ):
+            safe_dirs: List[str] = []
+            for dirname in dirs:
+                if dirname in DEFAULT_IGNORE_DIRS:
+                    continue
+                candidate = os.path.join(root, dirname)
+                if os.path.islink(candidate) or (
+                    is_junction is not None and is_junction(candidate)
+                ):
+                    raise ValueError("Structural diff workspace contains a linked directory.")
+                safe_dirs.append(dirname)
+            dirs[:] = safe_dirs
+            for name in files:
+                abs_path = os.path.join(root, name)
+                if os.path.islink(abs_path) or (
+                    is_junction is not None and is_junction(abs_path)
+                ) or not stat.S_ISREG(os.stat(abs_path, follow_symlinks=False).st_mode):
+                    raise ValueError("Structural diff workspace contains a non-regular file.")
                 rel_path = os.path.relpath(abs_path, workspace_path).replace("\\", "/")
                 files_map[rel_path] = abs_path
         return files_map
