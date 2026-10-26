@@ -85,3 +85,18 @@ def test_reject_path_traversal():
     for url in traversal_urls:
         with pytest.raises(InvalidRepositoryURLError):
             validate_github_url(url)
+
+
+def test_www_github_url_normalizes_to_canonical_git_origin():
+    """The hostname allowlist permits www.github.com; parser must agree."""
+    assert validate_github_url("https://www.github.com/fastapi/fastapi") == (
+        "https://github.com/fastapi/fastapi.git"
+    )
+    assert validate_github_url("https://www.github.com/fastapi/fastapi.git/") == (
+        "https://github.com/fastapi/fastapi.git"
+    )
+
+
+def test_www_domain_lookalike_cannot_bypass_canonical_host():
+    with pytest.raises(InvalidRepositoryURLError):
+        validate_github_url("https://www.github.com.evil.example/fastapi/fastapi")

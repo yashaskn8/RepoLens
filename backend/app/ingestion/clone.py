@@ -44,7 +44,7 @@ class RepositoryResourceLimitError(IngestionError):
 
 # Strict regex for public GitHub repository: https://github.com/owner/repo(.git)?
 GITHUB_URL_PATTERN = re.compile(
-    r"^https://github\.com/([a-zA-Z0-9_.-]+)/([a-zA-Z0-9_.-]+?)(?:\.git)?/?$"
+    r"^https://(?:www\.)?github\.com/([a-zA-Z0-9_.-]+)/([a-zA-Z0-9_.-]+?)(?:\.git)?/?$"
 )
 
 _GIT_TRANSPORT_ENV = frozenset({
