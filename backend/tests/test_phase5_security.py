@@ -516,6 +516,9 @@ async def test_github_provider_redacts_error_responses():
     mock_resp = MagicMock(spec=httpx.Response)
     mock_resp.status_code = 403
     mock_resp.is_error = True
+    # httpx.Response always exposes headers. A spec'd MagicMock does not,
+    # so provide an empty mapping to exercise forbidden-response redaction.
+    mock_resp.headers = {}
     mock_resp.content = b'{"message": "Invalid token ' + secret_token.encode() + b'"}'
     mock_resp.text = f'{{"message": "Invalid token {secret_token}"}}'
     mock_resp.json.return_value = {"message": f"Invalid token {secret_token}"}
