@@ -16,7 +16,6 @@ import httpx
 
 from app.core.config import Settings, get_settings
 from app.delivery.schemas import GitHubAPIError
-from app.security.redaction import redact_secrets
 
 logger = logging.getLogger(__name__)
 

@@ -7,6 +7,7 @@ import httpx
 
 from app.core.config import Settings, get_settings
 from app.delivery.github_client import GITHUB_API_BASE_URL, GitHubHttpTransport
+from app.ingestion.clone import IngestionError, validate_git_branch_name
 from app.delivery.provider import RepositoryDeliveryProvider
 from app.delivery.schemas import (
     GitCommitInfo,
@@ -84,9 +85,21 @@ class GitHubDeliveryProvider(RepositoryDeliveryProvider):
             is_write=is_write,
         )
 
+    @staticmethod
+    def _checked_branch_ref(branch: str) -> str:
+        """Validate refs before creating an outbound credentialed GitHub request."""
+        try:
+            if not isinstance(branch, str):
+                raise IngestionError("Invalid Git branch name.")
+            # Remove only one conventional prefix, never every occurrence
+            # within a legitimate nested branch name.
+            return validate_git_branch_name(branch.removeprefix("refs/heads/"))
+        except IngestionError:
+            raise GitHubAPIError("Invalid GitHub branch ref.", status_code=400) from None
+
     async def get_branch_head(self, owner: str, repo: str, branch: str) -> str:
         """Resolve current commit SHA at the head of a remote branch."""
-        clean_branch = branch.replace("refs/heads/", "")
+        clean_branch = self._checked_branch_ref(branch)
         try:
             data = await self._request("GET", f"/repos/{owner}/{repo}/git/ref/heads/{clean_branch}")
             obj = data.get("object", {})
@@ -185,7 +198,7 @@ class GitHubDeliveryProvider(RepositoryDeliveryProvider):
 
     async def create_branch(self, owner: str, repo: str, branch_name: str, sha: str) -> str:
         """Create a new reference refs/heads/{branch_name} pointing to sha and return the ref name."""
-        clean_branch = branch_name.replace("refs/heads/", "")
+        clean_branch = self._checked_branch_ref(branch_name)
         payload = {
             "ref": f"refs/heads/{clean_branch}",
             "sha": sha,
@@ -255,8 +268,8 @@ class GitHubDeliveryProvider(RepositoryDeliveryProvider):
         base: str,
     ) -> Optional[GitPullRequestInfo]:
         """Search for an existing open pull request matching the head and base branches."""
-        clean_head = head.replace("refs/heads/", "")
-        clean_base = base.replace("refs/heads/", "")
+        clean_head = self._checked_branch_ref(head)
+        clean_base = self._checked_branch_ref(base)
         # GitHub search parameter for head is owner:branch or just branch
         params = {
             "head": f"{owner}:{clean_head}",
@@ -282,8 +295,8 @@ class GitHubDeliveryProvider(RepositoryDeliveryProvider):
         base: str,
     ) -> GitPullRequestInfo:
         """Create a new pull request and return canonical pull request info."""
-        clean_head = head.replace("refs/heads/", "")
-        clean_base = base.replace("refs/heads/", "")
+        clean_head = self._checked_branch_ref(head)
+        clean_base = self._checked_branch_ref(base)
         payload = {
             "title": redact_secrets(title)[:256],
             "body": redact_secrets(body),
