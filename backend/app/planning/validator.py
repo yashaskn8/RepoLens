@@ -51,20 +51,72 @@ def validate_fix_plan(
         )
 
     # =========================================================================
-    # Rule 2: No Invented Files (All Targeted Files Must Actually Exist)
+    # Rule 2: Bind this plan to its selected finding and exact approved file set
     # =========================================================================
-    repo_files: Set[str] = set()
-    if manifest:
-        repo_files.update(f.path.replace("\\", "/").lstrip("/") for f in manifest.files)
-    if context_bundle:
-        repo_files.update(c.chunk.file_path.replace("\\", "/").lstrip("/") for c in context_bundle.relevant_chunks)
+    if plan.finding_id != finding.id:
+        rejection_reasons.append("Fix plan finding_id does not match the selected finding.")
 
-    all_targeted_files = set(f.replace("\\", "/").lstrip("/") for f in plan.files_expected_to_change)
+    step_numbers = [step.step_number for step in plan.ordered_changes]
+    if step_numbers != list(range(1, len(step_numbers) + 1)):
+        rejection_reasons.append("Fix plan steps must be numbered consecutively from 1.")
+
+    def safe_repo_path(raw: str) -> Optional[str]:
+        # Never convert absolute/traversal paths into apparently valid repo paths.
+        path = raw.replace("\\", "/")
+        components = path.split("/")
+        if (
+            not path
+            or path.startswith("/")
+            or re.match(r"^[A-Za-z]:", path)
+            or any(part in {"", ".", ".."} for part in components)
+            or any(ord(char) < 32 or ord(char) == 127 for char in path)
+        ):
+            return None
+        return path
+
+    declared_files: Set[str] = set()
+    all_targeted_files: Set[str] = set()
+    for target in plan.files_expected_to_change:
+        path = safe_repo_path(target)
+        if path is None:
+            rejection_reasons.append("Fix plan contains an unsafe target file path.")
+        else:
+            declared_files.add(path)
+            all_targeted_files.add(path)
+
     for step in plan.ordered_changes:
-        all_targeted_files.add(step.target_file.replace("\\", "/").lstrip("/") )
+        path = safe_repo_path(step.target_file)
+        if path is None:
+            rejection_reasons.append("Fix plan step contains an unsafe target file path.")
+        elif path not in declared_files:
+            rejection_reasons.append(
+                f"Fix plan step modifies undeclared file '{path}'."
+            )
+        else:
+            all_targeted_files.add(path)
 
-    if repo_files:
-        for target_f in all_targeted_files:
+    # Repository manifest is authoritative when supplied; retrieved context
+    # must not augment its membership with stale/invented filenames.
+    repo_files: Set[str] = set()
+    if manifest is not None:
+        repo_files.update(
+            normalized
+            for entry in manifest.files
+            if (normalized := safe_repo_path(entry.path)) is not None
+        )
+    elif context_bundle is not None:
+        repo_files.update(
+            normalized
+            for entry in context_bundle.relevant_chunks
+            if (normalized := safe_repo_path(entry.chunk.file_path)) is not None
+        )
+
+    if not repo_files:
+        rejection_reasons.append(
+            "Fix plan cannot verify targeted files without repository source evidence."
+        )
+    else:
+        for target_f in sorted(all_targeted_files):
             if target_f not in repo_files:
                 rejection_reasons.append(
                     f"Plan references invented file not present in repository: '{target_f}'"

@@ -390,3 +390,109 @@ async def test_fix_planning_service_orchestration():
 
         assert plan.finding_id == finding.id
         assert plan.validation_report.is_valid
+
+
+@pytest.mark.parametrize(
+    "invalid_kind",
+    [
+        "wrong_finding",
+        "undeclared_file",
+        "out_of_order",
+        "traversal",
+        "absolute_path",
+        "windows_drive",
+        "invented_file_without_manifest",
+    ],
+)
+def test_fix_plan_rejects_unbound_or_unsafe_changes(invalid_kind):
+    """A confirmed finding never authorizes unrelated, invented, or unsafe edits."""
+    finding = Finding(
+        id=uuid4(),
+        scan_id=uuid4(),
+        title="Input validation defect",
+        description="Untrusted input",
+        severity=Severity.HIGH,
+        verification_verdict=VerificationVerdict.CONFIRMED,
+        evidences=[Evidence(file_path="src/main.py", start_line=1)],
+    )
+    declared = "src/main.py"
+    step_path = declared
+    finding_id = finding.id
+    step_number = 1
+    manifest = RepositoryManifest(
+        repository_url="https://github.com/org/repo",
+        commit_hash="1" * 40,
+        files=[FileEntry(path="src/main.py", size_bytes=20)],
+    )
+    if invalid_kind == "wrong_finding":
+        finding_id = uuid4()
+    elif invalid_kind == "undeclared_file":
+        step_path = "src/unrelated.py"
+    elif invalid_kind == "out_of_order":
+        step_number = 2
+    elif invalid_kind == "traversal":
+        declared = step_path = "../private.py"
+    elif invalid_kind == "absolute_path":
+        declared = step_path = "/tmp/private.py"
+    elif invalid_kind == "windows_drive":
+        declared = step_path = "C:\\private.py"
+    elif invalid_kind == "invented_file_without_manifest":
+        declared = step_path = "src/nonexistent.py"
+        manifest = None
+
+    plan = FixPlan(
+        finding_id=finding_id,
+        root_cause="Missing validation",
+        objective="Validate input",
+        files_expected_to_change=[declared],
+        ordered_changes=[
+            OrderedChangeStep(
+                step_number=step_number,
+                target_file=step_path,
+                description="Validate the untrusted input",
+                rationale="Prevents invalid input use",
+            ),
+        ],
+        validation_plan=["Run existing unit tests"],
+    )
+    result = validate_fix_plan(plan=plan, finding=finding, manifest=manifest)
+    assert result.status == PlanValidationStatus.REJECTED
+    assert not result.is_valid
+
+
+def test_fix_plan_requires_manifest_membership_even_when_context_lists_other_file():
+    """Context retrieval cannot override the authoritative repository manifest."""
+    from unittest.mock import SimpleNamespace
+    finding = Finding(
+        id=uuid4(),
+        scan_id=uuid4(),
+        title="Input validation defect",
+        description="Untrusted input",
+        severity=Severity.HIGH,
+        verification_verdict=VerificationVerdict.CONFIRMED,
+        evidences=[Evidence(file_path="src/main.py", start_line=1)],
+    )
+    plan = FixPlan(
+        finding_id=finding.id,
+        root_cause="Missing validation",
+        objective="Validate input",
+        files_expected_to_change=["src/fabricated.py"],
+        ordered_changes=[OrderedChangeStep(
+            step_number=1,
+            target_file="src/fabricated.py",
+            description="Validate input",
+            rationale="Prevents invalid input",
+        )],
+        validation_plan=["Run tests"],
+    )
+    manifest = RepositoryManifest(
+        repository_url="https://github.com/org/repo",
+        commit_hash="1" * 40,
+        files=[FileEntry(path="src/main.py", size_bytes=20)],
+    )
+    context = SimpleNamespace(relevant_chunks=[
+        SimpleNamespace(chunk=SimpleNamespace(file_path="src/fabricated.py"))
+    ])
+    report = validate_fix_plan(plan, finding, manifest=manifest, context_bundle=context)
+    assert report.status == PlanValidationStatus.REJECTED
+    assert any("invented file" in reason for reason in report.rejection_reasons)
