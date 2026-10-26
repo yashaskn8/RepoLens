@@ -84,3 +84,31 @@ async def test_pr_creation_rejects_remote_identity_mismatch_without_claiming_suc
         await provider.create_pull_request(
             "org", "repo", "Fix", "Details", "repolens/fix-1", "main",
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remote_state", [None, "", "draft", "merged", 200, True])
+async def test_invalid_pr_state_never_satisfies_delivery_reconciliation(remote_state):
+    provider = GitHubDeliveryProvider(token="test-token", delivery_enabled=True)
+    pr = _pr()
+    if remote_state is None:
+        pr.pop("state")
+    else:
+        pr["state"] = remote_state
+    provider._request = AsyncMock(return_value=[pr])
+    with pytest.raises(GitHubAPIError, match="Invalid GitHub pull request state"):
+        await provider.find_existing_pull_request(
+            "org", "repo", "repolens/fix-1", "main",
+        )
+
+
+@pytest.mark.asyncio
+async def test_new_pr_must_be_open_before_delivery_claims_success():
+    provider = GitHubDeliveryProvider(token="test-token", delivery_enabled=True)
+    pr = _pr()
+    pr["state"] = "closed"
+    provider._request = AsyncMock(return_value=pr)
+    with pytest.raises(GitHubAPIError, match="did not return an open state"):
+        await provider.create_pull_request(
+            "org", "repo", "Fix", "Details", "repolens/fix-1", "main",
+        )
