@@ -79,3 +79,20 @@ async def test_github_success_status_with_malformed_json_fails_closed():
             await transport.request("GET", "/repos/org/repo")
     assert failure.value.status_code == 502
     assert marker not in str(failure.value)
+
+
+@pytest.mark.asyncio
+async def test_github_rate_limit_classification_never_echoes_provider_message():
+    marker = "private-rate-limit-canary"
+
+    async def handler(request):
+        return httpx.Response(403, json={"message": f"API rate limit exceeded {marker}"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        transport = GitHubHttpTransport(token="test-token", client=client)
+        with pytest.raises(GitHubAPIError) as failure:
+            await transport.request("POST", "/repos/org/repo/git/refs", is_write=True)
+    assert failure.value.status_code == 403
+    assert failure.value.message == "GitHub API rate limit exceeded."
+    assert marker not in str(failure.value)
+    assert failure.value.response_data == {}

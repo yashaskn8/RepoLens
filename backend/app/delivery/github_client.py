@@ -137,8 +137,30 @@ class GitHubHttpTransport:
                     # text in arbitrary nested JSON fields. HTTP status is
                     # sufficient for error routing; never retain raw payloads
                     # or messages on an exception that reaches logs or clients.
+                    # 403 rate-limit replies must remain distinguishable from
+                    # authorization errors, but echoing the raw response is
+                    # never needed to classify them.
+                    rate_limited = response.status_code == 429
+                    if response.status_code == 403:
+                        remaining = response.headers.get("x-ratelimit-remaining")
+                        rate_limited = remaining == "0"
+                        if not rate_limited:
+                            try:
+                                data = response.json()
+                                provider_message = data.get("message", "") if isinstance(data, dict) else ""
+                                rate_limited = (
+                                    isinstance(provider_message, str)
+                                    and "rate limit" in provider_message.lower()
+                                )
+                            except (ValueError, TypeError):
+                                rate_limited = False
+                    message = (
+                        "GitHub API rate limit exceeded."
+                        if rate_limited
+                        else f"GitHub API returned HTTP {response.status_code}."
+                    )
                     raise GitHubAPIError(
-                        message=f"GitHub API returned HTTP {response.status_code}.",
+                        message=message,
                         status_code=response.status_code,
                         response_data={},
                     )

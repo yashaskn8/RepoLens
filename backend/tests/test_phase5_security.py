@@ -527,7 +527,10 @@ async def test_github_provider_redacts_error_responses():
         await provider.get_branch_head("owner", "repo", "main")
 
     assert secret_token not in exc_info.value.message
-    assert "[REDACTED_GITHUB_TOKEN]" in exc_info.value.message
+    # Generic HTTP status reporting is stronger: it never includes raw
+    # provider content, even when the content is not recognized as a token.
+    assert exc_info.value.message == "GitHub API returned HTTP 403."
+    assert exc_info.value.response_data == {}
 
 
 # 12. Write operations do not blindly retry on failure
