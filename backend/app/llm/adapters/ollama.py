@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import time
 from typing import Any
 from urllib.parse import urlparse
@@ -21,8 +22,18 @@ from app.llm.types import LLMProvider, LLMRequest, LLMResponse
 
 def _loopback_base_url(value: str) -> str:
     """Validate that local inference cannot be repurposed as an SSRF transport."""
-    parsed = urlparse(value)
-    hostname = parsed.hostname
+    if not isinstance(value, str) or value != value.strip() or any(
+        ord(char) < 32 or ord(char) == 127 for char in value
+    ):
+        raise ValueError("OLLAMA_BASE_URL must be an uncredentialed loopback HTTP(S) origin")
+    try:
+        parsed = urlparse(value)
+        hostname = parsed.hostname
+        port = parsed.port  # Reject malformed/overflowed explicit port numbers.
+    except ValueError:
+        raise ValueError("OLLAMA_BASE_URL must be an uncredentialed loopback HTTP(S) origin") from None
+    if port is not None and port == 0:
+        raise ValueError("OLLAMA_BASE_URL must have a usable loopback port")
     loopback = hostname == "localhost"
     if hostname and not loopback:
         try:
@@ -125,6 +136,12 @@ class OllamaAdapter(BaseLLMAdapter):
             content = data.get("message", {}).get("content")
             if not isinstance(content, str) or not content.strip():
                 raise ValueError("missing message content")
+            if request.json_mode:
+                # A 200 status does not prove the local model met its JSON
+                # contract; invalid structured output must trigger fallback.
+                parsed_content = json.loads(content)
+                if not isinstance(parsed_content, (dict, list)):
+                    raise ValueError("local model returned a non-structured JSON value")
             prompt_tokens = self._nonnegative_int(data.get("prompt_eval_count"))
             completion_tokens = self._nonnegative_int(data.get("eval_count"))
         except Exception as exc:

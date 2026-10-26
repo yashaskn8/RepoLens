@@ -241,3 +241,34 @@ async def test_ollama_malformed_response_enters_cooldown() -> None:
 
     assert post.await_count == 1
 
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_content", ["not json", "{oops}", '"just a string"', "false"])
+async def test_ollama_json_mode_rejects_invalid_or_scalar_response(bad_content) -> None:
+    adapter = OllamaAdapter(enabled=True, model="local-test", failure_cooldown_seconds=30)
+    response = MagicMock(status_code=200)
+    response.json.return_value = {
+        "model": "local-test",
+        "message": {"role": "assistant", "content": bad_content},
+        "done": True,
+    }
+    request = LLMRequest(
+        messages=[LLMMessage(role="user", content="Return JSON facts")],
+        json_mode=True,
+    )
+    with patch("httpx.AsyncClient.post", new=AsyncMock(return_value=response)):
+        with pytest.raises(LLMError, match="invalid chat response"):
+            await adapter.generate(request)
+    assert adapter.cooldown_remaining_seconds > 0
+
+
+@pytest.mark.parametrize("bad_url", [
+    "http://localhost:0",
+    "http://localhost:65536",
+    "http://localhost:invalid",
+    "http://localhost/\n",
+])
+def test_ollama_rejects_invalid_loopback_ports_and_controls(bad_url) -> None:
+    with pytest.raises(ValueError, match="OLLAMA_BASE_URL"):
+        OllamaAdapter(enabled=True, base_url=bad_url)
