@@ -100,6 +100,14 @@ def build_manifest(
     max_files = settings.MAX_REPO_FILES
     max_file_size = settings.MAX_FILE_SIZE_BYTES
     max_total_source_bytes = getattr(settings, "MAX_TOTAL_SOURCE_BYTES", 52_428_800)
+    # os.walk returns no rows for a missing root and follows symlink roots
+    # despite followlinks=False. Neither case may appear as a complete scan.
+    if (
+        not repo_dir
+        or _is_link_or_reparse_point(repo_dir)
+        or not os.path.isdir(repo_dir)
+    ):
+        raise ValueError("Repository workspace root is missing or unsafe.")
     resolved_repo_root = os.path.realpath(os.path.abspath(repo_dir))
 
     # 1. Walk directory tree safely. By default, os.walk silently omits

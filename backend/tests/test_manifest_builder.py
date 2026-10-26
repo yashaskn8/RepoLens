@@ -280,3 +280,23 @@ def test_manifest_walker_error_is_reported_as_incomplete(tmp_path, monkeypatch):
     assert manifest.analysis_scope.truncated
     assert manifest.analysis_scope.reason == "source_directory_unreadable"
     assert "internal-directory-canary" not in manifest.model_dump_json()
+
+
+def test_manifest_rejects_missing_repository_root(tmp_path):
+    """A nonexistent workspace cannot masquerade as a clean empty repository."""
+    with pytest.raises(ValueError, match="root is missing or unsafe"):
+        build_manifest(str(tmp_path / "not-present"), "https://github.com/org/repo", "a" * 40)
+
+
+def test_manifest_rejects_symlinked_repository_root(tmp_path):
+    """Root links are followed by os.walk even with followlinks disabled."""
+    source = tmp_path / "real-root"
+    source.mkdir()
+    (source / "private.py").write_text("x = 1", encoding="utf-8")
+    alias = tmp_path / "alias-root"
+    try:
+        alias.symlink_to(source, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlink creation unavailable")
+    with pytest.raises(ValueError, match="root is missing or unsafe"):
+        build_manifest(str(alias), "https://github.com/org/repo", "a" * 40)
