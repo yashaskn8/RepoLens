@@ -56,8 +56,9 @@ async function load({ status = 'COMPLETED', failures = [], retryToken = 0 } = {}
 test('failed required artifacts remain unknown and can be retried', async () => {
   const { state } = await load({ failures: ['diff', 'review', 'publication'] });
   assert.deepEqual(state.missing, ['structural diff', 'review evidence']);
-  assert.equal(state.diff, undefined);
-  assert.equal(state.review, undefined);
+  // Initial load clears stale evidence to null, which remains unverified (not empty).
+  assert.equal(state.diff, null);
+  assert.equal(state.review, null);
   assert.deepEqual(state.impacts, []);
   assert.equal(state.loading, false);
   assert.match(source, /Missing evidence does not mean zero findings/);
