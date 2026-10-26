@@ -10,6 +10,7 @@ import { Input } from '@/components/ui/Input';
 import { Badge } from '@/components/ui/Badge';
 import { startScan, fetchScan, listScans } from '@/lib/api';
 import { useWorkflowStream } from '@/lib/useWorkflowStream';
+import { reconcilePolledScan } from '@/lib/scanPolling';
 import { Scan } from '@/types/domain';
 import { useAuth } from '@/context/AuthContext';
 import {
@@ -133,30 +134,45 @@ function ScanWorkspaceContent() {
     return () => { cancelled = true; };
   }, [isAuthenticated, isAuthLoading]);
 
-  // Poll scan completion if running
+  // Sequential, cancel-safe polling avoids stale responses regressing terminal
+  // status or replacing the scan selected after this request started.
   useEffect(() => {
-    if (!activeScan?.id) return;
-    if (activeScan.status === 'COMPLETED' || activeScan.status === 'FAILED') return;
+    const scanId = activeScan?.id;
+    if (!scanId || activeScan?.status === 'COMPLETED' || activeScan?.status === 'FAILED') return;
 
-    const interval = setInterval(async () => {
+    let cancelled = false;
+    let failures = 0;
+    let nextPoll: ReturnType<typeof setTimeout> | null = null;
+    const poll = async () => {
       try {
-        const updated = await fetchScan(activeScan.id);
-        setActiveScan(updated);
-
-        setRecentScans((current) => [
-          updated,
-          ...current.filter((scan) => scan.id !== updated.id),
-        ].slice(0, 10));
-
-        if (updated.status === 'COMPLETED' || updated.status === 'FAILED') {
-          clearInterval(interval);
-        }
+        const updated = await fetchScan(scanId);
+        if (cancelled) return;
+        failures = 0;
+        setActiveScan((current) => reconcilePolledScan(current, updated, scanId));
+        setRecentScans((current) => {
+          const previous = current.find((scan) => scan.id === scanId) || null;
+          const resolved = reconcilePolledScan(previous, updated, scanId) || updated;
+          return [resolved, ...current.filter((scan) => scan.id !== scanId)].slice(0, 10);
+        });
+        if (updated.status === 'COMPLETED' || updated.status === 'FAILED') return;
       } catch {
-        // ignore polling error
+        if (cancelled) return;
+        failures += 1;
+        if (failures >= 10) {
+          setError('Unable to refresh scan progress. Please refresh the page to check the latest result.');
+          return;
+        }
       }
-    }, 2000);
+      if (!cancelled) {
+        nextPoll = setTimeout(poll, Math.min(2000 * 2 ** Math.max(0, failures - 1), 30000));
+      }
+    };
+    nextPoll = setTimeout(poll, 2000);
 
-    return () => clearInterval(interval);
+    return () => {
+      cancelled = true;
+      if (nextPoll !== null) clearTimeout(nextPoll);
+    };
   }, [activeScan?.id, activeScan?.status]);
 
   const handleStartScan = async (e: React.FormEvent) => {
