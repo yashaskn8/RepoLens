@@ -1,7 +1,9 @@
 'use client';
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { useAuth } from '@/context/AuthContext';
+import { isCurrentAccountResponse } from '@/lib/accountRequest';
 import { AppShell } from '@/components/layout/AppShell';
 import { Alert } from '@/components/ui/Alert';
 import { Button } from '@/components/ui/Button';
@@ -19,6 +21,10 @@ const SCAN_PAGE_SIZE = 25;
 
 export default function FindingsPage() {
   const router = useRouter();
+  const { user, isLoading: authLoading } = useAuth();
+  const accountId = user?.id ?? null;
+  const requestGeneration = useRef(0);
+  const [loadedForAccount, setLoadedForAccount] = useState<string | null>(null);
   const [findings, setFindings] = useState<Finding[]>([]);
   const [search, setSearch] = useState('');
   const [severity, setSeverity] = useState<'ALL' | Severity>('ALL');
@@ -30,37 +36,67 @@ export default function FindingsPage() {
   const [error, setError] = useState<string | null>(null);
 
   const loadFindings = useCallback(async () => {
+    const generation = ++requestGeneration.current;
     setLoading(true);
+    setLoadingMore(false);
     setError(null);
+    setLoadedForAccount(null);
+    if (!accountId || authLoading) {
+      setFindings([]);
+      setLoadedScanCount(0);
+      setHasOlderScans(false);
+      setLoading(false);
+      return;
+    }
     try {
       const page = await loadScanFindingsPage(0, SCAN_PAGE_SIZE, listScans, fetchScanFindings);
+      if (!isCurrentAccountResponse(accountId, user?.id ?? null, generation, requestGeneration.current)) return;
       setFindings(page.findings);
       setLoadedScanCount(page.scanCount);
       setHasOlderScans(page.hasOlderScans);
+      setLoadedForAccount(accountId);
       if (page.failedCount > 0) {
         setError(`${page.failedCount} scan result${page.failedCount === 1 ? '' : 's'} could not be loaded. The findings shown are incomplete.`);
       }
     } catch (caught: unknown) {
+      if (generation !== requestGeneration.current) return;
       setFindings([]);
       setLoadedScanCount(0);
       setHasOlderScans(false);
+      setLoadedForAccount(accountId);
       setError(caught instanceof Error ? caught.message : 'Failed to load findings');
     } finally {
-      setLoading(false);
+      if (generation === requestGeneration.current) setLoading(false);
     }
-  }, []);
+  }, [accountId, authLoading, user?.id]);
 
   useEffect(() => {
-    void loadFindings();
-  }, [loadFindings]);
+    // Account-scoped data cannot survive session restoration, logout, or a
+    // switch to another tenant; invalidate every older in-flight response.
+    requestGeneration.current += 1;
+    setFindings([]);
+    setLoadedForAccount(null);
+    setLoadedScanCount(0);
+    setHasOlderScans(false);
+    setLoadingMore(false);
+    setExpandedFindingId(null);
+    setError(null);
+    if (!authLoading && accountId) {
+      void loadFindings();
+    } else {
+      setLoading(false);
+    }
+  }, [accountId, authLoading, loadFindings]);
 
   const loadOlderScans = useCallback(async () => {
-    if (loading || loadingMore || !hasOlderScans) return;
+    if (authLoading || !accountId || loadedForAccount !== accountId || loading || loadingMore || !hasOlderScans) return;
+    const generation = requestGeneration.current;
     setLoadingMore(true);
     try {
       const page = await loadScanFindingsPage(
         loadedScanCount, SCAN_PAGE_SIZE, listScans, fetchScanFindings
       );
+      if (!isCurrentAccountResponse(accountId, user?.id ?? null, generation, requestGeneration.current)) return;
       setFindings((current) => {
         const seen = new Set(current.map((finding) => finding.id));
         return [...current, ...page.findings.filter((finding) => !seen.has(finding.id))];
@@ -74,18 +110,22 @@ export default function FindingsPage() {
         ].filter(Boolean).join(' '));
       }
     } catch (caught: unknown) {
+      if (generation !== requestGeneration.current) return;
       setError((previous) => [
         previous,
         caught instanceof Error ? caught.message : 'Failed to load older scan findings',
       ].filter(Boolean).join(' '));
     } finally {
-      setLoadingMore(false);
+      if (generation === requestGeneration.current) setLoadingMore(false);
     }
-  }, [hasOlderScans, loadedScanCount, loading, loadingMore]);
+  }, [accountId, user?.id, authLoading, loadedForAccount, hasOlderScans, loadedScanCount, loading, loadingMore]);
+
+  const visibleFindings = loadedForAccount === accountId && accountId ? findings : [];
+  const displayLoading = authLoading || (Boolean(accountId) && (loading || loadedForAccount !== accountId));
 
   const filteredFindings = useMemo(() => {
     const query = search.trim().toLowerCase();
-    return findings.filter((finding) => {
+    return visibleFindings.filter((finding) => {
       const matchesSeverity = severity === 'ALL' || finding.severity === severity;
       const matchesSearch =
         !query ||
@@ -96,7 +136,7 @@ export default function FindingsPage() {
         finding.evidences.some((evidence) => evidence.file_path.toLowerCase().includes(query));
       return matchesSeverity && Boolean(matchesSearch);
     });
-  }, [findings, search, severity]);
+  }, [visibleFindings, search, severity]);
 
   return (
     <AppShell breadcrumbs={[{ label: 'Findings Explorer' }]} title="Verified Security & Quality Findings">
@@ -134,19 +174,19 @@ export default function FindingsPage() {
           </Button>
         </div>
 
-        {error && <Alert variant="warning" title="Findings data is incomplete">{error}</Alert>}
+        {accountId && error && <Alert variant="warning" title="Findings data is incomplete">{error}</Alert>}
 
-        {loading ? (
+        {displayLoading ? (
           <><CardSkeleton /><CardSkeleton /></>
-        ) : findings.length === 0 ? (
+        ) : visibleFindings.length === 0 ? (
           <EmptyState
             icon={<ScanIcon size={24} />}
-            title={hasOlderScans ? 'No verified findings in loaded scans' : 'No verified findings yet'}
+            title={!accountId ? 'Sign in to view findings' : hasOlderScans ? 'No verified findings in loaded scans' : 'No verified findings yet'}
             description={hasOlderScans
               ? 'Load older scans to look for verified findings, or start a new repository scan.'
               : 'Run a repository scan. Only tenant-owned findings that pass RepoLens evidence verification are shown here.'}
-            actionLabel="Start a repository scan"
-            onAction={() => router.push('/scan')}
+            actionLabel={accountId ? 'Start a repository scan' : 'Sign in'}
+            onAction={() => accountId ? router.push('/scan') : window.dispatchEvent(new Event('repolens:open-auth'))}
           />
         ) : filteredFindings.length === 0 ? (
           <EmptyState
@@ -157,7 +197,7 @@ export default function FindingsPage() {
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
             <p style={{ color: 'var(--text-secondary)', fontSize: '0.8125rem' }}>
-              Showing {filteredFindings.length} of {findings.length} persisted, evidence-grounded finding{findings.length === 1 ? '' : 's'} across {loadedScanCount} loaded scan{loadedScanCount === 1 ? '' : 's'}.
+              Showing {filteredFindings.length} of {visibleFindings.length} persisted, evidence-grounded finding{visibleFindings.length === 1 ? '' : 's'} across {loadedScanCount} loaded scan{loadedScanCount === 1 ? '' : 's'}.
             </p>
             {filteredFindings.map((finding) => (
               <FindingCard
@@ -169,7 +209,7 @@ export default function FindingsPage() {
             ))}
           </div>
         )}
-        {!loading && hasOlderScans && (
+        {!displayLoading && accountId && hasOlderScans && (
           <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
             <p style={{ color: 'var(--text-secondary)', fontSize: '0.8125rem' }}>
               Older scans have not been loaded yet; this is not a complete findings history.
