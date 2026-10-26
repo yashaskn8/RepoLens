@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import os
+import stat
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -80,14 +81,17 @@ class MCPRepositoryServer:
         max_file_bytes = int(get_settings().MAX_FILE_SIZE_BYTES)
         try:
             abs_path = self._resolve_safe_path(file_entry.path)
-            if (
-                not os.path.isfile(abs_path)
-                or file_entry.size_bytes > max_file_bytes
-                or os.path.getsize(abs_path) != file_entry.size_bytes
-                or os.path.getsize(abs_path) > max_file_bytes
-            ):
+            if file_entry.size_bytes > max_file_bytes:
                 return None, "MCP_SOURCE_RESOURCE_LIMIT: File is unavailable, changed, or exceeds the manifest byte limit."
-            with open(abs_path, "rb") as source_file:
+            # Stat the opened descriptor, not a pathname that can be replaced
+            # between inspection and read. Never follow a swapped symlink
+            # where the host supports O_NOFOLLOW.
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+            fd = os.open(abs_path, flags)
+            with os.fdopen(fd, "rb") as source_file:
+                opened = os.fstat(source_file.fileno())
+                if not stat.S_ISREG(opened.st_mode) or opened.st_size != file_entry.size_bytes:
+                    return None, "MCP_SOURCE_RESOURCE_LIMIT: File is unavailable, changed, or exceeds the manifest byte limit."
                 source_bytes = source_file.read(max_file_bytes + 1)
         except Exception:
             # Repository-controlled paths and filesystem failures are both
@@ -99,6 +103,12 @@ class MCPRepositoryServer:
             return None, "MCP_SOURCE_RESOURCE_LIMIT: File is unavailable, changed, or exceeds the manifest byte limit."
         if not hmac.compare_digest(hashlib.sha256(source_bytes).hexdigest(), file_entry.content_sha256):
             return None, "MCP_SOURCE_SNAPSHOT_DRIFT: Source no longer matches the authorized repository snapshot."
+        try:
+            source_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            return None, "MCP_SOURCE_ENCODING_UNSUPPORTED: Snapshot source is not valid UTF-8."
+        if b"\\x00" in source_bytes:
+            return None, "MCP_FILE_UNSUPPORTED: Source contains binary NUL bytes."
         return source_bytes, None
 
     def list_tools(self) -> List[MCPToolDefinition]:

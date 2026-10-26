@@ -438,3 +438,38 @@ async def test_mcp_security_unknown_tool_rejection(mcp_server_fixture):
     res = await server.call_tool("system_exec", {"cmd": "whoami"})
     assert res.is_error is True
     assert "Unknown MCP tool" in res.error_message
+
+
+@pytest.mark.asyncio
+async def test_mcp_rejects_attested_non_utf8_source_instead_of_replacing_bytes(
+    mcp_server_fixture,
+):
+    """A byte-valid snapshot must not be textually distorted for an MCP reader."""
+    server, workspace = mcp_server_fixture
+    source = b"ok = True\n\xff\n"
+    with open(os.path.join(workspace, "main.py"), "wb") as f:
+        f.write(source)
+    manifest_entry = server.evidence_store.manifest.files[0]
+    manifest_entry.size_bytes = len(source)
+    manifest_entry.content_sha256 = hashlib.sha256(source).hexdigest()
+    manifest_entry.lines_count = 2
+    response = await server.call_tool(
+        "repo_read_file", {"file_path": "main.py", "start_line": 1, "end_line": 2},
+    )
+    assert response.is_error
+    assert response.error_message.startswith("MCP_SOURCE_ENCODING_UNSUPPORTED")
+
+
+@pytest.mark.asyncio
+async def test_mcp_rejects_attested_binary_nul_text(mcp_server_fixture):
+    server, workspace = mcp_server_fixture
+    source = b"ok = True\n\x00\n"
+    with open(os.path.join(workspace, "main.py"), "wb") as f:
+        f.write(source)
+    manifest_entry = server.evidence_store.manifest.files[0]
+    manifest_entry.size_bytes = len(source)
+    manifest_entry.content_sha256 = hashlib.sha256(source).hexdigest()
+    manifest_entry.lines_count = 2
+    response = await server.call_tool("repo_search_code", {"query": "ok"})
+    assert response.is_error
+    assert response.error_message.startswith("MCP_FILE_UNSUPPORTED")
