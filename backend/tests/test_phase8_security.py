@@ -504,7 +504,7 @@ async def test_patch_approval_ignores_spoofed_approved_by_in_payload(db_session:
         id=str(uuid4()),
         scan_id=scan.id,
         finding_id=finding.id,
-        status=PatchStatus.DRAFT.value,
+        status=PatchStatus.VERIFIED.value,
         unified_diff="diff",
         files_modified=["app.py"],
         explanation="fix",

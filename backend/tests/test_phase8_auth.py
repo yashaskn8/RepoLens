@@ -314,7 +314,7 @@ def test_concurrent_registration_unique_conflict_returns_duplicate_email(
             if lookups == 1:
                 # Another registration commits the same email after the
                 # application's optimistic existence check.
-                return SimpleNamespace(first=lambda: None)
+                return SimpleNamespace(filter=lambda *_a, **_k: SimpleNamespace(first=lambda: None))
         return query(model, *args, **kwargs)
 
     monkeypatch.setattr(db_session, "query", race_query)
