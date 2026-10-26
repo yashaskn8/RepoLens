@@ -720,3 +720,12 @@ def test_review_verifier_preserves_exact_source_newlines(tmp_path):
         "first = 1\r\n",
         "second = 2\r\n",
     ]
+
+
+def test_review_verifier_rejects_nul_bearing_source(tmp_path):
+    """An embedded NUL marks the file as non-text evidence, even with valid UTF-8."""
+    from app.analysis.review_verifier import _read_file_lines_safe
+
+    source = tmp_path / "binary.py"
+    source.write_bytes(b"before\n\x00after\n")
+    assert _read_file_lines_safe(str(tmp_path), "binary.py") is None

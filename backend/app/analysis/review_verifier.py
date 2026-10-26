@@ -82,7 +82,7 @@ def _read_file_lines_safe(
             # silently dropping them with errors="ignore".
             with open(abs_path, "rb") as source:
                 data = source.read(max_file_size + 1)
-            if len(data) > max_file_size or len(data) != st.st_size or b"\\x00" in data:
+            if len(data) > max_file_size or len(data) != st.st_size or b"\x00" in data:
                 return None
             return data.decode("utf-8").splitlines(keepends=True)
     except Exception:
