@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { WORKFLOW_EVENT_TYPES, WorkflowEvent, WorkflowEventType } from '@/types/domain';
 import { getApiBaseUrl } from '@/lib/api';
+import { WorkflowRetryBudget } from '@/lib/workflowRetry';
 
 export type StreamStatus = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'completed' | 'error';
 
@@ -57,8 +58,7 @@ export function useWorkflowStream(
     }
 
     let isMounted = true;
-    let retryCount = 0;
-    const maxRetries = 10;
+    const retryBudget = new WorkflowRetryBudget(10);
 
     function handleEvent(messageEvent: MessageEvent) {
       if (!isMounted || terminalReceivedRef.current) return;
@@ -68,6 +68,8 @@ export function useWorkflowStream(
         if (parsed && typeof parsed.id === 'number') {
           if (parsed.id > lastEventIdRef.current) {
             lastEventIdRef.current = parsed.id;
+            // Only new persisted progress proves the connection is healthy.
+            retryBudget.recordProgress();
           }
 
           setEvents((prev) => {
@@ -127,7 +129,6 @@ export function useWorkflowStream(
       es.onopen = () => {
         if (!isMounted) return;
         setStatus('connected');
-        retryCount = 0;
       };
 
       // Register shared event handler for generic messages
@@ -151,10 +152,9 @@ export function useWorkflowStream(
           return;
         }
 
-        if (retryCount < maxRetries) {
-          retryCount += 1;
+        const delay = retryBudget.nextDelayMs();
+        if (delay !== null) {
           setStatus('reconnecting');
-          const delay = Math.min(1000 * 2 ** retryCount, 10000);
           retryTimeoutRef.current = setTimeout(connect, delay);
         } else {
           setStatus('error');
