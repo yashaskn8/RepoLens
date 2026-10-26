@@ -581,3 +581,50 @@ async def test_singleflight_capacity_bypass_is_also_time_bounded() -> None:
         await first
     await asyncio.sleep(0)
     assert flight.active_count == 0
+
+
+@pytest.mark.asyncio
+async def test_singleflight_never_coalesces_identical_requests_across_tenants() -> None:
+    """Cross-tenant identity cannot share a provider execution or response."""
+    adapter = CountingAdapter(delay=0.03)
+    router = LLMRouter(
+        adapters={LLMProvider.GROQ: adapter},
+        response_cache=AIResponseCache(store=MemoryCacheStore()),
+    )
+    first = _request("classify the identical input")
+    second = first.model_copy(deep=True)
+    second.lineage = second.lineage.model_copy(
+        update={"tenant_id": "22222222-2222-2222-2222-222222222222"}
+    )
+
+    responses = await asyncio.gather(
+        router.generate(first), router.generate(second),
+    )
+    assert adapter.calls == 2
+    assert all(
+        not response.metadata.extra_metadata.get("singleflight_coalesced")
+        for response in responses
+    )
+
+
+@pytest.mark.asyncio
+async def test_singleflight_never_coalesces_distinct_evidence_snapshots() -> None:
+    """Matching prompts against different evidence digests require separate work."""
+    adapter = CountingAdapter(delay=0.03)
+    router = LLMRouter(
+        adapters={LLMProvider.GROQ: adapter},
+        response_cache=AIResponseCache(store=MemoryCacheStore()),
+    )
+    first = _request("classify the identical input")
+    second = first.model_copy(deep=True)
+    second.lineage = second.lineage.model_copy(
+        update={"evidence_digest": "b" * 64}
+    )
+    responses = await asyncio.gather(
+        router.generate(first), router.generate(second),
+    )
+    assert adapter.calls == 2
+    assert all(
+        not response.metadata.extra_metadata.get("singleflight_coalesced")
+        for response in responses
+    )
