@@ -97,7 +97,7 @@ class PatchGeneratorAgent:
             raise ValueError("Patch generation rejected: plan belongs to a different finding.")
         if fix_plan.validation_report is not None and not fix_plan.validation_report.is_valid:
             raise ValueError("Patch generation rejected: plan failed deterministic validation.")
-        if set(source_files) != set(fix_plan.files_expected_to_change):
+        if set(source_files) != {path.replace("\\", "/") for path in fix_plan.files_expected_to_change}:
             raise ValueError("Patch generation rejected: approved source evidence is incomplete.")
         system_prompt = self._build_system_prompt()
         user_prompt = self._build_user_prompt(finding, fix_plan, context_bundle, source_files)
