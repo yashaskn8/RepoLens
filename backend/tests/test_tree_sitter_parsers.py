@@ -188,3 +188,31 @@ axios(`/api/${tenantId}`, {method: "POST"});
     assert calls[0].details["statically_resolvable"] is True
     assert calls[1].details["http_method"] == "POST"
     assert calls[1].details["statically_resolvable"] is False
+
+
+def test_axios_request_configuration_preserves_method_and_url():
+    source_code = b"""
+import axios from "axios";
+axios.request({url: "/api/orders", method: "POST"});
+apiClient.request({url: "/api/orders/1", method: "PATCH"});
+axios.request({url: "/api/orders"});
+"""
+    symbols = parse_file("src/client.ts", "typescript", source_code)
+    calls = [symbol for symbol in symbols if symbol.kind == SymbolKind.AXIOS_CALL]
+    assert len(calls) == 3
+    assert [call.details["http_method"] for call in calls] == ["POST", "PATCH", "GET"]
+    assert [call.details["target"] for call in calls] == [
+        "/api/orders", "/api/orders/1", "/api/orders",
+    ]
+    assert all(call.details["statically_resolvable"] for call in calls)
+
+
+def test_dynamic_axios_request_method_is_not_mislabeled_as_get():
+    source_code = b"""
+import axios from "axios";
+axios.request({url: "/api/items", method: methodFromProps});
+"""
+    symbols = parse_file("src/client.ts", "typescript", source_code)
+    calls = [symbol for symbol in symbols if symbol.kind == SymbolKind.AXIOS_CALL]
+    assert len(calls) == 1
+    assert calls[0].details["http_method"] == "UNKNOWN"

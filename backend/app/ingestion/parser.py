@@ -938,6 +938,30 @@ def _extract_js_ts_symbols_and_calls(
                                     target_url = _node_text(arg, source_bytes).strip("\"'`")
                                     statically_resolvable = arg.type != "identifier"
                                     break
+                        http_method = prop_text.upper() if prop_text != "request" else "GET"
+                        if prop_text == "request" and named_args and named_args[0].type == "object":
+                            for prop in named_args[0].named_children:
+                                if prop.type != "pair":
+                                    continue
+                                key_node = prop.child_by_field_name("key")
+                                value_node = prop.child_by_field_name("value")
+                                if key_node is None or value_node is None:
+                                    continue
+                                key = _node_text(key_node, source_bytes).strip("\"'")
+                                value = _node_text(value_node, source_bytes).strip("\"'").strip(chr(96))
+                                if key == "url":
+                                    target_url = value
+                                    statically_resolvable = (
+                                        value_node.type in {"string", "template_string"}
+                                        and ("$" + "{") not in value
+                                    )
+                                elif key == "method":
+                                    http_method = (
+                                        value.upper()
+                                        if value_node.type == "string"
+                                        and value.upper() in {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}
+                                        else "UNKNOWN"
+                                    )
                         body_shape = (
                             _js_expression_shape(named_args[1], source_bytes, bindings)
                             if prop_text in {"post", "put", "patch"} and len(named_args) > 1
@@ -955,7 +979,7 @@ def _extract_js_ts_symbols_and_calls(
                                     "callee": f"{obj_text}.{prop_text}",
                                     "target": target_url,
                                     "url": target_url,
-                                    "http_method": prop_text.upper() if prop_text != "request" else "GET",
+                                    "http_method": http_method,
                                     "body_shape": body_shape,
                                     "statically_resolvable": statically_resolvable,
                                 },
