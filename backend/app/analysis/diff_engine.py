@@ -219,6 +219,23 @@ def _parse_pyproject_toml(content: str) -> Dict[str, str]:
     return deps
 
 
+
+def _read_bounded_snapshot_file(path: str, max_bytes: int) -> bytes:
+    """Read exact regular source bytes under a descriptor-enforced budget."""
+    if max_bytes < 1:
+        raise ValueError("Invalid source byte budget")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    fd = os.open(path, flags)
+    with os.fdopen(fd, "rb") as source:
+        opened = os.fstat(source.fileno())
+        if not stat.S_ISREG(opened.st_mode) or opened.st_size > max_bytes:
+            raise ValueError("Source file unavailable or outside comparison budget")
+        content = source.read(max_bytes + 1)
+        if len(content) > max_bytes or len(content) != opened.st_size:
+            raise ValueError("Source size changed during structural comparison")
+    return content
+
+
 class ChangeDiffEngine:
     """Deterministic structural diff engine comparing two repository workspaces."""
 
@@ -515,14 +532,25 @@ class ChangeDiffEngine:
                 )
                 continue
 
-            base_bytes = b""
-            head_bytes = b""
             try:
-                with open(base_abs, "rb") as f:
-                    base_bytes = f.read()
-                with open(head_abs, "rb") as f:
-                    head_bytes = f.read()
-            except OSError:
+                base_bytes = _read_bounded_snapshot_file(base_abs, max_file_size)
+                head_bytes = _read_bounded_snapshot_file(head_abs, max_file_size)
+            except (OSError, ValueError):
+                # A file replaced after enumeration is unknown, not unchanged.
+                modified_files_list.append(rel_path)
+                changed_files.append(
+                    FileDiffFact(
+                        file_path=rel_path,
+                        old_path=None,
+                        change_type=FileChangeType.MODIFIED,
+                        is_binary=False,
+                        is_parsed=False,
+                        skipped_reason="SOURCE_UNAVAILABLE_OR_CHANGED",
+                        language=detect_language(rel_path),
+                        changed_line_ranges=[],
+                        base_line_ranges=[],
+                    )
+                )
                 continue
 
             if base_bytes == head_bytes:
@@ -536,9 +564,13 @@ class ChangeDiffEngine:
             base_ranges: List[List[int]] = []
 
             if not is_bin:
-                base_lines = base_bytes.decode("utf-8", errors="ignore").splitlines()
-                head_lines = head_bytes.decode("utf-8", errors="ignore").splitlines()
-                head_ranges, base_ranges = _extract_line_ranges_from_diff(base_lines, head_lines)
+                try:
+                    base_lines = base_bytes.decode("utf-8").splitlines()
+                    head_lines = head_bytes.decode("utf-8").splitlines()
+                except UnicodeDecodeError:
+                    skipped_reason = "INVALID_SOURCE_ENCODING"
+                else:
+                    head_ranges, base_ranges = _extract_line_ranges_from_diff(base_lines, head_lines)
 
             modified_files_list.append(rel_path)
             changed_files.append(
@@ -547,7 +579,7 @@ class ChangeDiffEngine:
                     old_path=None,
                     change_type=FileChangeType.MODIFIED,
                     is_binary=is_bin,
-                    is_parsed=lang is not None and not is_bin,
+                    is_parsed=lang is not None and not is_bin and skipped_reason is None,
                     skipped_reason=skipped_reason,
                     language=lang,
                     changed_line_ranges=head_ranges,

@@ -543,3 +543,37 @@ def test_symbol_diff_fallback_checks_actual_line_range(tmp_path):
     with pytest.raises(ValueError, match="exceeds the source file"):
         _extract_and_normalize_symbol_lines(str(source), 1, 12)
     assert _extract_and_normalize_symbol_lines(str(source), 1, 1) == "x = 1"
+
+def test_structural_diff_rejects_lossy_utf8_in_modified_source(tmp_path):
+    base = tmp_path / "base"
+    head = tmp_path / "head"
+    base.mkdir()
+    head.mkdir()
+    (base / "source.py").write_bytes(b"x = 1" + bytes([10]))
+    (head / "source.py").write_bytes(b"x = 2" + bytes([10, 255]))
+    result = ChangeDiffEngine().compute_structural_diff(
+        str(base), str(head), "a" * 40, "b" * 40, "https://github.com/org/repo",
+    )
+    fact = next(item for item in result.changed_files if item.file_path == "source.py")
+    assert fact.change_type == FileChangeType.MODIFIED
+    assert fact.skipped_reason == "INVALID_SOURCE_ENCODING"
+    assert not fact.is_parsed
+    assert fact.changed_line_ranges == []
+
+
+def test_structural_diff_read_rejects_actual_oversized_bytes(tmp_path):
+    from unittest.mock import patch
+    from types import SimpleNamespace
+    import stat as stat_module
+    from app.analysis.diff_engine import _read_bounded_snapshot_file
+
+    source = tmp_path / "changed.py"
+    source.write_bytes(bytes(range(64)))
+    # Simulate a file growing after a stale size estimate; the read itself
+    # must enforce the authoritative budget regardless of reported st_size.
+    with patch(
+        "app.analysis.diff_engine.os.fstat",
+        return_value=SimpleNamespace(st_size=8, st_mode=stat_module.S_IFREG),
+    ):
+        with pytest.raises(ValueError, match="budget|size changed"):
+            _read_bounded_snapshot_file(str(source), 16)
