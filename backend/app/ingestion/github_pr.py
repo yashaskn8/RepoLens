@@ -155,7 +155,7 @@ class GitHubPRResolver:
             raise GitHubPRAPIError(f"Missing state in GitHub PR #{pr_number} response")
         state = str(raw_state).strip().lower()
         if state not in ("open", "closed"):
-            raise GitHubPRAPIError(f"Invalid state '{state}' in GitHub PR #{pr_number} response")
+            raise GitHubPRAPIError(f"Invalid state in GitHub PR #{pr_number} response")
 
         # 2. Base and head info
         base_info = data.get("base")
@@ -188,7 +188,7 @@ class GitHubPRResolver:
 
         expected_base = f"{owner}/{repo}".lower()
         if base_full_name != expected_base:
-            raise GitHubPRAPIError(f"Base repository full_name '{base_full_name}' does not match requested '{expected_base}'")
+            raise GitHubPRAPIError("GitHub PR base repository does not match the requested repository")
 
         is_fork = (head_full_name != base_full_name) or bool(head_repo.get("fork", False))
         head_repo_url = head_repo.get("html_url")
@@ -208,9 +208,9 @@ class GitHubPRResolver:
         base_sha = str(base_info.get("sha") or "").strip().lower()
         head_sha = str(head_info.get("sha") or "").strip().lower()
         if not re.match(r"^[0-9a-f]{40}$", base_sha):
-            raise GitHubPRAPIError(f"Invalid or missing base commit SHA in GitHub PR response: '{base_sha}'")
+            raise GitHubPRAPIError("Invalid or missing base commit SHA in GitHub PR response")
         if not re.match(r"^[0-9a-f]{40}$", head_sha):
-            raise GitHubPRAPIError(f"Invalid or missing head commit SHA in GitHub PR response: '{head_sha}'")
+            raise GitHubPRAPIError("Invalid or missing head commit SHA in GitHub PR response")
 
         title = str(data.get("title") or f"Pull Request #{pr_number}")
         canonical_repo_url = f"https://github.com/{owner}/{repo}"

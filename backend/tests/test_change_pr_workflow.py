@@ -496,3 +496,31 @@ def test_change_analysis_sse_uses_persisted_terminal_state_when_event_missing(
     assert "event: CHANGE_ANALYSIS_FAILED" in response.text
     assert '"status_source": "persisted_resource_state"' in response.text
 
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corrupt_field", ["state", "base_sha", "head_sha", "base_repo"])
+async def test_pr_resolver_does_not_reflect_untrusted_provider_fields(mock_pr_payload, corrupt_field):
+    """Malformed provider metadata must not become user-visible exception content."""
+    import copy
+    from unittest.mock import AsyncMock, MagicMock
+
+    canary = "sensitive-provider-diagnostic-canary"
+    payload = copy.deepcopy(mock_pr_payload)
+    if corrupt_field == "state":
+        payload["state"] = canary
+    elif corrupt_field == "base_sha":
+        payload["base"]["sha"] = canary
+    elif corrupt_field == "head_sha":
+        payload["head"]["sha"] = canary
+    else:
+        payload["base"]["repo"]["full_name"] = canary
+
+    transport = MagicMock()
+    transport.request = AsyncMock(return_value=payload)
+    resolver = GitHubPRResolver(transport=transport)
+    with pytest.raises(GitHubPRAPIError) as failure:
+        await resolver.resolve_pr("https://github.com/fastapi/fastapi/pull/456")
+
+    assert canary not in str(failure.value)
+    transport.request.assert_awaited_once()
