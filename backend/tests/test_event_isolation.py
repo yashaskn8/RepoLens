@@ -470,7 +470,9 @@ def test_operational_event_failure_never_logs_secret_bearing_exception(caplog):
     def broken_session_factory():
         raise RuntimeError(canary)
 
-    with caplog.at_level(logging.WARNING):
+    # Other tests configure and shut down global logging. Observe the logger
+    # directly so the security assertion does not depend on pytest capture state.
+    with patch("app.services.workflow_event_service.logger.warning") as warning:
         result = WorkflowEventService.emit_operational(
             WorkflowEventCreate(
                 event_type=WorkflowEventType.SCAN_STARTED,
@@ -481,6 +483,7 @@ def test_operational_event_failure_never_logs_secret_bearing_exception(caplog):
         )
 
     assert result is None
-    assert "RuntimeError" in caplog.text
-    assert canary not in caplog.text
-    assert "private-secret" not in caplog.text
+    warning.assert_called_once()
+    assert warning.call_args.args == ("Operational event emission failed (%s).", "RuntimeError")
+    assert canary not in repr(warning.call_args)
+    assert "private-secret" not in repr(warning.call_args)
