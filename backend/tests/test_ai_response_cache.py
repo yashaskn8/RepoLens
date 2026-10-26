@@ -471,3 +471,21 @@ def test_search_language_does_not_misroute_generation_to_embedding_provider() ->
     )
 
     assert TaskClassifier.classify(request) == TaskCategory.SIMPLE_GENERATION
+
+
+@pytest.mark.asyncio
+async def test_cache_serialization_failure_never_breaks_successful_model_call() -> None:
+    """Metadata outside the cache JSON contract cannot fail model execution."""
+    cache = AIResponseCache(store=MemoryCacheStore())
+    response = LLMResponse(
+        content="valid provider result",
+        model="test-model",
+        provider=LLMProvider.GROQ,
+        metadata=ModelExecutionMetadata(model_name="test-model", provider="groq"),
+    )
+    # The metadata field supports arbitrary diagnostic values, but Redis
+    # cache entries require JSON-serializable values.
+    response.metadata.extra_metadata["unserializable"] = object()
+    await cache.store_response(_request(), "route/v1", response)
+    assert response.content == "valid provider result"
+

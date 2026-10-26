@@ -151,8 +151,10 @@ class AIResponseCache:
         if not self.exact_cache_allowed(request) or not self.store.is_available:
             return
         settings = get_settings()
-        payload = self._safe_response_payload(response)
         try:
+            # Cache serialization is optional: unrepresentable diagnostic
+            # metadata must not turn a successful model response into failure.
+            payload = self._safe_response_payload(response)
             await self.store.set(
                 self.request_key(request, routing_identity),
                 payload,
