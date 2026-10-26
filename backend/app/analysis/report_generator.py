@@ -238,6 +238,10 @@ def _render_markdown_report(
         agent_row = "| **Change Review Agent** | ⚠️ Unavailable — deterministic-only result | Fallback Mode |"
     elif llm_status == "FAILED":
         agent_row = "| **Change Review Agent** | ❌ Failed — deterministic fallback | Fallback Mode |"
+    else:
+        # Unrecognized or skipped model execution statuses must not crash
+        # report rendering or be reported as successful AI verification.
+        agent_row = "| **Change Review Agent** | ⚠️ Result unavailable or unverified | Static Evidence Only |"
     lines.append(agent_row)
     lines.append("| **Runtime Sandbox / Dynamic Testing** | ❌ Not Executed | Static Evidence Only |")
     lines.append("")

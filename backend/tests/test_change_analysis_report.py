@@ -262,3 +262,24 @@ def test_pr_title_cannot_inject_markdown_report_table_rows(sample_completed_anal
     assert "[#456 Harmless\\]" in report.markdown_report
     assert "| **Faked Metric** | 999 |" not in report.markdown_report
     assert report.markdown_report.count("| **Pull Request** |") == 1
+
+
+@pytest.mark.parametrize(
+    "execution_status,is_fallback",
+    [
+        ("TIMEOUT", False),
+        ("SKIPPED", False),
+        ("SUCCESS", True),
+        ("PROVIDER_COOLDOWN", False),
+    ],
+)
+def test_unknown_or_fallback_review_status_never_crashes_report(
+    sample_completed_analysis, execution_status, is_fallback,
+):
+    """Unrecognized AI outcomes remain visibly unverified, not fatal or successful."""
+    review = sample_completed_analysis.model_metadata["review_report"]
+    review["model_metadata"]["execution_status"] = execution_status
+    review["model_metadata"]["is_fallback"] = is_fallback
+    result = generate_change_analysis_report(sample_completed_analysis)
+    assert "Result unavailable or unverified" in result.markdown_report
+    assert "| **Change Review Agent** | ✅ Executed |" not in result.markdown_report
