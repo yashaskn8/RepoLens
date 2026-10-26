@@ -324,3 +324,31 @@ def test_graph_keeps_ambiguous_aliases_unresolved():
     assert _resolve_js_ts_module_to_file(
         "@/components/Widget", "frontend/src/app/page.tsx", files
     ) is None
+
+
+def test_cross_layer_path_case_does_not_create_false_contract_match():
+    """Case-sensitive backend routes cannot match differently cased client URLs."""
+    assert normalize_route_path("/API/Users/:id") == "/API/Users/{param}"
+    assert normalize_route_path("/api/users/{name}") == "/api/users/{param}"
+
+    backend_routes = [
+        GraphNode(
+            id="route:GET:/api/users",
+            kind=NodeKind.ROUTE,
+            label="GET /api/users",
+            metadata={"http_method": "GET", "path": "/api/users"},
+        ),
+    ]
+    frontend_requests = [
+        GraphNode(
+            id="req:case",
+            kind=NodeKind.FRONTEND_REQUEST,
+            label="GET /API/Users",
+            file_path="src/client.ts",
+            metadata={"http_method": "GET", "url": "/API/Users"},
+        ),
+    ]
+    result = match_route_contract(frontend_requests, backend_routes)
+    assert result.matched_count == 0
+    assert result.unmatched_count == 1
+    assert result.matches[0].status == ContractMatchStatus.UNMATCHED_FRONTEND_REQUEST

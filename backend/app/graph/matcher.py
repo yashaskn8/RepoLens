@@ -125,7 +125,10 @@ def normalize_route_path(path: str) -> str:
     if len(cleaned) > 1 and cleaned.endswith("/"):
         cleaned = cleaned[:-1]
 
-    return cleaned.lower()
+    # HTTP methods are case-insensitive, but URL paths are not generally
+    # case-insensitive (FastAPI and Express can route these differently).
+    # Preserve static segment case to avoid false cross-layer matches.
+    return cleaned
 
 
 def match_route_contract(
