@@ -64,6 +64,7 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
   const [activeAnalysis, setActiveAnalysis] = useState<ChangeAnalysisResponse | null>(null);
   const analysisGenerationRef = useRef(0);
   const [artifactError, setArtifactError] = useState<string | null>(null);
+  const [isRetryingArtifacts, setIsRetryingArtifacts] = useState(false);
   const [artifactAvailability, setArtifactAvailability] = useState({
     impacts: false, review: false, report: false, diff: false, telemetry: false,
   });
@@ -196,11 +197,23 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
       : null);
   };
 
+  const retryCompletedArtifacts = async () => {
+    if (!activeAnalysis || activeAnalysis.status !== 'COMPLETED' || isRetryingArtifacts) return;
+    const generation = analysisGenerationRef.current;
+    setIsRetryingArtifacts(true);
+    try {
+      await loadCompletedAnalysisData(activeAnalysis.id, generation);
+    } finally {
+      if (generation === analysisGenerationRef.current) setIsRetryingArtifacts(false);
+    }
+  };
+
   const handleStartAnalysis = async (e: React.FormEvent) => {
     e.preventDefault();
     const generation = ++analysisGenerationRef.current;
     setErrorMsg(null);
     setArtifactError(null);
+    setIsRetryingArtifacts(false);
     setArtifactAvailability({
       impacts: false, review: false, report: false, diff: false, telemetry: false,
     });
@@ -410,7 +423,12 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
       )}
 
       {activeAnalysis?.status === 'COMPLETED' && artifactError && (
-        <Alert variant="error" title="Incomplete analysis artifacts">{artifactError}</Alert>
+        <div className="flex flex-col gap-2">
+          <Alert variant="error" title="Incomplete analysis artifacts">{artifactError}</Alert>
+          <Button variant="filter" size="sm" onClick={() => void retryCompletedArtifacts()} disabled={isRetryingArtifacts}>
+            {isRetryingArtifacts ? 'Retrying artifacts…' : 'Retry missing artifacts'}
+          </Button>
+        </div>
       )}
 
       {/* Overview Metrics & Deterministic Risk */}
