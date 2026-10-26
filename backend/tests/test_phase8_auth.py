@@ -263,3 +263,26 @@ def test_operator_cli_creation_and_elevation(db_session: Session):
     elevated = create_or_elevate_operator(db_session, email=normal_email)
     assert elevated.id == reg_user.id
     assert elevated.role == UserRole.OPERATOR.value
+
+
+def test_registration_error_logs_never_include_exception_secrets(client, monkeypatch, caplog):
+    """Database/provider error text can contain secrets and must not be logged."""
+    import logging
+    from app.api.routes import auth as auth_routes
+
+    secret = "private-credential-canary-must-not-be-logged"
+
+    def broken_registration(self, email, password, *, request_id=None):
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(auth_routes.AuthService, "register_user", broken_registration)
+    with caplog.at_level(logging.ERROR):
+        response = client.post(
+            "/api/v1/auth/register",
+            json={"email": "registration-error@example.com", "password": "ValidPassword12345!"},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error_code"] == "REGISTRATION_FAILED"
+    assert secret not in caplog.text
+    assert secret not in response.text

@@ -52,7 +52,7 @@ def register(
             headers={"Retry-After": "1"},
         )
     except Exception as exc:
-        logger.error(f"Registration failed: {str(exc)}")
+        logger.error("Registration failed (%s).", type(exc).__name__)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error_code": "REGISTRATION_FAILED", "message": "Failed to create account"},
