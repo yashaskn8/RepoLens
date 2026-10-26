@@ -46,3 +46,18 @@ def test_review_reconciliation_publisher_login_is_operator_pinned_and_validated(
     assert settings.GITHUB_REVIEW_PUBLISHER_LOGIN == "repolens[bot]"
     with pytest.raises(ValueError, match="GitHub account login"):
         Settings(_env_file=None, GITHUB_REVIEW_PUBLISHER_LOGIN="not a login")
+
+
+def test_example_configuration_tracks_operational_defaults():
+    """Copying the example must not undo repaired scan limits or storage identity."""
+    from pathlib import Path
+    from dotenv import dotenv_values
+
+    template = Path(__file__).resolve().parents[2] / ".env.example"
+    example = dotenv_values(template)
+    for name in (
+        "MAX_SCAN_DURATION_SECONDS",
+        "MODEL_ARCHITECTURE",
+        "REPORT_ARTIFACT_DIR",
+    ):
+        assert example[name] == str(Settings.model_fields[name].default)
