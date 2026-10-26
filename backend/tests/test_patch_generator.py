@@ -619,3 +619,50 @@ def test_patch_service_bounds_source_read(tmp_path, monkeypatch):
     source.write_bytes(b"x" * 1024)
     monkeypatch.setattr(config.get_settings(), "MAX_FILE_SIZE_BYTES", 32)
     assert PatchService()._read_target_files(str(tmp_path), ["large.py"]) == {}
+
+
+def test_parse_diff_files_deletion_identifies_deleted_source():
+    """Deletion diff headers must not turn /dev/null into a phantom file."""
+    diff = (
+        "--- a/src/obsolete.py\n"
+        "+++ /dev/null\n"
+        "@@ -1 +0,0 @@\n"
+        "-old code\n"
+    )
+    assert parse_diff_files(diff) == ["src/obsolete.py"]
+
+
+def test_patch_validator_accepts_scoped_file_deletion():
+    """A true deletion can be reviewed when the original file is approved."""
+    plan = FixPlan(
+        finding_id=uuid4(),
+        root_cause="Obsolete vulnerable implementation",
+        objective="Remove the vulnerable implementation",
+        files_expected_to_change=["src/obsolete.py"],
+        ordered_changes=[OrderedChangeStep(
+            step_number=1,
+            target_file="src/obsolete.py",
+            description="Remove the obsolete file",
+            rationale="The implementation is no longer used",
+        )],
+        validation_plan=["Verify imports and tests"],
+    )
+    proposal = PatchProposal(
+        finding_id=plan.finding_id,
+        plan_id=plan.id,
+        unified_diff=(
+            "--- a/src/obsolete.py\n"
+            "+++ /dev/null\n"
+            "@@ -1 +0,0 @@\n"
+            "-old code\n"
+        ),
+        files_modified=["src/obsolete.py"],
+        explanation="Remove the obsolete source",
+        expected_behavior_change="The vulnerable module is removed",
+    )
+    report = validate_patch_proposal(
+        proposal, fix_plan=plan, repo_files={"src/obsolete.py"},
+    )
+    assert report.is_valid
+    assert report.parsed_files == ["src/obsolete.py"]
+

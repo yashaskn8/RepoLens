@@ -15,17 +15,23 @@ from app.planning.schemas import FixPlan
 def parse_diff_files(unified_diff: str) -> List[str]:
     """Extract normalized relative file paths modified in a unified diff string."""
     files: List[str] = []
-    lines = unified_diff.split("\n")
-
-    for line in lines:
-        if line.startswith("+++ "):
-            # Match +++ b/path/to/file or +++ path/to/file
-            target = line[4:].strip()
-            if target.startswith("b/"):
+    original_path: str | None = None
+    for line in unified_diff.splitlines():
+        if line.startswith("--- "):
+            original_path = line[4:].strip()
+        elif line.startswith("+++ "):
+            # Deleted files use +++ /dev/null. Their modified-file identity
+            # is the old path, never the sentinel "dev/null".
+            new_path = line[4:].strip()
+            target = original_path if new_path == "/dev/null" else new_path
+            if not target or target == "/dev/null":
+                continue
+            if target.startswith(("a/", "b/")):
                 target = target[2:]
             clean = target.replace("\\", "/").lstrip("/")
-            if clean and clean != "/dev/null" and clean not in files:
+            if clean and clean not in files:
                 files.append(clean)
+            original_path = None
 
     return files
 
