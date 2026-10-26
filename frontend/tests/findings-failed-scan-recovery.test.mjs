@@ -72,7 +72,7 @@ test('retry merges recovered evidence without duplicating existing findings', as
     fetch: async (id) => [{ id: id === 'scan-a' ? 'existing' : 'recovered' }],
   });
   await ctx.retry();
-  assert.deepEqual(ctx.findings.map((finding) => finding.id), ['existing', 'recovered']);
+  assert.deepEqual(Array.from(ctx.findings, (finding) => finding.id), ['existing', 'recovered']);
   assert.deepEqual(Array.from(ctx.failedScanIds), []);
   assert.equal(ctx.retrying, false);
 });
