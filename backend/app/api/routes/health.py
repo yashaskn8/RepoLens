@@ -123,6 +123,8 @@ def _build_telemetry_report(db: Session) -> TelemetryReport:
     db_status = "connected"
     try:
         db.execute(text("SELECT 1"))
+        if missing_scan_storage_tables(db):
+            db_status = "migration_required"
     except Exception as exc:
         logger.error("Database telemetry check failed (%s)", type(exc).__name__)
         db_status = "unhealthy"
@@ -190,6 +192,7 @@ def _build_telemetry_report(db: Session) -> TelemetryReport:
 
     # 4. Metrics aggregation
     metrics = MetricsTelemetry()
+    metrics_available = True
     try:
         from app.models.delivery import DeliveryModel
         from app.schemas.enums import DeliveryStatus
@@ -211,8 +214,16 @@ def _build_telemetry_report(db: Session) -> TelemetryReport:
         metrics.total_workflow_events = db.query(func.count(WorkflowEventModel.id)).scalar() or 0
     except Exception as exc:
         logger.warning("Telemetry metrics unavailable (%s)", type(exc).__name__)
+        # Partially filled counters are not authoritative. Never publish them
+        # as healthy metrics when schema access or aggregation has failed.
+        metrics_available = False
+        metrics = MetricsTelemetry()
 
-    overall_status = "healthy" if db_status == "connected" and snapshot_writable else "degraded"
+    overall_status = (
+        "healthy"
+        if db_status == "connected" and snapshot_writable and metrics_available
+        else "degraded"
+    )
 
     from app.core.redis import get_redis_manager
     redis_mgr = get_redis_manager()

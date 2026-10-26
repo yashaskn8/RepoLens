@@ -97,3 +97,40 @@ def test_completed_scan_sse_emits_state_based_terminal_signal_if_event_missing(
     assert "event: SCAN_COMPLETED" in response.text
     assert '"status_source": "persisted_resource_state"' in response.text
 
+
+
+def test_detailed_telemetry_reports_degraded_when_metric_queries_fail(monkeypatch):
+    """Incomplete metrics must not be represented as accurate healthy totals."""
+    from app.api.routes import health
+
+    class BrokenMetricsDB:
+        def execute(self, *_args, **_kwargs):
+            return None
+
+        def query(self, *_args, **_kwargs):
+            raise RuntimeError("diagnostic-secret-canary")
+
+    monkeypatch.setattr(health, "missing_scan_storage_tables", lambda _db: frozenset())
+    result = health._build_telemetry_report(BrokenMetricsDB())
+    assert result.status == "degraded"
+    assert result.metrics.total_scans == 0
+    assert "diagnostic-secret-canary" not in result.model_dump_json()
+
+
+def test_detailed_telemetry_reports_unapplied_migrations(monkeypatch):
+    from app.api.routes import health
+
+    class HealthyDatabase:
+        def execute(self, *_args, **_kwargs):
+            return None
+
+        def query(self, *_args, **_kwargs):
+            raise RuntimeError("unapplied tables")
+
+    monkeypatch.setattr(
+        health, "missing_scan_storage_tables",
+        lambda _db: frozenset({"findings"}),
+    )
+    result = health._build_telemetry_report(HealthyDatabase())
+    assert result.database == "migration_required"
+    assert result.status == "degraded"
