@@ -19,7 +19,7 @@ const effect = new Function(
   'scanId', 'fetchScan', 'fetchScanFindings', 'fetchScanTelemetry',
   'setScan', 'setFindings', 'setTelemetry', 'setFindingsLoaded',
   'setChainbrainAiNotes', 'setChainbrainAiBusy', 'setIsLoading', 'setTimeout', 'clearTimeout',
-  effectJs + '\nreturn runEffect;',
+  effectJs + '\nreturn runEffect();',
 );
 
 async function flush() {
