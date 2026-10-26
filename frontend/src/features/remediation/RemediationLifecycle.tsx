@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   DeliveryPreviewResponse,
   DeliveryResponse,
@@ -14,6 +14,7 @@ import {
   approvePatch,
   fetchDeliveryByPatch,
   fetchDeliveryPreview,
+  fetchScanPatches,
   rejectPatch,
   requestDelivery,
   requestFindingResearch,
@@ -58,6 +59,48 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
   const [showDeliveryModal, setShowDeliveryModal] = useState<boolean>(false);
   const [deliveryNotes, setDeliveryNotes] = useState<string>('');
   const [deliveryRequestedBy, setDeliveryRequestedBy] = useState<string>('lead-engineer');
+  const localPatchActionRef = useRef(false);
+
+  // Reset state whenever the selected finding changes. Do not carry a
+  // previous finding's patch or delivery approval to another resource.
+  useEffect(() => {
+    localPatchActionRef.current = false;
+    setResearch(null);
+    setPlan(null);
+    setWorkflowResult(null);
+    setPatchId(initialPatch?.id || null);
+    setPatchStatus(initialPatch?.status || 'DRAFT');
+    setDiff(initialPatch?.unified_diff || '');
+    setFilesModified(initialPatch?.files_modified || []);
+    setDelivery(null);
+    setDeliveryPreview(null);
+    setError(null);
+  }, [finding.id, initialPatch?.id]);
+
+  // Restore the latest persisted proposal after refresh. A late recovery
+  // response must not overwrite a newly generated or revised patch.
+  useEffect(() => {
+    if (initialPatch) return;
+    let active = true;
+    void (async () => {
+      try {
+        const history = await fetchScanPatches(finding.scan_id);
+        if (!active || localPatchActionRef.current) return;
+        const saved = history.find((patch) => patch.finding_id === finding.id);
+        if (!saved) return;
+        setPatchId(saved.id);
+        setPatchStatus(saved.status);
+        setDiff(saved.unified_diff);
+        setFilesModified(saved.files_modified);
+        setWorkflowResult(null);
+      } catch {
+        if (active && !localPatchActionRef.current) {
+          setError('Saved patch history could not be loaded; retry after checking the API connection.');
+        }
+      }
+    })();
+    return () => { active = false; };
+  }, [finding.id, finding.scan_id, initialPatch?.id]);
 
   // Step 1: Request Research
   const handleRequestResearch = async () => {
@@ -92,11 +135,14 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
     try {
       setError(null);
       setLoadingStep('patch');
+      localPatchActionRef.current = true;
       const res = await requestPatchGeneration(finding.id);
       setWorkflowResult(res);
       setPatchId(res.proposal.id);
       setDiff(res.proposal.unified_diff);
       setFilesModified(res.proposal.files_modified);
+      setDelivery(null);
+      setDeliveryPreview(null);
       setPatchStatus(
         res.machine_verdict === 'PASSED' || res.final_verdict === 'PASSED'
           ? 'VERIFIED'
@@ -148,8 +194,18 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
     try {
       setError(null);
       setLoadingStep('revise');
+      localPatchActionRef.current = true;
       const updated = await revisePatch(patchId, { user_feedback: revisionFeedback });
+      // A revision is a different persisted patch. The old ID/diff and
+      // verifier result must not remain actionable as the child proposal.
+      setPatchId(updated.id);
+      setDiff(updated.unified_diff);
+      setFilesModified(updated.files_modified);
       setPatchStatus(updated.status);
+      setWorkflowResult(null);
+      setDeliveryPreview(null);
+      setDelivery(null);
+      setRevisionFeedback('');
       setShowReviseInput(false);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Revision request failed');
@@ -219,9 +275,11 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
 
         {/* Dynamic Status Badges */}
         <div className="flex items-center space-x-2 flex-wrap gap-1.5">
-          <span className="px-2.5 py-1 text-[11px] font-bold rounded-md uppercase tracking-wider bg-purple-950/80 text-purple-300 border border-purple-800">
-            🤖 AI GENERATED
-          </span>
+          {patchId && (
+            <span className="px-2.5 py-1 text-[11px] font-bold rounded-md uppercase tracking-wider bg-purple-950/80 text-purple-300 border border-purple-800">
+              🤖 AI GENERATED
+            </span>
+          )}
 
           {workflowResult?.verification_result?.status === 'PASSED' && (
             <span className="px-2.5 py-1 text-[11px] font-bold rounded-md uppercase tracking-wider bg-sky-950/80 text-sky-300 border border-sky-800">
@@ -229,7 +287,11 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
             </span>
           )}
 
-          {patchStatus === 'APPROVED' ? (
+          {!patchId ? (
+            <span className="px-2.5 py-1 text-[11px] font-bold rounded-md uppercase tracking-wider bg-neutral-900 text-neutral-300 border border-neutral-700">
+              No patch proposal yet
+            </span>
+          ) : patchStatus === 'APPROVED' ? (
             <span className="px-2.5 py-1 text-[11px] font-bold rounded-md uppercase tracking-wider bg-emerald-950 text-emerald-300 border border-emerald-700">
               ✅ HUMAN APPROVED
             </span>
