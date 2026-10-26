@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { AppShell } from '@/components/layout/AppShell';
 import { useAuth } from '@/context/AuthContext';
 import { isCurrentAccountResponse } from '@/lib/accountRequest';
+import { describeChangeRisk } from '@/lib/changeRiskPresentation';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
@@ -324,19 +325,8 @@ function ChangeAnalysisEntryContent() {
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                   {analysis.risk_level && (
-                    <Badge
-                      variant={
-                        analysis.risk_level === 'CRITICAL'
-                          ? 'critical'
-                          : analysis.risk_level === 'HIGH'
-                          ? 'high'
-                          : analysis.risk_level === 'MEDIUM'
-                          ? 'medium'
-                          : 'low'
-                      }
-                      size="sm"
-                    >
-                      {analysis.risk_level} RISK
+                    <Badge variant={describeChangeRisk(analysis.risk_level)?.variant ?? 'default'} size="sm">
+                      {describeChangeRisk(analysis.risk_level)?.label ?? 'Risk unknown'}
                     </Badge>
                   )}
                   <ChevronRight size={16} style={{ color: 'var(--text-muted)' }} />
