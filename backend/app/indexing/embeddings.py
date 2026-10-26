@@ -2,6 +2,7 @@
 
 from abc import ABC, abstractmethod
 import logging
+import math
 import time
 from typing import List, Optional
 
@@ -15,6 +16,40 @@ from app.indexing.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _validated_embedding_results(
+    vectors: list[tuple[object, object]],
+    *,
+    expected_count: int,
+) -> List[EmbeddingResult]:
+    """Reject partial, repeated, non-finite, and inconsistent provider vectors."""
+    if not isinstance(vectors, list) or len(vectors) != expected_count or expected_count < 1:
+        raise RuntimeError("Embedding provider returned an incomplete result batch.")
+    seen: set[int] = set()
+    expected_dimensions: int | None = None
+    results: List[EmbeddingResult] = []
+    for index, vector in vectors:
+        if (
+            type(index) is not int
+            or index < 0
+            or index >= expected_count
+            or index in seen
+            or not isinstance(vector, list)
+            or not vector
+            or any(
+                type(value) not in (int, float) or not math.isfinite(value)
+                for value in vector
+            )
+        ):
+            raise RuntimeError("Embedding provider returned malformed vector data.")
+        if expected_dimensions is None:
+            expected_dimensions = len(vector)
+        elif len(vector) != expected_dimensions:
+            raise RuntimeError("Embedding provider returned inconsistent vector dimensions.")
+        seen.add(index)
+        results.append(EmbeddingResult(index=index, vector=vector, dimensions=len(vector)))
+    return sorted(results, key=lambda item: item.index)
 
 
 class EmbeddingProvider(ABC):
@@ -104,23 +139,22 @@ class NvidiaEmbeddingAdapter(EmbeddingProvider):
         elapsed_ms = (time.perf_counter() - start) * 1000.0
 
         if resp.status_code != 200:
-            raise RuntimeError(
-                f"NVIDIA embedding request failed ({resp.status_code}): {resp.text}"
-            )
+            raise RuntimeError(f"NVIDIA embedding request failed (HTTP {resp.status_code}).")
 
-        data = resp.json()
-        embeddings = []
-        for item in data.get("data", []):
-            vec = item["embedding"]
-            embeddings.append(
-                EmbeddingResult(
-                    index=item["index"],
-                    vector=vec,
-                    dimensions=len(vec),
-                )
-            )
+        try:
+            data = resp.json()
+            if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+                raise ValueError("invalid response")
+            indexed = [
+                (item.get("index"), item.get("embedding"))
+                for item in data["data"]
+                if isinstance(item, dict)
+            ]
+            embeddings = _validated_embedding_results(indexed, expected_count=len(request.texts))
+        except (TypeError, ValueError, KeyError):
+            raise RuntimeError("NVIDIA embedding provider returned invalid structured output.") from None
 
-        usage = data.get("usage", {})
+        usage = data.get("usage") or {}
         return EmbeddingResponse(
             embeddings=embeddings,
             model=data.get("model", model),
@@ -185,23 +219,22 @@ class HuggingFaceEmbeddingAdapter(EmbeddingProvider):
         elapsed_ms = (time.perf_counter() - start) * 1000.0
 
         if resp.status_code != 200:
-            raise RuntimeError(
-                f"HuggingFace embedding request failed ({resp.status_code}): {resp.text}"
-            )
+            raise RuntimeError(f"HuggingFace embedding request failed (HTTP {resp.status_code}).")
 
-        data = resp.json()
-        embeddings = []
-        for item in data.get("data", []):
-            vec = item["embedding"]
-            embeddings.append(
-                EmbeddingResult(
-                    index=item["index"],
-                    vector=vec,
-                    dimensions=len(vec),
-                )
-            )
+        try:
+            data = resp.json()
+            if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+                raise ValueError("invalid response")
+            indexed = [
+                (item.get("index"), item.get("embedding"))
+                for item in data["data"]
+                if isinstance(item, dict)
+            ]
+            embeddings = _validated_embedding_results(indexed, expected_count=len(request.texts))
+        except (TypeError, ValueError, KeyError):
+            raise RuntimeError("Hugging Face embedding provider returned invalid structured output.") from None
 
-        usage = data.get("usage", {})
+        usage = data.get("usage") or {}
         return EmbeddingResponse(
             embeddings=embeddings,
             model=data.get("model", model),
@@ -273,27 +306,25 @@ class CohereEmbeddingAdapter(EmbeddingProvider):
         elapsed_ms = (time.perf_counter() - start) * 1000.0
 
         if resp.status_code != 200:
-            raise RuntimeError(
-                f"Cohere embedding request failed ({resp.status_code}): {resp.text}"
+            raise RuntimeError(f"Cohere embedding request failed (HTTP {resp.status_code}).")
+
+        try:
+            data = resp.json()
+            if not isinstance(data, dict):
+                raise ValueError("invalid response")
+            raw_embeddings = data.get("embeddings")
+            if isinstance(raw_embeddings, dict):
+                raw_embeddings = raw_embeddings.get("float")
+            if not isinstance(raw_embeddings, list):
+                raise ValueError("invalid vectors")
+            embeddings = _validated_embedding_results(
+                list(enumerate(raw_embeddings)), expected_count=len(request.texts),
             )
+        except (TypeError, ValueError, KeyError):
+            raise RuntimeError("Cohere embedding provider returned invalid structured output.") from None
 
-        data = resp.json()
-        raw_embeddings = data.get("embeddings", [])
-        if isinstance(raw_embeddings, dict) and "float" in raw_embeddings:
-            raw_embeddings = raw_embeddings["float"]
-
-        embeddings = []
-        for idx, vec in enumerate(raw_embeddings):
-            embeddings.append(
-                EmbeddingResult(
-                    index=idx,
-                    vector=vec,
-                    dimensions=len(vec),
-                )
-            )
-
-        meta = data.get("meta", {})
-        billed_units = meta.get("billed_units", {})
+        meta = data.get("meta") or {}
+        billed_units = meta.get("billed_units") or {}
         total_tokens = billed_units.get("input_tokens")
 
         return EmbeddingResponse(
