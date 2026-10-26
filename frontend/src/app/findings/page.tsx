@@ -214,7 +214,7 @@ export default function FindingsPage() {
           </Button>
         </div>
 
-        {accountId && error && <Alert variant="warning" title="Findings data is incomplete">{error}</Alert>}
+        {accountId && loadedForAccount === accountId && error && <Alert variant="warning" title="Findings data is incomplete">{error}</Alert>}
         {accountId && missingEvidenceCount > 0 && (
           <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
             <Alert variant="warning" title="Scan evidence unavailable">
@@ -230,15 +230,17 @@ export default function FindingsPage() {
               {retryingFailedFindings ? 'Retrying missing findings...' : 'Retry missing findings'}
             </Button>
           </div>
-        )
+        )}
 
         {displayLoading ? (
           <><CardSkeleton /><CardSkeleton /></>
         ) : visibleFindings.length === 0 ? (
           <EmptyState
             icon={<ScanIcon size={24} />}
-            title={!accountId ? 'Sign in to view findings' : hasOlderScans ? 'No verified findings in loaded scans' : 'No verified findings yet'}
-            description={hasOlderScans
+            title={!accountId ? 'Sign in to view findings' : missingEvidenceCount > 0 ? 'Some scan findings are unavailable' : hasOlderScans ? 'No verified findings in loaded scans' : 'No verified findings yet'}
+            description={missingEvidenceCount > 0
+              ? 'Retry missing scan findings before concluding that these scans have no verified findings.'
+              : hasOlderScans
               ? 'Load older scans to look for verified findings, or start a new repository scan.'
               : 'Run a repository scan. Only tenant-owned findings that pass RepoLens evidence verification are shown here.'}
             actionLabel={accountId ? 'Start a repository scan' : 'Sign in'}
