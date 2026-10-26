@@ -1,6 +1,6 @@
 'use client';
 
-import { Suspense, useCallback, useEffect, useState } from 'react';
+import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 
 import { AppShell } from '@/components/layout/AppShell';
@@ -19,24 +19,44 @@ function RemediationWorkspaceContent() {
   const [finding, setFinding] = useState<Finding | null>(null);
   const [loading, setLoading] = useState(Boolean(findingId));
   const [error, setError] = useState<string | null>(null);
+  const [resolvedFindingId, setResolvedFindingId] = useState<string | null>(null);
+  const requestVersion = useRef(0);
 
   const loadFinding = useCallback(async () => {
-    if (!findingId) return;
-    setLoading(true);
+    const version = ++requestVersion.current;
+    setFinding(null);
+    setResolvedFindingId(null);
     setError(null);
-    try {
-      setFinding(await fetchFinding(findingId));
-    } catch (caught: unknown) {
-      setFinding(null);
-      setError(caught instanceof Error ? caught.message : 'Failed to load finding');
-    } finally {
+    if (!findingId) {
       setLoading(false);
+      return;
+    }
+    setLoading(true);
+    try {
+      const loaded = await fetchFinding(findingId);
+      if (version === requestVersion.current) setFinding(loaded);
+    } catch (caught: unknown) {
+      if (version === requestVersion.current) {
+        setError(caught instanceof Error ? caught.message : 'Failed to load finding');
+      }
+    } finally {
+      if (version === requestVersion.current) {
+        setResolvedFindingId(findingId);
+        setLoading(false);
+      }
     }
   }, [findingId]);
 
   useEffect(() => {
     void loadFinding();
+    return () => {
+      // Invalidate requests on route changes and unmount, including retries.
+      requestVersion.current += 1;
+    };
   }, [loadFinding]);
+
+  // Do not show another finding's patch/approval controls before the effect runs.
+  const currentFinding = finding?.id === findingId ? finding : null;
 
   if (!findingId) {
     return (
@@ -49,7 +69,7 @@ function RemediationWorkspaceContent() {
     );
   }
 
-  if (loading) {
+  if (loading || resolvedFindingId !== findingId) {
     return (
       <div style={{ display: 'grid', gap: '1rem' }}>
         <CardSkeleton />
@@ -59,7 +79,7 @@ function RemediationWorkspaceContent() {
     );
   }
 
-  if (error || !finding) {
+  if (error || !currentFinding) {
     return (
       <div style={{ display: 'grid', gap: '1rem' }}>
         <Alert variant="error">{error || 'The finding is unavailable.'}</Alert>
@@ -70,7 +90,7 @@ function RemediationWorkspaceContent() {
     );
   }
 
-  return <RemediationLifecycle finding={finding} />;
+  return <RemediationLifecycle key={findingId} finding={currentFinding} />;
 }
 
 export default function RemediationPage() {
