@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, use } from 'react';
+import React, { useState, useEffect, useRef, use } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { AppShell } from '@/components/layout/AppShell';
@@ -56,10 +56,36 @@ interface ChangeDetailPageProps {
 }
 
 export default function ChangeDetailPage({ params }: ChangeDetailPageProps) {
-  const resolvedParams = use(params);
-  const analysisId = resolvedParams.id;
+  const { id: analysisId } = use(params);
+  const { user, isLoading: authLoading } = useAuth();
+  const accountId = user?.id ?? null;
+
+  // An account change must synchronously remove the previous account's PR
+  // diff, review and publication approval state, before any effect runs.
+  if (authLoading || !accountId) {
+    return (
+      <AppShell breadcrumbs={[{ label: 'PR Impact', href: '/change-analysis' }]} title="PR Impact Workspace">
+        <EmptyState
+          icon={<Lock size={24} />}
+          title={authLoading ? 'Checking session' : 'Sign in to view PR analysis'}
+          description="Authenticate before loading private pull request analysis and review publication controls."
+        />
+      </AppShell>
+    );
+  }
+
+  return <ChangeDetailWorkspace key={`${accountId}:${analysisId}`} analysisId={analysisId} />;
+}
+
+function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
   const router = useRouter();
   const { isOperator } = useAuth();
+  const actionGeneration = useRef(0);
+  const publishingRef = useRef(false);
+
+  // An already-started approval request must not start a second GitHub write
+  // after navigation or an account switch unmounts this workspace.
+  useEffect(() => () => { actionGeneration.current += 1; }, []);
 
   const [analysis, setAnalysis] = useState<ChangeAnalysisResponse | null>(null);
   const [diff, setDiff] = useState<StructuralDiffResult | null>(null);
@@ -129,29 +155,40 @@ export default function ChangeDetailPage({ params }: ChangeDetailPageProps) {
   }, [analysisId]);
 
   const handleGeneratePreview = async () => {
+    const generation = actionGeneration.current;
     try {
       const pub = await generateReviewPublicationPreview(analysisId);
-      setPublication(pub);
+      if (generation === actionGeneration.current) setPublication(pub);
     } catch (err: unknown) {
-      setPublishMessage(getErrorMessage(err, 'Failed to generate review preview.'));
+      if (generation === actionGeneration.current) {
+        setPublishMessage(getErrorMessage(err, 'Failed to generate review preview.'));
+      }
     }
   };
 
   const handleApproveAndPublish = async () => {
-    if (!publication?.preview_digest) return;
+    if (!publication?.preview_digest || !isOperator || !confirmedPublish || publishingRef.current) return;
+    const generation = actionGeneration.current;
+    const digest = publication.preview_digest;
+    publishingRef.current = true;
     setIsPublishing(true);
     setPublishMessage(null);
 
     try {
-      await approveReviewPublication(analysisId, publication.preview_digest);
-      const res = await publishReviewPublication(analysisId, publication.preview_digest);
+      await approveReviewPublication(analysisId, digest);
+      if (generation !== actionGeneration.current) return;
+      const res = await publishReviewPublication(analysisId, digest);
+      if (generation !== actionGeneration.current) return;
       setPublishMessage(`Review published successfully to GitHub (Review ID: ${res.github_review_id || 'OK'})`);
       const updatedPub = await fetchReviewPublication(analysisId);
-      setPublication(updatedPub);
+      if (generation === actionGeneration.current) setPublication(updatedPub);
     } catch (err: unknown) {
-      setPublishMessage(getErrorMessage(err, 'Failed to publish review to GitHub.'));
+      if (generation === actionGeneration.current) {
+        setPublishMessage(getErrorMessage(err, 'Failed to publish review to GitHub.'));
+      }
     } finally {
-      setIsPublishing(false);
+      publishingRef.current = false;
+      if (generation === actionGeneration.current) setIsPublishing(false);
     }
   };
 
@@ -245,11 +282,13 @@ export default function ChangeDetailPage({ params }: ChangeDetailPageProps) {
                     ? 'high'
                     : analysis?.risk_level === 'MEDIUM'
                     ? 'medium'
-                    : 'success'
+                    : analysis?.risk_level === 'LOW'
+                    ? 'success'
+                    : 'warning'
                 }
                 size="md"
               >
-                {analysis?.risk_level || 'LOW'} RISK
+                {analysis?.risk_level ? `${analysis.risk_level} RISK` : 'Not assessed'}
               </Badge>
             </div>
           </div>
