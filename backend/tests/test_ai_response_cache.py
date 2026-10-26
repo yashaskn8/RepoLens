@@ -530,3 +530,34 @@ async def test_semantic_cache_ignores_corrupt_vectors_without_losing_valid_hits(
 ])
 def test_semantic_cache_rejects_invalid_vectors(vector) -> None:
     assert AIResponseCache._valid_embedding_vector(vector) is False
+
+
+@pytest.mark.asyncio
+async def test_singleflight_timed_out_provider_does_not_poison_key() -> None:
+    flight: SingleFlight[str] = SingleFlight(task_timeout_seconds=0.02)
+    started = asyncio.Event()
+
+    async def never_finish() -> str:
+        started.set()
+        await asyncio.Event().wait()
+        return "not-reached"
+
+    first = asyncio.create_task(flight.run("same-key", never_finish))
+    await started.wait()
+    second = asyncio.create_task(flight.run("same-key", never_finish))
+    with pytest.raises(asyncio.TimeoutError):
+        await first
+    with pytest.raises(asyncio.TimeoutError):
+        await second
+    await asyncio.sleep(0)
+    assert flight.active_count == 0
+
+    result, shared = await flight.run("same-key", lambda: asyncio.sleep(0, result="recovered"))
+    assert result == "recovered"
+    assert shared is False
+
+
+def test_singleflight_rejects_invalid_timeout() -> None:
+    for invalid in [0, -1, float("inf"), float("nan")]:
+        with pytest.raises(ValueError, match="finite and positive"):
+            SingleFlight(task_timeout_seconds=invalid)

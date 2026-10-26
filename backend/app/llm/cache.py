@@ -370,8 +370,11 @@ T = TypeVar("T")
 class SingleFlight(Generic[T]):
     """Coalesce identical in-process work without a durable/distributed lock."""
 
-    def __init__(self, max_entries: int = 256) -> None:
+    def __init__(self, max_entries: int = 256, task_timeout_seconds: float = 300.0) -> None:
         self.max_entries = max(1, max_entries)
+        if not math.isfinite(task_timeout_seconds) or task_timeout_seconds <= 0:
+            raise ValueError("Single-flight task timeout must be finite and positive.")
+        self.task_timeout_seconds = task_timeout_seconds
         self._lock = asyncio.Lock()
         self._tasks: dict[str, asyncio.Task[T]] = {}
 
@@ -388,7 +391,11 @@ class SingleFlight(Generic[T]):
                 if len(self._tasks) >= self.max_entries:
                     bypass = True
                 else:
-                    task = asyncio.create_task(factory())
+                    # A hung provider must not leave an immortal in-flight
+                    # key shared by all future callers.
+                    task = asyncio.create_task(
+                        asyncio.wait_for(factory(), timeout=self.task_timeout_seconds)
+                    )
                     self._tasks[key] = task
                     task.add_done_callback(
                         lambda completed, request_key=key: self._on_done(
