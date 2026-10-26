@@ -107,7 +107,7 @@ class MCPRepositoryServer:
             source_bytes.decode("utf-8")
         except UnicodeDecodeError:
             return None, "MCP_SOURCE_ENCODING_UNSUPPORTED: Snapshot source is not valid UTF-8."
-        if b"\\x00" in source_bytes:
+        if b"\x00" in source_bytes:
             return None, "MCP_FILE_UNSUPPORTED: Source contains binary NUL bytes."
         return source_bytes, None
 
