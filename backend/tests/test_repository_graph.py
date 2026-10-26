@@ -288,3 +288,39 @@ def test_build_repository_graph_from_manifest_fixture():
     assert report.total_backend_routes == 1
     assert report.matched_count == 1          # GET /api/v1/items/:id matches GET /api/v1/items/{item_id}
     assert report.method_mismatch_count == 1  # DELETE /api/v1/items/:id has method mismatch on backend
+
+
+@pytest.mark.parametrize(
+    "module,expected",
+    [
+        ("@/components/Widget", "frontend/src/components/Widget.jsx"),
+        ("@/components/icons", "frontend/src/components/icons/index.tsx"),
+        ("@/pages/Dashboard", "frontend/src/pages/Dashboard.tsx"),
+        ("@/pages/Dashboard.tsx", "frontend/src/pages/Dashboard.tsx"),
+        ("features/Chart", "frontend/src/features/Chart/index.jsx"),
+    ],
+)
+def test_graph_resolves_tsx_jsx_and_nextjs_internal_aliases(module, expected):
+    from app.graph.builder import _resolve_js_ts_module_to_file
+
+    files = {
+        "frontend/src/components/Widget.jsx",
+        "frontend/src/components/icons/index.tsx",
+        "frontend/src/pages/Dashboard.tsx",
+        "frontend/src/features/Chart/index.jsx",
+    }
+    assert _resolve_js_ts_module_to_file(
+        module, "frontend/src/app/page.tsx", files
+    ) == expected
+
+
+def test_graph_keeps_ambiguous_aliases_unresolved():
+    from app.graph.builder import _resolve_js_ts_module_to_file
+
+    files = {
+        "frontend/src/components/Widget.jsx",
+        "packages/ui/components/Widget.jsx",
+    }
+    assert _resolve_js_ts_module_to_file(
+        "@/components/Widget", "frontend/src/app/page.tsx", files
+    ) is None

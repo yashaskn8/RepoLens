@@ -120,14 +120,22 @@ def _resolve_js_ts_module_to_file(
             return norm_path
         return None
 
-    # Suffix match for non-relative aliases
+    # Resolve conventional Next.js/TypeScript @/ aliases without inventing
+    # a target when multiple projects expose the same suffix. Include JSX
+    # files and TSX/JSX index modules that the earlier resolver omitted.
+    alias = source_str[2:] if source_str.startswith("@/") else source_str
+    if not alias:
+        return None
+    suffixes = (
+        ".ts", ".tsx", ".js", ".jsx",
+        "/index.ts", "/index.tsx", "/index.js", "/index.jsx",
+    )
     matching = [
-        f for f in all_file_paths
-        if f.endswith(f"/{source_str}.ts")
-        or f.endswith(f"/{source_str}.tsx")
-        or f.endswith(f"/{source_str}.js")
-        or f.endswith(f"/{source_str}/index.ts")
-        or f.endswith(f"/{source_str}/index.js")
+        file_path
+        for file_path in all_file_paths
+        if file_path == alias
+        or file_path.endswith(f"/{alias}")
+        or any(file_path.endswith(f"/{alias}{ext}") for ext in suffixes)
     ]
     if len(matching) == 1:
         return matching[0]
