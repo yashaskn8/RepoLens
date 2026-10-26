@@ -209,7 +209,7 @@ class MCPRepositoryServer:
                     "type": "object",
                     "properties": {
                         "route_or_url": {"type": "string", "description": "Route path or client URL pattern (e.g. /api/users/:id or /api/users/{id})"},
-                        "http_method": {"type": "string", "description": "Optional HTTP method (GET, POST, PUT, DELETE)"},
+                        "http_method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"], "description": "HTTP method; defaults to GET"},
                     },
                     "required": ["route_or_url"],
                     "additionalProperties": False,
@@ -566,8 +566,11 @@ class MCPRepositoryServer:
                 is_truncated = False
                 if self.repository_graph:
                     for node in self.repository_graph.get_nodes_by_kind(NodeKind.SYMBOL):
-                        if node.label == sym_name or sym_name in node.label:
-                            if not f_path or (node.file_path and f_path in node.file_path):
+                        if node.label == sym_name:
+                            if not f_path or (
+                                node.file_path
+                                and node.file_path.replace("\\", "/") == f_path.replace("\\", "/")
+                            ):
                                 # Gather connected neighbors
                                 for edge in self.repository_graph.get_outgoing_edges(node.id):
                                     tgt = self.repository_graph.get_node(edge.target)
@@ -608,6 +611,8 @@ class MCPRepositoryServer:
                 method = arguments.get("http_method", "GET").upper()
                 if not raw_route:
                     return MCPToolCallResponse(tool_name=tool_name, is_error=True, error_message="Parameter 'route_or_url' is required.")
+                if method not in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}:
+                    return MCPToolCallResponse(tool_name=tool_name, is_error=True, error_message="MCP_ARGUMENT_INVALID: Unsupported HTTP method.")
 
                 norm_path = normalize_route_path(raw_route)
                 routes = self.evidence_store.get_routes()
@@ -617,10 +622,12 @@ class MCPRepositoryServer:
                 matched_routes = [
                     r.model_dump() for r in routes
                     if normalize_route_path(r.details.get("path", "")) == norm_path
+                    and str(r.details.get("http_method") or "").upper() == method
                 ]
                 matched_calls = [
                     c.model_dump() for c in calls
                     if normalize_route_path(c.details.get("url") or c.details.get("target", "")) == norm_path
+                    and str(c.details.get("http_method") or "").upper() == method
                 ]
 
                 backend_total = len(matched_routes)

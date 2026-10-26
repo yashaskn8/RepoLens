@@ -141,3 +141,53 @@ async def test_mcp_tool_repo_retrieve_context(sample_mcp_setup):
     assert "graph_relationships" in bundle_data
     assert "provenance" in bundle_data
     assert len(bundle_data["relevant_chunks"]) >= 1
+
+@pytest.mark.asyncio
+async def test_mcp_trace_contract_matches_method_not_only_path(sample_mcp_setup, monkeypatch):
+    """POST and GET endpoints at the same path are different contracts."""
+    routes = [
+        ParsedSymbol(
+            name="list_items", kind=SymbolKind.FASTAPI_ROUTE, start_line=1, end_line=2,
+            details={"path": "/api/v1/items", "http_method": "GET"},
+        ),
+    ]
+    calls = [
+        ParsedSymbol(
+            name="create_item", kind=SymbolKind.FETCH_CALL, start_line=3, end_line=4,
+            details={"url": "/api/v1/items", "http_method": "POST"},
+        ),
+    ]
+    monkeypatch.setattr(sample_mcp_setup.evidence_store, "get_routes", lambda: routes)
+    monkeypatch.setattr(sample_mcp_setup.evidence_store, "get_http_calls", lambda: calls)
+    post = await sample_mcp_setup.call_tool(
+        "repo_trace_contract", {"route_or_url": "/api/v1/items", "http_method": "POST"},
+    )
+    assert not post.is_error
+    assert post.content["backend_routes"] == []
+    assert len(post.content["frontend_calls"]) == 1
+    assert post.content["is_matched"] is False
+    get = await sample_mcp_setup.call_tool(
+        "repo_trace_contract", {"route_or_url": "/api/v1/items", "http_method": "GET"},
+    )
+    assert not get.is_error
+    assert len(get.content["backend_routes"]) == 1
+    assert get.content["frontend_calls"] == []
+    assert get.content["is_matched"] is False
+
+
+@pytest.mark.asyncio
+async def test_mcp_related_symbol_never_matches_partial_name_or_file_path(
+    sample_mcp_setup,
+):
+    """Symbol and file path filters must be exact, not fuzzy aliases."""
+    near_name = await sample_mcp_setup.call_tool(
+        "repo_get_related_symbols", {"symbol_name": "get_item"},
+    )
+    assert not near_name.is_error
+    assert near_name.content["related_symbols"] == []
+    near_path = await sample_mcp_setup.call_tool(
+        "repo_get_related_symbols",
+        {"symbol_name": "get_items", "file_path": "main.py"},
+    )
+    assert not near_path.is_error
+    assert near_path.content["related_symbols"] == []
