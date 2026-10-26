@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/Button';
 
 export interface HumanReviewControlsProps {
   patchStatus: string;
+  canRevise: boolean;
   loadingStep: string | null;
   showReviseInput: boolean;
   onToggleReviseInput: () => void;
@@ -18,6 +19,8 @@ export interface HumanReviewControlsProps {
 }
 
 export const HumanReviewControls: React.FC<HumanReviewControlsProps> = ({
+  patchStatus,
+  canRevise,
   loadingStep,
   showReviseInput,
   onToggleReviseInput,
@@ -31,6 +34,8 @@ export const HumanReviewControls: React.FC<HumanReviewControlsProps> = ({
   onRevise,
   onReject,
 }) => {
+  const reviewReady = patchStatus === 'VERIFIED' || patchStatus === 'NEEDS_REVIEW';
+  const busy = loadingStep !== null;
   return (
     <div className="rounded-lg border border-amber-900/50 bg-amber-950/20 p-4 space-y-3">
       <div className="flex items-center justify-between flex-wrap gap-3">
@@ -48,6 +53,7 @@ export const HumanReviewControls: React.FC<HumanReviewControlsProps> = ({
             variant="filter"
             size="sm"
             onClick={onToggleReviseInput}
+            disabled={!reviewReady || !canRevise || busy}
           >
             Request Revision
           </Button>
@@ -55,6 +61,7 @@ export const HumanReviewControls: React.FC<HumanReviewControlsProps> = ({
             variant="danger"
             size="sm"
             onClick={onToggleRejectInput}
+            disabled={busy}
           >
             Reject
           </Button>
@@ -62,7 +69,7 @@ export const HumanReviewControls: React.FC<HumanReviewControlsProps> = ({
             variant="primary"
             size="sm"
             onClick={onApprove}
-            disabled={loadingStep === 'approve'}
+            disabled={!reviewReady || busy}
             isLoading={loadingStep === 'approve'}
             className="bg-emerald-700 hover:bg-emerald-600 border-emerald-600"
           >
@@ -72,7 +79,7 @@ export const HumanReviewControls: React.FC<HumanReviewControlsProps> = ({
       </div>
 
       {/* Revision Feedback Input */}
-      {showReviseInput && (
+      {showReviseInput && canRevise && reviewReady && (
         <div className="space-y-2 pt-2 border-t border-amber-900/40">
           <label className="text-[11px] font-medium text-neutral-300 block">
             Targeted Revision Feedback (Allows 1 Automatic Revision):
@@ -89,7 +96,7 @@ export const HumanReviewControls: React.FC<HumanReviewControlsProps> = ({
               variant="filter-active"
               size="sm"
               onClick={onRevise}
-              disabled={!revisionFeedback.trim() || loadingStep === 'revise'}
+              disabled={!revisionFeedback.trim() || busy}
               isLoading={loadingStep === 'revise'}
             >
               Submit
@@ -116,7 +123,7 @@ export const HumanReviewControls: React.FC<HumanReviewControlsProps> = ({
               variant="danger"
               size="sm"
               onClick={onReject}
-              disabled={!rejectReason.trim() || loadingStep === 'reject'}
+              disabled={!rejectReason.trim() || busy}
               isLoading={loadingStep === 'reject'}
             >
               Confirm Rejection

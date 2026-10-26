@@ -44,6 +44,7 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
   const [plan, setPlan] = useState<FixPlan | null>(null);
   const [workflowResult, setWorkflowResult] = useState<PatchWorkflowResult | null>(null);
   const [patchStatus, setPatchStatus] = useState<string>(initialPatch?.status || 'DRAFT');
+  const [revisionNumber, setRevisionNumber] = useState<number>(initialPatch?.revision_number ?? 0);
   const [patchId, setPatchId] = useState<string | null>(initialPatch?.id || null);
   const [diff, setDiff] = useState<string>(initialPatch?.unified_diff || '');
   const [filesModified, setFilesModified] = useState<string[]>(initialPatch?.files_modified || []);
@@ -71,6 +72,7 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
     setWorkflowResult(null);
     setPatchId(initialPatch?.id || null);
     setPatchStatus(initialPatch?.status || 'DRAFT');
+    setRevisionNumber(initialPatch?.revision_number ?? 0);
     setDiff(initialPatch?.unified_diff || '');
     setFilesModified(initialPatch?.files_modified || []);
     setDelivery(null);
@@ -91,6 +93,7 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
         if (!saved) return;
         setPatchId(saved.id);
         setPatchStatus(saved.status);
+        setRevisionNumber(saved.revision_number ?? 0);
         setDiff(saved.unified_diff);
         setFilesModified(saved.files_modified);
         setWorkflowResult(null);
@@ -140,6 +143,7 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
       const res = await requestPatchGeneration(finding.id);
       setWorkflowResult(res);
       setPatchId(res.proposal.id);
+      setRevisionNumber(0);
       setDiff(res.proposal.unified_diff);
       setFilesModified(res.proposal.files_modified);
       setDelivery(null);
@@ -203,6 +207,7 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
       setDiff(updated.unified_diff);
       setFilesModified(updated.files_modified);
       setPatchStatus(updated.status);
+      setRevisionNumber(updated.revision_number ?? 1);
       setWorkflowResult(null);
       setDeliveryPreview(null);
       setDelivery(null);
@@ -308,7 +313,7 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
             </span>
           ) : (
             <span className="px-2.5 py-1 text-[11px] font-bold rounded-md uppercase tracking-wider bg-amber-950/70 text-amber-300 border border-amber-800">
-              ⏳ AWAITING HUMAN REVIEW
+              {patchStatus === 'DRAFT' ? 'Not yet verified' : 'Awaiting human review'}
             </span>
           )}
         </div>
@@ -346,6 +351,7 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
         {diff && patchStatus !== 'APPROVED' && patchStatus !== 'REJECTED' && (
           <HumanReviewControls
             patchStatus={patchStatus}
+            canRevise={revisionNumber < 1}
             loadingStep={loadingStep}
             showReviseInput={showReviseInput}
             onToggleReviseInput={() => setShowReviseInput(!showReviseInput)}
