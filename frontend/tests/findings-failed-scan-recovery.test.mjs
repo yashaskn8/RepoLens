@@ -49,7 +49,7 @@ function makeRetry({ failedIds = ['missing'], fetch = async () => [], findings =
   context.setRetryingFailedFindings = (value) => { context.retrying = value; };
   context.setFindings = (update) => { context.findings = update(context.findings); };
   context.setFailedScanIds = (update) => { context.failedScanIds = update(context.failedScanIds); };
-  runInNewContext(transpile(callback + '\\nglobalThis.retry = retryFailedFindings;'), context);
+  runInNewContext(transpile(callback + '\nglobalThis.retry = retryFailedFindings;'), context);
   return context;
 }
 
