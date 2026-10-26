@@ -342,3 +342,40 @@ async def test_verification_fails_on_patch_apply_error_and_preserves_original_re
         # Original repo must remain strictly unchanged
         with open(orig_file, "r", encoding="utf-8") as f:
             assert f.read() == original_content
+
+
+@pytest.mark.parametrize("file_name", [
+    "/tmp/outsider.py",
+    "C:/outside.py",
+    "../outside.py",
+    "source/../../outside.py",
+    "/dev/null_extra",
+])
+def test_strict_parser_rejects_unsafe_source_paths(file_name):
+    """Patch file headers cannot disguise absolute or traversal paths."""
+    from app.patching.applier import parse_unified_diff
+    diff = (
+        f"--- {file_name}\n"
+        "+++ b/safe.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+    with pytest.raises(PatchApplyError, match="Path traversal detected"):
+        parse_unified_diff(diff)
+
+
+def test_strict_parser_rejects_unknown_backslash_directive():
+    """The only supported special diff directive is the standard EOF marker."""
+    from app.patching.applier import parse_unified_diff
+    diff = (
+        "--- a/safe.py\n"
+        "+++ b/safe.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+        "\\ arbitrary directive\n"
+    )
+    with pytest.raises(PatchApplyError, match="Invalid diff line marker"):
+        parse_unified_diff(diff)
+

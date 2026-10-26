@@ -90,15 +90,29 @@ def parse_unified_diff(unified_diff: str) -> List[FilePatch]:
         orig_file = orig_file_match.group(1).replace("\\", "/")
         new_file = new_file_match.group(1).replace("\\", "/")
 
+        # Validate untrusted header names before removing any prefix. In
+        # particular, absolute paths must not be reinterpreted as relative.
+        for file_name in (orig_file, new_file):
+            if file_name == "/dev/null":
+                continue
+            if (
+                not file_name
+                or file_name.startswith("/")
+                or re.match(r"^[A-Za-z]:", file_name)
+                or any(part in {"", ".", ".."} for part in file_name.split("/"))
+                or any(ord(ch) < 32 or ord(ch) == 127 for ch in file_name)
+            ):
+                raise PatchApplyError("Path traversal detected in unified diff file headers.")
+
         target_file = new_file if new_file != "/dev/null" else orig_file
-        clean_target = target_file.lstrip("/")
+        clean_target = target_file
 
         # Check binary file extension
         _, ext = os.path.splitext(clean_target.lower())
         if ext in _BINARY_EXTENSIONS:
             raise PatchApplyError(f"Binary file patch rejected: '{clean_target}'", file_path=clean_target)
 
-        is_new_file = (orig_file == "/dev/null" or orig_file.startswith("/dev/null"))
+        is_new_file = (orig_file == "/dev/null")
         is_deleted_file = (new_file == "/dev/null")
         if not is_new_file and not is_deleted_file and orig_file != new_file:
             raise PatchApplyError(
@@ -133,7 +147,7 @@ def parse_unified_diff(unified_diff: str) -> List[FilePatch]:
                     hunk_index=hunk_idx,
                 )
             elif current_hunk is not None:
-                if line.startswith(("\\ No newline at end of file", "\\")):
+                if line == "\\ No newline at end of file":
                     continue
                 if line.startswith((" ", "-", "+")):
                     prefix = line[0]
