@@ -10,24 +10,29 @@ import { EmptyState } from '@/components/ui/EmptyState';
 import { CardSkeleton } from '@/components/ui/Skeleton';
 import { RemediationLifecycle } from '@/features/remediation/RemediationLifecycle';
 import { fetchFinding } from '@/lib/api';
+import { useAuth } from '@/context/AuthContext';
 import type { Finding } from '@/types/domain';
 
 function RemediationWorkspaceContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const findingId = searchParams.get('findingId');
+  const { user, isLoading: authLoading } = useAuth();
+  const accountId = user?.id ?? null;
   const [finding, setFinding] = useState<Finding | null>(null);
   const [loading, setLoading] = useState(Boolean(findingId));
   const [error, setError] = useState<string | null>(null);
   const [resolvedFindingId, setResolvedFindingId] = useState<string | null>(null);
+  const [resolvedAccountId, setResolvedAccountId] = useState<string | null>(null);
   const requestVersion = useRef(0);
 
   const loadFinding = useCallback(async () => {
     const version = ++requestVersion.current;
     setFinding(null);
     setResolvedFindingId(null);
+    setResolvedAccountId(null);
     setError(null);
-    if (!findingId) {
+    if (!findingId || !accountId || authLoading) {
       setLoading(false);
       return;
     }
@@ -42,10 +47,11 @@ function RemediationWorkspaceContent() {
     } finally {
       if (version === requestVersion.current) {
         setResolvedFindingId(findingId);
+        setResolvedAccountId(accountId);
         setLoading(false);
       }
     }
-  }, [findingId]);
+  }, [findingId, accountId, authLoading]);
 
   useEffect(() => {
     void loadFinding();
@@ -55,7 +61,7 @@ function RemediationWorkspaceContent() {
     };
   }, [loadFinding]);
 
-  // Do not show another finding's patch/approval controls before the effect runs.
+  // Do not show another finding or account's approval controls before effects run.
   const currentFinding = finding?.id === findingId ? finding : null;
 
   if (!findingId) {
@@ -69,7 +75,11 @@ function RemediationWorkspaceContent() {
     );
   }
 
-  if (loading || resolvedFindingId !== findingId) {
+  if (!authLoading && !accountId) {
+    return <Alert variant="warning">Sign in to view this finding and its remediation history.</Alert>;
+  }
+
+  if (authLoading || loading || resolvedFindingId !== findingId || resolvedAccountId !== accountId) {
     return (
       <div style={{ display: 'grid', gap: '1rem' }}>
         <CardSkeleton />
@@ -90,7 +100,7 @@ function RemediationWorkspaceContent() {
     );
   }
 
-  return <RemediationLifecycle key={findingId} finding={currentFinding} />;
+  return <RemediationLifecycle key={`${accountId}:${findingId}`} finding={currentFinding} />;
 }
 
 export default function RemediationPage() {

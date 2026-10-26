@@ -54,6 +54,7 @@ function mount() {
     react,
     'react/jsx-runtime': { jsx, jsxs: jsx },
     'next/navigation': { useRouter: () => ({ push() {} }), useSearchParams: () => ({ get: () => findingId }) },
+    '@/context/AuthContext': { useAuth: () => ({ user: { id: 'account-A' }, isLoading: false }) },
     '@/components/layout/AppShell': { AppShell: stub },
     '@/components/ui/Alert': { Alert: stub },
     '@/components/ui/Button': { Button: stub },
