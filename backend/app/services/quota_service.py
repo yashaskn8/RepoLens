@@ -40,7 +40,10 @@ def _get_limit(settings: Settings, operation: str) -> int:
         UsageOperation.PATCH_GENERATE.value: settings.MAX_DAILY_PATCH_GENERATIONS_PER_USER,
         UsageOperation.CHAINBRAIN_AI_EXPLAIN.value: settings.MAX_DAILY_CHAINBRAIN_AI_EXPLANATIONS_PER_USER,
     }
-    return limits.get(operation, 999999)
+    if operation not in limits:
+        # An unknown operation must never get an effectively unlimited budget.
+        raise ValueError("Unsupported quota operation.")
+    return limits[operation]
 
 
 def _validate_user_id(user_id: str) -> str:

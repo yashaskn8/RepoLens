@@ -92,3 +92,14 @@ def test_api_quota_enforcement_returns_429(client: TestClient, db_session: Sessi
     )
     assert resp.status_code == 429
     assert "DAILY_QUOTA_EXCEEDED" in resp.json()["detail"]
+
+
+def test_quota_rejects_unknown_operation_without_consuming_any_budget(db_session: Session):
+    """Misspelled/future operations cannot silently receive unlimited quota."""
+    user_id = str(uuid4())
+    with pytest.raises(ValueError, match="Unsupported quota operation"):
+        check_and_increment_quota(db_session, user_id, "SCAN_CREATE_UNTRACKED")
+    assert db_session.query(UsageCounterModel).filter(
+        UsageCounterModel.user_id == user_id,
+    ).count() == 0
+
