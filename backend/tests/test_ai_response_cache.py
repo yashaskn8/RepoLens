@@ -489,3 +489,44 @@ async def test_cache_serialization_failure_never_breaks_successful_model_call() 
     await cache.store_response(_request(), "route/v1", response)
     assert response.content == "valid provider result"
 
+
+
+@pytest.mark.asyncio
+async def test_semantic_cache_ignores_corrupt_vectors_without_losing_valid_hits() -> None:
+    """A malformed Redis bucket entry cannot poison an otherwise valid cache hit."""
+    store = MemoryCacheStore()
+    cache = AIResponseCache(
+        store=store,
+        embedding_provider=StableEmbeddingProvider(),
+    )
+    request = _request("summarize the repository")
+    request.cache_mode = "semantic"
+    request.cache_task = "summary"
+    response = LLMResponse(
+        content="repository summary",
+        model="test-model",
+        provider=LLMProvider.GROQ,
+        metadata=ModelExecutionMetadata(model_name="test-model", provider="groq"),
+    )
+    await cache.store_response(request, "route/v1", response)
+    other = _request("summarize the whole repository")
+    other.cache_mode = "semantic"
+    other.cache_task = "summary"
+    bucket = f"cache:{cache.semantic_bucket_key(other, 'route/v1')}"
+    assert isinstance(store.values[bucket], list)
+    store.values[bucket].insert(0, {
+        "vector": ["bad-value", 0.0, 0.0],
+        "response": {"content": "forged-cache-result"},
+    })
+    hit = await cache.lookup(other, "route/v1")
+    assert hit is not None
+    assert hit.kind == "semantic"
+    assert hit.response.content == "repository summary"
+
+
+@pytest.mark.parametrize("vector", [
+    [], [True, 0.0], ["0.1", 1.0], [float("nan")],
+    [float("inf")], [1e308, 1e308],
+])
+def test_semantic_cache_rejects_invalid_vectors(vector) -> None:
+    assert AIResponseCache._valid_embedding_vector(vector) is False

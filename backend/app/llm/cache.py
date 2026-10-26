@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import hashlib
 import inspect
 import json
+import math
 from typing import Awaitable, Callable, Generic, Protocol, TypeVar
 
 from app.core.config import get_settings
@@ -189,14 +190,20 @@ class AIResponseCache:
         if not isinstance(entries, list) or not entries:
             return None
         vector = await self._embed_request(provider, request)
-        if vector is None:
+        if not self._valid_embedding_vector(vector):
             return None
+        assert vector is not None
         threshold = get_settings().AI_SEMANTIC_CACHE_SIMILARITY_THRESHOLD
         best: tuple[float, dict] | None = None
         for entry in entries:
-            if not isinstance(entry, dict) or not isinstance(entry.get("vector"), list):
+            if not isinstance(entry, dict):
                 continue
-            score = cosine_similarity(vector, entry["vector"])
+            cached_vector = entry.get("vector")
+            if not self._valid_embedding_vector(cached_vector) or len(cached_vector) != len(vector):
+                # Redis entries can be stale/corrupted independently. Do not
+                # let one invalid vector disable other valid, scoped hits.
+                continue
+            score = cosine_similarity(vector, cached_vector)
             if score >= threshold and (best is None or score > best[0]):
                 best = (score, entry)
         if best is None:
@@ -217,7 +224,7 @@ class AIResponseCache:
         if provider is None:
             return
         vector = await self._embed_request(provider, request)
-        if vector is None:
+        if not self._valid_embedding_vector(vector):
             return
         key = self.semantic_bucket_key(request, routing_identity)
         existing = await self.store.get(key, namespace="cache")
@@ -231,6 +238,22 @@ class AIResponseCache:
             ttl=get_settings().AI_SEMANTIC_CACHE_TTL_SECONDS,
             namespace="cache",
         )
+
+    @staticmethod
+    def _valid_embedding_vector(vector: object) -> bool:
+        """Validate an optional cache vector without trusting the Redis payload."""
+        if not isinstance(vector, list) or not vector:
+            return False
+        norm = 0.0
+        for value in vector:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return False
+            if not math.isfinite(value):
+                return False
+            norm += value * value
+            if not math.isfinite(norm):
+                return False
+        return norm > 0.0
 
     async def _embed_request(
         self, provider: EmbeddingProvider, request: LLMRequest
