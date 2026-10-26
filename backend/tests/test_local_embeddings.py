@@ -717,3 +717,20 @@ class TestVectorIndexDefaultDimension:
         results = idx.query(vec, top_k=1)
         assert len(results) == 1
         assert results[0][0] == "chunk1"
+
+
+@pytest.mark.parametrize(
+    "vector,message",
+    [
+        ("not-a-vector", "non-list vector"),
+        ([0.5, "invalid"], "non-numeric"),
+        ([0.5, True], "non-numeric"),
+        ([1e308, 1e308], "norm is non-finite"),
+    ],
+)
+def test_malformed_local_embedding_vector_is_rejected(vector, message):
+    """Unexpected model values fail with a typed error, never a TypeError or an infinite norm."""
+    service = LocalEmbeddingService()
+    service._dimensions = 2
+    with pytest.raises(LocalEmbeddingError, match=message):
+        service._validate_vector(vector)

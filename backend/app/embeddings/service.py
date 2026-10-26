@@ -306,17 +306,23 @@ class LocalEmbeddingService:
 
     def _validate_vector(self, vec: list[float]) -> None:
         """Validate that a vector has correct dimension and finite values."""
+        if not isinstance(vec, list):
+            raise LocalEmbeddingError("Embedding model returned a non-list vector")
         if len(vec) != self._dimensions:
             raise LocalEmbeddingError(
                 f"Expected dimension {self._dimensions}, got {len(vec)}"
             )
         for i, val in enumerate(vec):
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                raise LocalEmbeddingError(f"Embedding vector contains a non-numeric value at index {i}")
             if not math.isfinite(val):
                 raise LocalEmbeddingError(
                     f"Non-finite value at index {i}: {val}"
                 )
         # Verify vector is not all zeros (would indicate failed normalization)
         norm_sq = sum(v * v for v in vec)
+        if not math.isfinite(norm_sq):
+            raise LocalEmbeddingError("Embedding vector norm is non-finite")
         if norm_sq < 1e-12:
             raise LocalEmbeddingError(
                 "Embedding vector is effectively zero — model output invalid"
