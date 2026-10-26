@@ -13,6 +13,7 @@ import {
 import {
   approvePatch,
   fetchDeliveryByPatch,
+  fetchDelivery,
   fetchDeliveryPreview,
   fetchScanPatches,
   fetchJobResult,
@@ -312,6 +313,40 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
     };
   }, [patchId, patchStatus]);
 
+  // A successful submission may only enqueue GitHub delivery. Keep
+  // reading the same authorized record until a terminal state is persisted;
+  // never submit another write because the initial response was HTTP 202.
+  useEffect(() => {
+    if (!delivery?.id || ['PR_CREATED', 'FAILED', 'BLOCKED'].includes(delivery.status)) return;
+    let active = true;
+    let attempts = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const refresh = async () => {
+      try {
+        const next = await fetchDelivery(delivery.id);
+        if (!active) return;
+        if (next.id !== delivery.id || next.patch_id !== patchId) {
+          setError('Delivery status does not match the approved patch.');
+          return;
+        }
+        setDelivery(next);
+        if (['PR_CREATED', 'FAILED', 'BLOCKED'].includes(next.status)) return;
+      } catch {
+        if (active) setError('Delivery status could not be refreshed. Check the persisted delivery before retrying.');
+      }
+      if (active && ++attempts < 120) {
+        timer = setTimeout(() => { void refresh(); }, 2000);
+      } else if (active) {
+        setError('GitHub delivery is still processing. Refresh the page to recover its persisted state.');
+      }
+    };
+    timer = setTimeout(() => { void refresh(); }, 2000);
+    return () => {
+      active = false;
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, [delivery?.id, delivery?.status, patchId]);
+
   // Step 8: Execute Safe GitHub Delivery
   const handleDeliver = async () => {
     if (!patchId || !user?.id || !isOperator || !deliveryPreview?.eligible || !deliveryPreview.github_delivery_configured) {
@@ -468,12 +503,12 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
                     !isOperator ||
                     !deliveryPreview?.eligible ||
                     !deliveryPreview.github_delivery_configured ||
-                    delivery?.status === 'BLOCKED'
+                    (delivery !== null && !['FAILED', 'BLOCKED'].includes(delivery.status))
                   }
                   className="px-4 py-1.5 text-xs font-semibold bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded border border-emerald-600 shadow-sm transition inline-flex items-center gap-1.5"
                 >
-                  {loadingStep === 'deliver' ? (
-                    'Creating Pull Request...'
+                  {loadingStep === 'deliver' || (delivery !== null && !['FAILED', 'BLOCKED'].includes(delivery.status)) ? (
+                    'Delivery in progress...'
                   ) : (
                     <>
                       <span>Open GitHub Pull Request</span>
