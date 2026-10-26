@@ -467,7 +467,7 @@ def test_change_analysis_sse_uses_canonical_events_and_numeric_ids(client: TestC
     )
     assert response.status_code == 200
     assert "event: CHANGE_ANALYSIS_COMPLETED" in response.text
-    assert f"id: {event.id}\\n" in response.text
+    assert f"id: {event.id}\n" in response.text
     assert '"event_type": "CHANGE_ANALYSIS_COMPLETED"' in response.text
     assert '"id": "' not in response.text
     assert "event: workflow_event" not in response.text
