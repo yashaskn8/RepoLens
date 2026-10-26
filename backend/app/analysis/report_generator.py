@@ -80,6 +80,7 @@ def _markdown_pr_label(raw: object) -> str:
         ("|", "\\|"),
         ("[", "\\["),
         ("]", "\\]"),
+        ("`", "&#96;"),
         ("<", "&lt;"),
         (">", "&gt;"),
     ):
@@ -125,8 +126,8 @@ def _render_markdown_report(
             f"| **Pull Request** | [#{pr_num} {_markdown_pr_label(pr_title)}]"
             f"({analysis.repository_url}/pull/{pr_num}) |"
         )
-    lines.append(f"| **Base Revision** | `{analysis.base_commit_sha}` ({analysis.base_ref or 'base'}) |")
-    lines.append(f"| **Head Revision** | `{analysis.head_commit_sha}` ({analysis.head_ref or 'head'}) |")
+    lines.append(f"| **Base Revision** | `{analysis.base_commit_sha}` ({_markdown_pr_label(analysis.base_ref or 'base')}) |")
+    lines.append(f"| **Head Revision** | `{analysis.head_commit_sha}` ({_markdown_pr_label(analysis.head_ref or 'head')}) |")
     lines.append(f"| **Created At** | `{analysis.created_at.isoformat() if analysis.created_at else 'N/A'}` |")
     lines.append(f"| **Completed At** | `{analysis.completed_at.isoformat() if analysis.completed_at else 'N/A'}` |")
     if duration_seconds is not None:
@@ -162,7 +163,7 @@ def _render_markdown_report(
             lines.append("| :--- | :--- | :--- | :--- | :--- |")
             for r in route_deltas:
                 m = f"`{r.base_http_method or '-'}` → `{r.head_http_method or '-'}`"
-                lines.append(f"| `{r.file_path}` | `{r.route_name}` | {m} | `{r.change_type}` | {r.details} |")
+                lines.append(f"| `{_markdown_pr_label(r.file_path)}` | `{_markdown_pr_label(r.route_name)}` | {m} | `{r.change_type}` | {_markdown_pr_label(r.details)} |")
             lines.append("")
 
         if schema_deltas:
@@ -171,7 +172,7 @@ def _render_markdown_report(
             lines.append("| :--- | :--- | :--- | :--- | :--- |")
             for s in schema_deltas:
                 t = f"`{s.base_type or '-'}` → `{s.head_type or '-'}`"
-                lines.append(f"| `{s.file_path}` | `{s.model_name}` | `{s.field_name}` | {t} | {s.details} |")
+                lines.append(f"| `{_markdown_pr_label(s.file_path)}` | `{_markdown_pr_label(s.model_name)}` | `{_markdown_pr_label(s.field_name)}` | {t} | {_markdown_pr_label(s.details)} |")
             lines.append("")
 
         if dependency_deltas:
@@ -179,7 +180,7 @@ def _render_markdown_report(
             lines.append("| Manifest | Package | Base Version | Head Version | Change |")
             lines.append("| :--- | :--- | :--- | :--- | :--- |")
             for d in dependency_deltas:
-                lines.append(f"| `{d.manifest_file}` | **{d.package_name}** | `{d.base_version or '-'}` | `{d.head_version or '-'}` | `{d.change_type}` |")
+                lines.append(f"| `{_markdown_pr_label(d.manifest_file)}` | **{_markdown_pr_label(d.package_name)}** | `{_markdown_pr_label(d.base_version or '-')}` | `{_markdown_pr_label(d.head_version or '-')}` | `{d.change_type}` |")
             lines.append("")
 
         if config_deltas:
@@ -187,7 +188,7 @@ def _render_markdown_report(
             lines.append("| Config File | Key | Change Type |")
             lines.append("| :--- | :--- | :--- |")
             for c in config_deltas:
-                lines.append(f"| `{c.file_path}` | `{c.key}` | `{c.change_type}` |")
+                lines.append(f"| `{_markdown_pr_label(c.file_path)}` | `{_markdown_pr_label(c.key)}` | `{c.change_type}` |")
             lines.append("")
 
     # 4. Blast Radius Impacts
@@ -197,10 +198,10 @@ def _render_markdown_report(
         lines.append("| Severity | Type | Source Symbol / File | Affected Symbol / File | Status | Description |")
         lines.append("| :--- | :--- | :--- | :--- | :--- | :--- |")
         for imp in impacts:
-            src = f"`{imp.source_file}`" + (f" (`{imp.source_symbol}`)" if imp.source_symbol else "")
-            aff = f"`{imp.affected_file}`" + (f" (`{imp.affected_symbol}`)" if imp.affected_symbol else "")
+            src = f"`{_markdown_pr_label(imp.source_file)}`" + (f" (`{_markdown_pr_label(imp.source_symbol)}`)" if imp.source_symbol else "")
+            aff = f"`{_markdown_pr_label(imp.affected_file)}`" + (f" (`{_markdown_pr_label(imp.affected_symbol)}`)" if imp.affected_symbol else "")
             lines.append(
-                f"| **{imp.severity.value}** | `{imp.impact_type.value}` | {src} | {aff} | `{imp.verification_status.value}` | {imp.title} |"
+                f"| **{imp.severity.value}** | `{imp.impact_type.value}` | {src} | {aff} | `{imp.verification_status.value}` | {_markdown_pr_label(imp.title)} |"
             )
         lines.append("")
 
@@ -209,16 +210,16 @@ def _render_markdown_report(
         lines.append("## 🤖 Grounded AI Change Review Findings")
         lines.append("")
         for f in review_findings:
-            lines.append(f"### ⚠️ [{f.severity.value}] {f.title}")
-            lines.append(f"- **Risk Category**: `{f.risk_type}`")
+            lines.append(f"### ⚠️ [{f.severity.value}] {_markdown_pr_label(f.title)}")
+            lines.append(f"- **Risk Category**: `{_markdown_pr_label(f.risk_type)}`")
             lines.append(f"- **Verdict**: `{f.verdict.value}` (Confidence: `{f.confidence:.0%}`)")
-            lines.append(f"- **Reasoning**: {f.reasoning_summary}")
+            lines.append(f"- **Reasoning**: {_markdown_pr_label(f.reasoning_summary)}")
             if f.affected_files:
-                lines.append(f"- **Affected Files**: {', '.join(f'`{p}`' for p in f.affected_files)}")
+                lines.append(f"- **Affected Files**: {', '.join(f'`{_markdown_pr_label(p)}`' for p in f.affected_files)}")
             if f.evidence_refs:
-                lines.append(f"- **Evidence References**: {', '.join(f'`{r}`' for r in f.evidence_refs)}")
+                lines.append(f"- **Evidence References**: {', '.join(f'`{_markdown_pr_label(r)}`' for r in f.evidence_refs)}")
             if f.assumptions:
-                lines.append(f"- **Disclosed Assumptions**: {'; '.join(f.assumptions)}")
+                lines.append(f"- **Disclosed Assumptions**: {'; '.join(_markdown_pr_label(a) for a in f.assumptions)}")
             lines.append("")
 
     # 6. Tool Availability & Epistemic Limitations

@@ -283,3 +283,25 @@ def test_unknown_or_fallback_review_status_never_crashes_report(
     result = generate_change_analysis_report(sample_completed_analysis)
     assert "Result unavailable or unverified" in result.markdown_report
     assert "| **Change Review Agent** | ✅ Executed |" not in result.markdown_report
+
+
+def test_report_does_not_allow_source_metadata_to_inject_markdown_rows(
+    sample_completed_analysis,
+):
+    """Untrusted route details and impact titles cannot forge report rows."""
+    meta = sample_completed_analysis.model_metadata["diff_result"]
+    meta["route_deltas"][0]["details"] = "changed | next\n| **Forged Risk** | CRITICAL |"
+    sample_completed_analysis.impacts[0].title = "Risk\n| **Forged Impact** | CRITICAL |"
+    report = generate_change_analysis_report(sample_completed_analysis)
+    assert "| **Forged Risk** | CRITICAL |" not in report.markdown_report
+    assert "| **Forged Impact** | CRITICAL |" not in report.markdown_report
+    assert "Forged Risk" in report.markdown_report
+    assert "Forged Impact" in report.markdown_report
+
+
+def test_report_escapes_untrusted_review_finding_title(sample_completed_analysis):
+    review = sample_completed_analysis.model_metadata["review_report"]
+    review["findings"][0]["title"] = "Safe title\n## Forged section | ALERT"
+    report = generate_change_analysis_report(sample_completed_analysis)
+    assert "## Forged section | ALERT" not in report.markdown_report
+    assert "Safe title" in report.markdown_report
