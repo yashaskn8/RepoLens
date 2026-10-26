@@ -1,9 +1,7 @@
 """PatchGeneratorAgent producing evidence-constrained unified diffs."""
 
 import json
-import logging
-from typing import Any, Dict, List, Optional
-from uuid import UUID
+from typing import Dict, Optional
 
 from app.agents.helpers import extract_json_block
 from app.context.schemas import ContextBundle
@@ -15,9 +13,7 @@ from app.patching.schemas import PatchProposal
 from app.patching.validator import parse_diff_files, validate_patch_proposal
 from app.planning.schemas import FixPlan
 from app.schemas.finding import Finding
-
-logger = logging.getLogger(__name__)
-
+from app.schemas.enums import VerificationVerdict
 
 class PatchGeneratorAgent:
     """Specialized AI agent generating strict unified diff patches constrained by verified evidence.
@@ -95,6 +91,14 @@ class PatchGeneratorAgent:
         manifest: Optional[RepositoryManifest] = None,
     ) -> PatchProposal:
         """Generate, parse, and deterministically validate a unified diff PatchProposal."""
+        if finding.verification_verdict != VerificationVerdict.CONFIRMED:
+            raise ValueError("Patch generation requires a confirmed, verified finding.")
+        if fix_plan.finding_id != finding.id:
+            raise ValueError("Patch generation rejected: plan belongs to a different finding.")
+        if fix_plan.validation_report is not None and not fix_plan.validation_report.is_valid:
+            raise ValueError("Patch generation rejected: plan failed deterministic validation.")
+        if set(source_files) != set(fix_plan.files_expected_to_change):
+            raise ValueError("Patch generation rejected: approved source evidence is incomplete.")
         system_prompt = self._build_system_prompt()
         user_prompt = self._build_user_prompt(finding, fix_plan, context_bundle, source_files)
 
@@ -121,37 +125,45 @@ class PatchGeneratorAgent:
         response = await self.router.generate(request)
         json_str = extract_json_block(response.content)
 
-        unified_diff = ""
-        explanation = "Patch generated for finding."
-        behavior_change = "Remediates identified defect."
-        test_plan: List[str] = ["Run test suite"]
-
         try:
             data = json.loads(json_str)
-            if isinstance(data, dict):
-                unified_diff = data.get("unified_diff", "").strip()
-                explanation = data.get("explanation", explanation)
-                behavior_change = data.get("expected_behavior_change", behavior_change)
-                test_plan = data.get("generated_tests_or_test_plan", test_plan)
-        except Exception as exc:
-            logger.warning("Failed to parse PatchProposal JSON from model response: %s", str(exc))
-            unified_diff = response.content.strip()
+            if not isinstance(data, dict):
+                raise ValueError("Invalid patch payload")
+            required = (
+                "unified_diff",
+                "explanation",
+                "expected_behavior_change",
+                "generated_tests_or_test_plan",
+            )
+            if any(key not in data for key in required):
+                raise ValueError("Missing required patch fields")
+            if any(
+                not isinstance(data[key], str) or not data[key].strip()
+                for key in required[:3]
+            ):
+                raise ValueError("Invalid patch text fields")
+            test_plan = data["generated_tests_or_test_plan"]
+            if not isinstance(test_plan, list) or any(
+                not isinstance(item, str) or not item.strip() for item in test_plan
+            ):
+                raise ValueError("Invalid patch validation plan")
+            unified_diff = data["unified_diff"].strip()
+            files_modified = parse_diff_files(unified_diff)
+            if not files_modified:
+                raise ValueError("Patch does not name a modified repository file")
 
-        # Extract parsed files from diff headers
-        files_modified = parse_diff_files(unified_diff)
-        if not files_modified:
-            files_modified = fix_plan.files_expected_to_change
-
-        proposal = PatchProposal(
-            finding_id=finding.id,
-            plan_id=fix_plan.id,
-            unified_diff=unified_diff,
-            files_modified=files_modified,
-            explanation=explanation,
-            expected_behavior_change=behavior_change,
-            generated_tests_or_test_plan=test_plan,
-            model_metadata=response.metadata,
-        )
+            proposal = PatchProposal(
+                finding_id=finding.id,
+                plan_id=fix_plan.id,
+                unified_diff=unified_diff,
+                files_modified=files_modified,
+                explanation=data["explanation"],
+                expected_behavior_change=data["expected_behavior_change"],
+                generated_tests_or_test_plan=test_plan,
+                model_metadata=response.metadata,
+            )
+        except (TypeError, ValueError):
+            raise ValueError("Model returned an invalid PatchProposal; no patch was created.") from None
 
         # Deterministic boundary validation
         validation_report = validate_patch_proposal(

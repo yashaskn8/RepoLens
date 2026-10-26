@@ -523,3 +523,74 @@ def test_patch_validator_rejects_undeclared_step_file_even_if_file_is_real():
     )
     assert not report.is_valid
     assert any("outside approved FixPlan" in reason for reason in report.rejection_reasons)
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content",
+    [
+        "non-json patch content",
+        "{}",
+        '{"unified_diff": "", "explanation": "Fix", "expected_behavior_change": "Safe", "generated_tests_or_test_plan": ["pytest"]}',
+        '{"unified_diff": "--- a/src/main.py\\n+++ b/src/main.py\\n@@ -1 +1 @@\\n-old\\n+new", "explanation": "", "expected_behavior_change": "Safe", "generated_tests_or_test_plan": ["pytest"]}',
+    ],
+)
+async def test_patch_generator_rejects_malformed_model_output(content):
+    """Malformed LLM replies cannot become fabricated candidate patches."""
+    finding = Finding(
+        id=uuid4(), scan_id=uuid4(), title="Bug",
+        description="Missing validation", severity=Severity.HIGH,
+        verification_verdict=VerificationVerdict.CONFIRMED,
+        evidences=[Evidence(file_path="src/main.py", start_line=1)],
+    )
+    plan = FixPlan(
+        finding_id=finding.id, root_cause="Bug", objective="Fix",
+        files_expected_to_change=["src/main.py"],
+        ordered_changes=[OrderedChangeStep(
+            step_number=1, target_file="src/main.py",
+            description="Fix input", rationale="Prevent invalid data",
+        )], validation_plan=["pytest"],
+    )
+    model_response = LLMResponse(
+        content=content, model="mock-model", provider=LLMProvider.GEMINI,
+        metadata=ModelExecutionMetadata(
+            model_name="mock-model", provider="gemini", execution_time_ms=1.0,
+        ),
+    )
+    router = AsyncMock()
+    router.generate.return_value = model_response
+    context = ContextBundle(
+        scan_id=str(finding.scan_id), query="Input validation",
+        analysis_intent="patch_generation", relevant_chunks=[],
+    )
+    with pytest.raises(ValueError, match="invalid PatchProposal"):
+        await PatchGeneratorAgent(router=router).generate_patch(
+            finding, plan, context, source_files={"src/main.py": "old"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_patch_generator_direct_call_rejects_unconfirmed_finding():
+    finding = Finding(
+        id=uuid4(), scan_id=uuid4(), title="Unverified claim",
+        description="Missing evidence", severity=Severity.HIGH,
+        verification_verdict=VerificationVerdict.POSSIBLE,
+        evidences=[Evidence(file_path="src/main.py", start_line=1)],
+    )
+    plan = FixPlan(
+        finding_id=finding.id, root_cause="Bug", objective="Fix",
+        files_expected_to_change=["src/main.py"],
+        ordered_changes=[OrderedChangeStep(
+            step_number=1, target_file="src/main.py",
+            description="Fix", rationale="Fix",
+        )], validation_plan=["pytest"],
+    )
+    router = AsyncMock()
+    context = ContextBundle(
+        scan_id=str(finding.scan_id), query="Claim",
+        analysis_intent="patch_generation", relevant_chunks=[],
+    )
+    with pytest.raises(ValueError, match="confirmed, verified"):
+        await PatchGeneratorAgent(router=router).generate_patch(
+            finding, plan, context, source_files={"src/main.py": "old"},
+        )
+    router.generate.assert_not_called()
