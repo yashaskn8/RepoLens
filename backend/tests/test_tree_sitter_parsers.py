@@ -216,3 +216,31 @@ axios.request({url: "/api/items", method: methodFromProps});
     calls = [symbol for symbol in symbols if symbol.kind == SymbolKind.AXIOS_CALL]
     assert len(calls) == 1
     assert calls[0].details["http_method"] == "UNKNOWN"
+
+
+def test_fetch_dynamic_method_cannot_be_mistaken_for_get():
+    code = b"""
+const method = getMethodFromProps();
+fetch("/api/orders", { method });
+fetch("/api/orders", { method: method });
+fetch("/api/orders", { method: "POST" });
+fetch("/api/orders");
+"""
+    calls = [s for s in parse_file("src/client.ts", "typescript", code)
+             if s.kind == SymbolKind.FETCH_CALL]
+    assert len(calls) == 4
+    assert [s.details["http_method"] for s in calls] == [
+        "UNKNOWN", "UNKNOWN", "POST", "GET",
+    ]
+
+
+def test_fetch_interpolated_template_url_is_not_statically_resolved():
+    code = b"""
+fetch(`/api/users/${userId}`);
+fetch("/api/users/fixed");
+"""
+    calls = [s for s in parse_file("src/client.ts", "typescript", code)
+             if s.kind == SymbolKind.FETCH_CALL]
+    assert len(calls) == 2
+    assert calls[0].details["statically_resolvable"] is False
+    assert calls[1].details["statically_resolvable"] is True

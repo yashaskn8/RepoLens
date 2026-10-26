@@ -811,12 +811,19 @@ def _extract_js_ts_symbols_and_calls(
                             for arg in args_node.children:
                                 if arg.type in ("string", "template_string", "string_fragment", "identifier"):
                                     url_arg = _node_text(arg, source_bytes).strip("\"'`")
-                                    statically_resolvable = arg.type != "identifier"
+                                    statically_resolvable = (
+                                        arg.type != "identifier"
+                                        and ("$" + "{") not in url_arg
+                                    )
                                     break
                             # Extract HTTP method from options object: fetch(url, { method: 'POST' })
                             for arg in args_node.children:
                                 if arg.type == "object":
                                     for prop in arg.children:
+                                        if prop.type == "shorthand_property_identifier":
+                                            # A shorthand method key is dynamic; no GET claim.
+                                            if _node_text(prop, source_bytes) == "method":
+                                                http_method = "UNKNOWN"
                                         if prop.type in ("pair", "property"):
                                             key_node = prop.child_by_field_name("key")
                                             val_node = prop.child_by_field_name("value")
@@ -824,8 +831,12 @@ def _extract_js_ts_symbols_and_calls(
                                                 key_text = _node_text(key_node, source_bytes).strip("\"'")
                                                 if key_text == "method":
                                                     val_text = _node_text(val_node, source_bytes).strip("\"'`")
-                                                    if val_text.upper() in ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"):
-                                                        http_method = val_text.upper()
+                                                    http_method = (
+                                                        val_text.upper()
+                                                        if val_node.type == "string"
+                                                        and val_text.upper() in ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS")
+                                                        else "UNKNOWN"
+                                                    )
                                                 elif key_text == "body":
                                                     body_shape = _js_expression_shape(val_node, source_bytes, bindings)
                                     break  # Only inspect first object argument
