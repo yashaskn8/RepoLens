@@ -62,6 +62,13 @@ class OSVScannerAdapter(BaseScannerAdapter):
         if "results" not in data or not isinstance(data["results"], list):
             raise ScannerOutputError(self.tool_name, "Expected 'results' to be a JSON array")
         results = data["results"]
+        reported_errors = data.get("errors")
+        if reported_errors is not None and (
+            not isinstance(reported_errors, list) or bool(reported_errors)
+        ):
+            raise ScannerOutputError(
+                self.tool_name, "OSV-Scanner reported scan errors; coverage may be incomplete"
+            )
         for entry_index, entry in enumerate(results):
             if not isinstance(entry, dict):
                 raise ScannerOutputError(self.tool_name, f"Malformed result entry at index {entry_index}")

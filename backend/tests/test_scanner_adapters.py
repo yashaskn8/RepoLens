@@ -789,3 +789,29 @@ def test_scanner_rejects_internal_symlink_to_outside(tmp_path):
             confined_scanner_path("semgrep", "external/secret.py", str(tmp_path))
     finally:
         outside.rmdir()
+
+
+@pytest.mark.parametrize(
+    "adapter_type,payload",
+    [
+        (TrivyAdapter, {"Results": [], "Errors": [{"message": "private host path"}]}),
+        (TrivyAdapter, {"Results": [], "Errors": {"unexpected": "error"}}),
+        (OSVScannerAdapter, {"results": [], "errors": [{"message": "private host path"}]}),
+        (OSVScannerAdapter, {"results": [], "errors": "scanner database unavailable"}),
+    ],
+)
+def test_scanner_json_error_sections_cannot_report_clean(adapter_type, payload, tmp_path):
+    """Partial scanner coverage must be rejected even with zero result entries."""
+    with pytest.raises(ScannerOutputError):
+        adapter_type().parse_output(json.dumps(payload), str(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "adapter_type,payload",
+    [
+        (TrivyAdapter, {"Results": [], "Errors": []}),
+        (OSVScannerAdapter, {"results": [], "errors": []}),
+    ],
+)
+def test_scanner_empty_error_sections_allow_true_clean_result(adapter_type, payload, tmp_path):
+    assert adapter_type().parse_output(json.dumps(payload), str(tmp_path)) == []

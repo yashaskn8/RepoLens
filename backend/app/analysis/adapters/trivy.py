@@ -63,6 +63,13 @@ class TrivyAdapter(BaseScannerAdapter):
             if "Results" not in data or not isinstance(data["Results"], list):
                 raise ScannerOutputError(self.tool_name, "Expected 'Results' to be a JSON array")
             results = data["Results"]
+            reported_errors = data.get("Errors")
+            if reported_errors is not None and (
+                not isinstance(reported_errors, list) or bool(reported_errors)
+            ):
+                raise ScannerOutputError(
+                    self.tool_name, "Trivy reported scan errors; coverage may be incomplete"
+                )
         elif isinstance(data, list):
             results = data
         else:
