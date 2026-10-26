@@ -216,7 +216,7 @@ async def test_ollama_never_uses_ambient_proxy_for_loopback(monkeypatch) -> None
             )
 
     monkeypatch.setattr("app.llm.adapters.ollama.httpx.AsyncClient", FakeClient)
-    adapter = OllamaAdapter(enabled=True, model="local-test")
+    adapter = OllamaAdapter(enabled=True, model="local-test", base_url="http://localhost:11434")
     response = await adapter.generate(
         LLMRequest(messages=[LLMMessage(role="user", content="Summarize a comment")])
     )
