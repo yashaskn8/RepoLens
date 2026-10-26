@@ -7,6 +7,7 @@ import { AppShell } from '@/components/layout/AppShell';
 import { useAuth } from '@/context/AuthContext';
 import { isCurrentAccountResponse } from '@/lib/accountRequest';
 import { describeChangeRisk } from '@/lib/changeRiskPresentation';
+import { parseExactChangeCommits } from '@/lib/exactChangeCommits';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
@@ -44,8 +45,8 @@ function ChangeAnalysisEntryContent() {
   const [mode, setMode] = useState<'pr' | 'commits'>('pr');
   const [prUrl, setPrUrl] = useState('https://github.com/yashaskn8/RepoLens/pull/1');
   const [repoUrl, setRepoUrl] = useState(searchParams.get('repo') || 'https://github.com/yashaskn8/RepoLens');
-  const [baseRef, setBaseRef] = useState('main');
-  const [headRef, setHeadRef] = useState('feature/auth-contracts');
+  const [baseRef, setBaseRef] = useState('');
+  const [headRef, setHeadRef] = useState('');
 
   const [recentAnalyses, setRecentAnalyses] = useState<ChangeAnalysisSummary[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -106,6 +107,17 @@ function ChangeAnalysisEntryContent() {
     }
     // Ref guard closes the double-click window before React updates the button.
     if (submitPending.current) return;
+    // This endpoint accepts immutable SHAs, never branch names. Validate
+    // before submitting work or consuming an analysis quota.
+    let exactCommits: ReturnType<typeof parseExactChangeCommits> | null = null;
+    if (mode === 'commits') {
+      try {
+        exactCommits = parseExactChangeCommits(baseRef, headRef);
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Enter two exact commit SHAs.');
+        return;
+      }
+    }
     submitPending.current = true;
     const generation = ++submitGeneration.current;
     setError(null);
@@ -116,8 +128,8 @@ function ChangeAnalysisEntryContent() {
         ? await startChangeAnalysisFromPR({ pr_url: prUrl })
         : await startChangeAnalysis({
             repository_url: repoUrl,
-            base_commit_sha: baseRef,
-            head_commit_sha: headRef,
+            base_commit_sha: exactCommits!.baseSha,
+            head_commit_sha: exactCommits!.headSha,
           });
       if (!isCurrentAccountResponse(accountId, activeAccountRef.current, generation, submitGeneration.current)) return;
       router.push(`/changes/${result.id}`);
@@ -158,7 +170,7 @@ function ChangeAnalysisEntryContent() {
           <Tabs
             tabs={[
               { id: 'pr', label: 'Pull Request URL', icon: <GitPullRequest size={15} /> },
-              { id: 'commits', label: 'Compare Branches / Commits', icon: <GitBranch size={15} /> },
+              { id: 'commits', label: 'Compare Exact Commits', icon: <GitBranch size={15} /> },
             ]}
             activeTab={mode}
             onChange={(id) => setMode(id as 'pr' | 'commits')}
@@ -208,18 +220,18 @@ function ChangeAnalysisEntryContent() {
               />
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
                 <Input
-                  label="Base branch / commit (default: main)"
+                  label="Base commit SHA (40 hexadecimal characters)"
                   required
-                  placeholder="main"
+                  placeholder="40-character base commit SHA"
                   leftIcon={<GitBranch size={15} />}
                   value={baseRef}
                   onChange={(e) => setBaseRef(e.target.value)}
                   disabled={isSubmitting}
                 />
                 <Input
-                  label="Head branch / commit"
+                  label="Head commit SHA (40 hexadecimal characters)"
                   required
-                  placeholder="feature/branch"
+                  placeholder="40-character head commit SHA"
                   leftIcon={<GitBranch size={15} />}
                   value={headRef}
                   onChange={(e) => setHeadRef(e.target.value)}
