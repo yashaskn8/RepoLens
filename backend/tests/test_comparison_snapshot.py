@@ -551,3 +551,25 @@ def test_workspace_safety_rejects_unreadable_subdirectories(tmp_path):
             validate_workspace_safety(str(tmp_path))
     assert "unreadable-subtree-secret" not in str(exc.value)
 
+
+
+@pytest.mark.parametrize("link_is_directory", [False, True])
+def test_workspace_safety_rejects_internal_symlink_aliases(tmp_path, link_is_directory):
+    """Internal aliases must not be excluded from source-budget accounting."""
+    workspace = tmp_path / "snapshot"
+    workspace.mkdir()
+    if link_is_directory:
+        destination = workspace / "real_directory"
+        destination.mkdir()
+        (destination / "source.py").write_text("x = 1", encoding="utf-8")
+        link = workspace / "alias_directory"
+    else:
+        destination = workspace / "source.py"
+        destination.write_text("x = 1", encoding="utf-8")
+        link = workspace / "alias_source.py"
+    try:
+        link.symlink_to(destination, target_is_directory=link_is_directory)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlink creation is unavailable on this host")
+    with pytest.raises(SymlinkEscapeError, match="workspace contains"):
+        validate_workspace_safety(str(workspace))

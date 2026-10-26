@@ -140,6 +140,9 @@ def validate_workspace_safety(
                     is_inside = False
                 if not is_inside:
                     raise SymlinkEscapeError(f"Directory symlink '{d}' escapes workspace boundary to '{target}'")
+                # A link inside the tree is still not an independently checked
+                # source directory and may bypass file counts or snapshot immutability.
+                raise SymlinkEscapeError("Snapshot workspace contains a directory symlink.")
             if os.path.isdir(os.path.join(dir_full, ".git")):
                 raise SubmoduleExecutionError(f"Active git submodule detected at '{d}'. Submodules are strictly disallowed.")
 
@@ -155,7 +158,9 @@ def validate_workspace_safety(
                     is_inside = False
                 if not is_inside:
                     raise SymlinkEscapeError(f"Symlink '{file}' escapes workspace boundary to '{target}'")
-                continue
+                # Do not ignore internal links: readers may follow them later,
+                # while this validator would otherwise exclude their bytes.
+                raise SymlinkEscapeError("Snapshot workspace contains a file symlink.")
 
             total_files += 1
             if total_files > max_files:
