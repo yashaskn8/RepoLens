@@ -13,6 +13,7 @@ import { Drawer } from '@/components/ui/Drawer';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { fetchScan, fetchScanFindings, fetchScanTelemetry, explainChainBrainSignal } from '@/lib/api';
+import { useAuth } from '@/context/AuthContext';
 import { useWorkflowStream } from '@/lib/useWorkflowStream';
 import { ScanReportAction } from '@/features/scan/ScanReportAction';
 import { FindingCard } from '@/features/findings/FindingCard';
@@ -56,8 +57,31 @@ function asCount(value: unknown): number | null {
 }
 
 export default function ScanDetailPage({ params }: ScanDetailPageProps) {
-  const resolvedParams = use(params);
-  const scanId = resolvedParams.id;
+  const { id: scanId } = use(params);
+  const { user, isLoading: authLoading } = useAuth();
+  const accountId = user?.id ?? null;
+
+  // Never mount the private workspace or its credentialed SSE connection
+  // without a known account. The key remounts every stateful child when
+  // either the tenant or the selected scan changes, even before effects run.
+  if (authLoading || !accountId) {
+    return (
+      <AppShell breadcrumbs={[{ label: 'Scans', href: '/scan' }]} title="Scan Results">
+        <EmptyState
+          icon={<ShieldAlert size={28} />}
+          title={authLoading ? 'Checking session' : 'Sign in to view scan results'}
+          description={authLoading
+            ? 'Waiting for authentication before loading private scan evidence.'
+            : 'Authenticate to view scan evidence and live workflow events.'}
+        />
+      </AppShell>
+    );
+  }
+
+  return <ScanDetailWorkspace key={`${accountId}:${scanId}`} scanId={scanId} />;
+}
+
+function ScanDetailWorkspace({ scanId }: { scanId: string }) {
   const router = useRouter();
 
   const [scan, setScan] = useState<Scan | null>(null);
