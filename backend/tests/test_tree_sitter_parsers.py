@@ -158,3 +158,33 @@ export const UserDashboard: React.FC = () => {
 
     assert len(axios_calls) >= 1
     assert "metrics" in axios_calls[0].details.get("target", "")
+
+
+def test_axios_config_calls_preserve_real_http_method_and_path():
+    source_code = b"""
+import axios from "axios";
+axios("/api/v1/items", {method: "POST"});
+axios({url: "/api/v1/items", method: "put"});
+axios("/api/v1/items");
+"""
+    symbols = parse_file("src/client.ts", "typescript", source_code)
+    calls = [symbol for symbol in symbols if symbol.kind == SymbolKind.AXIOS_CALL]
+    assert len(calls) == 3
+    assert [call.details["http_method"] for call in calls] == ["POST", "PUT", "GET"]
+    assert all(call.details["url"] == "/api/v1/items" for call in calls)
+    assert all(call.details["statically_resolvable"] for call in calls)
+
+
+def test_axios_unresolved_method_does_not_claim_get_contract():
+    source_code = b"""
+import axios from "axios";
+axios({url: "/api/private", method: currentMethod});
+axios(`/api/${tenantId}`, {method: "POST"});
+"""
+    symbols = parse_file("src/client.ts", "typescript", source_code)
+    calls = [symbol for symbol in symbols if symbol.kind == SymbolKind.AXIOS_CALL]
+    assert len(calls) == 2
+    assert calls[0].details["http_method"] == "UNKNOWN"
+    assert calls[0].details["statically_resolvable"] is True
+    assert calls[1].details["http_method"] == "POST"
+    assert calls[1].details["statically_resolvable"] is False

@@ -847,14 +847,42 @@ def _extract_js_ts_symbols_and_calls(
                             )
                         )
                     elif fn_name == "axios":
+                        # Axios accepts a URL plus options or a single config object.
+                        # Preserve explicit methods and never invent GET for dynamic methods.
                         target_url = "unknown"
                         statically_resolvable = False
-                        if args_node and args_node.children:
-                            for arg in args_node.children:
-                                if arg.type in ("string", "template_string", "string_fragment", "identifier"):
-                                    target_url = _node_text(arg, source_bytes).strip("\"'`")
-                                    statically_resolvable = arg.type != "identifier"
-                                    break
+                        http_method = "GET"
+                        named_args = list(args_node.named_children) if args_node else []
+                        for position, arg in enumerate(named_args):
+                            if position == 0 and arg.type in ("string", "template_string", "identifier"):
+                                target_url = _node_text(arg, source_bytes).strip("\"'").strip(chr(96))
+                                statically_resolvable = (
+                                    arg.type != "identifier" and ("$" + "{") not in target_url
+                                )
+                            if arg.type != "object":
+                                continue
+                            for prop in arg.named_children:
+                                if prop.type != "pair":
+                                    continue
+                                key_node = prop.child_by_field_name("key")
+                                value_node = prop.child_by_field_name("value")
+                                if key_node is None or value_node is None:
+                                    continue
+                                key = _node_text(key_node, source_bytes).strip("\"'")
+                                value = _node_text(value_node, source_bytes).strip("\"'").strip(chr(96))
+                                if key == "url" and position == 0:
+                                    target_url = value
+                                    statically_resolvable = (
+                                        value_node.type in ("string", "template_string")
+                                        and ("$" + "{") not in value
+                                    )
+                                elif key == "method":
+                                    http_method = (
+                                        value.upper()
+                                        if value_node.type == "string"
+                                        and value.upper() in {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}
+                                        else "UNKNOWN"
+                                    )
                         symbols.append(
                             ParsedSymbol(
                                 name=f"axios({target_url})",
@@ -867,6 +895,7 @@ def _extract_js_ts_symbols_and_calls(
                                     "callee": "axios",
                                     "target": target_url,
                                     "url": target_url,
+                                    "http_method": http_method,
                                     "statically_resolvable": statically_resolvable,
                                 },
                             )
