@@ -202,10 +202,10 @@ export const RemediationLifecycle: React.FC<RemediationLifecycleProps> = ({
       setDelivery(null);
       setDeliveryPreview(null);
       setPatchStatus(
-        res.machine_verdict === 'PASSED' || res.final_verdict === 'PASSED'
-          ? 'VERIFIED'
-          : res.machine_verdict === 'REJECTED' || res.final_verdict === 'REJECTED'
+        res.machine_verdict === 'REJECTED' || res.verification_result?.status === 'FAILED'
           ? 'REJECTED'
+          : res.machine_verdict === 'PASSED' && res.verification_result?.status === 'PASSED'
+          ? 'VERIFIED'
           : 'NEEDS_REVIEW'
       );
     } catch (err: unknown) {

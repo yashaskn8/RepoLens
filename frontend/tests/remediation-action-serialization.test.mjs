@@ -36,7 +36,7 @@ function mount(api = {}) {
     setDelivery() {}, setDeliveryPreview() {},
     requestFindingResearch: async () => ({}),
     requestFixPlan: async () => ({}),
-    requestPatchGeneration: async () => ({ proposal, machine_verdict: 'PASSED' }),
+    requestPatchGeneration: async () => ({ proposal, machine_verdict: 'PASSED', verification_result: { status: 'PASSED' } }),
     approvePatch: async () => ({ status: 'APPROVED' }),
     ...api,
   };
@@ -60,7 +60,7 @@ test('approval in flight cannot authorize a newly regenerated patch', async () =
     approvePatch: () => approval.promise,
     requestPatchGeneration: async () => {
       generations += 1;
-      return { proposal: { id: 'new-patch', unified_diff: 'diff', files_modified: [] }, machine_verdict: 'PASSED' };
+      return { proposal: { id: 'new-patch', unified_diff: 'diff', files_modified: [] }, machine_verdict: 'PASSED', verification_result: { status: 'PASSED' } };
     },
   });
   const pending = app.handleApprove();
@@ -84,7 +84,7 @@ test('regeneration in flight cannot approve the previous patch', async () => {
   const pending = app.handleRequestPatch();
   await app.handleApprove();
   assert.equal(approvals, 0);
-  generation.resolve({ proposal: { id: 'new-patch', unified_diff: 'diff', files_modified: [] }, machine_verdict: 'PASSED' });
+  generation.resolve({ proposal: { id: 'new-patch', unified_diff: 'diff', files_modified: [] }, machine_verdict: 'PASSED', verification_result: { status: 'PASSED' } });
   await pending;
   assert.equal(app.state.patchId, 'new-patch');
   assert.equal(app.state.patchStatus, 'VERIFIED');
@@ -134,3 +134,26 @@ test('request panels disable new actions while another lifecycle action runs', (
     assert.match(panel, /disabled=\{isLoading \|\| disabled\}/);
   }
 });
+
+for (const [name, machineVerdict, verificationStatus, expectedStatus] of [
+  ['critic rejection despite passing verification', 'REJECTED', 'PASSED', 'REJECTED'],
+  ['critic review despite passing verification', 'NEEDS_REVIEW', 'PASSED', 'NEEDS_REVIEW'],
+  ['failed verification despite passing critic', 'PASSED', 'FAILED', 'REJECTED'],
+  ['incomplete verification despite passing critic', 'PASSED', 'NEEDS_REVIEW', 'NEEDS_REVIEW'],
+  ['both checks passed', 'PASSED', 'PASSED', 'VERIFIED'],
+  ['missing verification evidence', 'PASSED', null, 'NEEDS_REVIEW'],
+]) {
+  test('generated patch status honors verifier and critic: ' + name, async () => {
+    const app = mount({
+      requestPatchGeneration: async () => ({
+        proposal: { id: 'new-patch', unified_diff: 'diff', files_modified: [] },
+        machine_verdict: machineVerdict,
+        final_verdict: machineVerdict,
+        ...(verificationStatus ? { verification_result: { status: verificationStatus } } : {}),
+      }),
+    });
+    await app.handleRequestPatch();
+    assert.equal(app.state.patchId, 'new-patch');
+    assert.equal(app.state.patchStatus, expectedStatus);
+  });
+}
