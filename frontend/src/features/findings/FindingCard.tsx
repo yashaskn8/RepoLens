@@ -16,36 +16,18 @@ export interface FindingCardProps {
  * Returns a human-friendly explanation of why a finding matters based on category/severity.
  */
 function getImpactExplanation(finding: Finding): string {
-  if (finding.description && finding.description.length > 20) {
-    return finding.description;
-  }
-  switch (finding.severity) {
-    case 'CRITICAL':
-      return 'Critical security risk: Can lead to unauthorized access, privilege escalation, or arbitrary code execution.';
-    case 'HIGH':
-      return 'High risk: Exposes sensitive data, circumvents access controls, or creates severe architectural fragility.';
-    case 'MEDIUM':
-      return 'Medium risk: Insecure configuration, missing input sanitization, or breaking contract inconsistency.';
-    case 'LOW':
-    default:
-      return 'Code quality or maintenance debt: Could degrade maintainability or introduce subtle defects over time.';
-  }
+  // Severity is a ranking, not proof of a specific exploit or consequence.
+  return finding.description?.trim() || 'No impact explanation was recorded for this finding.';
 }
 
 /**
  * Returns a clear recommended action for the finding.
  */
 function getRecommendation(finding: Finding): string {
-  if (finding.mitigation_guidance) {
-    return finding.mitigation_guidance;
-  }
-  if (finding.category?.toLowerCase().includes('auth') || finding.title.toLowerCase().includes('token')) {
-    return 'Ensure credentials and tokens are loaded securely from environment secrets and never committed to source.';
-  }
-  if (finding.category?.toLowerCase().includes('injection') || finding.title.toLowerCase().includes('sql')) {
-    return 'Use parameterized queries or an ORM to prevent unsanitized user inputs from being executed directly.';
-  }
-  return 'Apply input validation, confine permissions, and verify that test coverage guards against regressions.';
+  // Only persisted, evidence-grounded remediation guidance may be displayed
+  // as a recommendation. Do not synthesize fixes from a title or category.
+  return finding.mitigation_guidance?.trim()
+    || 'No remediation guidance was recorded. Review the source evidence before planning a fix.';
 }
 
 export const FindingCard: React.FC<FindingCardProps> = ({
@@ -168,7 +150,7 @@ export const FindingCard: React.FC<FindingCardProps> = ({
               </div>
             ) : (
               <span style={{ fontSize: '0.8125rem', color: 'var(--text-muted)' }}>
-                Identified in repository configuration or manifest
+                No source evidence is attached to this finding.
               </span>
             )}
           </div>
