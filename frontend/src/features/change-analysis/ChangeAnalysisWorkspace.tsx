@@ -65,6 +65,8 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
   const [activeAnalysis, setActiveAnalysis] = useState<ChangeAnalysisResponse | null>(null);
   const analysisGenerationRef = useRef(0);
   const artifactLoadSequenceRef = useRef(0);
+  // Invalidate pending report downloads and publication/artifact callbacks on unmount.
+  useEffect(() => () => { analysisGenerationRef.current += 1; }, []);
   const submitPendingRef = useRef(false);
   const publicationPendingRef = useRef(false);
   const [artifactError, setArtifactError] = useState<string | null>(null);
@@ -285,13 +287,16 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
 
   const handleDownloadMarkdown = async () => {
     if (!activeAnalysis) return;
+    const generation = analysisGenerationRef.current;
+    const analysisId = activeAnalysis.id;
     try {
-      const text = await downloadChangeAnalysisMarkdown(activeAnalysis.id);
+      const text = await downloadChangeAnalysisMarkdown(analysisId);
+      if (generation !== analysisGenerationRef.current) return;
       const blob = new Blob([text], { type: 'text/markdown' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `repolens_change_report_${activeAnalysis.id.slice(0, 8)}.md`;
+      a.download = `repolens_change_report_${analysisId.slice(0, 8)}.md`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
