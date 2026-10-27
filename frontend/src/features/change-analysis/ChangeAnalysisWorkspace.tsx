@@ -486,7 +486,15 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
           fetchReviewPublication(analysisId, controller.signal),
           deadline,
         ]);
-        if (generation === analysisGenerationRef.current) setPublication(updated);
+        if (generation === analysisGenerationRef.current) {
+          setPublication((current) => {
+            if (!current || current.publication_id !== updated.publication_id) return current;
+            // A lagging read must never downgrade an acknowledged publication
+            // to APPROVED and accidentally re-enable the Publish action.
+            if (current.status === 'PUBLISHED' && updated.status !== 'PUBLISHED') return current;
+            return updated;
+          });
+        }
       } catch {
         if (generation === analysisGenerationRef.current) {
           setPubError('Publication request returned successfully, but its status could not be refreshed. Do not repeat publication until the current status is verified.');
