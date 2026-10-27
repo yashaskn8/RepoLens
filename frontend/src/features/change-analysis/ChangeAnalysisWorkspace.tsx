@@ -102,6 +102,14 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
   const [pubError, setPubError] = useState<string | null>(null);
   const [showPublishConfirm, setShowPublishConfirm] = useState<boolean>(false);
   const [copiedDigest, setCopiedDigest] = useState<boolean>(false);
+  const [copyDigestError, setCopyDigestError] = useState<string | null>(null);
+  const copyDigestSequenceRef = useRef(0);
+  // A regenerated preview may have a different digest; invalidate older copy callbacks.
+  useEffect(() => {
+    copyDigestSequenceRef.current += 1;
+    setCopiedDigest(false);
+    setCopyDigestError(null);
+  }, [publication?.preview_digest]);
 
   // UI exploration tabs & filters
   const [activeTab, setActiveTab] = useState<
@@ -309,6 +317,8 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
     setIsPublishingPub(false);
     setShowPublishConfirm(false);
     setCopiedDigest(false);
+    setCopyDigestError(null);
+    copyDigestSequenceRef.current += 1;
     copySequenceRef.current += 1;
     setCopiedReport(false);
     setCopyError(null);
@@ -467,11 +477,26 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
     }
   };
 
-  const handleCopyDigest = () => {
-    if (publication?.preview_digest) {
-      navigator.clipboard.writeText(publication.preview_digest);
+  const handleCopyDigest = async () => {
+    if (!publication?.preview_digest) return;
+    const generation = analysisGenerationRef.current;
+    const copySequence = ++copyDigestSequenceRef.current;
+    const digest = publication.preview_digest;
+    setCopiedDigest(false);
+    setCopyDigestError(null);
+    try {
+      await navigator.clipboard.writeText(digest);
+      if (generation !== analysisGenerationRef.current || copySequence !== copyDigestSequenceRef.current) return;
       setCopiedDigest(true);
-      setTimeout(() => setCopiedDigest(false), 2000);
+      setTimeout(() => {
+        if (generation === analysisGenerationRef.current && copySequence === copyDigestSequenceRef.current) {
+          setCopiedDigest(false);
+        }
+      }, 2000);
+    } catch {
+      if (generation === analysisGenerationRef.current && copySequence === copyDigestSequenceRef.current) {
+        setCopyDigestError('Could not copy the preview digest. Check clipboard permissions or select and copy it manually.');
+      }
     }
   };
 
@@ -703,6 +728,7 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
               pubError={pubError}
               showPublishConfirm={showPublishConfirm}
               copiedDigest={copiedDigest}
+              copyDigestError={copyDigestError}
               isAnalysisCompleted={activeAnalysis.status === 'COMPLETED'}
               onGeneratePreview={handleGeneratePreview}
               onApprovePublication={handleApprovePublication}
