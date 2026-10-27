@@ -1,6 +1,6 @@
 # RepoLens sequential repair-pack acceptance tracker
 
-Updated 2026-10-27. This tracks the user's numbered **Prompts 0–35 plus supplemental Prompt 0B** (37 acceptance items). **No item is certified complete at this HEAD.** “PARTIAL” means some relevant fixes/tests exist, **not** that the prompt's success criterion passed. “BLOCKED” means a required trust boundary is absent; “NOT TESTED” means final acceptance was not executed.
+Updated 2026-10-28. This tracks the user's numbered **Prompts 0–35 plus supplemental Prompt 0B** (37 acceptance items). **No item is certified complete at this HEAD.** “PARTIAL” means some relevant fixes/tests exist, **not** that the prompt's success criterion passed. “BLOCKED” means a required trust boundary is absent; “NOT TESTED” means final acceptance was not executed.
 
 Repository: `yashaskn8/RepoLens`. Direct-`main` work only. Snapshot HEAD before this tracker: `4f4725278f55af4ad854701cb648af795a9d2e74`.
 
@@ -407,3 +407,16 @@ See [REPAIR_AUDIT_2026-10-26.md](REPAIR_AUDIT_2026-10-26.md) for historical CI e
 - `0beec629f816aca41ceda3f36f82957bb7c67ed0`: accumulate distinct requirement variants and emit a stable sorted `MULTIPLE_REQUIREMENTS:` representation when needed. Single-version representations remain unchanged; credential-bearing direct references remain SHA-256 fingerprints. This does not relax production isolation or approval controls.
 - **Executed:** eight isolated Python `unittest` checks of manually copied parser logic, running as unprivileged `nobody`, all passed. Static source inspection confirmed the committed parser changes. **Not executed:** the five committed pytest cases, repository-wide backend/frontend tests, TypeScript build, live browser flow, production hard-isolation and deployment recovery gates. GitHub checkout still fails DNS resolution in the local container.
 - Prompt 15 and 17 remain **PARTIAL**. All 37 acceptance items remain open; this repair does not certify release readiness.
+
+
+## Exported dotenv and type-aware JSON configuration evidence (2026-10-28)
+
+- **Reproduced defect A:** `_parse_env_file` silently ignored valid `export KEY=value` assignments. Two revisions differing only in an exported configuration value produced the same empty map, hiding the change from PR analysis.
+- `577e1bdd912e012da6c124150857992c07db127e`: three pytest regression tests for exported and plain assignments, secret-safe changed values, and added/removed exported keys.
+- `ef6443e110f7849e7803a636b43ea87906d9d414`: parse an optional `export` prefix while retaining existing unprefixed dotenv behavior.
+- **Reproduced defect B:** JSON configuration values were normalized with `str(value)`. Boolean `true` and string `"True"`, or number `1` and string `"1"`, were indistinguishable; nested object key reordering instead produced spurious changes.
+- `8f535b8a4c7faffbcff4874edd0458e1e53da910`: three pytest regression tests for type-changing values and order-independent nested JSON objects.
+- `7d961df0e98bc0ef63cc866dc5181cafb4e8e905`: canonical, type-aware JSON value serialization before fingerprinting. Raw configuration values are still not stored in deltas.
+- **Executed:** 7 isolated Python `unittest` scenarios for exported dotenv values and config change detection; 6 isolated Python `unittest` scenarios for JSON type changes, key order and fingerprint distinctions, all as unprivileged `nobody`. Seven source/test-presence assertions passed against fetched committed `main` files. The original false negatives were reproduced in isolated Python before editing.
+- **Not executed:** the six committed pytest tests in the repository, full backend pytest, frontend tests/build, browser tests, or deployment acceptance. Git checkout still fails because `github.com` cannot be resolved in the container. Isolated checks are not repository integration tests. Prompt 15/17/18 remain **PARTIAL**; Prompt 34 remains **BLOCKED**; Prompt 35 remains **NOT TESTED**. All 37 acceptance items remain open.
+
