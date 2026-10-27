@@ -13,6 +13,7 @@ export interface ReviewPublicationPanelProps {
   pubError: string | null;
   showPublishConfirm: boolean;
   copiedDigest: boolean;
+  copyDigestError: string | null;
   isAnalysisCompleted: boolean;
   onGeneratePreview: () => void;
   onApprovePublication: () => void;
@@ -29,6 +30,7 @@ export const ReviewPublicationPanel: React.FC<ReviewPublicationPanelProps> = ({
   pubError,
   showPublishConfirm,
   copiedDigest,
+  copyDigestError,
   isAnalysisCompleted,
   onGeneratePreview,
   onApprovePublication,
@@ -205,6 +207,10 @@ export const ReviewPublicationPanel: React.FC<ReviewPublicationPanelProps> = ({
                 {copiedDigest ? '✓ Copied' : '📋 Copy'}
               </Button>
             </div>
+
+            {copyDigestError && (
+              <Alert variant="error" title="Digest copy failed">{copyDigestError}</Alert>
+            )}
 
             {/* Action Buttons */}
             <div className="flex gap-3 flex-wrap items-center mt-2">
