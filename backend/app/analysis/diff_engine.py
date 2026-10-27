@@ -227,6 +227,12 @@ def _parse_package_json(content: str) -> Dict[str, str]:
                 # npm package names cannot contain brackets, so this suffix
                 # cannot collide with a real package name.
                 deps[f"{k}[dev]"] = _redact_dependency_reference(str(v))
+        # npm's optional and peer dependency sets affect installation and
+        # compatibility independently of runtime and development scopes.
+        for section, scope in (("optionalDependencies", "optional"), ("peerDependencies", "peer")):
+            if isinstance(data.get(section), dict):
+                for k, v in data[section].items():
+                    deps[f"{k}[{scope}]"] = _redact_dependency_reference(str(v))
     except Exception:
         pass
     return deps
