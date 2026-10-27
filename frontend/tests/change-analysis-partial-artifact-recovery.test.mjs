@@ -44,14 +44,18 @@ function fixture({ telemetry, report } = {}) {
 }
 
 test('stalled telemetry cannot hide completed report and impacts', async () => {
-  const f = fixture({ telemetry: () => new Promise(() => {}) });
-  void f.load('analysis-A', 1);
+  const stalled = deferred();
+  const f = fixture({ telemetry: () => stalled.promise });
+  const loading = f.load('analysis-A', 1);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.state.report?.markdown_report, '# ready');
   assert.deepEqual(f.state.impacts, [{ id: 'impact-1' }]);
   assert.equal(f.state.availability.report, true);
   assert.equal(f.state.availability.impacts, true);
   assert.notEqual(f.state.availability.telemetry, true);
+  // Release the simulated stalled request so the deadline timer is cleared.
+  stalled.resolve({});
+  await loading;
 });
 
 test('failed telemetry still reports missing evidence without hiding successful artifacts', async () => {
