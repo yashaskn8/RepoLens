@@ -329,3 +329,57 @@ async def test_provenance_canonical_and_legacy(db_session):
     with pytest.raises(ForkPRUnsupportedError):
         service._extract_pr_provenance(a4)
 
+
+
+@pytest.mark.asyncio
+async def test_published_review_replays_require_original_digest(db_session):
+    """Published status does not authorize a different digest or another write."""
+    analysis = _create_mock_pr_analysis(db_session)
+    pub = PullRequestReviewPublicationModel(
+        analysis_id=analysis.id,
+        repository_owner="octocat",
+        repository_name="Hello-World",
+        pr_number=42,
+        base_commit_sha="a" * 40,
+        head_commit_sha="b" * 40,
+        status=ReviewPublicationStatus.PUBLISHED.value,
+        preview_digest="a" * 64,
+        preview_body="Published review",
+    )
+    db_session.add(pub)
+    db_session.commit()
+
+    provider = MagicMock()
+    service = ReviewPublicationService(db=db_session, provider=provider)
+    with pytest.raises(PreviewDigestMismatchError):
+        await service.approve_preview(UUID(analysis.id), expected_preview_digest="b" * 64)
+    with pytest.raises(PreviewDigestMismatchError):
+        await service.publish_review(UUID(analysis.id), expected_preview_digest="b" * 64)
+
+    assert await service.approve_preview(UUID(analysis.id), expected_preview_digest="a" * 64) is pub
+    assert await service.publish_review(UUID(analysis.id), expected_preview_digest="a" * 64) is pub
+    provider.create_comment_review.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_uncertain_publication_rejects_wrong_digest_before_reconciliation(db_session):
+    """Wrong digest cannot trigger uncertain-write reconciliation."""
+    analysis = _create_mock_pr_analysis(db_session)
+    pub = PullRequestReviewPublicationModel(
+        analysis_id=analysis.id,
+        repository_owner="octocat",
+        repository_name="Hello-World",
+        pr_number=42,
+        base_commit_sha="a" * 40,
+        head_commit_sha="b" * 40,
+        status=ReviewPublicationStatus.PUBLISHING.value,
+        preview_digest="a" * 64,
+    )
+    db_session.add(pub)
+    db_session.commit()
+    provider = MagicMock()
+    service = ReviewPublicationService(db=db_session, provider=provider)
+
+    with pytest.raises(PreviewDigestMismatchError):
+        await service.publish_review(UUID(analysis.id), expected_preview_digest="b" * 64)
+    provider.list_pull_request_reviews.assert_not_called()
