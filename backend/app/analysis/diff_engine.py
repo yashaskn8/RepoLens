@@ -222,7 +222,11 @@ def _parse_package_json(content: str) -> Dict[str, str]:
                 deps[k] = _redact_dependency_reference(str(v))
         if isinstance(data.get("devDependencies"), dict):
             for k, v in data["devDependencies"].items():
-                deps[k] = _redact_dependency_reference(str(v))
+                # A dev-only dependency becoming a runtime dependency changes
+                # installation and security exposure even at the same version.
+                # npm package names cannot contain brackets, so this suffix
+                # cannot collide with a real package name.
+                deps[f"{k}[dev]"] = _redact_dependency_reference(str(v))
     except Exception:
         pass
     return deps
