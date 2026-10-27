@@ -1,10 +1,12 @@
 import React from 'react';
 import { ChangeAnalysisReportResponse } from '@/types/domain';
 import { Button } from '@/components/ui/Button';
+import { Alert } from '@/components/ui/Alert';
 
 export interface ReviewReportPanelProps {
   report: ChangeAnalysisReportResponse | null;
   copiedReport: boolean;
+  copyError: string | null;
   onCopyMarkdown: () => void;
   onDownloadMarkdown: () => void;
 }
@@ -12,6 +14,7 @@ export interface ReviewReportPanelProps {
 export const ReviewReportPanel: React.FC<ReviewReportPanelProps> = ({
   report,
   copiedReport,
+  copyError,
   onCopyMarkdown,
   onDownloadMarkdown,
 }) => {
@@ -38,6 +41,8 @@ export const ReviewReportPanel: React.FC<ReviewReportPanelProps> = ({
           </Button>
         </div>
       </div>
+
+      {copyError && <Alert variant="warning" title="Clipboard unavailable">{copyError}</Alert>}
 
       {/* Epistemic Guarantee Banner */}
       <div className="p-3 bg-blue-950/20 border border-blue-800/40 rounded-lg mb-4 text-xs text-sky-300">
