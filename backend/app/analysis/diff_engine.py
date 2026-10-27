@@ -845,27 +845,36 @@ class ChangeDiffEngine:
                 b_has = rel_p in base_files
                 h_has = rel_p in head_files
 
-                b_text = ""
-                h_text = ""
-                if b_has:
-                    try:
-                        with open(base_files[rel_p], "r", encoding="utf-8", errors="ignore") as f:
-                            b_text = f.read()
-                    except OSError:
-                        pass
-                if h_has:
-                    try:
-                        with open(head_files[rel_p], "r", encoding="utf-8", errors="ignore") as f:
-                            h_text = f.read()
-                    except OSError:
-                        pass
+                # Read configuration through the same descriptor-enforced budget
+                # as dependency manifests. An unreadable or malformed file is
+                # unknown evidence, never an empty configuration.
+                b_text = (
+                    _read_bounded_snapshot_file(
+                        base_files[rel_p], int(self.settings.MAX_FILE_SIZE_BYTES)
+                    ).decode("utf-8")
+                    if b_has else ""
+                )
+                h_text = (
+                    _read_bounded_snapshot_file(
+                        head_files[rel_p], int(self.settings.MAX_FILE_SIZE_BYTES)
+                    ).decode("utf-8")
+                    if h_has else ""
+                )
 
                 if rel_p.endswith(".json"):
-                    try:
-                        b_dict = {k: str(v) for k, v in json.loads(b_text or "{}").items()} if b_text else {}
-                        h_dict = {k: str(v) for k, v in json.loads(h_text or "{}").items()} if h_text else {}
-                    except Exception:
-                        b_dict, h_dict = {}, {}
+                    def parse_config_json(content: str, present: bool) -> Dict[str, str]:
+                        if not present:
+                            return {}
+                        try:
+                            document = json.loads(content)
+                        except json.JSONDecodeError:
+                            raise ValueError("Configuration JSON could not be parsed.") from None
+                        if not isinstance(document, dict):
+                            raise ValueError("Configuration JSON must contain an object.")
+                        return {str(k): str(v) for k, v in document.items()}
+
+                    b_dict = parse_config_json(b_text, b_has)
+                    h_dict = parse_config_json(h_text, h_has)
                 else:
                     b_dict = _parse_env_file(b_text)
                     h_dict = _parse_env_file(h_text)
