@@ -162,3 +162,11 @@ See [REPAIR_AUDIT_2026-10-26.md](REPAIR_AUDIT_2026-10-26.md) for historical CI e
 - **Actually executed:** seven source-level assertions passed against fetched committed `main` source/test files. Python AST parsing and three isolated Markdown count-formatting scenarios passed for copied changed expressions. **Not executed:** the two new pytest parameter cases, complete backend suite, browser journey, or deployment tests; a full local checkout remains unavailable due to DNS resolution failure. These checks do not certify integration behavior.
 - Prompts 18/22/28/35 remain **PARTIAL** or **NOT TESTED**. Prompt 34 remains **BLOCKED**; no acceptance item has been certified complete.
 - `10d6ea54004265bb1d8353d902fb4c2f844d9f81`: refactored both contract and review count presentation through `_format_evidence_count` to avoid nested f-strings and keep zero distinct from unavailable. **Actually executed:** four isolated Python helper assertions and AST parsing on a copied helper body passed. The committed pytest cases and complete repository checks remain **not executed**.
+
+## Artifact retry ordering regression (2026-10-27)
+
+- Existing completed-analysis retry UI and tests: `frontend/tests/change-analysis-artifact-retry.test.mjs`. The previous run's pending write is now visible on main; it must not be treated as proof that a full frontend suite passed.
+- `0d89a28d3dc6fe129ef55f2f355c1206b456b2de`: prevent a superseded artifact request from overwriting a newer report, impacts, diff, telemetry, or availability/error state. Reproduced against the previous main source: two loads were started, the newer completed first, then the older completed and incorrectly replaced `new` with `old`.
+- `4e9920adb42d9dbd7a891c48f5e30ffa443063d0`: add `frontend/tests/change-analysis-artifact-ordering.test.mjs`, including overlapping-response ordering and invalidated-analysis generation tests.
+- **Actually executed**: two isolated behavioral assertions against the updated committed artifact loader (out-of-order response and stale generation) passed in a JavaScript harness. **Written but not executed**: the two committed Node tests. Full frontend Node suite, TypeScript type-check, Next.js build, backend pytest, and browser acceptance were not run in this environment. Prompts 18, 24, and 28 remain **PARTIAL**.
+
