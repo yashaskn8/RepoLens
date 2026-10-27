@@ -345,6 +345,9 @@ def generate_change_analysis_report(model: ChangeAnalysisModel) -> ChangeAnalysi
         ast_recorded
         and isinstance(raw_blast, dict)
         and str(raw_blast.get("analysis_id")) == str(model.id)
+        and raw_blast.get("repository_url") == model.repository_url
+        and raw_blast.get("base_commit_sha") == model.base_commit_sha
+        and raw_blast.get("head_commit_sha") == model.head_commit_sha
     )
     route_deltas = [RouteContractDelta(**r) for r in diff_data.get("route_deltas", [])]
     schema_deltas = [SchemaModelDelta(**s) for s in diff_data.get("schema_deltas", [])]
