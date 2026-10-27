@@ -796,17 +796,16 @@ class ChangeDiffEngine:
                 if head_has else ""
             )
 
+            # An absent manifest has no dependencies, but a *present* empty
+            # or malformed JSON/TOML manifest must still fail closed.
             if manifest_type == "package.json":
-                base_deps = _parse_package_json(base_content)
-                head_deps = _parse_package_json(head_content)
+                parser = _parse_package_json
             elif manifest_type == "requirements.txt":
-                base_deps = _parse_requirements_txt(base_content)
-                head_deps = _parse_requirements_txt(head_content)
-            elif manifest_type == "pyproject.toml":
-                base_deps = _parse_pyproject_toml(base_content)
-                head_deps = _parse_pyproject_toml(head_content)
+                parser = _parse_requirements_txt
             else:
-                base_deps, head_deps = {}, {}
+                parser = _parse_pyproject_toml
+            base_deps = parser(base_content) if base_has else {}
+            head_deps = parser(head_content) if head_has else {}
 
             all_pkgs = set(base_deps.keys()) | set(head_deps.keys())
             for pkg in sorted(all_pkgs):
