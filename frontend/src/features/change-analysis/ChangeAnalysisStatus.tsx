@@ -8,6 +8,7 @@ export interface ChangeAnalysisStatusProps {
   isRunning: boolean;
   workflowEvents: WorkflowEvent[];
   onDownloadMarkdown: () => void;
+  isDownloading: boolean;
 }
 
 export const ChangeAnalysisStatus: React.FC<ChangeAnalysisStatusProps> = ({
@@ -15,6 +16,7 @@ export const ChangeAnalysisStatus: React.FC<ChangeAnalysisStatusProps> = ({
   isRunning,
   workflowEvents,
   onDownloadMarkdown,
+  isDownloading,
 }) => {
   const getStatusBadgeStyle = (): React.CSSProperties => {
     if (analysis.status === 'COMPLETED') {
@@ -60,8 +62,10 @@ export const ChangeAnalysisStatus: React.FC<ChangeAnalysisStatusProps> = ({
               variant="primary"
               size="sm"
               onClick={onDownloadMarkdown}
+              disabled={isDownloading}
+              isLoading={isDownloading}
             >
-              📥 Download Report (.md)
+              {isDownloading ? 'Downloading report...' : '📥 Download Report (.md)'}
             </Button>
           </div>
         )}
