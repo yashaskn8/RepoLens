@@ -35,6 +35,7 @@ function setup() {
     publication: { preview_digest: 'digest-A' },
     analysisGenerationRef: { current: 1 },
     publicationPendingRef: { current: false },
+    publicationActionSequenceRef: { current: 0 },
     setPublication: (value) => writes.publications.push(value),
     setPubError: (value) => writes.errors.push(value),
     setIsGeneratingPreview: (value) => writes.preview.push(value),
