@@ -184,11 +184,32 @@ def _parse_requirements_txt(content: str) -> Dict[str, str]:
         line = line.strip()
         if not line or line.startswith("#") or line.startswith("-"):
             continue
+        # PEP 508 direct references otherwise match only their package name,
+        # hiding URL/revision updates. Fingerprint the entire requirement
+        # instead of emitting credential-bearing network locations.
+        direct = re.match(
+            r"^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[A-Za-z0-9_,.-]+\])?\s*@\s*\S",
+            line,
+        )
+        if direct:
+            deps[direct.group(1).lower()] = (
+                "DIRECT_REFERENCE_SHA256:" + hashlib.sha256(line.encode("utf-8")).hexdigest()
+            )
+            continue
         match = _REQ_PKG_REGEX.match(line)
         if match:
             pkg, ver = match.groups()
             deps[pkg.lower()] = (ver or "").strip()
     return deps
+
+
+def _redact_dependency_reference(value: str) -> str:
+    """Preserve ordinary versions but fingerprint remote/local reference locations."""
+    if "://" in value or value.startswith(
+        ("git@", "file:", "link:", "github:", "gitlab:", "bitbucket:")
+    ):
+        return "DIRECT_REFERENCE_SHA256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+    return value
 
 
 def _parse_package_json(content: str) -> Dict[str, str]:
@@ -198,10 +219,10 @@ def _parse_package_json(content: str) -> Dict[str, str]:
         data = json.loads(content)
         if isinstance(data.get("dependencies"), dict):
             for k, v in data["dependencies"].items():
-                deps[k] = str(v)
+                deps[k] = _redact_dependency_reference(str(v))
         if isinstance(data.get("devDependencies"), dict):
             for k, v in data["devDependencies"].items():
-                deps[k] = str(v)
+                deps[k] = _redact_dependency_reference(str(v))
     except Exception:
         pass
     return deps
