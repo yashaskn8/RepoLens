@@ -65,6 +65,8 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
   const [activeAnalysis, setActiveAnalysis] = useState<ChangeAnalysisResponse | null>(null);
   const analysisGenerationRef = useRef(0);
   const artifactLoadSequenceRef = useRef(0);
+  // React state updates are asynchronous; guard retry re-entry synchronously.
+  const artifactRetryPendingRef = useRef(false);
   // Invalidate pending report downloads and publication/artifact callbacks on unmount.
   useEffect(() => () => { analysisGenerationRef.current += 1; }, []);
   const submitPendingRef = useRef(false);
@@ -212,13 +214,17 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
   };
 
   const retryCompletedArtifacts = async () => {
-    if (!activeAnalysis || activeAnalysis.status !== 'COMPLETED' || isRetryingArtifacts) return;
+    if (!activeAnalysis || activeAnalysis.status !== 'COMPLETED' || isRetryingArtifacts || artifactRetryPendingRef.current) return;
+    artifactRetryPendingRef.current = true;
     const generation = analysisGenerationRef.current;
     setIsRetryingArtifacts(true);
     try {
       await loadCompletedAnalysisData(activeAnalysis.id, generation);
     } finally {
-      if (generation === analysisGenerationRef.current) setIsRetryingArtifacts(false);
+      if (generation === analysisGenerationRef.current) {
+        artifactRetryPendingRef.current = false;
+        setIsRetryingArtifacts(false);
+      }
     }
   };
 
@@ -238,6 +244,7 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
     const generation = ++analysisGenerationRef.current;
     setErrorMsg(null);
     setArtifactError(null);
+    artifactRetryPendingRef.current = false;
     setIsRetryingArtifacts(false);
     setArtifactAvailability({
       impacts: false, review: false, report: false, diff: false, telemetry: false,
