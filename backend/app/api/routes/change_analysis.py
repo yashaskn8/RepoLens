@@ -556,8 +556,12 @@ def get_change_analysis_diff(
     model = get_owned_change_analysis_or_404(db, str(analysis_id), current_user)
     meta = model.model_metadata or {}
     diff_data = meta.get("diff_result")
-    if not isinstance(diff_data, dict) or not diff_data:
-        # Missing structural analysis must never be reported as zero changes.
+    if (
+        not isinstance(diff_data, dict)
+        or diff_data.get("base_commit_sha") != model.base_commit_sha
+        or diff_data.get("head_commit_sha") != model.head_commit_sha
+    ):
+        # Missing or wrong-revision structural evidence is not zero changes.
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
