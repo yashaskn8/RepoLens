@@ -354,3 +354,42 @@ def test_report_degrades_safely_when_diff_metadata_is_malformed(
     assert report.tool_availability["tree_sitter_ast"] is False
     assert report.route_deltas == []
     assert "| **Tree-sitter AST Parser** | ⚠️ Execution Not Attested" in report.markdown_report
+
+
+@pytest.mark.parametrize("invalid_diff", ["wrong_base", "wrong_head", "missing"])
+def test_report_and_diff_reject_unbound_revision_evidence(
+    client: TestClient,
+    db_session: Session,
+    sample_completed_analysis: ChangeAnalysisModel,
+    invalid_diff: str,
+):
+    """A persisted diff from another revision must not become this analysis's evidence."""
+    metadata = dict(sample_completed_analysis.model_metadata)
+    if invalid_diff == "missing":
+        metadata.pop("diff_result", None)
+    else:
+        diff = dict(metadata["diff_result"])
+        field = "base_commit_sha" if invalid_diff == "wrong_base" else "head_commit_sha"
+        diff[field] = "f" * 40
+        metadata["diff_result"] = diff
+    sample_completed_analysis.model_metadata = metadata
+    db_session.commit()
+
+    base_url = f"/api/v1/change-analyses/{sample_completed_analysis.id}"
+    diff_response = client.get(f"{base_url}/diff")
+    assert diff_response.status_code == 409
+    assert diff_response.json()["detail"]["error_code"] == "CHANGE_DIFF_UNAVAILABLE"
+
+    report_response = client.get(f"{base_url}/report")
+    assert report_response.status_code == 200
+    report = report_response.json()
+    assert report["route_deltas"] == []
+    assert report["schema_deltas"] == []
+    assert report["tool_availability"]["tree_sitter_ast"] is False
+    assert any("contract delta counts are unavailable" in item for item in report["limitations"])
+    assert "| ⚡ **API Route Contract Deltas** | Unavailable |" in report["markdown_report"]
+    assert "| 📐 **Schema & Model Deltas** | Unavailable |" in report["markdown_report"]
+
+    markdown_response = client.get(f"{base_url}/markdown")
+    assert markdown_response.status_code == 200
+    assert "| ⚡ **API Route Contract Deltas** | Unavailable |" in markdown_response.text
