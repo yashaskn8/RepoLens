@@ -786,10 +786,12 @@ export async function listChangeAnalyses(
 }
 
 export async function fetchChangeAnalysis(
-  analysisId: string
+  analysisId: string,
+  signal?: AbortSignal
 ): Promise<ChangeAnalysisResponse> {
   const response = await apiFetch(`/api/v1/change-analyses/${analysisId}`, {
     cache: 'no-store',
+    signal,
   });
 
   if (!response.ok) {
