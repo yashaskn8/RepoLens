@@ -76,7 +76,7 @@ from app.schemas.change_analysis import (
     SymbolDiffFact,
 )
 
-_ENV_KEY_VAL_REGEX = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
+_ENV_KEY_VAL_REGEX = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
 _REQ_PKG_REGEX = re.compile(r"^\s*([a-zA-Z0-9_\-\.]+)(\[[A-Za-z0-9_,.\-]+\])?\s*([=><~^!;].*)?$")
 
 
