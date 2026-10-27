@@ -194,3 +194,12 @@ See [REPAIR_AUDIT_2026-10-26.md](REPAIR_AUDIT_2026-10-26.md) for historical CI e
 - `0b7903e49151b16276b3cc690f64286724acc149`: committed `frontend/tests/change-analysis-retry-concurrency.test.mjs` covering synchronous duplicate retries, nonterminal rejection, and stale completion after a new analysis starts.
 - `454f81af844c21ba561425b225046bf2ec6edf08`: introduced `artifactRetryPendingRef` to exclude immediate re-entry; reset on a new analysis, and release only for the current generation. No backend auth, publication approval, or scanner isolation behavior changed.
 - **Actually executed:** 7 focused JavaScript behavioral assertions against the fetched committed retry handler passed. **Written but not executed in the repository:** the new Node regression file. Full frontend tests, TypeScript, Next.js build, backend pytest, and browser acceptance were not run. Prompts 24 and 28 remain **PARTIAL**; production isolation and Prompt 35 remain blocked/unverified.
+
+
+## Optional publication fetch must not stall mandatory analysis evidence (2026-10-27)
+
+- **Reproduced on fetched pre-fix source:** when `fetchReviewPublication` remained unresolved, `loadCompletedAnalysisData` did not complete and did not set the already-ready required report. The isolated reproduction observed `required_report_loaded=false` while the optional request hung.
+- `f8f71e0559b377716c5a12c2898fdf252a0fc2a1`: committed three Node regressions in `frontend/tests/change-analysis-optional-publication-recovery.test.mjs`.
+- `ad08d9b1ffdc0195f5a3fd4b702430dc2ace8614`: moved optional publication retrieval off the mandatory five-artifact `Promise.allSettled` path; kept generation, load-sequence, pending-action, and operator-action-sequence guards. Optional 404/failure is not treated as missing required evidence.
+- `ebf8534a872b6394a36bbebd55abec382c784155`: corrected the existing artifact-ordering test fixture to supply publication guard refs used by the loader.
+- **Actually executed:** six isolated JavaScript checks against the fetched committed loader passed (mandatory report loads without publication, delayed optional success, stale generation, optional rejection, operator action invalidation). **Not executed:** the newly committed Node tests, complete frontend tests/type-check/build, backend suite, and browser acceptance. Prompts 18/19/24/28 remain **PARTIAL**. No release gate is certified.
