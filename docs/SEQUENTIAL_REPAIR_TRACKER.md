@@ -432,3 +432,10 @@ See [REPAIR_AUDIT_2026-10-26.md](REPAIR_AUDIT_2026-10-26.md) for historical CI e
 **Executed:** eight isolated behavioral checks of a copied, corrected JSON config parser, nine isolated checks of a copied duplicate-key rejecting object-pairs hook, and a standard-library JSON reproduction of the original overwrite behavior. GitHub connector source checks confirmed the malformed literal sequences were removed and the hook is used at both call sites. **Not executed:** the committed pytest tests, full-source Python AST compilation, backend/frontend suites, browser workflows, or deployment tests. A direct Git checkout was attempted and failed due to GitHub DNS resolution. These are targeted source and isolated checks, not integrated acceptance.
 
 Prompts 15/17/28 remain **PARTIAL**. Prompt 34 remains **BLOCKED**; Prompt 35 remains **NOT TESTED**. All 37 acceptance items remain open. No change to authentication, CSRF, tenant isolation, human approval, or production isolation gates.
+
+## Environment-specific dotenv coverage (2026-10-28)
+
+- `58b09a09fc06f43b4ddcf1e318c76d691f710c40`: five regression cases for `.env.production`, `.env.development`, `.env.staging`, `.env.test.local`, and nested `.env.production.local`, including secret-safe evidence assertions.
+- `fe6bb0f80b07da5fcbfeb48bd759b2316c49189b`: structural configuration discovery now includes `.env.*` variants without dropping previously supported names. Previously all five test paths were ignored.
+
+**Executed:** source-backed reproduction of all five missed filenames and twelve isolated path-classification checks (nine included and three excluded). **Not executed:** the five committed pytest cases, complete structural-diff integration, full backend/frontend suites, or browser/deployment acceptance because GitHub DNS resolution prevented a local checkout. Prompt 15 remains **PARTIAL**, and all 37 acceptance items remain open.
