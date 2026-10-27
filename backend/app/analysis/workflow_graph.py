@@ -69,9 +69,22 @@ def _matches_exact_diff(
     )
 
 
-def _matches_analysis_blast(blast: object, *, analysis_id: str) -> bool:
-    """Never reuse an impact report produced for a different analysis."""
-    return isinstance(blast, BlastRadiusReport) and str(blast.analysis_id) == analysis_id
+def _matches_analysis_blast(
+    blast: object,
+    *,
+    analysis_id: str,
+    repository_url: str,
+    base_commit_sha: str,
+    head_commit_sha: str,
+) -> bool:
+    """A cached blast radius must be tied to this analysis and exact diff inputs."""
+    return (
+        isinstance(blast, BlastRadiusReport)
+        and str(blast.analysis_id) == analysis_id
+        and blast.repository_url == repository_url
+        and blast.base_commit_sha == base_commit_sha
+        and blast.head_commit_sha == head_commit_sha
+    )
 
 
 class ChangeAnalysisState(TypedDict, total=False):
@@ -225,7 +238,13 @@ async def run_impact_node(state: ChangeAnalysisState) -> Dict[str, Any]:
         head_commit_sha=state["head_commit_sha"],
     ):
         raise RuntimeError("CHANGE_DIFF_PROVENANCE_MISMATCH: Cannot compute impact from an unrelated diff.")
-    if _matches_analysis_blast(state.get("blast_radius"), analysis_id=state["analysis_id"]):
+    if _matches_analysis_blast(
+        state.get("blast_radius"),
+        analysis_id=state["analysis_id"],
+        repository_url=state["repository_url"],
+        base_commit_sha=state["base_commit_sha"],
+        head_commit_sha=state["head_commit_sha"],
+    ):
         completed.append("impact")
         return {"status": "ANALYZING", "completed_nodes": completed}
 
@@ -253,6 +272,9 @@ async def run_impact_node(state: ChangeAnalysisState) -> Dict[str, Any]:
         base_graph = frontier_graph(frontier)
         report = impact_engine.compute_blast_radius(
             analysis_id=UUID(state["analysis_id"]), diff_result=diff_res, base_graph=base_graph)
+        report.repository_url = state["repository_url"]
+        report.base_commit_sha = state["base_commit_sha"]
+        report.head_commit_sha = state["head_commit_sha"]
         if (frontier and frontier["partial"]) or diff_res.discovery_coverage.get("complete") is False:
             report.is_truncated = True
             report.truncation_reason = "PARTIAL_DISCOVERY_OR_IMPACT_FRONTIER"
