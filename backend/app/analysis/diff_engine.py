@@ -232,10 +232,22 @@ def _redact_dependency_reference(value: str) -> str:
     return value
 
 
+
+def _reject_duplicate_json_object_pairs(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
+    """Reject ambiguous JSON objects rather than silently overwriting evidence."""
+    result: Dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            # Do not echo potentially sensitive configuration keys in errors.
+            raise ValueError("JSON document contains duplicate object keys.")
+        result[key] = value
+    return result
+
+
 def _parse_package_json(content: str) -> Dict[str, str]:
     """Parse npm dependency scopes without hiding malformed manifest evidence."""
     try:
-        data = json.loads(content)
+        data = json.loads(content, object_pairs_hook=_reject_duplicate_json_object_pairs)
     except json.JSONDecodeError:
         raise ValueError("Dependency manifest JSON could not be parsed.") from None
     if not isinstance(data, dict):
@@ -889,7 +901,7 @@ class ChangeDiffEngine:
                         if not present:
                             return {}
                         try:
-                            document = json.loads(content)
+                            document = json.loads(content, object_pairs_hook=_reject_duplicate_json_object_pairs)
                         except json.JSONDecodeError:
                             raise ValueError("Configuration JSON could not be parsed.") from None
                         if not isinstance(document, dict):
