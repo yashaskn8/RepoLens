@@ -152,7 +152,7 @@ def _render_markdown_report(
     lines.append(f"| 📐 **Schema & Model Deltas** | {f'`{len(schema_deltas)}`' if ast_recorded else 'Unavailable'} |")
     lines.append(f"| 📦 **Dependency Deltas** | {f'`{len(dependency_deltas)}`' if ast_recorded else 'Unavailable'} |")
     lines.append(f"| ⚙️ **Config Deltas** | {f'`{len(config_deltas)}`' if ast_recorded else 'Unavailable'} |")
-    lines.append(f"| 🤖 **Verified Review Findings** | `{len(review_findings)}` |")
+    lines.append(f"| 🤖 **Verified Review Findings** | {f'`{len(review_findings)}`' if has_review_data and not invalid_review_count else 'Unavailable'} |")
     lines.append("")
 
     # 3. Contract Changes
@@ -364,10 +364,10 @@ def generate_change_analysis_report(model: ChangeAnalysisModel) -> ChangeAnalysi
     if isinstance(raw_meta, dict):
         extra = raw_meta.get("extra_metadata") if isinstance(raw_meta.get("extra_metadata"), dict) else {}
         is_llm_fallback = bool(raw_meta.get("is_fallback") or extra.get("is_fallback", False))
-        llm_status = str(raw_meta.get("execution_status") or extra.get("execution_status") or ("SUCCESS" if raw_review and not is_llm_fallback else "UNAVAILABLE")).upper()
+        llm_status = str(raw_meta.get("execution_status") or extra.get("execution_status") or ("SUCCESS" if review_data and not is_llm_fallback else "UNAVAILABLE")).upper()
     else:
         is_llm_fallback = False
-        llm_status = "SUCCESS" if raw_review else "UNAVAILABLE"
+        llm_status = "SUCCESS" if review_data else "UNAVAILABLE"
 
     review_findings: List[ChangeReviewFinding] = []
     raw_findings = review_data.get("findings", [])
@@ -424,7 +424,7 @@ def generate_change_analysis_report(model: ChangeAnalysisModel) -> ChangeAnalysi
         duration_seconds=duration_sec,
         llm_status=llm_status,
         is_llm_fallback=is_llm_fallback,
-        has_review_data=bool(raw_review),
+        has_review_data=bool(review_data),
         invalid_review_count=invalid_review_count,
         ast_recorded=ast_recorded,
         graph_recorded=graph_recorded,
@@ -435,7 +435,7 @@ def generate_change_analysis_report(model: ChangeAnalysisModel) -> ChangeAnalysi
         "repository_graph": graph_recorded,
         "semgrep_scanner": False,
         "osv_scanner": False,
-        "llm_reviewer": bool(raw_review and not is_llm_fallback and llm_status == "SUCCESS"),
+        "llm_reviewer": bool(review_data and not is_llm_fallback and llm_status == "SUCCESS"),
         "runtime_sandbox": False,
     }
 
@@ -444,6 +444,10 @@ def generate_change_analysis_report(model: ChangeAnalysisModel) -> ChangeAnalysi
         "Repository test suites and CI pipelines were NOT executed.",
         "Dynamic reflection and runtime duck-typing cannot be fully determined through static analysis alone.",
     ]
+    if not review_data:
+        limitations.append(
+            "Verified change review evidence is unavailable; review finding count is unknown, not verified zero."
+        )
     if not ast_recorded:
         limitations.append(
             "Structural diff evidence is missing or does not match the requested immutable revisions; contract delta counts are unavailable, not verified zero."
