@@ -111,3 +111,14 @@ test('obsolete publish response cannot update a newer analysis', async () => {
   assert.equal(f.writes.publications.length, 0);
   assert.equal(f.writes.confirmations.length, 0);
 });
+
+test('stale confirmation GET cannot downgrade a successful published response', async () => {
+  const f = fixture();
+  f.context.fetchReviewPublication = async () => ({
+    publication_id: 'pub-1', status: 'APPROVED', preview_digest: 'digest-A',
+  });
+  await f.run();
+  assert.equal(f.context.publication.status, 'PUBLISHED');
+  assert.equal(f.context.publication.github_review_id, 42);
+  assert.equal(f.context.publicationPendingRef.current, false);
+});
