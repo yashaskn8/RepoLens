@@ -178,24 +178,43 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
         if (isCurrent()) apply(value);
         return value;
       });
+    // A stalled evidence endpoint must eventually report a recoverable failure.
+    // Abort the network request, but also settle the wrapper when a mocked or
+    // non-cooperative request ignores AbortSignal. Late results cannot apply.
+    const withArtifactDeadline = <T,>(request: (signal: AbortSignal) => Promise<T>): Promise<T> => {
+      const controller = new AbortController();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          reject(new Error('Artifact request timed out'));
+        }, 15_000);
+      });
+      return Promise.race([
+        Promise.resolve().then(() => request(controller.signal)),
+        deadline,
+      ]).finally(() => {
+        if (timer !== undefined) clearTimeout(timer);
+      });
+    };
     const outcomes = await Promise.allSettled([
-      applyWhenCurrent(fetchChangeAnalysisImpacts(analysisId), (value) => {
+      applyWhenCurrent(withArtifactDeadline((signal) => fetchChangeAnalysisImpacts(analysisId, signal)), (value) => {
         setImpacts(value || []);
         setArtifactAvailability((state) => ({ ...state, impacts: true }));
       }),
-      applyWhenCurrent(fetchChangeAnalysisReview(analysisId), (value) => {
+      applyWhenCurrent(withArtifactDeadline((signal) => fetchChangeAnalysisReview(analysisId, signal)), (value) => {
         setReviewFindings(value.findings || []);
         setArtifactAvailability((state) => ({ ...state, review: true }));
       }),
-      applyWhenCurrent(fetchChangeAnalysisReport(analysisId), (value) => {
+      applyWhenCurrent(withArtifactDeadline((signal) => fetchChangeAnalysisReport(analysisId, signal)), (value) => {
         setReport(value);
         setArtifactAvailability((state) => ({ ...state, report: true }));
       }),
-      applyWhenCurrent(fetchChangeAnalysisTelemetry(analysisId), (value) => {
+      applyWhenCurrent(withArtifactDeadline((signal) => fetchChangeAnalysisTelemetry(analysisId, signal)), (value) => {
         setTelemetry(value);
         setArtifactAvailability((state) => ({ ...state, telemetry: true }));
       }),
-      applyWhenCurrent(fetchChangeAnalysisDiff(analysisId), (diff) => {
+      applyWhenCurrent(withArtifactDeadline((signal) => fetchChangeAnalysisDiff(analysisId, signal)), (diff) => {
         setDiffDeltas({
           route_deltas: diff.route_deltas || [],
           schema_deltas: diff.schema_deltas || [],
