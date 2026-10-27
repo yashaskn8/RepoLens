@@ -25,10 +25,13 @@ function fixture() {
   const state = { report: null, impacts: null, error: null, availability: {} };
   const analysisGenerationRef = { current: 1 };
   const artifactLoadSequenceRef = { current: 0 };
+  const publicationActionSequenceRef = { current: 0 };
+  const publicationPendingRef = { current: false };
   const load = new Function(
     'fetchChangeAnalysisImpacts', 'fetchChangeAnalysisReview', 'fetchChangeAnalysisReport',
     'fetchChangeAnalysisTelemetry', 'fetchChangeAnalysisDiff', 'fetchReviewPublication',
     'analysisGenerationRef', 'artifactLoadSequenceRef',
+    'publicationActionSequenceRef', 'publicationPendingRef',
     'setImpacts', 'setReviewFindings', 'setReport', 'setTelemetry', 'setDiffDeltas',
     'setPublication', 'setArtifactAvailability', 'setArtifactError',
     compiled + '\nreturn loadCompletedAnalysisData;',
@@ -40,6 +43,7 @@ function fixture() {
     async () => ({}),
     async () => null,
     analysisGenerationRef, artifactLoadSequenceRef,
+    publicationActionSequenceRef, publicationPendingRef,
     value => { state.impacts = value; },
     () => {},
     value => { state.report = value; },
