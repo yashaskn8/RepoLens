@@ -215,28 +215,30 @@ def _redact_dependency_reference(value: str) -> str:
 
 
 def _parse_package_json(content: str) -> Dict[str, str]:
-    """Parse package dependencies and devDependencies from package.json."""
-    deps: Dict[str, str] = {}
+    """Parse npm dependency scopes without hiding malformed manifest evidence."""
     try:
         data = json.loads(content)
-        if isinstance(data.get("dependencies"), dict):
-            for k, v in data["dependencies"].items():
-                deps[k] = _redact_dependency_reference(str(v))
-        if isinstance(data.get("devDependencies"), dict):
-            for k, v in data["devDependencies"].items():
-                # A dev-only dependency becoming a runtime dependency changes
-                # installation and security exposure even at the same version.
-                # npm package names cannot contain brackets, so this suffix
-                # cannot collide with a real package name.
-                deps[f"{k}[dev]"] = _redact_dependency_reference(str(v))
-        # npm's optional and peer dependency sets affect installation and
-        # compatibility independently of runtime and development scopes.
-        for section, scope in (("optionalDependencies", "optional"), ("peerDependencies", "peer")):
-            if isinstance(data.get(section), dict):
-                for k, v in data[section].items():
-                    deps[f"{k}[{scope}]"] = _redact_dependency_reference(str(v))
-    except Exception:
-        pass
+    except json.JSONDecodeError:
+        raise ValueError("Dependency manifest JSON could not be parsed.") from None
+    if not isinstance(data, dict):
+        raise ValueError("Dependency manifest JSON must contain an object.")
+
+    deps: Dict[str, str] = {}
+    for section, suffix in (
+        ("dependencies", ""),
+        ("devDependencies", "[dev]"),
+        ("optionalDependencies", "[optional]"),
+        ("peerDependencies", "[peer]"),
+    ):
+        if section not in data:
+            continue
+        entries = data[section]
+        if not isinstance(entries, dict):
+            raise ValueError("Dependency manifest scope must contain an object.")
+        for name, version in entries.items():
+            if not isinstance(version, str):
+                raise ValueError("Dependency manifest version must be a string.")
+            deps[f"{name}{suffix}"] = _redact_dependency_reference(version)
     return deps
 
 
@@ -245,10 +247,10 @@ def _parse_pyproject_toml(content: str) -> Dict[str, str]:
     try:
         document = tomllib.loads(content)
     except tomllib.TOMLDecodeError:
-        return {}
+        raise ValueError("Dependency manifest TOML could not be parsed.") from None
     project = document.get("project", {})
     if not isinstance(project, dict):
-        return {}
+        raise ValueError("Dependency manifest project must contain a table.")
     raw_dependencies = project.get("dependencies", [])
     dependencies: Dict[str, str] = {}
     def record_requirement(requirement: Any, group: str | None = None) -> None:
@@ -285,14 +287,17 @@ def _parse_pyproject_toml(content: str) -> Dict[str, str]:
                         (name + "=" + version).encode("utf-8")
                     ).hexdigest()
                 dependencies[name.lower()] = version
+    else:
+        raise ValueError("Dependency manifest dependencies must be a list or table.")
 
     optional_groups = project.get("optional-dependencies", {})
-    if isinstance(optional_groups, dict):
-        for group, requirements in optional_groups.items():
-            if not isinstance(group, str) or not isinstance(requirements, list):
-                continue
-            for requirement in requirements:
-                record_requirement(requirement, group)
+    if not isinstance(optional_groups, dict):
+        raise ValueError("Dependency manifest optional dependencies must be a table.")
+    for group, requirements in optional_groups.items():
+        if not isinstance(group, str) or not isinstance(requirements, list):
+            raise ValueError("Dependency manifest optional group must contain a list.")
+        for requirement in requirements:
+            record_requirement(requirement, group)
     return dependencies
 
 
