@@ -163,10 +163,10 @@ test('successful optional publication fetch clears its deadline', async () => {
 
 test('optional publication API forwards abort signal to fetch', () => {
   const start = apiSource.indexOf('export async function fetchReviewPublication(');
-  const end = apiSource.indexOf('\\n}', start);
+  const end = apiSource.indexOf('\n}', start);
   assert.ok(start >= 0 && end > start);
   const getter = apiSource.slice(start, end);
-  assert.match(getter, /signal\\?: AbortSignal/);
-  assert.match(getter, /cache: 'no-store',\\s*signal,/);
-  assert.match(source, /withArtifactDeadline\\(\\(signal\\) => fetchReviewPublication\\(analysisId, signal\\)/);
+  assert.match(getter, /signal\?: AbortSignal/);
+  assert.match(getter, /cache: 'no-store',\s*signal,/);
+  assert.match(source, /withArtifactDeadline\(\(signal\) => fetchReviewPublication\(analysisId, signal\)/);
 });
