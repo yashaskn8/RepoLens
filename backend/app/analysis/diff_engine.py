@@ -77,7 +77,7 @@ from app.schemas.change_analysis import (
 )
 
 _ENV_KEY_VAL_REGEX = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
-_REQ_PKG_REGEX = re.compile(r"^\s*([a-zA-Z0-9_\-\.]+)\s*([=><~^!].*)?$")
+_REQ_PKG_REGEX = re.compile(r"^\s*([a-zA-Z0-9_\-\.]+)(\[[A-Za-z0-9_,.\-]+\])?\s*([=><~^!;].*)?$")
 
 
 def _is_breaking_signature_change(b_params_str: str, h_params_str: str, b_ret: str, h_ret: str) -> bool:
@@ -198,8 +198,10 @@ def _parse_requirements_txt(content: str) -> Dict[str, str]:
             continue
         match = _REQ_PKG_REGEX.match(line)
         if match:
-            pkg, ver = match.groups()
-            deps[pkg.lower()] = (ver or "").strip()
+            pkg, extras, ver = match.groups()
+            # Extras change the installed dependency set; marker-only
+            # requirements are also meaningful even without a version pin.
+            deps[pkg.lower()] = (extras or "") + (ver or "").strip()
     return deps
 
 
