@@ -42,9 +42,9 @@ def test_package_json_remote_references_are_fingerprinted():
         "devDependencies": {"tool": "https://user:secret@example.com/tool.tgz"},
     }))
     assert before["internal"].startswith("DIRECT_REFERENCE_SHA256:")
-    assert before["tool"].startswith("DIRECT_REFERENCE_SHA256:")
+    assert before["tool[dev]"].startswith("DIRECT_REFERENCE_SHA256:")
     assert before["internal"] != after["internal"]
-    assert before["tool"] == after["tool"]
+    assert before["tool[dev]"] == after["tool[dev]"]
     assert "secret" not in str(before) + str(after)
 
 
@@ -53,7 +53,7 @@ def test_package_json_normal_versions_are_preserved():
         '{"dependencies":{"react":"^19.0.0"},'
         '"devDependencies":{"typescript":"~5.8.0"}}'
     )
-    assert parsed == {"react": "^19.0.0", "typescript": "~5.8.0"}
+    assert parsed == {"react": "^19.0.0", "typescript[dev]": "~5.8.0"}
 
 
 def test_structural_diff_reports_direct_reference_updates_without_secrets(tmp_path):
