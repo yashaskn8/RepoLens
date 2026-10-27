@@ -420,6 +420,9 @@ class BlastRadiusReport(BaseModel):
     """Aggregated report of graph-aware blast radius analysis."""
 
     analysis_id: UUID = Field(..., description="Parent ChangeAnalysis identifier")
+    repository_url: Optional[str] = Field(default=None, description="Repository whose exact revisions were analyzed")
+    base_commit_sha: Optional[str] = Field(default=None, description="Exact base revision used for impact computation")
+    head_commit_sha: Optional[str] = Field(default=None, description="Exact head revision used for impact computation")
     impacts: List[ChangeImpact] = Field(default_factory=list, description="Computed structured change impact records")
     total_impacts: int = Field(default=0, description="Total impact records generated")
     direct_impacts_count: int = Field(default=0, description="Count of direct (depth 1) impacts")
