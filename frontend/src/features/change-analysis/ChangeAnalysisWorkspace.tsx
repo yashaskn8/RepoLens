@@ -160,24 +160,6 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
   const loadCompletedAnalysisData = async (analysisId: string, generation: number) => {
     const loadSequence = ++artifactLoadSequenceRef.current;
     const publicationActionSequence = publicationActionSequenceRef.current;
-    // Publication previews are optional and may be absent or slow. Never let
-    // that request delay the required report, findings, diff, or telemetry.
-    void Promise.resolve().then(() => fetchReviewPublication(analysisId)).then((publication) => {
-      if (generation !== analysisGenerationRef.current ||
-          loadSequence !== artifactLoadSequenceRef.current ||
-          publicationPendingRef.current ||
-          publicationActionSequence !== publicationActionSequenceRef.current) return;
-      setPublication(publication);
-    }, () => { /* No publication preview exists yet, or its fetch failed. */ });
-    // Apply each completed artifact immediately. A slow or stalled sibling
-    // must not hide an already-available report, review, diff, or telemetry.
-    const isCurrent = () =>
-      generation === analysisGenerationRef.current && loadSequence === artifactLoadSequenceRef.current;
-    const applyWhenCurrent = <T,>(request: Promise<T>, apply: (value: T) => void) =>
-      request.then((value) => {
-        if (isCurrent()) apply(value);
-        return value;
-      });
     // A stalled evidence endpoint must eventually report a recoverable failure.
     // Abort the network request, but also settle the wrapper when a mocked or
     // non-cooperative request ignores AbortSignal. Late results cannot apply.
@@ -197,6 +179,24 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
         if (timer !== undefined) clearTimeout(timer);
       });
     };
+    // Publication previews are optional and may be absent or slow. Never let
+    // that request delay the required report, findings, diff, or telemetry.
+    void withArtifactDeadline((signal) => fetchReviewPublication(analysisId, signal)).then((publication) => {
+      if (generation !== analysisGenerationRef.current ||
+          loadSequence !== artifactLoadSequenceRef.current ||
+          publicationPendingRef.current ||
+          publicationActionSequence !== publicationActionSequenceRef.current) return;
+      setPublication(publication);
+    }, () => { /* No publication preview exists yet, or its fetch failed. */ });
+    // Apply each completed artifact immediately. A slow or stalled sibling
+    // must not hide an already-available report, review, diff, or telemetry.
+    const isCurrent = () =>
+      generation === analysisGenerationRef.current && loadSequence === artifactLoadSequenceRef.current;
+    const applyWhenCurrent = <T,>(request: Promise<T>, apply: (value: T) => void) =>
+      request.then((value) => {
+        if (isCurrent()) apply(value);
+        return value;
+      });
     const outcomes = await Promise.allSettled([
       applyWhenCurrent(withArtifactDeadline((signal) => fetchChangeAnalysisImpacts(analysisId, signal)), (value) => {
         setImpacts(value || []);
