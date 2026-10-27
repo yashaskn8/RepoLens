@@ -88,6 +88,17 @@ async def request_scan_report(
         )
         if existing_work is not None:
             existing_report = get_owned_report_or_404(db, existing_work.resource_id, current_user)
+            # An external idempotency key identifies one request, not any report
+            # owned by the caller. Reusing it for a different scan must fail
+            # rather than returning the first scan's report as the second's.
+            if existing_report.scan_id != scan.id:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "error_code": "IDEMPOTENCY_CONFLICT",
+                        "message": "This idempotency key is already associated with a different scan.",
+                    },
+                )
             try:
                 submission = submission_service.submit(
                     db,
