@@ -1,5 +1,7 @@
 """PEP 621 dependency changes must be represented in structural PR evidence."""
 
+import pytest
+
 from app.analysis.diff_engine import ChangeDiffEngine, _parse_pyproject_toml
 
 
@@ -57,9 +59,9 @@ def test_legacy_direct_reference_is_also_redacted():
     assert "secret" not in str(parsed)
 
 
-def test_malformed_pyproject_is_not_interpreted_as_dependency_data():
-    assert _parse_pyproject_toml('[project]\ndependencies = [') == {}
-
+def test_malformed_pyproject_fails_closed_instead_of_hiding_dependency_data():
+    with pytest.raises(ValueError):
+        _parse_pyproject_toml('[project]\\ndependencies = [')
 
 def test_pep621_dependency_deltas_reach_structural_diff(tmp_path):
     base = tmp_path / "base"
