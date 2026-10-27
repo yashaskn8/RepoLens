@@ -393,3 +393,37 @@ def test_report_and_diff_reject_unbound_revision_evidence(
     markdown_response = client.get(f"{base_url}/markdown")
     assert markdown_response.status_code == 200
     assert "| ⚡ **API Route Contract Deltas** | Unavailable |" in markdown_response.text
+
+
+@pytest.mark.parametrize("review_state", ["missing", "malformed"])
+def test_unavailable_review_never_appears_as_zero_verified_findings(
+    client: TestClient,
+    db_session: Session,
+    sample_completed_analysis: ChangeAnalysisModel,
+    review_state: str,
+):
+    """No review artifact is not proof that there are no review findings."""
+    metadata = dict(sample_completed_analysis.model_metadata)
+    if review_state == "missing":
+        metadata.pop("review_report", None)
+    else:
+        metadata["review_report"] = "invalid persisted review"
+    sample_completed_analysis.model_metadata = metadata
+    db_session.commit()
+
+    base_url = f"/api/v1/change-analyses/{sample_completed_analysis.id}"
+    review_response = client.get(f"{base_url}/review")
+    assert review_response.status_code == 409
+    assert review_response.json()["detail"]["error_code"] == "CHANGE_REVIEW_UNAVAILABLE"
+
+    response = client.get(f"{base_url}/report")
+    assert response.status_code == 200
+    report = response.json()
+    assert report["review_findings"] == []
+    assert report["tool_availability"]["llm_reviewer"] is False
+    assert any("review finding count is unknown" in item for item in report["limitations"])
+    assert "| 🤖 **Verified Review Findings** | Unavailable |" in report["markdown_report"]
+
+    markdown = client.get(f"{base_url}/markdown")
+    assert markdown.status_code == 200
+    assert "| 🤖 **Verified Review Findings** | Unavailable |" in markdown.text
