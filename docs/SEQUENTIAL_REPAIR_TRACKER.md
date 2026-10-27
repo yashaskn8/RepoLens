@@ -177,3 +177,12 @@ See [REPAIR_AUDIT_2026-10-26.md](REPAIR_AUDIT_2026-10-26.md) for historical CI e
 - `99b8f0e0b067bb4b76d1f1ed9852504f00fa4fcd`: add `frontend/tests/change-analysis-report-download-isolation.test.mjs` (two behavioral tests and one unmount guard check).
 - **Reproduced before fix** using the retrieved original handler: an obsolete response triggered one browser download. **Actually executed after fix**: two isolated handler cases passed (obsolete report produces no download; current report downloads once), and unmount guard source was inspected. The committed Node tests, full frontend suite, TypeScript check, build, backend tests, and browser end-to-end tests remain **unexecuted**. Prompt 22/28 acceptance remains **PARTIAL**.
 
+
+
+## Publication artifact recovery versus operator actions (2026-10-27)
+
+- **Substantiated:** the completed-analysis artifact loader independently fetches optional persisted review-publication state. If this request begins before an operator generates a new preview or approves/publishes a review, its delayed response could overwrite the newer local publication result. The existing analysis-generation and artifact-load-sequence guards did not distinguish operator actions within the same analysis. A simplified asynchronous reproduction demonstrated `old-preview` replacing `new-preview`.
+- `ea69712ea2899c94e2f311da625383b36bf45454`: added a publication-action sequence and pending-action check. Preview generation, approval, and publication increment the sequence on start and completion; the artifact loader only applies a persisted publication when no newer operator action intervened. The analysis-generation, human-approval, and tenant boundaries remain intact.
+- `0580758f867e6d4f74bda9e0dd396a52fb631d98`: added `frontend/tests/change-analysis-publication-artifact-race.test.mjs` with delayed stale-preview, pending-action, approval ordering, and normal persisted-load cases.
+- **Actually executed:** five focused Node test cases passed against a locally copied artifact-loader excerpt plus action markers; source-level checks against the fetched committed `main` confirmed all three action entry guards, finalizer increments, pending guard, and test presence. **Not executed:** the committed Node test against a complete repository checkout, full frontend test/type-check/build, backend suite, browser acceptance, or CI. The container could not resolve `github.com` for a full checkout. Prompt 19/24/28 remain **PARTIAL**; Prompt 35 remains **NOT TESTED**. No acceptance item is certified complete.
+
