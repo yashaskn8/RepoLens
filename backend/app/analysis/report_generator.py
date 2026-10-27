@@ -88,6 +88,11 @@ def _markdown_pr_label(raw: object) -> str:
     return cleaned
 
 
+def _format_evidence_count(count: int, available: bool) -> str:
+    """Distinguish an observed zero from evidence that was never available."""
+    return f"`{count}`" if available else "Unavailable"
+
+
 def _render_markdown_report(
     analysis: ChangeAnalysisModel,
     route_deltas: List[RouteContractDelta],
@@ -148,11 +153,14 @@ def _render_markdown_report(
     lines.append(f"| 📁 **Files Changed** | `{analysis.changed_files_count}` |")
     lines.append(f"| 🧩 **Symbols Changed** | `{analysis.changed_symbols_count}` |")
     lines.append(f"| 💥 **Impacted Symbols / Callers** | `{analysis.impacted_symbols_count}` |")
-    lines.append(f"| ⚡ **API Route Contract Deltas** | {f'`{len(route_deltas)}`' if ast_recorded else 'Unavailable'} |")
-    lines.append(f"| 📐 **Schema & Model Deltas** | {f'`{len(schema_deltas)}`' if ast_recorded else 'Unavailable'} |")
-    lines.append(f"| 📦 **Dependency Deltas** | {f'`{len(dependency_deltas)}`' if ast_recorded else 'Unavailable'} |")
-    lines.append(f"| ⚙️ **Config Deltas** | {f'`{len(config_deltas)}`' if ast_recorded else 'Unavailable'} |")
-    lines.append(f"| 🤖 **Verified Review Findings** | {f'`{len(review_findings)}`' if has_review_data and not invalid_review_count else 'Unavailable'} |")
+    lines.append(f"| ⚡ **API Route Contract Deltas** | {_format_evidence_count(len(route_deltas), ast_recorded)} |")
+    lines.append(f"| 📐 **Schema & Model Deltas** | {_format_evidence_count(len(schema_deltas), ast_recorded)} |")
+    lines.append(f"| 📦 **Dependency Deltas** | {_format_evidence_count(len(dependency_deltas), ast_recorded)} |")
+    lines.append(f"| ⚙️ **Config Deltas** | {_format_evidence_count(len(config_deltas), ast_recorded)} |")
+    review_count = _format_evidence_count(
+        len(review_findings), has_review_data and invalid_review_count == 0
+    )
+    lines.append(f"| 🤖 **Verified Review Findings** | {review_count} |")
     lines.append("")
 
     # 3. Contract Changes
