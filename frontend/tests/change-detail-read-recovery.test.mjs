@@ -97,3 +97,16 @@ test('successful publication is acknowledged before bounded reconciliation', () 
   assert.match(action, /current\.status === 'PUBLISHED' && updatedPub\.status !== 'PUBLISHED'/);
   assert.match(action, /Verify the current status before another publication attempt/);
 });
+
+test('published reviews cannot trigger another approval or publication', () => {
+  const actionStart = source.indexOf('  const handleApproveAndPublish = async () => {');
+  const guard = source.slice(actionStart, source.indexOf('    const generation =', actionStart));
+  const condition = guard.match(/if \(([^\n]+)\) return;/);
+  assert.ok(condition, 'publication guard exists');
+  const blocked = new Function('publication', 'isOperator', 'confirmedPublish', 'publishingRef',
+    'return Boolean(' + condition[1] + ');');
+  assert.equal(blocked({ preview_digest: 'digest', status: 'PUBLISHED' }, true, true, { current: false }), true);
+  assert.equal(blocked({ preview_digest: 'digest', status: 'PREVIEW_READY' }, true, true, { current: false }), false);
+  assert.match(source, /disabled=\{publication\.status === 'PUBLISHED' \|\| !confirmedPublish \|\| isPublishing \|\| !isOperator\}/);
+  assert.match(source, /Review Already Published/);
+});
