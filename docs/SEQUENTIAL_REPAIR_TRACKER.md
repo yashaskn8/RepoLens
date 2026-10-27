@@ -340,3 +340,13 @@ See [REPAIR_AUDIT_2026-10-26.md](REPAIR_AUDIT_2026-10-26.md) for historical CI e
 - **Executed:** seven isolated Python `unittest` checks passed against manually copied, connector-fetched committed parser as unprivileged `nobody`. **Not executed:** the four committed pytest tests, full structural-diff integration, backend/frontend suites, browser journey or deployment acceptance. Prompt 15/17/18 remains **PARTIAL**.
 
 **Current acceptance:** all 37 tracked items remain open; Prompt 34 **BLOCKED** on independently enforced acquisition quotas, controlled Git egress, isolated scanners and host probes, and Prompt 35 **NOT TESTED**. Git checkout in this container still fails with DNS resolution for `github.com`. Neither repair creates a branch or weakens auth, tenant, CSRF, approval or hard-isolation requirements. No CI monitoring was performed.
+
+## npm dependency scope and omitted manifest sections (2026-10-27)
+
+- **Reproduced from current-main parser:** `_parse_package_json` merged `dependencies` and `devDependencies` by bare package name. Moving a package from dev-only to runtime at an unchanged version therefore produced no dependency delta; simultaneous declarations overwrote one another. The same parser entirely ignored `optionalDependencies` and `peerDependencies`, hiding their changes from structural review.
+- `bf2434c2355f9ea5dc4fa23628f099d04b1eb06c`: four regression cases for dev-to-runtime moves, simultaneous scopes, credential-safe dev references and structural-diff propagation.
+- `5e5711d46e22687cb8e2f6fac8c3c5c187aa32fb`: preserve dev dependency scope as `package[dev]`, distinct from runtime `package`.
+- `025a3855f8d488db69e2786b289b042a50a82714`: align existing reference-redaction expectations with scoped dev keys.
+- `04806a1f61ef40e25c58cf670f6e43e5677661ff`: three regression cases for optional/peer dependency parsing, credential-safe references and structural-diff propagation.
+- `d7293ec40d459c245440aa73b2e74243c4e06858`: capture `optionalDependencies` as `package[optional]` and `peerDependencies` as `package[peer]`; retain fingerprint redaction in every scope.
+- **Actually executed:** eight isolated Python `unittest` behavioral checks passed as unprivileged `nobody`, against helper bodies copied from connector-fetched committed source. A syntax compilation of the isolated test module also passed. **Not executed:** the seven committed pytest regression cases, the updated pre-existing pytest cases, full structural-diff integration, backend/frontend suites, type-check, browser flow or production gates. Direct checkout was attempted and failed with GitHub DNS resolution. Prompts 15/17/18 remain **PARTIAL** and Prompt 35 **NOT TESTED**. These isolated checks do not certify production readiness.
