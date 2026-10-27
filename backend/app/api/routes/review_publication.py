@@ -202,6 +202,12 @@ async def publish_review(
     pub = db.query(PullRequestReviewPublicationModel).filter_by(analysis_id=str(analysis_id)).first()
     if pub is None:
         raise HTTPException(status_code=404, detail="Review publication not found for this analysis")
+    # Even a completed publication must not acknowledge a different digest.
+    if pub.preview_digest != payload.expected_preview_digest:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error_code": "PREVIEW_DIGEST_MISMATCH", "message": "The approved preview digest does not match."},
+        )
     if pub.status == ReviewPublicationStatus.PUBLISHED.value:
         response.status_code = status.HTTP_200_OK
         return _pub_to_publish_response(pub)
@@ -209,11 +215,6 @@ async def publish_review(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"error_code": "PUBLICATION_NOT_APPROVED", "message": "Review publication must be approved first."},
-        )
-    if pub.preview_digest != payload.expected_preview_digest:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"error_code": "PREVIEW_DIGEST_MISMATCH", "message": "The approved preview digest does not match."},
         )
     client_identity = idempotency_identity(
         "review-publication",
