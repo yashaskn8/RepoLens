@@ -48,6 +48,19 @@ def test_direct_reference_does_not_expose_embedded_credentials():
     )
 
 
+def test_legacy_direct_reference_is_also_redacted():
+    parsed = _parse_pyproject_toml(
+        '[project.dependencies]\\n'
+        'internal = "https://operator:secret@example.com/internal.whl"\\n'
+    )
+    assert parsed["internal"].startswith("DIRECT_REFERENCE_SHA256:")
+    assert "secret" not in str(parsed)
+
+
+def test_malformed_pyproject_is_not_interpreted_as_dependency_data():
+    assert _parse_pyproject_toml('[project]\\ndependencies = [') == {}
+
+
 def test_pep621_dependency_deltas_reach_structural_diff(tmp_path):
     base = tmp_path / "base"
     head = tmp_path / "head"
