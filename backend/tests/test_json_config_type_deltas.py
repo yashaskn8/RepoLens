@@ -41,3 +41,24 @@ def test_json_nested_object_key_reordering_is_not_a_config_change(tmp_path):
         {"nested": {"beta": 2, "alpha": 1}},
     )
     assert result.config_deltas == []
+
+
+def test_json_nested_value_type_change_is_detected(tmp_path):
+    result = _compare(
+        tmp_path,
+        {"nested": {"timeout": 1, "enabled": True}},
+        {"nested": {"timeout": "1", "enabled": True}},
+    )
+    assert [(delta.key, delta.change_type) for delta in result.config_deltas] == [
+        ("nested", "MODIFIED")
+    ]
+    assert result.config_deltas[0].base_fingerprint != result.config_deltas[0].head_fingerprint
+    assert result.config_deltas[0].base_value is None
+    assert result.config_deltas[0].head_value is None
+
+
+def test_json_array_reordering_remains_a_change(tmp_path):
+    result = _compare(tmp_path, {"order": ["a", "b"]}, {"order": ["b", "a"]})
+    assert [(delta.key, delta.change_type) for delta in result.config_deltas] == [
+        ("order", "MODIFIED")
+    ]
