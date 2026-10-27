@@ -125,10 +125,17 @@ def _is_breaking_signature_change(b_params_str: str, h_params_str: str, b_ret: s
     if len(h_parts) < len(b_parts):
         return True
 
-    for i in range(len(b_parts), len(h_parts)):
-        new_param = h_parts[i]
-        is_optional = ("=" in new_param) or ("?" in new_param) or new_param.startswith("*")
-        if not is_optional:
+    def is_optional(param: str) -> bool:
+        return "=" in param or "?" in param or param.startswith("*")
+
+    # A formerly optional argument now required breaks existing callers even
+    # when the total number of arguments is unchanged.
+    for before, after in zip(b_parts, h_parts):
+        if is_optional(before) and not is_optional(after):
+            return True
+
+    for new_param in h_parts[len(b_parts):]:
+        if not is_optional(new_param):
             return True
 
     return False
