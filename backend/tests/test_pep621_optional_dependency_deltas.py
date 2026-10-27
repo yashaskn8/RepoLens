@@ -1,5 +1,7 @@
 """PEP 621 optional dependency groups must contribute to change evidence."""
 
+import pytest
+
 from app.analysis.diff_engine import ChangeDiffEngine, _parse_pyproject_toml
 
 
@@ -29,15 +31,14 @@ def test_optional_direct_references_do_not_expose_credentials():
     assert "secret" not in str(parsed)
 
 
-def test_invalid_optional_groups_do_not_override_valid_dependencies():
-    parsed = _parse_pyproject_toml(
-        '[project]\nname = "demo"\n'
-        'dependencies = ["httpx>=0.27"]\n'
-        '[project.optional-dependencies]\n'
-        'invalid = "not a list"\n'
-    )
-    assert parsed == {"httpx": ">=0.27"}
-
+def test_invalid_optional_groups_fail_closed_instead_of_hiding_missing_evidence():
+    with pytest.raises(ValueError):
+        _parse_pyproject_toml(
+            '[project]\\nname = "demo"\\n'
+            'dependencies = ["httpx>=0.27"]\\n'
+            '[project.optional-dependencies]\\n'
+            'invalid = "not a list"\\n'
+        )
 
 def test_optional_dependency_deltas_are_reported(tmp_path):
     base, head = tmp_path / "base", tmp_path / "head"
