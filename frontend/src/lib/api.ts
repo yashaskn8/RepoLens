@@ -896,10 +896,12 @@ export async function downloadChangeAnalysisMarkdown(analysisId: string): Promis
 /* ========================================================================= */
 
 export async function fetchReviewPublication(
-  analysisId: string
+  analysisId: string,
+  signal?: AbortSignal
 ): Promise<ReviewPublicationPreviewResponse> {
   const response = await apiFetch(`/api/v1/change-analyses/${analysisId}/review-publication`, {
     cache: 'no-store',
+    signal,
   });
 
   if (!response.ok) {
