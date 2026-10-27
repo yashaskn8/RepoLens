@@ -420,3 +420,15 @@ See [REPAIR_AUDIT_2026-10-26.md](REPAIR_AUDIT_2026-10-26.md) for historical CI e
 - **Executed:** 7 isolated Python `unittest` scenarios for exported dotenv values and config change detection; 6 isolated Python `unittest` scenarios for JSON type changes, key order and fingerprint distinctions, all as unprivileged `nobody`. Seven source/test-presence assertions passed against fetched committed `main` files. The original false negatives were reproduced in isolated Python before editing.
 - **Not executed:** the six committed pytest tests in the repository, full backend pytest, frontend tests/build, browser tests, or deployment acceptance. Git checkout still fails because `github.com` cannot be resolved in the container. Isolated checks are not repository integration tests. Prompt 15/17/18 remain **PARTIAL**; Prompt 34 remains **BLOCKED**; Prompt 35 remains **NOT TESTED**. All 37 acceptance items remain open.
 
+
+## Structural-diff source recovery and duplicate JSON-key safety (2026-10-28)
+
+- `03fb777d646f3e1b43441a1abdd2c80855c76d98`: two new JSON configuration regression cases (nested type changes and array-order changes).
+- `a74482ab6c417a9ae01989c30f584cc77df6a1c5`: repaired literal backslash-n sequences accidentally committed inside the `parse_config_json` dictionary comprehension in `backend/app/analysis/diff_engine.py`. The previous source could not be parsed as Python, blocking imports of the structural-diff engine.
+- `1dea39563ec9bc860db4bab87dc688605c8188c9`: added an independent AST syntax regression test for the structural-diff module.
+- `c56b3a998e1a79734d6c7f133d2c8a5ffa070f22`: five regression cases for duplicate JSON object keys in `package.json` and `config.json`, including nested objects.
+- `af6abb0e44a6b82b5d9655e68b4821f6d5120509`: both JSON evidence parsers now reject duplicate object keys rather than silently accepting only the last value; error messages do not disclose key names.
+
+**Executed:** eight isolated behavioral checks of a copied, corrected JSON config parser, nine isolated checks of a copied duplicate-key rejecting object-pairs hook, and a standard-library JSON reproduction of the original overwrite behavior. GitHub connector source checks confirmed the malformed literal sequences were removed and the hook is used at both call sites. **Not executed:** the committed pytest tests, full-source Python AST compilation, backend/frontend suites, browser workflows, or deployment tests. A direct Git checkout was attempted and failed due to GitHub DNS resolution. These are targeted source and isolated checks, not integrated acceptance.
+
+Prompts 15/17/28 remain **PARTIAL**. Prompt 34 remains **BLOCKED**; Prompt 35 remains **NOT TESTED**. All 37 acceptance items remain open. No change to authentication, CSRF, tenant isolation, human approval, or production isolation gates.
