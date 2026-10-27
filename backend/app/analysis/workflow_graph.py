@@ -53,6 +53,27 @@ def _workspace_for(state: "ChangeAnalysisState", key: str) -> Optional[str]:
     return state.get(key)
 
 
+def _matches_exact_diff(
+    diff: object,
+    *,
+    repository_url: str,
+    base_commit_sha: str,
+    head_commit_sha: str,
+) -> bool:
+    """A resumed diff is reusable only for the exact acquired repository and revisions."""
+    return (
+        isinstance(diff, StructuralDiffResult)
+        and diff.repository_url == repository_url
+        and diff.base_commit_sha == base_commit_sha
+        and diff.head_commit_sha == head_commit_sha
+    )
+
+
+def _matches_analysis_blast(blast: object, *, analysis_id: str) -> bool:
+    """Never reuse an impact report produced for a different analysis."""
+    return isinstance(blast, BlastRadiusReport) and str(blast.analysis_id) == analysis_id
+
+
 class ChangeAnalysisState(TypedDict, total=False):
     """Typed LangGraph state for change intelligence analysis workflow."""
 
@@ -102,7 +123,12 @@ async def run_acquire_node(state: ChangeAnalysisState) -> Dict[str, Any]:
 async def run_diff_node(state: ChangeAnalysisState) -> Dict[str, Any]:
     """Node 2: Deterministic structural diff computation."""
     completed = list(state.get("completed_nodes", []))
-    if state.get("diff_result"):
+    if _matches_exact_diff(
+        state.get("diff_result"),
+        repository_url=state["repository_url"],
+        base_commit_sha=state["base_commit_sha"],
+        head_commit_sha=state["head_commit_sha"],
+    ):
         completed.append("diff")
         return {"status": "ANALYZING", "completed_nodes": completed}
 
@@ -120,6 +146,10 @@ async def run_diff_node(state: ChangeAnalysisState) -> Dict[str, Any]:
     completed.append("diff")
     return {
         "diff_result": diff_res,
+        # A newly computed diff invalidates all dependent checkpoint evidence.
+        "blast_radius": None,
+        "review_report": None,
+        "impact_frontier": {},
         "status": "ANALYZING",
         "completed_nodes": completed,
     }
@@ -188,7 +218,14 @@ async def build_canonical_phase6_graph(
 async def run_impact_node(state: ChangeAnalysisState) -> Dict[str, Any]:
     """Node 3: Graph-aware blast radius analysis using canonical RepositoryGraph."""
     completed = list(state.get("completed_nodes", []))
-    if state.get("blast_radius"):
+    if not _matches_exact_diff(
+        state.get("diff_result"),
+        repository_url=state["repository_url"],
+        base_commit_sha=state["base_commit_sha"],
+        head_commit_sha=state["head_commit_sha"],
+    ):
+        raise RuntimeError("CHANGE_DIFF_PROVENANCE_MISMATCH: Cannot compute impact from an unrelated diff.")
+    if _matches_analysis_blast(state.get("blast_radius"), analysis_id=state["analysis_id"]):
         completed.append("impact")
         return {"status": "ANALYZING", "completed_nodes": completed}
 
@@ -226,6 +263,8 @@ async def run_impact_node(state: ChangeAnalysisState) -> Dict[str, Any]:
     completed.append("impact")
     return {
         "blast_radius": report,
+        # Recomputed impacts invalidate a previously checkpointed AI review.
+        "review_report": None,
         "impact_frontier": frontier or {},
         "status": "ANALYZING",
         "completed_nodes": completed,
