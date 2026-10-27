@@ -54,7 +54,7 @@ def test_manifest_addition_or_removal_is_not_malformed(
     ("filename", "content"),
     [
         ("package.json", ""),
-        ("pyproject.toml", "[project\\n"),
+        ("pyproject.toml", "[project\n"),
     ],
 )
 def test_present_invalid_manifest_still_fails_closed(tmp_path, filename, content):
