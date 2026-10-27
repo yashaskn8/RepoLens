@@ -191,7 +191,11 @@ class GitHubPRResolver:
         if base_full_name != expected_base:
             raise GitHubPRAPIError("GitHub PR base repository does not match the requested repository")
 
-        is_fork = (head_full_name != base_full_name) or bool(head_repo.get("fork", False))
+        # GitHub's repo.fork describes whether the repository itself was
+        # forked from another project, not whether this PR comes from a
+        # different repository. Same-repository PRs in forked projects are
+        # supported; only a distinct head repository is a cross-repo PR.
+        is_fork = head_full_name != base_full_name
         head_repo_url = None
         raw_head_url = head_repo.get("html_url")
         if raw_head_url is not None:
