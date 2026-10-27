@@ -61,7 +61,7 @@ def test_legacy_direct_reference_is_also_redacted():
 
 def test_malformed_pyproject_fails_closed_instead_of_hiding_dependency_data():
     with pytest.raises(ValueError):
-        _parse_pyproject_toml('[project]\\ndependencies = [')
+        _parse_pyproject_toml('[project]\ndependencies = [')
 
 def test_pep621_dependency_deltas_reach_structural_diff(tmp_path):
     base = tmp_path / "base"
