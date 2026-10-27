@@ -894,7 +894,10 @@ class ChangeDiffEngine:
                             raise ValueError("Configuration JSON could not be parsed.") from None
                         if not isinstance(document, dict):
                             raise ValueError("Configuration JSON must contain an object.")
-                        return {\n                            str(k): json.dumps(v, sort_keys=True, separators=(",", ":"), ensure_ascii=False)\n                            for k, v in document.items()\n                        }
+                        return {
+                            str(k): json.dumps(v, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+                            for k, v in document.items()
+                        }
 
                     b_dict = parse_config_json(b_text, b_has)
                     h_dict = parse_config_json(h_text, h_has)
