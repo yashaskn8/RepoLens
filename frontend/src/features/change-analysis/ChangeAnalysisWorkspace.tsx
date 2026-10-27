@@ -458,11 +458,41 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
     setIsPublishingPub(true);
     setPubError(null);
     try {
-      await publishReviewPublication(analysisId, digest);
-      const updated = await fetchReviewPublication(analysisId);
-      if (generation === analysisGenerationRef.current) {
-        setPublication(updated);
-        setShowPublishConfirm(false);
+      // The POST result is authoritative for the write. A later read-only GET
+      // must not be required to acknowledge a successful publication.
+      const published = await publishReviewPublication(analysisId, digest);
+      if (generation !== analysisGenerationRef.current) return;
+      if (published?.publication_id) {
+        setPublication((current) =>
+          current?.publication_id === published.publication_id
+            ? { ...current, ...published }
+            : current);
+      }
+      setShowPublishConfirm(false);
+
+      // The confirmation GET is optional reconciliation. Bound it so a stalled
+      // read cannot keep the publication action locked forever. Never repeat
+      // the potentially successful POST as a recovery mechanism.
+      const controller = new AbortController();
+      let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+      const deadline = new Promise<never>((_, reject) => {
+        refreshTimer = setTimeout(() => {
+          controller.abort();
+          reject(new Error('Publication status refresh timed out'));
+        }, 15_000);
+      });
+      try {
+        const updated = await Promise.race([
+          fetchReviewPublication(analysisId, controller.signal),
+          deadline,
+        ]);
+        if (generation === analysisGenerationRef.current) setPublication(updated);
+      } catch {
+        if (generation === analysisGenerationRef.current) {
+          setPubError('Publication request returned successfully, but its status could not be refreshed. Do not repeat publication until the current status is verified.');
+        }
+      } finally {
+        if (refreshTimer !== undefined) clearTimeout(refreshTimer);
       }
     } catch (err: unknown) {
       if (generation === analysisGenerationRef.current) {
