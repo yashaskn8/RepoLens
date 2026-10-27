@@ -775,20 +775,21 @@ class ChangeDiffEngine:
             if not base_has and not head_has:
                 continue
 
-            base_content = ""
-            head_content = ""
-            if base_has:
-                try:
-                    with open(base_files[m_name], "r", encoding="utf-8", errors="ignore") as f:
-                        base_content = f.read()
-                except OSError:
-                    pass
-            if head_has:
-                try:
-                    with open(head_files[m_name], "r", encoding="utf-8", errors="ignore") as f:
-                        head_content = f.read()
-                except OSError:
-                    pass
+            # Do not turn unreadable, oversized, or invalid-UTF-8 manifests
+            # into an apparently empty dependency set. Enforce the byte
+            # budget on the opened descriptor, including nested manifests.
+            base_content = (
+                _read_bounded_snapshot_file(
+                    base_files[m_name], int(self.settings.MAX_FILE_SIZE_BYTES)
+                ).decode("utf-8")
+                if base_has else ""
+            )
+            head_content = (
+                _read_bounded_snapshot_file(
+                    head_files[m_name], int(self.settings.MAX_FILE_SIZE_BYTES)
+                ).decode("utf-8")
+                if head_has else ""
+            )
 
             if manifest_type == "package.json":
                 base_deps = _parse_package_json(base_content)
