@@ -51,6 +51,22 @@ import {
   Network,
 } from 'lucide-react';
 
+// Bound read-only requests so an unresponsive endpoint cannot indefinitely
+// suppress completed evidence or block recovery. Abort is best effort;
+// Promise.race also handles a transport that ignores AbortSignal.
+function withChangeDetailDeadline<T>(request: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error('Change analysis request timed out'));
+    }, 15_000);
+  });
+  return Promise.race([Promise.resolve().then(() => request(controller.signal)), deadline])
+    .finally(() => { if (timer !== undefined) clearTimeout(timer); });
+}
+
 interface ChangeDetailPageProps {
   params: Promise<{ id: string }>;
 }
@@ -82,6 +98,7 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
   const { isOperator } = useAuth();
   const actionGeneration = useRef(0);
   const publishingRef = useRef(false);
+  const publicationReadSequenceRef = useRef(0);
 
   // An already-started approval request must not start a second GitHub write
   // after navigation or an account switch unmounts this workspace.
@@ -124,16 +141,24 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
     async function loadData() {
       let terminal = false;
       try {
-        const current = await fetchChangeAnalysis(analysisId);
+        const current = await withChangeDetailDeadline((signal) => fetchChangeAnalysis(analysisId, signal));
         if (cancelled) return;
         setAnalysis(current);
         terminal = current.status === 'COMPLETED' || current.status === 'FAILED';
         if (current.status === 'COMPLETED') {
-          const [diffRes, impactsRes, reviewRes, pubRes] = await Promise.allSettled([
-            fetchChangeAnalysisDiff(analysisId),
-            fetchChangeAnalysisImpacts(analysisId),
-            fetchChangeAnalysisReview(analysisId),
-            fetchReviewPublication(analysisId),
+          // Optional publication state must not hold up the required evidence.
+          // An operator action supersedes an older background publication read.
+          const publicationReadSequence = publicationReadSequenceRef.current;
+          void withChangeDetailDeadline((signal) => fetchReviewPublication(analysisId, signal))
+            .then((value) => {
+              if (!cancelled && publicationReadSequence === publicationReadSequenceRef.current) {
+                setPublication(value);
+              }
+            }, () => { /* No preview exists, or the optional read failed. */ });
+          const [diffRes, impactsRes, reviewRes] = await Promise.allSettled([
+            withChangeDetailDeadline((signal) => fetchChangeAnalysisDiff(analysisId, signal)),
+            withChangeDetailDeadline((signal) => fetchChangeAnalysisImpacts(analysisId, signal)),
+            withChangeDetailDeadline((signal) => fetchChangeAnalysisReview(analysisId, signal)),
           ]);
           if (cancelled) return;
           const missing: string[] = [];
@@ -149,8 +174,6 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
           } else missing.push('downstream impacts');
           if (reviewRes.status === 'fulfilled') setReview(reviewRes.value);
           else missing.push('review evidence');
-          // Publication is optional; its absence is not a failed analysis.
-          if (pubRes.status === 'fulfilled') setPublication(pubRes.value);
           setMissingArtifacts(missing);
         }
       } catch {
@@ -179,6 +202,7 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
 
   const handleGeneratePreview = async () => {
     const generation = actionGeneration.current;
+    publicationReadSequenceRef.current += 1;
     try {
       const pub = await generateReviewPublicationPreview(analysisId);
       if (generation === actionGeneration.current) setPublication(pub);
@@ -192,6 +216,7 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
   const handleApproveAndPublish = async () => {
     if (!publication?.preview_digest || !isOperator || !confirmedPublish || publishingRef.current) return;
     const generation = actionGeneration.current;
+    publicationReadSequenceRef.current += 1;
     const digest = publication.preview_digest;
     publishingRef.current = true;
     setIsPublishing(true);
@@ -203,8 +228,25 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
       const res = await publishReviewPublication(analysisId, digest);
       if (generation !== actionGeneration.current) return;
       setPublishMessage(`Review published successfully to GitHub (Review ID: ${res.github_review_id || 'OK'})`);
-      const updatedPub = await fetchReviewPublication(analysisId);
-      if (generation === actionGeneration.current) setPublication(updatedPub);
+      // The successful POST is authoritative. A delayed confirmation GET
+      // must not turn a completed write into a failure or permit another write.
+      setPublication((current) => current?.publication_id === res.publication_id
+        ? { ...current, ...res } : current);
+      setConfirmedPublish(false);
+      try {
+        const updatedPub = await withChangeDetailDeadline((signal) => fetchReviewPublication(analysisId, signal));
+        if (generation === actionGeneration.current) {
+          setPublication((current) => {
+            if (!current || current.publication_id !== updatedPub.publication_id) return current;
+            if (current.status === 'PUBLISHED' && updatedPub.status !== 'PUBLISHED') return current;
+            return updatedPub;
+          });
+        }
+      } catch {
+        if (generation === actionGeneration.current) {
+          setPublishMessage('Review published successfully, but status refresh was unavailable. Verify the current status before another publication attempt.');
+        }
+      }
     } catch (err: unknown) {
       if (generation === actionGeneration.current) {
         setPublishMessage(getErrorMessage(err, 'Failed to publish review to GitHub.'));
