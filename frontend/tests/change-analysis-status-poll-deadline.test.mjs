@@ -112,7 +112,7 @@ test('read-only analysis status getter forwards AbortSignal to apiFetch', () => 
   const end = apiSource.indexOf('export async function fetchChangeAnalysisDiff(', start);
   assert.ok(start >= 0 && end > start);
   const getter = apiSource.slice(start, end);
-  assert.match(getter, /signal\\?: AbortSignal/);
-  assert.match(getter, /cache: 'no-store',\\s*signal,/);
-  assert.match(source, /fetchChangeAnalysis\\(analysisId, controller.signal\\)/);
+  assert.match(getter, /signal\?: AbortSignal/);
+  assert.match(getter, /cache: 'no-store',\s*signal,/);
+  assert.match(source, /fetchChangeAnalysis\(analysisId, controller.signal\)/);
 });
