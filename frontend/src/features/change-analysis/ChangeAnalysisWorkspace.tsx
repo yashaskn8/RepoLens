@@ -131,13 +131,28 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
     const generation = analysisGenerationRef.current;
     let stopped = false;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let pollAbort: AbortController | undefined;
     const isCurrent = () => !stopped && generation === analysisGenerationRef.current;
 
     const poll = async () => {
       if (!isCurrent()) return;
       let terminal = false;
+      const controller = new AbortController();
+      pollAbort = controller;
+      let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+      // A hung status request must not permanently stop progress polling.
+      // Promise.race also handles fetch implementations that ignore abort.
+      const deadline = new Promise<never>((_, reject) => {
+        deadlineTimer = setTimeout(() => {
+          controller.abort();
+          reject(new Error('Change analysis status request timed out'));
+        }, 15_000);
+      });
       try {
-        const updated = await fetchChangeAnalysis(analysisId);
+        const updated = await Promise.race([
+          fetchChangeAnalysis(analysisId, controller.signal),
+          deadline,
+        ]);
         if (!isCurrent()) return;
         setActiveAnalysis((current) => current?.id === analysisId ? updated : current);
         terminal = updated.status === 'COMPLETED' || updated.status === 'FAILED';
@@ -146,6 +161,9 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
         }
       } catch (err) {
         if (isCurrent()) console.error('Polling error for change analysis:', err);
+      } finally {
+        if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+        if (pollAbort === controller) pollAbort = undefined;
       }
       if (isCurrent() && !terminal) retryTimer = setTimeout(poll, 2000);
     };
@@ -153,7 +171,8 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
     void poll();
     return () => {
       stopped = true;
-      if (retryTimer) clearTimeout(retryTimer);
+      if (retryTimer !== undefined) clearTimeout(retryTimer);
+      pollAbort?.abort();
     };
   }, [activeAnalysis?.id]);
 
