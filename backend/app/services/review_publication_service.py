@@ -318,16 +318,16 @@ class ReviewPublicationService:
         if not pub:
             raise ReviewPublicationError("Review publication preview has not been generated", error_code="PREVIEW_NOT_FOUND", status_code=404)
 
+        # A published review is idempotent only for the same approved digest.
+        # Never acknowledge a different preview as already authorized.
+        if pub.preview_digest != expected_preview_digest:
+            raise PreviewDigestMismatchError("Provided digest does not match the approved publication digest")
+
         if pub.status == ReviewPublicationStatus.PUBLISHED.value:
             return pub
 
         if pub.status not in (ReviewPublicationStatus.PREVIEW_READY.value, ReviewPublicationStatus.APPROVED.value):
             raise PublicationNotApprovedError(f"Cannot approve publication in '{pub.status}' state")
-
-        if pub.preview_digest != expected_preview_digest:
-            raise PreviewDigestMismatchError(
-                f"Digest mismatch (expected: {expected_preview_digest}, current: {pub.preview_digest})"
-            )
 
         pub.status = ReviewPublicationStatus.APPROVED.value
         pub.approved_at = _utc_now()
@@ -378,7 +378,12 @@ class ReviewPublicationService:
         if not pub:
             raise ReviewPublicationError("Review publication preview has not been generated", error_code="PREVIEW_NOT_FOUND", status_code=404)
 
-        # Idempotent return if already published
+        # Validate the digest before any idempotent return or reconciliation.
+        # A completed publication is not an authorization for another digest.
+        if pub.preview_digest != expected_preview_digest:
+            raise PreviewDigestMismatchError("Provided digest does not match the approved publication digest")
+
+        # Idempotent return if already published with the same digest
         if pub.status == ReviewPublicationStatus.PUBLISHED.value:
             return pub
 
@@ -395,9 +400,6 @@ class ReviewPublicationService:
 
         if pub.status != ReviewPublicationStatus.APPROVED.value:
             raise PublicationNotApprovedError(f"Publication must be in APPROVED state before publishing (current: {pub.status})")
-
-        if pub.preview_digest != expected_preview_digest:
-            raise PreviewDigestMismatchError("Provided digest does not match the approved publication digest")
 
         if not self.provider.write_enabled:
             raise GitHubReviewWriteDisabledError()
