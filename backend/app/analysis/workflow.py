@@ -18,6 +18,8 @@ from app.analysis.workflow_graph import (
     bind_change_workspaces,
     build_change_analysis_graph,
     reset_change_workspaces,
+    _matches_exact_diff,
+    _matches_analysis_blast,
 )
 from app.core.database import SessionLocal
 from app.ingestion.comparison_snapshot import get_comparison_snapshot_service
@@ -131,13 +133,24 @@ async def execute_background_change_analysis(
             blast_radius_cached = None
             if "diff_result" in initial_meta:
                 try:
-                    diff_res_cached = StructuralDiffResult.model_validate(initial_meta["diff_result"])
-                except Exception:
+                    candidate = StructuralDiffResult.model_validate(initial_meta["diff_result"])
+                    if _matches_exact_diff(
+                        candidate,
+                        repository_url=analysis_model.repository_url,
+                        base_commit_sha=analysis_model.base_commit_sha,
+                        head_commit_sha=analysis_model.head_commit_sha,
+                    ):
+                        diff_res_cached = candidate
+                except (TypeError, ValueError):
                     pass
-            if "blast_radius" in initial_meta:
+            # Impact records have no independent revision fields; they can only
+            # be restored alongside a matching exact-revision structural diff.
+            if diff_res_cached is not None and "blast_radius" in initial_meta:
                 try:
-                    blast_radius_cached = BlastRadiusReport.model_validate(initial_meta["blast_radius"])
-                except Exception:
+                    candidate = BlastRadiusReport.model_validate(initial_meta["blast_radius"])
+                    if _matches_analysis_blast(candidate, analysis_id=analysis_id):
+                        blast_radius_cached = candidate
+                except (TypeError, ValueError):
                     pass
 
             initial_state = {
