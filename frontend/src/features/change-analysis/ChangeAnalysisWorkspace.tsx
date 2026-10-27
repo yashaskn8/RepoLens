@@ -158,18 +158,26 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
   const loadCompletedAnalysisData = async (analysisId: string, generation: number) => {
     const loadSequence = ++artifactLoadSequenceRef.current;
     const publicationActionSequence = publicationActionSequenceRef.current;
+    // Publication previews are optional and may be absent or slow. Never let
+    // that request delay the required report, findings, diff, or telemetry.
+    void Promise.resolve().then(() => fetchReviewPublication(analysisId)).then((publication) => {
+      if (generation !== analysisGenerationRef.current ||
+          loadSequence !== artifactLoadSequenceRef.current ||
+          publicationPendingRef.current ||
+          publicationActionSequence !== publicationActionSequenceRef.current) return;
+      setPublication(publication);
+    }, () => { /* No publication preview exists yet, or its fetch failed. */ });
     const outcomes = await Promise.allSettled([
       fetchChangeAnalysisImpacts(analysisId),
       fetchChangeAnalysisReview(analysisId),
       fetchChangeAnalysisReport(analysisId),
       fetchChangeAnalysisTelemetry(analysisId),
       fetchChangeAnalysisDiff(analysisId),
-      fetchReviewPublication(analysisId),
     ]);
     if (generation !== analysisGenerationRef.current || loadSequence !== artifactLoadSequenceRef.current) return;
 
     const missing: string[] = [];
-    const [impactsResult, reviewResult, reportResult, telemetryResult, diffResult, publicationResult] = outcomes;
+    const [impactsResult, reviewResult, reportResult, telemetryResult, diffResult] = outcomes;
     if (impactsResult.status === 'fulfilled') {
       setImpacts(impactsResult.value || []);
       setArtifactAvailability((state) => ({ ...state, impacts: true }));
@@ -200,14 +208,6 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
       });
       setArtifactAvailability((state) => ({ ...state, diff: true }));
     } else missing.push('structural diff');
-    // Publication is optional and is normally 404 until an operator requests
-    // a preview. It is not a required change-analysis artifact.
-    if (publicationResult.status === 'fulfilled' &&
-        !publicationPendingRef.current &&
-        publicationActionSequence === publicationActionSequenceRef.current) {
-      setPublication(publicationResult.value);
-    }
-
     setArtifactError(missing.length
       ? `Analysis completed, but unavailable artifacts: ${missing.join(', ')}. Empty panels are not evidence of zero findings.`
       : null);
