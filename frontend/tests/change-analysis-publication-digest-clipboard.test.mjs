@@ -26,7 +26,7 @@ function fixture() {
   const makeCopy = digest => new Function(
     'publication', 'navigator', 'analysisGenerationRef', 'copyDigestSequenceRef',
     'setCopiedDigest', 'setCopyDigestError', 'setTimeout',
-    handlerSource + '\\nreturn handleCopyDigest;',
+    handlerSource + '\nreturn handleCopyDigest;',
   )(
     { preview_digest: digest },
     { clipboard: { writeText: value => {
@@ -74,7 +74,7 @@ test('obsolete analysis or replaced digest cannot claim copy success', async () 
   f.clipboard[1].resolve();
   await newer;
   assert.equal(f.copied.includes(true), false);
-  assert.match(source, /\\[publication\\?\\.preview_digest\\]/);
+  assert.match(source, /\[publication\?\.preview_digest\]/);
 });
 
 test('earlier copy timer cannot reset a newer digest copy indicator', async () => {
