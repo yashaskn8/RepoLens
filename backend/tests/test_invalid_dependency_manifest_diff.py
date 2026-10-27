@@ -19,6 +19,10 @@ from app.analysis.diff_engine import (
         (_parse_pyproject_toml, "[project\n"),
         (_parse_pyproject_toml, '[project]\ndependencies="requests>=3"\n'),
         (_parse_pyproject_toml, '[project]\noptional-dependencies=["requests>=3"]\n'),
+        (_parse_pyproject_toml, '[project]\ndependencies=[123]\n'),
+        (_parse_pyproject_toml, '[project]\ndependencies=["@@not-a-requirement"]\n'),
+        (_parse_pyproject_toml, '[project.dependencies]\nrequests=123\n'),
+        (_parse_pyproject_toml, '[project.optional-dependencies]\nsecurity=[false]\n'),
     ],
 )
 def test_malformed_manifest_is_not_an_empty_dependency_set(parser, invalid):
