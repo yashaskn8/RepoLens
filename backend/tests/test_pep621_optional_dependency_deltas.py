@@ -34,10 +34,10 @@ def test_optional_direct_references_do_not_expose_credentials():
 def test_invalid_optional_groups_fail_closed_instead_of_hiding_missing_evidence():
     with pytest.raises(ValueError):
         _parse_pyproject_toml(
-            '[project]\\nname = "demo"\\n'
-            'dependencies = ["httpx>=0.27"]\\n'
-            '[project.optional-dependencies]\\n'
-            'invalid = "not a list"\\n'
+            '[project]\nname = "demo"\n'
+            'dependencies = ["httpx>=0.27"]\n'
+            '[project.optional-dependencies]\n'
+            'invalid = "not a list"\n'
         )
 
 def test_optional_dependency_deltas_are_reported(tmp_path):
