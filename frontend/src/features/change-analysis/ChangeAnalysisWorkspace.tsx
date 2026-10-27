@@ -64,6 +64,7 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
   // Active Analysis state
   const [activeAnalysis, setActiveAnalysis] = useState<ChangeAnalysisResponse | null>(null);
   const analysisGenerationRef = useRef(0);
+  const artifactLoadSequenceRef = useRef(0);
   const submitPendingRef = useRef(false);
   const publicationPendingRef = useRef(false);
   const [artifactError, setArtifactError] = useState<string | null>(null);
@@ -149,6 +150,7 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
   }, [activeAnalysis?.id]);
 
   const loadCompletedAnalysisData = async (analysisId: string, generation: number) => {
+    const loadSequence = ++artifactLoadSequenceRef.current;
     const outcomes = await Promise.allSettled([
       fetchChangeAnalysisImpacts(analysisId),
       fetchChangeAnalysisReview(analysisId),
@@ -157,7 +159,7 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
       fetchChangeAnalysisDiff(analysisId),
       fetchReviewPublication(analysisId),
     ]);
-    if (generation !== analysisGenerationRef.current) return;
+    if (generation !== analysisGenerationRef.current || loadSequence !== artifactLoadSequenceRef.current) return;
 
     const missing: string[] = [];
     const [impactsResult, reviewResult, reportResult, telemetryResult, diffResult, publicationResult] = outcomes;
