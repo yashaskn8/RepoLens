@@ -338,7 +338,13 @@ def generate_change_analysis_report(model: ChangeAnalysisModel) -> ChangeAnalysi
     )
     diff_data = raw_diff if ast_recorded else {}
     raw_blast = meta.get("blast_radius")
-    graph_recorded = isinstance(raw_blast, dict) and bool(raw_blast)
+    # A blast-radius payload from another analysis is not graph evidence for
+    # this report. The graph result also depends on an exact-revision diff.
+    graph_recorded = (
+        ast_recorded
+        and isinstance(raw_blast, dict)
+        and str(raw_blast.get("analysis_id")) == str(model.id)
+    )
     route_deltas = [RouteContractDelta(**r) for r in diff_data.get("route_deltas", [])]
     schema_deltas = [SchemaModelDelta(**s) for s in diff_data.get("schema_deltas", [])]
     dependency_deltas = [DependencyDelta(**d) for d in diff_data.get("dependency_deltas", [])]
