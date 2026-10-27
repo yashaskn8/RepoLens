@@ -74,7 +74,7 @@ test('late approval failure cannot display an old error or release a newer lock'
   assert.equal(context.publicationPendingRef.current, true);
 });
 
-test('late publication refresh cannot overwrite the new preview or close its confirmation', async () => {
+test('late publication refresh cannot overwrite a newer preview after successful POST closes confirmation', async () => {
   const { context, writes } = setup();
   const refresh = deferred();
   context.publishReviewPublication = async () => {};
@@ -87,7 +87,7 @@ test('late publication refresh cannot overwrite the new preview or close its con
   refresh.resolve({ status: 'PUBLISHED', preview_digest: 'old-preview' });
   await running;
   assert.deepEqual(writes.publications, []);
-  assert.deepEqual(writes.confirms, []);
+  assert.deepEqual(writes.confirms, [false], 'successful POST closes its own confirmation before optional refresh');
   assert.deepEqual(writes.publish, [true]);
   assert.equal(context.publicationPendingRef.current, true);
 });
