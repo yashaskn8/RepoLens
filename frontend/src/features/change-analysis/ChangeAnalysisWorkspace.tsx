@@ -67,8 +67,13 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
   const artifactLoadSequenceRef = useRef(0);
   // React state updates are asynchronous; guard retry re-entry synchronously.
   const artifactRetryPendingRef = useRef(false);
+  const downloadPendingRef = useRef(false);
+  const downloadAbortRef = useRef<AbortController | null>(null);
   // Invalidate pending report downloads and publication/artifact callbacks on unmount.
-  useEffect(() => () => { analysisGenerationRef.current += 1; }, []);
+  useEffect(() => () => {
+    analysisGenerationRef.current += 1;
+    downloadAbortRef.current?.abort();
+  }, []);
   const submitPendingRef = useRef(false);
   const publicationPendingRef = useRef(false);
   // Invalidate an older persisted-publication fetch when an operator action begins or finishes.
@@ -79,6 +84,8 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
     impacts: false, review: false, report: false, diff: false, telemetry: false,
   });
   const [report, setReport] = useState<ChangeAnalysisReportResponse | null>(null);
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
   const [impacts, setImpacts] = useState<ChangeImpact[]>([]);
   const [reviewFindings, setReviewFindings] = useState<ChangeReviewFinding[]>([]);
   const [telemetry, setTelemetry] = useState<ChangeAnalysisTelemetry | null>(null);
@@ -295,6 +302,11 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
     const generation = ++analysisGenerationRef.current;
     setErrorMsg(null);
     setArtifactError(null);
+    downloadAbortRef.current?.abort();
+    downloadAbortRef.current = null;
+    downloadPendingRef.current = false;
+    setIsDownloading(false);
+    setDownloadError(null);
     artifactRetryPendingRef.current = false;
     setIsRetryingArtifacts(false);
     setArtifactAvailability({
@@ -357,23 +369,55 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
   };
 
   const handleDownloadMarkdown = async () => {
-    if (!activeAnalysis) return;
+    if (!activeAnalysis || activeAnalysis.status !== 'COMPLETED' || downloadPendingRef.current) return;
+    downloadPendingRef.current = true;
     const generation = analysisGenerationRef.current;
     const analysisId = activeAnalysis.id;
+    const controller = new AbortController();
+    downloadAbortRef.current = controller;
+    setIsDownloading(true);
+    setDownloadError(null);
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const text = await downloadChangeAnalysisMarkdown(analysisId);
+      // A stalled response must not keep the download action locked forever.
+      // The race also settles if an HTTP implementation ignores AbortSignal.
+      const deadline = new Promise<never>((_, reject) => {
+        deadlineTimer = setTimeout(() => {
+          controller.abort();
+          reject(new Error('Report download timed out'));
+        }, 15_000);
+      });
+      const text = await Promise.race([
+        downloadChangeAnalysisMarkdown(analysisId, controller.signal),
+        deadline,
+      ]);
       if (generation !== analysisGenerationRef.current) return;
       const blob = new Blob([text], { type: 'text/markdown' });
       const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `repolens_change_report_${analysisId.slice(0, 8)}.md`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      console.error('Download failed:', err);
+      try {
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `repolens_change_report_${analysisId.slice(0, 8)}.md`;
+        document.body.appendChild(a);
+        try {
+          a.click();
+        } finally {
+          document.body.removeChild(a);
+        }
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    } catch {
+      if (generation === analysisGenerationRef.current) {
+        setDownloadError('Report download failed or timed out. Please retry; the analysis remains available.');
+      }
+    } finally {
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+      if (downloadAbortRef.current === controller) downloadAbortRef.current = null;
+      if (generation === analysisGenerationRef.current) {
+        downloadPendingRef.current = false;
+        setIsDownloading(false);
+      }
     }
   };
 
@@ -623,7 +667,12 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
           isRunning={isRunning}
           workflowEvents={workflowEvents}
           onDownloadMarkdown={handleDownloadMarkdown}
+          isDownloading={isDownloading}
         />
+      )}
+
+      {activeAnalysis?.status === 'COMPLETED' && downloadError && (
+        <Alert variant="error" title="Report download unavailable">{downloadError}</Alert>
       )}
 
       {activeAnalysis?.status === 'COMPLETED' && artifactError && (
