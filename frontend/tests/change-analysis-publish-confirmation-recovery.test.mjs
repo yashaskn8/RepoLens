@@ -9,7 +9,7 @@ assert.ok(start >= 0 && end > start, 'publication handler must exist');
 const handler = source.slice(start, end)
   .replaceAll('catch (err: unknown)', 'catch (err)')
   .replaceAll('new Promise<never>', 'new Promise')
-  .replace(/let refreshTimer: ReturnType<typeof setTimeout> \\| undefined;/, 'let refreshTimer;');
+  .replace(/let refreshTimer: ReturnType<typeof setTimeout> \| undefined;/, 'let refreshTimer;');
 
 const deferred = () => {
   let resolve, reject;
@@ -47,7 +47,7 @@ function fixture() {
     },
     clearTimeout: id => timers.delete(id),
   };
-  const run = new Function('context', 'with (context) { ' + handler + '\\nreturn handlePublishReview; }')(context);
+  const run = new Function('context', 'with (context) { ' + handler + '\nreturn handlePublishReview; }')(context);
   return {
     run, context, writes,
     pending: () => timers.size,
