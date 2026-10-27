@@ -239,25 +239,31 @@ def _parse_pyproject_toml(content: str) -> Dict[str, str]:
         return {}
     raw_dependencies = project.get("dependencies", [])
     dependencies: Dict[str, str] = {}
+    def record_requirement(requirement: Any, group: str | None = None) -> None:
+        if not isinstance(requirement, str):
+            return
+        match = re.fullmatch(
+            r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)(?=\s|[<>=!~;\[@]|$)(.*)",
+            requirement,
+        )
+        if not match:
+            return
+        name, spec = match.groups()
+        spec = spec.strip()
+        # Direct references can embed credentials. Keep a stable change
+        # fingerprint without copying the URL into review evidence.
+        if "@" in spec or "://" in spec:
+            spec = "DIRECT_REFERENCE_SHA256:" + hashlib.sha256(
+                requirement.encode("utf-8")
+            ).hexdigest()
+        # Keep optional groups separate from core and from each other, so
+        # moving a dependency between groups is represented as a delta.
+        key = name.lower() if group is None else f"{name.lower()}[{group}]"
+        dependencies[key] = spec
+
     if isinstance(raw_dependencies, list):
         for requirement in raw_dependencies:
-            if not isinstance(requirement, str):
-                continue
-            match = re.fullmatch(
-                r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)(?=\s|[<>=!~;\[@]|$)(.*)",
-                requirement,
-            )
-            if not match:
-                continue
-            name, spec = match.groups()
-            spec = spec.strip()
-            # Direct references can embed credentials. Keep a stable change
-            # fingerprint without copying the URL into review evidence.
-            if "@" in spec or "://" in spec:
-                spec = "DIRECT_REFERENCE_SHA256:" + hashlib.sha256(
-                    requirement.encode("utf-8")
-                ).hexdigest()
-            dependencies[name.lower()] = spec
+            record_requirement(requirement)
     elif isinstance(raw_dependencies, dict):
         # Preserve compatibility with existing [project.dependencies] inputs.
         for name, version in raw_dependencies.items():
@@ -267,6 +273,14 @@ def _parse_pyproject_toml(content: str) -> Dict[str, str]:
                         (name + "=" + version).encode("utf-8")
                     ).hexdigest()
                 dependencies[name.lower()] = version
+
+    optional_groups = project.get("optional-dependencies", {})
+    if isinstance(optional_groups, dict):
+        for group, requirements in optional_groups.items():
+            if not isinstance(group, str) or not isinstance(requirements, list):
+                continue
+            for requirement in requirements:
+                record_requirement(requirement, group)
     return dependencies
 
 
