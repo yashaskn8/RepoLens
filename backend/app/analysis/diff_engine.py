@@ -234,6 +234,10 @@ def _parse_pyproject_toml(content: str) -> Dict[str, str]:
         # Preserve compatibility with existing [project.dependencies] inputs.
         for name, version in raw_dependencies.items():
             if isinstance(version, str):
+                if "@" in version or "://" in version:
+                    version = "DIRECT_REFERENCE_SHA256:" + hashlib.sha256(
+                        (name + "=" + version).encode("utf-8")
+                    ).hexdigest()
                 dependencies[name.lower()] = version
     return dependencies
 
