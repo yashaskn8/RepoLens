@@ -876,7 +876,7 @@ class ChangeDiffEngine:
         # 6. Environment & Configuration Deltas (Secret-Safe: zero raw values stored)
         config_deltas: List[ConfigDelta] = []
         for rel_p in sorted(base_rel_set | head_rel_set):
-            if rel_p.endswith((".env", ".env.example", ".env.local", ".env.test", "config.json")):
+            if rel_p.endswith((".env", ".env.example", ".env.local", ".env.test", "config.json")) or rel_p.rsplit("/", 1)[-1].startswith(".env."):
                 b_has = rel_p in base_files
                 h_has = rel_p in head_files
 
