@@ -560,6 +560,7 @@ def get_change_analysis_diff(
         not isinstance(diff_data, dict)
         or diff_data.get("base_commit_sha") != model.base_commit_sha
         or diff_data.get("head_commit_sha") != model.head_commit_sha
+        or diff_data.get("repository_url") != model.repository_url
     ):
         # Missing or wrong-revision structural evidence is not zero changes.
         raise HTTPException(
