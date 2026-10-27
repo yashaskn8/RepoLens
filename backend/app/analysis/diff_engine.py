@@ -255,13 +255,13 @@ def _parse_pyproject_toml(content: str) -> Dict[str, str]:
     dependencies: Dict[str, str] = {}
     def record_requirement(requirement: Any, group: str | None = None) -> None:
         if not isinstance(requirement, str):
-            return
+            raise ValueError("Dependency manifest requirement must be a string.")
         match = re.fullmatch(
             r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)(?=\s|[<>=!~;\[@]|$)(.*)",
             requirement,
         )
         if not match:
-            return
+            raise ValueError("Dependency manifest requirement is malformed.")
         name, spec = match.groups()
         spec = spec.strip()
         # Direct references can embed credentials. Keep a stable change
@@ -281,12 +281,13 @@ def _parse_pyproject_toml(content: str) -> Dict[str, str]:
     elif isinstance(raw_dependencies, dict):
         # Preserve compatibility with existing [project.dependencies] inputs.
         for name, version in raw_dependencies.items():
-            if isinstance(version, str):
-                if "@" in version or "://" in version:
-                    version = "DIRECT_REFERENCE_SHA256:" + hashlib.sha256(
-                        (name + "=" + version).encode("utf-8")
-                    ).hexdigest()
-                dependencies[name.lower()] = version
+            if not isinstance(version, str):
+                raise ValueError("Dependency manifest version must be a string.")
+            if "@" in version or "://" in version:
+                version = "DIRECT_REFERENCE_SHA256:" + hashlib.sha256(
+                    (name + "=" + version).encode("utf-8")
+                ).hexdigest()
+            dependencies[name.lower()] = version
     else:
         raise ValueError("Dependency manifest dependencies must be a list or table.")
 
