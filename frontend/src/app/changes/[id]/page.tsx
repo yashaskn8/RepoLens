@@ -214,7 +214,7 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
   };
 
   const handleApproveAndPublish = async () => {
-    if (!publication?.preview_digest || !isOperator || !confirmedPublish || publishingRef.current) return;
+    if (!publication?.preview_digest || publication.status === 'PUBLISHED' || !isOperator || !confirmedPublish || publishingRef.current) return;
     const generation = actionGeneration.current;
     publicationReadSequenceRef.current += 1;
     const digest = publication.preview_digest;
@@ -817,7 +817,7 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
                       type="checkbox"
                       checked={confirmedPublish}
                       onChange={(e) => setConfirmedPublish(e.target.checked)}
-                      disabled={!isOperator}
+                      disabled={!isOperator || publication.status === 'PUBLISHED'}
                     />
                     <span>I authorize posting this review to GitHub</span>
                   </label>
@@ -826,11 +826,11 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
                     variant="glow"
                     size="sm"
                     onClick={handleApproveAndPublish}
-                    disabled={!confirmedPublish || isPublishing || !isOperator}
+                    disabled={publication.status === 'PUBLISHED' || !confirmedPublish || isPublishing || !isOperator}
                     isLoading={isPublishing}
                     leftIcon={<Send size={13} />}
                   >
-                    {isOperator ? 'Approve & Publish to PR' : 'Operator Required to Publish'}
+                    {publication.status === 'PUBLISHED' ? 'Review Already Published' : isOperator ? 'Approve & Publish to PR' : 'Operator Required to Publish'}
                   </Button>
                 </div>
               ) : (
