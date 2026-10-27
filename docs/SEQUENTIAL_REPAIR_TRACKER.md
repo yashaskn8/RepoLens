@@ -324,3 +324,19 @@ See [REPAIR_AUDIT_2026-10-26.md](REPAIR_AUDIT_2026-10-26.md) for historical CI e
 - `09759afd0f50c757eebe4a23b5adfd12fd269af3`: eight parameterized regression cases covering optional-to-required, appended required/optional parameters, default changes, and removals.
 - `45ef7bdbe90a76f0690f1a0e794f087aa8097eda`: compare requiredness for existing argument positions as well as appended arguments.
 - **Executed:** original false-negative reproduction and **eight isolated candidate-classifier cases**, run as the unprivileged `nobody` user. The committed pytest file and application fix were retrieved/inspected, but **pytest itself, full structural-diff integration, backend/frontend suites and live acceptance were not executed** because a local Git checkout is DNS-blocked. Prompts 15/17/18 remain **PARTIAL** and release certification is unchanged.
+
+## Credential-safe direct dependency reference repair (2026-10-27)
+
+- **Reproduced:** the previous `_parse_requirements_txt` treated `private-lib @ https://.../old.whl` and `private-lib @ https://.../new.whl` as the same package with an empty version, hiding actual dependency changes. The previous `_parse_package_json` copied `git+https://user:secret@...` and tarball URLs directly into dependency evidence, exposing embedded credentials. Both defects were reproduced with the original helper logic in an isolated Python process running as unprivileged `nobody`.
+- `e65af33442520f93909ae4516e4da06ed876c12a`: five committed pytest regression cases, including full structural-diff propagation and redaction.
+- `3bc88882475ed25514c07e157d58d49111ae52b9`: fingerprint PEP 508 direct references in `requirements.txt`; fingerprint credential-bearing remote/local reference specs in `package.json` dependencies and devDependencies. Ordinary version constraints remain readable and unchanged.
+- **Executed:** eight isolated Python `unittest` checks passed against manually copied, connector-fetched committed helper bodies as unprivileged `nobody`. **Not executed:** the five committed pytest tests, full structural-diff integration, backend/frontend suites, browser journey, or deployment acceptance. Prompt 15/17/18 acceptance remains **PARTIAL**. Fingerprints do not make original source files secret-safe for unrelated display paths; those require independent review.
+
+## PEP 621 optional dependency-group repair (2026-10-27)
+
+- **Reproduced:** valid `[project.optional-dependencies]` groups in `pyproject.toml` were ignored by the existing parser, so changes to extra-specific security or test dependencies could be missing from structural PR evidence. The pre-fix parser returned an empty dependency map for a valid optional-only manifest.
+- `9457ebf34ff6cfb0892f390ec4bbb8028e421be8`: four committed pytest regression cases for group-aware parsing, credential-safe direct references, malformed groups and structural-diff propagation.
+- `ab2ea85c34523770654abd454543ad26e0ab9d12`: parse PEP 621 optional dependency groups with group-qualified package identities (e.g. `cryptography[security]`), preserving core and legacy table behavior and direct-reference redaction.
+- **Executed:** seven isolated Python `unittest` checks passed against manually copied, connector-fetched committed parser as unprivileged `nobody`. **Not executed:** the four committed pytest tests, full structural-diff integration, backend/frontend suites, browser journey or deployment acceptance. Prompt 15/17/18 remains **PARTIAL**.
+
+**Current acceptance:** all 37 tracked items remain open; Prompt 34 **BLOCKED** on independently enforced acquisition quotas, controlled Git egress, isolated scanners and host probes, and Prompt 35 **NOT TESTED**. Git checkout in this container still fails with DNS resolution for `github.com`. Neither repair creates a branch or weakens auth, tenant, CSRF, approval or hard-isolation requirements. No CI monitoring was performed.
