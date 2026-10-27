@@ -40,6 +40,9 @@ async function load({ status = 'COMPLETED', failures = [], retryToken = 0 } = {}
     setMissingArtifacts: value => { state.missing = value; },
     setIsLoading: value => { state.loading = value; },
     retryPendingRef,
+    publicationReadSequenceRef: { current: 0 },
+    // Deadline behavior is tested separately; this fixture exercises artifact state.
+    withChangeDetailDeadline: request => request({}),
     fetchChangeAnalysis: async () => ({ status }),
     fetchChangeAnalysisDiff: fetch('diff', { changed_files: [] }),
     fetchChangeAnalysisImpacts: fetch('impacts', []),
