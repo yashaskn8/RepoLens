@@ -177,9 +177,27 @@ def _parse_env_file(content: str) -> Dict[str, str]:
     return result
 
 
+def _collapse_requirement_variants(variants: Dict[str, List[str]]) -> Dict[str, str]:
+    """Keep all distinct constraints for a package without depending on file order.
+
+    Single requirements retain their existing human-readable representation.
+    Direct-reference entries have already been fingerprinted before reaching
+    this helper, so multiple alternatives cannot expose credential-bearing URLs.
+    """
+    result: Dict[str, str] = {}
+    for name, values in variants.items():
+        unique = sorted(set(values))
+        if unique:
+            result[name] = (
+                unique[0] if len(unique) == 1
+                else "MULTIPLE_REQUIREMENTS:" + json.dumps(unique, separators=(",", ":"))
+            )
+    return result
+
+
 def _parse_requirements_txt(content: str) -> Dict[str, str]:
     """Parse package names and version specifications from a requirements.txt file."""
-    deps: Dict[str, str] = {}
+    deps: Dict[str, List[str]] = {}
     for line in content.splitlines():
         line = line.strip()
         if not line or line.startswith("#") or line.startswith("-"):
@@ -192,7 +210,7 @@ def _parse_requirements_txt(content: str) -> Dict[str, str]:
             line,
         )
         if direct:
-            deps[direct.group(1).lower()] = (
+            deps.setdefault(direct.group(1).lower(), []).append(
                 "DIRECT_REFERENCE_SHA256:" + hashlib.sha256(line.encode("utf-8")).hexdigest()
             )
             continue
@@ -201,8 +219,8 @@ def _parse_requirements_txt(content: str) -> Dict[str, str]:
             pkg, extras, ver = match.groups()
             # Extras change the installed dependency set; marker-only
             # requirements are also meaningful even without a version pin.
-            deps[pkg.lower()] = (extras or "") + (ver or "").strip()
-    return deps
+            deps.setdefault(pkg.lower(), []).append((extras or "") + (ver or "").strip())
+    return _collapse_requirement_variants(deps)
 
 
 def _redact_dependency_reference(value: str) -> str:
@@ -252,7 +270,7 @@ def _parse_pyproject_toml(content: str) -> Dict[str, str]:
     if not isinstance(project, dict):
         raise ValueError("Dependency manifest project must contain a table.")
     raw_dependencies = project.get("dependencies", [])
-    dependencies: Dict[str, str] = {}
+    dependencies: Dict[str, List[str]] = {}
     def record_requirement(requirement: Any, group: str | None = None) -> None:
         if not isinstance(requirement, str):
             raise ValueError("Dependency manifest requirement must be a string.")
@@ -273,7 +291,7 @@ def _parse_pyproject_toml(content: str) -> Dict[str, str]:
         # Keep optional groups separate from core and from each other, so
         # moving a dependency between groups is represented as a delta.
         key = name.lower() if group is None else f"{name.lower()}[{group}]"
-        dependencies[key] = spec
+        dependencies.setdefault(key, []).append(spec)
 
     if isinstance(raw_dependencies, list):
         for requirement in raw_dependencies:
@@ -287,7 +305,7 @@ def _parse_pyproject_toml(content: str) -> Dict[str, str]:
                 version = "DIRECT_REFERENCE_SHA256:" + hashlib.sha256(
                     (name + "=" + version).encode("utf-8")
                 ).hexdigest()
-            dependencies[name.lower()] = version
+            dependencies.setdefault(name.lower(), []).append(version)
     else:
         raise ValueError("Dependency manifest dependencies must be a list or table.")
 
@@ -299,7 +317,7 @@ def _parse_pyproject_toml(content: str) -> Dict[str, str]:
             raise ValueError("Dependency manifest optional group must contain a list.")
         for requirement in requirements:
             record_requirement(requirement, group)
-    return dependencies
+    return _collapse_requirement_variants(dependencies)
 
 
 def _read_bounded_snapshot_file(path: str, max_bytes: int) -> bytes:
