@@ -260,6 +260,10 @@ def _render_markdown_report(
     lines.append("### Limitations & Grounding Constraints")
     lines.append("- **Static Analysis Boundary**: Analysis operates purely on static source AST and repository dependency graphs. No repository code was executed in a sandbox.")
     lines.append("- **No Test Execution**: Repository test suites, integration tests, and CI/CD pipelines were **NOT executed**.")
+    if not ast_recorded:
+        lines.append(
+            "- **Structural Diff Evidence Unavailable**: Missing or mismatched revision evidence; contract delta counts are unknown, not verified zero."
+        )
     if invalid_review_count:
         lines.append(
             f"- **Incomplete Review Evidence**: {invalid_review_count} malformed AI review record(s) "
