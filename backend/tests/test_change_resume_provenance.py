@@ -121,14 +121,50 @@ async def test_impact_rejects_wrong_revision_diff_before_graph_build(monkeypatch
         await workflow_graph.run_impact_node(_state(_diff(base="c" * 40)))
 
 
-def test_impact_cache_is_bound_to_its_analysis_id():
+def test_impact_cache_is_bound_to_analysis_repository_and_revisions():
     analysis_id = str(uuid4())
-    assert workflow_graph._matches_analysis_blast(
-        BlastRadiusReport(analysis_id=analysis_id), analysis_id=analysis_id
+    valid = BlastRadiusReport(
+        analysis_id=analysis_id,
+        repository_url=REPOSITORY,
+        base_commit_sha=BASE,
+        head_commit_sha=HEAD,
+    )
+    expected = {
+        "analysis_id": analysis_id,
+        "repository_url": REPOSITORY,
+        "base_commit_sha": BASE,
+        "head_commit_sha": HEAD,
+    }
+    assert workflow_graph._matches_analysis_blast(valid, **expected)
+    assert not workflow_graph._matches_analysis_blast(
+        BlastRadiusReport(analysis_id=uuid4(), repository_url=REPOSITORY, base_commit_sha=BASE, head_commit_sha=HEAD),
+        **expected,
     )
     assert not workflow_graph._matches_analysis_blast(
-        BlastRadiusReport(analysis_id=uuid4()), analysis_id=analysis_id
+        BlastRadiusReport(analysis_id=analysis_id), **expected
     )
+    assert not workflow_graph._matches_analysis_blast(
+        valid.model_copy(update={"head_commit_sha": "c" * 40}), **expected
+    )
+
+
+@pytest.mark.asyncio
+async def test_valid_impact_cache_skips_graph_build(monkeypatch):
+    state = _state(_diff())
+    state["blast_radius"] = BlastRadiusReport(
+        analysis_id=state["analysis_id"],
+        repository_url=REPOSITORY,
+        base_commit_sha=BASE,
+        head_commit_sha=HEAD,
+    )
+    monkeypatch.setattr(
+        workflow_graph,
+        "build_canonical_phase6_graph",
+        lambda **kwargs: pytest.fail("Provenance-matched impact cache must be reused"),
+    )
+    result = await workflow_graph.run_impact_node(state)
+    assert result["status"] == "ANALYZING"
+    assert "blast_radius" not in result
 
 
 def test_report_does_not_attest_unrelated_graph_or_repository(db_session):
@@ -163,7 +199,12 @@ def test_report_does_not_attest_unrelated_graph_or_repository(db_session):
 
     analysis.model_metadata = {
         "diff_result": _diff().model_dump(mode="json"),
-        "blast_radius": BlastRadiusReport(analysis_id=analysis_id).model_dump(mode="json"),
+        "blast_radius": BlastRadiusReport(
+            analysis_id=analysis_id,
+            repository_url=REPOSITORY,
+            base_commit_sha=BASE,
+            head_commit_sha=HEAD,
+        ).model_dump(mode="json"),
     }
     report = generate_change_analysis_report(analysis)
     assert "| **Repository Graph Traversal** | ✅ Evidence Recorded" in report.markdown_report
