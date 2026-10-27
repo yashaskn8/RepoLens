@@ -170,3 +170,10 @@ See [REPAIR_AUDIT_2026-10-26.md](REPAIR_AUDIT_2026-10-26.md) for historical CI e
 - `4e9920adb42d9dbd7a891c48f5e30ffa443063d0`: add `frontend/tests/change-analysis-artifact-ordering.test.mjs`, including overlapping-response ordering and invalidated-analysis generation tests.
 - **Actually executed**: two isolated behavioral assertions against the updated committed artifact loader (out-of-order response and stale generation) passed in a JavaScript harness. **Written but not executed**: the two committed Node tests. Full frontend Node suite, TypeScript type-check, Next.js build, backend pytest, and browser acceptance were not run in this environment. Prompts 18, 24, and 28 remain **PARTIAL**.
 
+
+## Stale report download isolation (2026-10-27)
+
+- `aa22ac8a80e65869d08b60128fd6e86b7ac2bc36`: guard asynchronous Markdown report downloads against analysis generation changes and invalidate pending async callbacks when the workspace unmounts. The prior implementation could start a download for analysis A, navigate to B, then still download A's report when its request completed.
+- `99b8f0e0b067bb4b76d1f1ed9852504f00fa4fcd`: add `frontend/tests/change-analysis-report-download-isolation.test.mjs` (two behavioral tests and one unmount guard check).
+- **Reproduced before fix** using the retrieved original handler: an obsolete response triggered one browser download. **Actually executed after fix**: two isolated handler cases passed (obsolete report produces no download; current report downloads once), and unmount guard source was inspected. The committed Node tests, full frontend suite, TypeScript check, build, backend tests, and browser end-to-end tests remain **unexecuted**. Prompt 22/28 acceptance remains **PARTIAL**.
+
