@@ -335,6 +335,7 @@ def generate_change_analysis_report(model: ChangeAnalysisModel) -> ChangeAnalysi
         isinstance(raw_diff, dict)
         and raw_diff.get("base_commit_sha") == model.base_commit_sha
         and raw_diff.get("head_commit_sha") == model.head_commit_sha
+        and raw_diff.get("repository_url") == model.repository_url
     )
     diff_data = raw_diff if ast_recorded else {}
     raw_blast = meta.get("blast_radius")
