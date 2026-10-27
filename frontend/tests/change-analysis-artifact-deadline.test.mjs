@@ -18,11 +18,12 @@ function deferred() {
   return { promise, resolve };
 }
 
-function fixture({ telemetry = async () => ({ ready: true }) } = {}) {
-  const state = { report: null, telemetry: null, error: null, availability: {} };
+function fixture({ telemetry = async () => ({ ready: true }), publication = async () => { throw new Error('no optional publication'); } } = {}) {
+  const state = { report: null, telemetry: null, publication: null, error: null, availability: {} };
   const generation = { current: 1 };
   const timers = new Map();
   const signals = [];
+  const publicationSignals = [];
   let nextTimer = 0;
   const load = new Function(
     'fetchChangeAnalysisImpacts', 'fetchChangeAnalysisReview', 'fetchChangeAnalysisReport',
@@ -35,10 +36,10 @@ function fixture({ telemetry = async () => ({ ready: true }) } = {}) {
   )(
     async () => [], async () => ({ findings: [] }), async () => ({ markdown_report: '# ready' }),
     (id, signal) => { signals.push(signal); return telemetry(id, signal); },
-    async () => ({}), async () => { throw new Error('no optional publication'); },
+    async () => ({}), (id, signal) => { publicationSignals.push(signal); return publication(id, signal); },
     generation, { current: 0 }, { current: 0 }, { current: false },
     () => {}, () => {}, value => { state.report = value; },
-    value => { state.telemetry = value; }, () => {}, () => {},
+    value => { state.telemetry = value; }, () => {}, value => { state.publication = value; },
     updater => { state.availability = updater(state.availability); },
     value => { state.error = value; },
     (callback, delay) => {
@@ -50,7 +51,7 @@ function fixture({ telemetry = async () => ({ ready: true }) } = {}) {
     id => timers.delete(id),
   );
   return {
-    state, generation, signals, load,
+    state, generation, signals, publicationSignals, load,
     pendingTimers: () => timers.size,
     expire: () => {
       const pending = [...timers.values()];
@@ -132,4 +133,40 @@ test('all five evidence endpoints forward cancellation to the network request', 
     assert.match(getter, /cache: 'no-store',\s*signal,/);
     assert.match(source, new RegExp('withArtifactDeadline\\(\\(signal\\) => fetchChangeAnalysis' + name));
   }
+});
+
+test('stalled optional publication retrieval aborts without blocking required evidence', async () => {
+  const stalled = deferred();
+  const f = fixture({ publication: () => stalled.promise });
+  await f.load('analysis-A', 1);
+  assert.equal(f.state.report?.markdown_report, '# ready');
+  assert.equal(f.state.error, null);
+  assert.equal(f.pendingTimers(), 1, 'only optional publication should still have a deadline');
+
+  f.expire();
+  await tick();
+  assert.equal(f.publicationSignals[0].aborted, true);
+  assert.equal(f.state.error, null, 'optional publication is not required evidence');
+  stalled.resolve({ preview_digest: 'late-obsolete' });
+  await tick();
+  assert.equal(f.state.publication, null, 'late optional response must not apply');
+});
+
+test('successful optional publication fetch clears its deadline', async () => {
+  const f = fixture({ publication: async () => ({ preview_digest: 'saved' }) });
+  await f.load('analysis-A', 1);
+  await tick();
+  assert.equal(f.state.publication?.preview_digest, 'saved');
+  assert.equal(f.pendingTimers(), 0);
+  assert.equal(f.publicationSignals[0].aborted, false);
+});
+
+test('optional publication API forwards abort signal to fetch', () => {
+  const start = apiSource.indexOf('export async function fetchReviewPublication(');
+  const end = apiSource.indexOf('\\n}', start);
+  assert.ok(start >= 0 && end > start);
+  const getter = apiSource.slice(start, end);
+  assert.match(getter, /signal\\?: AbortSignal/);
+  assert.match(getter, /cache: 'no-store',\\s*signal,/);
+  assert.match(source, /withArtifactDeadline\\(\\(signal\\) => fetchReviewPublication\\(analysisId, signal\\)/);
 });
