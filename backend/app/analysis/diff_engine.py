@@ -761,9 +761,14 @@ class ChangeDiffEngine:
 
         # 5. Dependency Manifest Deltas
         dep_deltas: List[DependencyDelta] = []
-        dep_manifest_names = ("package.json", "requirements.txt", "pyproject.toml")
+        dep_manifest_names = {"package.json", "requirements.txt", "pyproject.toml"}
 
-        for m_name in dep_manifest_names:
+        # Monorepos commonly keep manifests under frontend/, backend/, or
+        # individual packages. Retain each relative path as provenance.
+        for m_name in sorted(base_rel_set | head_rel_set):
+            manifest_type = m_name.rsplit("/", 1)[-1]
+            if manifest_type not in dep_manifest_names:
+                continue
             base_has = m_name in base_files
             head_has = m_name in head_files
 
@@ -785,13 +790,13 @@ class ChangeDiffEngine:
                 except OSError:
                     pass
 
-            if m_name == "package.json":
+            if manifest_type == "package.json":
                 base_deps = _parse_package_json(base_content)
                 head_deps = _parse_package_json(head_content)
-            elif m_name == "requirements.txt":
+            elif manifest_type == "requirements.txt":
                 base_deps = _parse_requirements_txt(base_content)
                 head_deps = _parse_requirements_txt(head_content)
-            elif m_name == "pyproject.toml":
+            elif manifest_type == "pyproject.toml":
                 base_deps = _parse_pyproject_toml(base_content)
                 head_deps = _parse_pyproject_toml(head_content)
             else:
