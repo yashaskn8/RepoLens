@@ -12,6 +12,7 @@ import { Skeleton } from '@/components/ui/Skeleton';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { useAuth } from '@/context/AuthContext';
 import {
+  ApiError,
   fetchChangeAnalysis,
   fetchChangeAnalysisDiff,
   fetchChangeAnalysisImpacts,
@@ -118,6 +119,7 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
   const [confirmedPublish, setConfirmedPublish] = useState(false);
   const [publishMessage, setPublishMessage] = useState<string | null>(null);
   const [missingArtifacts, setMissingArtifacts] = useState<string[]>([]);
+  const [analysisLoadError, setAnalysisLoadError] = useState<string | null>(null);
   const [artifactRetryToken, setArtifactRetryToken] = useState(0);
   const retryPendingRef = useRef(false);
 
@@ -136,6 +138,7 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
       setSelectedFile(null);
       setMissingArtifacts([]);
     }
+    setAnalysisLoadError(null);
     setIsLoading(true);
 
     async function loadData() {
@@ -144,6 +147,7 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
         const current = await withChangeDetailDeadline((signal) => fetchChangeAnalysis(analysisId, signal));
         if (cancelled) return;
         setAnalysis(current);
+        setAnalysisLoadError(null);
         terminal = current.status === 'COMPLETED' || current.status === 'FAILED';
         if (current.status === 'COMPLETED') {
           // Optional publication state must not hold up the required evidence.
@@ -176,8 +180,32 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
           else missing.push('review evidence');
           setMissingArtifacts(missing);
         }
-      } catch {
-        // Do not infer zero findings or a clean diff from a failed request.
+      } catch (error: unknown) {
+        // Authorization and missing-resource errors are terminal, not transient
+        // polling failures. Never retain evidence from a revoked session.
+        const status = error instanceof ApiError ? error.status : undefined;
+        if (status === 401 || status === 403 || status === 404) {
+          terminal = true;
+          if (!cancelled) {
+            actionGeneration.current += 1;
+            publicationReadSequenceRef.current += 1;
+            setAnalysis(null);
+            setDiff(null);
+            setImpacts([]);
+            setImpactsLoaded(false);
+            setReview(null);
+            setPublication(null);
+            setSelectedFile(null);
+            setMissingArtifacts([]);
+            setConfirmedPublish(false);
+            setAnalysisLoadError(status === 401
+              ? 'Sign in again to access this analysis.'
+              : 'This analysis is unavailable or access was denied.');
+          }
+        } else if (!cancelled) {
+          // Timeouts and network/server failures remain retryable.
+          setAnalysisLoadError('Unable to load analysis status. Retrying automatically.');
+        }
       } finally {
         if (!cancelled) {
           setIsLoading(false);
@@ -307,6 +335,11 @@ function ChangeDetailWorkspace({ analysisId }: { analysisId: string }) {
       title="PR Impact Workspace"
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', height: 'calc(100vh - 8rem)' }}>
+        {analysisLoadError && (
+          <div role="alert" className="glass-panel" style={{ padding: '0.9rem 1.25rem', color: 'var(--warning-text)' }}>
+            {analysisLoadError}
+          </div>
+        )}
         {/* Workspace Executive Summary Card */}
         <div
           className="glass-panel"
