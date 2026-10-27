@@ -148,10 +148,10 @@ def _render_markdown_report(
     lines.append(f"| 📁 **Files Changed** | `{analysis.changed_files_count}` |")
     lines.append(f"| 🧩 **Symbols Changed** | `{analysis.changed_symbols_count}` |")
     lines.append(f"| 💥 **Impacted Symbols / Callers** | `{analysis.impacted_symbols_count}` |")
-    lines.append(f"| ⚡ **API Route Contract Deltas** | `{len(route_deltas)}` |")
-    lines.append(f"| 📐 **Schema & Model Deltas** | `{len(schema_deltas)}` |")
-    lines.append(f"| 📦 **Dependency Deltas** | `{len(dependency_deltas)}` |")
-    lines.append(f"| ⚙️ **Config Deltas** | `{len(config_deltas)}` |")
+    lines.append(f"| ⚡ **API Route Contract Deltas** | {f'`{len(route_deltas)}`' if ast_recorded else 'Unavailable'} |")
+    lines.append(f"| 📐 **Schema & Model Deltas** | {f'`{len(schema_deltas)}`' if ast_recorded else 'Unavailable'} |")
+    lines.append(f"| 📦 **Dependency Deltas** | {f'`{len(dependency_deltas)}`' if ast_recorded else 'Unavailable'} |")
+    lines.append(f"| ⚙️ **Config Deltas** | {f'`{len(config_deltas)}`' if ast_recorded else 'Unavailable'} |")
     lines.append(f"| 🤖 **Verified Review Findings** | `{len(review_findings)}` |")
     lines.append("")
 
@@ -317,12 +317,14 @@ def generate_change_analysis_report(model: ChangeAnalysisModel) -> ChangeAnalysi
 
     # Extract deltas from diff_result if available
     raw_diff = meta.get("diff_result")
-    diff_data = raw_diff if isinstance(raw_diff, dict) else {}
+    # A diff is authoritative only for the exact immutable revisions of this
+    # analysis. Never attribute another pair's contract deltas to this report.
     ast_recorded = (
         isinstance(raw_diff, dict)
-        and isinstance(raw_diff.get("base_commit_sha"), str)
-        and isinstance(raw_diff.get("head_commit_sha"), str)
+        and raw_diff.get("base_commit_sha") == model.base_commit_sha
+        and raw_diff.get("head_commit_sha") == model.head_commit_sha
     )
+    diff_data = raw_diff if ast_recorded else {}
     raw_blast = meta.get("blast_radius")
     graph_recorded = isinstance(raw_blast, dict) and bool(raw_blast)
     route_deltas = [RouteContractDelta(**r) for r in diff_data.get("route_deltas", [])]
@@ -438,6 +440,10 @@ def generate_change_analysis_report(model: ChangeAnalysisModel) -> ChangeAnalysi
         "Repository test suites and CI pipelines were NOT executed.",
         "Dynamic reflection and runtime duck-typing cannot be fully determined through static analysis alone.",
     ]
+    if not ast_recorded:
+        limitations.append(
+            "Structural diff evidence is missing or does not match the requested immutable revisions; contract delta counts are unavailable, not verified zero."
+        )
     if invalid_review_count:
         limitations.append(
             f"{invalid_review_count} malformed persisted AI review record(s) were omitted; review coverage is incomplete."
