@@ -167,47 +167,50 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
           publicationActionSequence !== publicationActionSequenceRef.current) return;
       setPublication(publication);
     }, () => { /* No publication preview exists yet, or its fetch failed. */ });
+    // Apply each completed artifact immediately. A slow or stalled sibling
+    // must not hide an already-available report, review, diff, or telemetry.
+    const isCurrent = () =>
+      generation === analysisGenerationRef.current && loadSequence === artifactLoadSequenceRef.current;
+    const applyWhenCurrent = <T,>(request: Promise<T>, apply: (value: T) => void) =>
+      request.then((value) => {
+        if (isCurrent()) apply(value);
+        return value;
+      });
     const outcomes = await Promise.allSettled([
-      fetchChangeAnalysisImpacts(analysisId),
-      fetchChangeAnalysisReview(analysisId),
-      fetchChangeAnalysisReport(analysisId),
-      fetchChangeAnalysisTelemetry(analysisId),
-      fetchChangeAnalysisDiff(analysisId),
+      applyWhenCurrent(fetchChangeAnalysisImpacts(analysisId), (value) => {
+        setImpacts(value || []);
+        setArtifactAvailability((state) => ({ ...state, impacts: true }));
+      }),
+      applyWhenCurrent(fetchChangeAnalysisReview(analysisId), (value) => {
+        setReviewFindings(value.findings || []);
+        setArtifactAvailability((state) => ({ ...state, review: true }));
+      }),
+      applyWhenCurrent(fetchChangeAnalysisReport(analysisId), (value) => {
+        setReport(value);
+        setArtifactAvailability((state) => ({ ...state, report: true }));
+      }),
+      applyWhenCurrent(fetchChangeAnalysisTelemetry(analysisId), (value) => {
+        setTelemetry(value);
+        setArtifactAvailability((state) => ({ ...state, telemetry: true }));
+      }),
+      applyWhenCurrent(fetchChangeAnalysisDiff(analysisId), (diff) => {
+        setDiffDeltas({
+          route_deltas: diff.route_deltas || [],
+          schema_deltas: diff.schema_deltas || [],
+          dependency_deltas: diff.dependency_deltas || [],
+          config_deltas: diff.config_deltas || [],
+        });
+        setArtifactAvailability((state) => ({ ...state, diff: true }));
+      }),
     ]);
-    if (generation !== analysisGenerationRef.current || loadSequence !== artifactLoadSequenceRef.current) return;
-
+    if (!isCurrent()) return;
     const missing: string[] = [];
     const [impactsResult, reviewResult, reportResult, telemetryResult, diffResult] = outcomes;
-    if (impactsResult.status === 'fulfilled') {
-      setImpacts(impactsResult.value || []);
-      setArtifactAvailability((state) => ({ ...state, impacts: true }));
-    }
-    else missing.push('impacts');
-    if (reviewResult.status === 'fulfilled') {
-      setReviewFindings(reviewResult.value.findings || []);
-      setArtifactAvailability((state) => ({ ...state, review: true }));
-    }
-    else missing.push('review');
-    if (reportResult.status === 'fulfilled') {
-      setReport(reportResult.value);
-      setArtifactAvailability((state) => ({ ...state, report: true }));
-    }
-    else missing.push('report');
-    if (telemetryResult.status === 'fulfilled') {
-      setTelemetry(telemetryResult.value);
-      setArtifactAvailability((state) => ({ ...state, telemetry: true }));
-    }
-    else missing.push('telemetry');
-    if (diffResult.status === 'fulfilled') {
-      const diff = diffResult.value;
-      setDiffDeltas({
-        route_deltas: diff.route_deltas || [],
-        schema_deltas: diff.schema_deltas || [],
-        dependency_deltas: diff.dependency_deltas || [],
-        config_deltas: diff.config_deltas || [],
-      });
-      setArtifactAvailability((state) => ({ ...state, diff: true }));
-    } else missing.push('structural diff');
+    if (impactsResult.status === 'rejected') missing.push('impacts');
+    if (reviewResult.status === 'rejected') missing.push('review');
+    if (reportResult.status === 'rejected') missing.push('report');
+    if (telemetryResult.status === 'rejected') missing.push('telemetry');
+    if (diffResult.status === 'rejected') missing.push('structural diff');
     setArtifactError(missing.length
       ? `Analysis completed, but unavailable artifacts: ${missing.join(', ')}. Empty panels are not evidence of zero findings.`
       : null);
