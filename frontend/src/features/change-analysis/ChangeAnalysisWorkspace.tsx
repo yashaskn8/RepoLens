@@ -112,6 +112,8 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
   const [expandedImpactId, setExpandedImpactId] = useState<string | null>(null);
   const [expandedFindingId, setExpandedFindingId] = useState<string | null>(null);
   const [copiedReport, setCopiedReport] = useState<boolean>(false);
+  const [copyError, setCopyError] = useState<string | null>(null);
+  const copySequenceRef = useRef(0);
 
   // SSE Workflow Event Stream
   const { events: workflowEvents } = useWorkflowStream(
@@ -269,6 +271,9 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
     setIsPublishingPub(false);
     setShowPublishConfirm(false);
     setCopiedDigest(false);
+    copySequenceRef.current += 1;
+    setCopiedReport(false);
+    setCopyError(null);
     setDiffDeltas({ route_deltas: [], schema_deltas: [], dependency_deltas: [], config_deltas: [] });
 
     try {
@@ -324,11 +329,26 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
     }
   };
 
-  const handleCopyMarkdown = () => {
+  const handleCopyMarkdown = async () => {
     if (!report?.markdown_report) return;
-    navigator.clipboard.writeText(report.markdown_report);
-    setCopiedReport(true);
-    setTimeout(() => setCopiedReport(false), 2000);
+    const generation = analysisGenerationRef.current;
+    const copySequence = ++copySequenceRef.current;
+    setCopiedReport(false);
+    setCopyError(null);
+    try {
+      await navigator.clipboard.writeText(report.markdown_report);
+      if (generation !== analysisGenerationRef.current || copySequence !== copySequenceRef.current) return;
+      setCopiedReport(true);
+      setTimeout(() => {
+        if (generation === analysisGenerationRef.current && copySequence === copySequenceRef.current) {
+          setCopiedReport(false);
+        }
+      }, 2000);
+    } catch {
+      if (generation === analysisGenerationRef.current && copySequence === copySequenceRef.current) {
+        setCopyError('Could not copy the report. Check clipboard permissions or select and copy the text manually.');
+      }
+    }
   };
 
   const handleGeneratePreview = async () => {
@@ -624,7 +644,8 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
             <ReviewReportPanel
               report={report}
               copiedReport={copiedReport}
-              onCopyMarkdown={handleCopyMarkdown}
+              copyError={copyError}
+              onCopyMarkdown={() => void handleCopyMarkdown()}
               onDownloadMarkdown={handleDownloadMarkdown}
             />
           ) : <Alert variant="warning">The report has not been loaded successfully.</Alert>)}
