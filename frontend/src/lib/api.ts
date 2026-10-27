@@ -800,10 +800,12 @@ export async function fetchChangeAnalysis(
 }
 
 export async function fetchChangeAnalysisDiff(
-  analysisId: string
+  analysisId: string,
+  signal?: AbortSignal
 ): Promise<StructuralDiffResult> {
   const response = await apiFetch(`/api/v1/change-analyses/${analysisId}/diff`, {
     cache: 'no-store',
+    signal,
   });
 
   if (!response.ok) {
@@ -814,10 +816,12 @@ export async function fetchChangeAnalysisDiff(
 }
 
 export async function fetchChangeAnalysisImpacts(
-  analysisId: string
+  analysisId: string,
+  signal?: AbortSignal
 ): Promise<ChangeImpact[]> {
   const response = await apiFetch(`/api/v1/change-analyses/${analysisId}/impacts`, {
     cache: 'no-store',
+    signal,
   });
 
   if (!response.ok) {
@@ -828,10 +832,12 @@ export async function fetchChangeAnalysisImpacts(
 }
 
 export async function fetchChangeAnalysisReview(
-  analysisId: string
+  analysisId: string,
+  signal?: AbortSignal
 ): Promise<ChangeReviewReport> {
   const response = await apiFetch(`/api/v1/change-analyses/${analysisId}/review`, {
     cache: 'no-store',
+    signal,
   });
 
   if (!response.ok) {
@@ -842,10 +848,12 @@ export async function fetchChangeAnalysisReview(
 }
 
 export async function fetchChangeAnalysisReport(
-  analysisId: string
+  analysisId: string,
+  signal?: AbortSignal
 ): Promise<ChangeAnalysisReportResponse> {
   const response = await apiFetch(`/api/v1/change-analyses/${analysisId}/report`, {
     cache: 'no-store',
+    signal,
   });
 
   if (!response.ok) {
@@ -856,10 +864,12 @@ export async function fetchChangeAnalysisReport(
 }
 
 export async function fetchChangeAnalysisTelemetry(
-  analysisId: string
+  analysisId: string,
+  signal?: AbortSignal
 ): Promise<ChangeAnalysisTelemetry> {
   const response = await apiFetch(`/api/v1/change-analyses/${analysisId}/telemetry`, {
     cache: 'no-store',
+    signal,
   });
 
   if (!response.ok) {
