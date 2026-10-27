@@ -41,6 +41,11 @@ async function load({ status = 'COMPLETED', failures = [], retryToken = 0 } = {}
     setIsLoading: value => { state.loading = value; },
     retryPendingRef,
     publicationReadSequenceRef: { current: 0 },
+    actionGeneration: { current: 0 },
+    ApiError: class ApiError extends Error {},
+    setAnalysisLoadError: noop,
+    setImpactsLoaded: noop,
+    setConfirmedPublish: noop,
     // Deadline behavior is tested separately; this fixture exercises artifact state.
     withChangeDetailDeadline: request => request({}),
     fetchChangeAnalysis: async () => ({ status }),
