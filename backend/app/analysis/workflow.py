@@ -148,7 +148,13 @@ async def execute_background_change_analysis(
             if diff_res_cached is not None and "blast_radius" in initial_meta:
                 try:
                     candidate = BlastRadiusReport.model_validate(initial_meta["blast_radius"])
-                    if _matches_analysis_blast(candidate, analysis_id=analysis_id):
+                    if _matches_analysis_blast(
+                        candidate,
+                        analysis_id=analysis_id,
+                        repository_url=analysis_model.repository_url,
+                        base_commit_sha=analysis_model.base_commit_sha,
+                        head_commit_sha=analysis_model.head_commit_sha,
+                    ):
                         blast_radius_cached = candidate
                 except (TypeError, ValueError):
                     pass
