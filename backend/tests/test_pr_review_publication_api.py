@@ -176,3 +176,38 @@ def test_api_post_publish_without_approval_rejected(client, db_session):
     )
     assert resp.status_code == 409
     assert resp.json()["detail"]["error_code"] == "PUBLICATION_NOT_APPROVED"
+
+
+def test_api_published_review_requires_matching_digest_on_replay(client, db_session):
+    """Completed publish and approve endpoints reject another preview digest."""
+    analysis = _create_test_analysis(db_session)
+    pub = PullRequestReviewPublicationModel(
+        analysis_id=analysis.id,
+        repository_owner="octocat",
+        repository_name="Hello-World",
+        pr_number=42,
+        base_commit_sha="1" * 40,
+        head_commit_sha="2" * 40,
+        status=ReviewPublicationStatus.PUBLISHED.value,
+        preview_digest="a" * 64,
+        preview_body="Published review",
+    )
+    db_session.add(pub)
+    db_session.commit()
+
+    base = f"/api/v1/change-analyses/{analysis.id}/review-publication"
+    for endpoint in ("approve", "publish"):
+        response = client.post(
+            f"{base}/{endpoint}",
+            json={"expected_preview_digest": "b" * 64},
+        )
+        assert response.status_code == 409
+        assert response.json()["detail"]["error_code"] == "PREVIEW_DIGEST_MISMATCH"
+
+    # An exact-digest replay remains idempotent and requires no new GitHub write.
+    response = client.post(
+        f"{base}/publish",
+        json={"expected_preview_digest": "a" * 64},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "PUBLISHED"
