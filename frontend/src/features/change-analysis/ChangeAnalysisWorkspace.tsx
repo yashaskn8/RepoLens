@@ -69,6 +69,8 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
   useEffect(() => () => { analysisGenerationRef.current += 1; }, []);
   const submitPendingRef = useRef(false);
   const publicationPendingRef = useRef(false);
+  // Invalidate an older persisted-publication fetch when an operator action begins or finishes.
+  const publicationActionSequenceRef = useRef(0);
   const [artifactError, setArtifactError] = useState<string | null>(null);
   const [isRetryingArtifacts, setIsRetryingArtifacts] = useState(false);
   const [artifactAvailability, setArtifactAvailability] = useState({
@@ -153,6 +155,7 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
 
   const loadCompletedAnalysisData = async (analysisId: string, generation: number) => {
     const loadSequence = ++artifactLoadSequenceRef.current;
+    const publicationActionSequence = publicationActionSequenceRef.current;
     const outcomes = await Promise.allSettled([
       fetchChangeAnalysisImpacts(analysisId),
       fetchChangeAnalysisReview(analysisId),
@@ -197,7 +200,11 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
     } else missing.push('structural diff');
     // Publication is optional and is normally 404 until an operator requests
     // a preview. It is not a required change-analysis artifact.
-    if (publicationResult.status === 'fulfilled') setPublication(publicationResult.value);
+    if (publicationResult.status === 'fulfilled' &&
+        !publicationPendingRef.current &&
+        publicationActionSequence === publicationActionSequenceRef.current) {
+      setPublication(publicationResult.value);
+    }
 
     setArtifactError(missing.length
       ? `Analysis completed, but unavailable artifacts: ${missing.join(', ')}. Empty panels are not evidence of zero findings.`
@@ -246,6 +253,7 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
     // Invalidate publication requests from the previous analysis. A late
     // response must not repopulate its preview or clear the new action's lock.
     publicationPendingRef.current = false;
+    publicationActionSequenceRef.current += 1;
     setIsGeneratingPreview(false);
     setIsApprovingPub(false);
     setIsPublishingPub(false);
@@ -318,6 +326,7 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
     const generation = analysisGenerationRef.current;
     const analysisId = activeAnalysis.id;
     publicationPendingRef.current = true;
+    publicationActionSequenceRef.current += 1;
     setIsGeneratingPreview(true);
     setPubError(null);
     try {
@@ -330,6 +339,7 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
     } finally {
       if (generation === analysisGenerationRef.current) {
         publicationPendingRef.current = false;
+        publicationActionSequenceRef.current += 1;
         setIsGeneratingPreview(false);
       }
     }
@@ -341,6 +351,7 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
     const analysisId = activeAnalysis.id;
     const digest = publication.preview_digest;
     publicationPendingRef.current = true;
+    publicationActionSequenceRef.current += 1;
     setIsApprovingPub(true);
     setPubError(null);
     try {
@@ -353,6 +364,7 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
     } finally {
       if (generation === analysisGenerationRef.current) {
         publicationPendingRef.current = false;
+        publicationActionSequenceRef.current += 1;
         setIsApprovingPub(false);
       }
     }
@@ -364,6 +376,7 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
     const analysisId = activeAnalysis.id;
     const digest = publication.preview_digest;
     publicationPendingRef.current = true;
+    publicationActionSequenceRef.current += 1;
     setIsPublishingPub(true);
     setPubError(null);
     try {
@@ -380,6 +393,7 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
     } finally {
       if (generation === analysisGenerationRef.current) {
         publicationPendingRef.current = false;
+        publicationActionSequenceRef.current += 1;
         setIsPublishingPub(false);
       }
     }
