@@ -14,7 +14,10 @@ function handler(name, context) {
     `  const ${name} = async \\(\\) => \\{([\\s\\S]*?)\\n  \\};`,
   ));
   assert.ok(match, `missing ${name} handler`);
-  const body = match[1].replaceAll('catch (err: unknown)', 'catch (err)');
+  const body = match[1]
+    .replaceAll('catch (err: unknown)', 'catch (err)')
+    .replaceAll('new Promise<never>', 'new Promise')
+    .replace('let refreshTimer: ReturnType<typeof setTimeout> | undefined;', 'let refreshTimer;');
   return new Function('context', `with (context) { return async () => { ${body} }; }`)(context);
 }
 
