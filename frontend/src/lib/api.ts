@@ -881,9 +881,10 @@ export async function fetchChangeAnalysisTelemetry(
   return response.json();
 }
 
-export async function downloadChangeAnalysisMarkdown(analysisId: string): Promise<string> {
+export async function downloadChangeAnalysisMarkdown(analysisId: string, signal?: AbortSignal): Promise<string> {
   const response = await apiFetch(`/api/v1/change-analyses/${analysisId}/markdown`, {
     cache: 'no-store',
+    signal,
   });
 
   if (!response.ok) {
