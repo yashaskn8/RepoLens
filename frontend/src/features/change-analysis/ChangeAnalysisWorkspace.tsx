@@ -65,6 +65,7 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
   const [activeAnalysis, setActiveAnalysis] = useState<ChangeAnalysisResponse | null>(null);
   const analysisGenerationRef = useRef(0);
   const submitPendingRef = useRef(false);
+  const publicationPendingRef = useRef(false);
   const [artifactError, setArtifactError] = useState<string | null>(null);
   const [isRetryingArtifacts, setIsRetryingArtifacts] = useState(false);
   const [artifactAvailability, setArtifactAvailability] = useState({
@@ -238,6 +239,14 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
     setTelemetry(null);
     setPublication(null);
     setPubError(null);
+    // Invalidate publication requests from the previous analysis. A late
+    // response must not repopulate its preview or clear the new action's lock.
+    publicationPendingRef.current = false;
+    setIsGeneratingPreview(false);
+    setIsApprovingPub(false);
+    setIsPublishingPub(false);
+    setShowPublishConfirm(false);
+    setCopiedDigest(false);
     setDiffDeltas({ route_deltas: [], schema_deltas: [], dependency_deltas: [], config_deltas: [] });
 
     try {
@@ -298,47 +307,74 @@ export function ChangeAnalysisWorkspace({ onNavigate }: ChangeAnalysisWorkspaceP
   };
 
   const handleGeneratePreview = async () => {
-    if (!activeAnalysis) return;
+    if (!activeAnalysis || publicationPendingRef.current) return;
+    const generation = analysisGenerationRef.current;
+    const analysisId = activeAnalysis.id;
+    publicationPendingRef.current = true;
     setIsGeneratingPreview(true);
     setPubError(null);
-    const generation = analysisGenerationRef.current;
     try {
-      const pub = await generateReviewPublicationPreview(activeAnalysis.id);
+      const pub = await generateReviewPublicationPreview(analysisId);
       if (generation === analysisGenerationRef.current) setPublication(pub);
     } catch (err: unknown) {
-      setPubError(err instanceof Error ? err.message : 'Failed to generate review publication preview');
+      if (generation === analysisGenerationRef.current) {
+        setPubError(err instanceof Error ? err.message : 'Failed to generate review publication preview');
+      }
     } finally {
-      setIsGeneratingPreview(false);
+      if (generation === analysisGenerationRef.current) {
+        publicationPendingRef.current = false;
+        setIsGeneratingPreview(false);
+      }
     }
   };
 
   const handleApprovePublication = async () => {
-    if (!activeAnalysis || !publication) return;
+    if (!activeAnalysis || !publication || publicationPendingRef.current) return;
+    const generation = analysisGenerationRef.current;
+    const analysisId = activeAnalysis.id;
+    const digest = publication.preview_digest;
+    publicationPendingRef.current = true;
     setIsApprovingPub(true);
     setPubError(null);
     try {
-      const pub = await approveReviewPublication(activeAnalysis.id, publication.preview_digest);
-      setPublication(pub);
+      const pub = await approveReviewPublication(analysisId, digest);
+      if (generation === analysisGenerationRef.current) setPublication(pub);
     } catch (err: unknown) {
-      setPubError(err instanceof Error ? err.message : 'Failed to approve review publication');
+      if (generation === analysisGenerationRef.current) {
+        setPubError(err instanceof Error ? err.message : 'Failed to approve review publication');
+      }
     } finally {
-      setIsApprovingPub(false);
+      if (generation === analysisGenerationRef.current) {
+        publicationPendingRef.current = false;
+        setIsApprovingPub(false);
+      }
     }
   };
 
   const handlePublishReview = async () => {
-    if (!activeAnalysis || !publication) return;
+    if (!activeAnalysis || !publication || publicationPendingRef.current) return;
+    const generation = analysisGenerationRef.current;
+    const analysisId = activeAnalysis.id;
+    const digest = publication.preview_digest;
+    publicationPendingRef.current = true;
     setIsPublishingPub(true);
     setPubError(null);
     try {
-      await publishReviewPublication(activeAnalysis.id, publication.preview_digest);
-      const updated = await fetchReviewPublication(activeAnalysis.id);
-      setPublication(updated);
-      setShowPublishConfirm(false);
+      await publishReviewPublication(analysisId, digest);
+      const updated = await fetchReviewPublication(analysisId);
+      if (generation === analysisGenerationRef.current) {
+        setPublication(updated);
+        setShowPublishConfirm(false);
+      }
     } catch (err: unknown) {
-      setPubError(err instanceof Error ? err.message : 'Failed to publish review to GitHub');
+      if (generation === analysisGenerationRef.current) {
+        setPubError(err instanceof Error ? err.message : 'Failed to publish review to GitHub');
+      }
     } finally {
-      setIsPublishingPub(false);
+      if (generation === analysisGenerationRef.current) {
+        publicationPendingRef.current = false;
+        setIsPublishingPub(false);
+      }
     }
   };
 
