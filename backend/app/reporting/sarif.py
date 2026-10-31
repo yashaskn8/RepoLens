@@ -10,7 +10,7 @@ import re
 from typing import Iterable
 from urllib.parse import quote
 
-from app.security.redaction import redact_secrets
+from app.security.redaction import contains_secrets, redact_secrets
 from app.services.finding_grounding import is_canonical_confirmed_finding
 
 MAX_SARIF_FINDINGS = 2_000
@@ -31,6 +31,10 @@ def _safe_path(raw: str) -> str | None:
     if any(part in ("", ".", "..") for part in raw.split("/")):
         return None
     if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw):
+        return None
+    # A credential in a path would otherwise survive URI encoding and leak in SARIF.
+    # Do not redact paths in place: that would point consumers at a fictitious file.
+    if contains_secrets(raw):
         return None
     return quote(raw, safe="/-._~")
 
