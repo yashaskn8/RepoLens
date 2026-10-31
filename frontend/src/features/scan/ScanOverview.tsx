@@ -61,6 +61,14 @@ export const ScanOverview: React.FC<ScanOverviewProps> = ({ scan }) => {
           <span aria-hidden="true">📄</span> Export Markdown Report
         </a>
         <a
+          href={`${apiBase}/api/v1/scans/${scan.id}/sarif`}
+          download={`repolens-report-${scan.id}.sarif`}
+          className="filter-btn text-violet-400 bg-violet-950/20 border-violet-800/40 hover:bg-violet-900/40"
+          aria-label="Export verified open findings as SARIF"
+        >
+          <span aria-hidden="true">🛡️</span> Export SARIF
+        </a>
+        <a
           href={`${apiBase}/api/v1/scans/${scan.id}/report?format=json`}
           download={`repolens-report-${scan.id}.json`}
           target="_blank"
