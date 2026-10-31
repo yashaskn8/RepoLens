@@ -22,10 +22,10 @@ _HASH_SUFFIX = re.compile(r"-[0-9a-f]{12}$")
 # Canonical redaction uses word boundaries; underscores can hide embedded GitHub tokens,
 # including GitHub App and OAuth tokens.
 _EMBEDDED_GITHUB_TOKEN = re.compile(r"(?:ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|(?:ghs_|ghu_|ghr_)[A-Za-z0-9_.-]{10,})")
-# Canonical \b boundaries miss other secret formats when preceded by an underscore.
-# Match the same known credential families at underscore/non-alphanumeric boundaries.
+# Canonical \b boundaries miss credentials concatenated to identifier text.
+# Recognize these structured secret formats even without a preceding separator.
 _EMBEDDED_NON_GITHUB_SECRET = re.compile(
-    r"(?<![A-Za-z0-9])(?:"
+    r"(?:"
     r"(?:sk-or-v1-|sk-|gsk_|hf_|nvapi-|cfut_|cohere_)[A-Za-z0-9_-]{16,}"
     r"|AIza[A-Za-z0-9_-]{20,}"
     r"|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
