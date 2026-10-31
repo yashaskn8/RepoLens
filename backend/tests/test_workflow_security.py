@@ -254,7 +254,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
 """)
     result = analyze_workflow_repository(str(tmp_path))
-    assert ("github-actions.privileged-untrusted-checkout", 6) in _rules(result)
+    assert ("github-actions.privileged-untrusted-checkout", 7) in _rules(result)
 
 
 @pytest.mark.asyncio
