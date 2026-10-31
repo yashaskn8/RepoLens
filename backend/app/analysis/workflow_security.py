@@ -121,6 +121,43 @@ def _finding(path: str, line: int, rule: str, title: str, description: str,
     )
 
 
+def _inline_privileged_pr_trigger(value: str) -> bool:
+    """Check only direct inline event names, not nested branch-filter values."""
+    value = value.strip()
+    if value.startswith("[") and value.endswith("]"):
+        return any(
+            item.strip().strip("'\\\"") == "pull_request_target"
+            for item in value[1:-1].split(",")
+        )
+    if value.startswith("{") and value.endswith("}"):
+        # Keep only depth-one mapping keys; nested filters are not events.
+        top_level: list[str] = []
+        depth = 0
+        quote: str | None = None
+        for char in value:
+            if quote is not None:
+                if depth == 1:
+                    top_level.append(char)
+                if char == quote:
+                    quote = None
+                continue
+            if char in ("'", '"'):
+                quote = char
+            elif char in "[{":
+                depth += 1
+                continue
+            elif char in "]}":
+                depth -= 1
+                continue
+            if depth == 1:
+                top_level.append(char)
+        return bool(re.search(
+            r"""(?:^|,)\s*(?:pull_request_target|'pull_request_target'|"pull_request_target")\s*:""",
+            "".join(top_level),
+        ))
+    return value.strip("'\\\"") == "pull_request_target"
+
+
 def _has_privileged_pr_trigger(lines: list[str]) -> bool:
     """Recognize pull_request_target only in the top-level event declaration.
 
@@ -142,7 +179,7 @@ def _has_privileged_pr_trigger(lines: list[str]) -> bool:
                 continue
             inline = event.group(1)
             if inline:
-                if re.search(r"\bpull_request_target\b", inline):
+                if _inline_privileged_pr_trigger(inline):
                     return True
             else:
                 in_event_block = True
