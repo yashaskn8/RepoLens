@@ -197,6 +197,32 @@ def test_sarif_redacts_credentials_in_rule_identifiers(client, db_session):
     assert all("REDACTED" in rule_id for rule_id in ids)
 
 
+def test_sarif_redacts_github_tokens_embedded_after_underscores(client, db_session):
+    # A preceding underscore is a word character, so canonical \b token patterns
+    # can miss an otherwise recognizable GitHub token.
+    scan = _scan(db_session)
+    token = "ghp_" + "Q" * 36
+    finding = _finding(
+        db_session, scan,
+        title=f"Finding prefix_{token}",
+        description=f"Detector prefix_{token}",
+        path="src/safe.py",
+    )
+    finding.source_tool = f"tool_{token}"
+    finding.detector_id = f"rule_{token}"
+    _finding(db_session, scan, path=f"src/prefix_{token}/issue.py")
+    db_session.flush()
+
+    response = client.get(f"/api/v1/scans/{scan.id}/report/sarif")
+    assert response.status_code == 200, response.text
+    assert token not in response.text
+    results = response.json()["runs"][0]["results"]
+    assert len(results) == 1
+    assert "REDACTED" in results[0]["ruleId"]
+    assert "REDACTED" in results[0]["message"]["text"]
+    assert results[0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == "src/safe.py"
+
+
 def test_sarif_omits_secret_bearing_paths_without_leaking_credentials(client, db_session):
     scan = _scan(db_session)
     tokens = ["ghp_" + "Z" * 36, "sk-" + "D" * 20]
