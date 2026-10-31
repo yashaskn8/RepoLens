@@ -1,10 +1,10 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { Download, FileDown, RefreshCw } from 'lucide-react';
+import { Download, FileDown, FileJson, RefreshCw } from 'lucide-react';
 
 import { Button } from '@/components/ui/Button';
-import { downloadReportPdf, fetchLatestScanReport, fetchReport, requestScanReport } from '@/lib/api';
+import { downloadReportPdf, downloadScanSarif, fetchLatestScanReport, fetchReport, requestScanReport } from '@/lib/api';
 import type { ScanReportResource, ScanStatus } from '@/types/domain';
 
 
@@ -20,6 +20,7 @@ export function ScanReportAction({ scanId, scanStatus }: ScanReportActionProps) 
   const [isDiscovering, setIsDiscovering] = useState(scanStatus === 'COMPLETED');
   const [isRequesting, setIsRequesting] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [isDownloadingSarif, setIsDownloadingSarif] = useState(false);
   const [transportError, setTransportError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -105,6 +106,28 @@ export function ScanReportAction({ scanId, scanStatus }: ScanReportActionProps) 
     }
   }, [report, scanId]);
 
+  const downloadSarif = useCallback(async () => {
+    if (scanStatus !== 'COMPLETED') return;
+    setIsDownloadingSarif(true);
+    setTransportError(null);
+    try {
+      const blob = await downloadScanSarif(scanId);
+      const objectUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = objectUrl;
+      anchor.download = `repolens-${scanId.slice(0, 8)}.sarif`;
+      anchor.style.display = 'none';
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+    } catch (error: unknown) {
+      setTransportError(error instanceof Error ? error.message : 'Could not download the SARIF report.');
+    } finally {
+      setIsDownloadingSarif(false);
+    }
+  }, [scanId, scanStatus]);
+
   const isGenerating = Boolean(report && ACTIVE_STATUSES.has(report.status));
   const ready = report?.status === 'READY';
   const failed = report?.status === 'FAILED';
@@ -155,6 +178,17 @@ export function ScanReportAction({ scanId, scanStatus }: ScanReportActionProps) 
           {isGenerating || isRequesting ? 'Generating PDF…' : isDiscovering ? 'Checking report…' : 'Generate PDF'}
         </Button>
       )}
+      <Button
+        variant="secondary"
+        size="sm"
+        onClick={downloadSarif}
+        isLoading={isDownloadingSarif}
+        disabled={unavailable || isDownloadingSarif}
+        title={unavailable ? 'Complete the repository scan before exporting SARIF.' : 'Export open, verified findings for code scanning.'}
+        leftIcon={<FileJson size={14} aria-hidden="true" />}
+      >
+        {isDownloadingSarif ? 'Exporting SARIF…' : 'Download SARIF'}
+      </Button>
       {(statusText || transportError) && (
         <span
           aria-live="polite"
