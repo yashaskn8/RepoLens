@@ -170,6 +170,39 @@ jobs:
     assert result.findings[0].confidence == "MEDIUM"
 
 
+def test_checkout_step_env_ref_is_not_a_checkout_input(tmp_path):
+    _workflow(tmp_path, """on:
+  pull_request_target:
+jobs:
+  review:
+    steps:
+      - uses: actions/checkout@""" + "a" * 40 + """
+        env:
+          ref: ${{ github.event.pull_request.head.sha }}
+""")
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert "github-actions.privileged-untrusted-checkout" not in [
+        finding.detector_id for finding in result.findings
+    ]
+
+
+def test_checkout_with_ref_still_warns_after_env_ref(tmp_path):
+    _workflow(tmp_path, """on:
+  pull_request_target:
+jobs:
+  review:
+    steps:
+      - uses: actions/checkout@""" + "a" * 40 + """
+        env:
+          ref: ${{ github.event.pull_request.head.sha }}
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+""")
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert _rules(result) == [("github-actions.privileged-untrusted-checkout", 10)]
+
 def test_named_checkout_step_detects_privileged_pr_head_ref(tmp_path):
     _workflow(tmp_path, (
         "on:\n  pull_request_target:\njobs:\n  review:\n    steps:\n"
