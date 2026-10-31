@@ -108,12 +108,41 @@ def _finding(path: str, line: int, rule: str, title: str, description: str,
     )
 
 
+def _has_privileged_pr_trigger(lines: list[str]) -> bool:
+    """Recognize pull_request_target only in the top-level event declaration.
+
+    This is conservative source inspection, not a complete YAML interpreter.
+    """
+    in_event_block = False
+    for raw in lines:
+        cleaned = raw.split(" #", 1)[0]
+        stripped = cleaned.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        if indent == 0:
+            in_event_block = False
+            event = re.match(r"^(?:on|'on'|\"on\")\s*:\s*(.*)$", stripped)
+            if event is None:
+                continue
+            inline = event.group(1)
+            if inline:
+                if re.search(r"\bpull_request_target\b", inline):
+                    return True
+            else:
+                in_event_block = True
+        elif in_event_block and re.match(r"^(?:pull_request_target\s*:|-\s*pull_request_target\s*$)", stripped):
+            return True
+    return False
+
+
 def _inspect_source(path: str, source: str) -> list[StaticFinding]:
     findings: list[StaticFinding] = []
     lines = source.splitlines()
-    pull_request_target = False
-    head_checkout_line: int | None = None
-    checkout_seen = False
+    pull_request_target = _has_privileged_pr_trigger(lines)
+    # A PR-head ref must be inside the same checkout step. An unrelated ref
+    # elsewhere in the workflow is not enough evidence for this finding.
+    checkout_step_indent: int | None = None
     block_indent: int | None = None
     for index, raw_line in enumerate(lines, 1):
         indentation = len(raw_line) - len(raw_line.lstrip(" "))
@@ -127,10 +156,17 @@ def _inspect_source(path: str, source: str) -> list[StaticFinding]:
         line = raw_line.split(" #", 1)[0]
         if not line.strip() or line.lstrip().startswith("#"):
             continue
-        if _PR_TARGET.search(line):
-            pull_request_target = True
-        if _HEAD_SHA.search(line):
-            head_checkout_line = index
+        if checkout_step_indent is not None and indentation <= checkout_step_indent:
+            checkout_step_indent = None
+        if pull_request_target and checkout_step_indent is not None and indentation > checkout_step_indent and _HEAD_SHA.search(line):
+            findings.append(_finding(
+                path, index, "github-actions.privileged-untrusted-checkout",
+                "Privileged workflow may check out pull-request code",
+                "A pull_request_target workflow checks out a pull-request head in the same action step. This is a contextual risk, not proof of untrusted code execution.",
+                Severity.MEDIUM,
+                "Do not check out PR-head code in privileged workflows; isolate privileged operations from untrusted code.",
+                confidence="MEDIUM",
+            ))
         if _WRITE_ALL.fullmatch(raw_line):
             findings.append(_finding(
                 path, index, "github-actions.write-all-token",
@@ -148,15 +184,15 @@ def _inspect_source(path: str, source: str) -> list[StaticFinding]:
         if action.startswith("docker://"):
             image_ref = action.split("@", 1)
             immutable = len(image_ref) == 2 and bool(_SHA256.fullmatch(image_ref[1]))
-        elif "${{" in action:
+        elif "$" + "{{" in action:
             continue
         else:
             action_parts = action.rsplit("@", 1)
             if len(action_parts) != 2 or "/" not in action_parts[0]:
                 continue
             immutable = bool(_SHA40.fullmatch(action_parts[1]))
-            if action_parts[0].lower() == "actions/checkout":
-                checkout_seen = True
+            if action_parts[0].lower() == "actions/checkout" and line.lstrip().startswith("-"):
+                checkout_step_indent = indentation
         if not immutable:
             findings.append(_finding(
                 path, index, "github-actions.mutable-action-reference",
@@ -165,16 +201,6 @@ def _inspect_source(path: str, source: str) -> list[StaticFinding]:
                 Severity.MEDIUM,
                 "Pin remote GitHub Actions to their full 40-character commit SHA and container images to a sha256 digest.",
             ))
-    if pull_request_target and checkout_seen and head_checkout_line is not None:
-        findings.append(_finding(
-            path, head_checkout_line, "github-actions.privileged-untrusted-checkout",
-            "Privileged workflow may check out pull-request code",
-            "A pull_request_target workflow combines actions/checkout with a pull-request head reference. Review the job boundary and permissions; this is a contextual risk, not proof of exploitation.",
-            Severity.MEDIUM,
-            "Avoid checking out untrusted PR-head code in pull_request_target jobs; separate privileged actions from untrusted processing.",
-            confidence="MEDIUM",
-        ))
-    return findings
 
 
 def analyze_workflow_repository(repo_dir: str) -> ScannerResult:
