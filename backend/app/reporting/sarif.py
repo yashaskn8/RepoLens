@@ -19,11 +19,18 @@ _SHA = re.compile(r"^[a-fA-F0-9]{40}(?:[a-fA-F0-9]{24})?$")
 _RULE_CHARS = re.compile(r"[^A-Za-z0-9_.:-]")
 # Reserve the digest suffix so a legitimate ID cannot impersonate a sanitized ID.
 _HASH_SUFFIX = re.compile(r"-[0-9a-f]{12}$")
+# Canonical redaction uses word boundaries; underscores can hide embedded GitHub tokens.
+_EMBEDDED_GITHUB_TOKEN = re.compile(r"(?:ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,})")
 _LEVELS = {"CRITICAL": "error", "HIGH": "error", "MEDIUM": "warning", "LOW": "note", "INFO": "note"}
 
 
 class SarifExportLimitExceeded(ValueError):
     """Fail closed rather than return silently truncated findings."""
+
+
+def _redact_export_text(value: str) -> str:
+    """Cover GitHub tokens embedded in identifiers and prose after underscores."""
+    return _EMBEDDED_GITHUB_TOKEN.sub("[REDACTED_GITHUB_TOKEN]", redact_secrets(value))
 
 
 def _safe_path(raw: str) -> str | None:
@@ -36,7 +43,7 @@ def _safe_path(raw: str) -> str | None:
         return None
     # A credential in a path would otherwise survive URI encoding and leak in SARIF.
     # Do not redact paths in place: that would point consumers at a fictitious file.
-    if contains_secrets(raw):
+    if contains_secrets(raw) or _EMBEDDED_GITHUB_TOKEN.search(raw):
         return None
     return quote(raw, safe="/-._~")
 
@@ -44,7 +51,7 @@ def _safe_path(raw: str) -> str | None:
 def _rule_component(value: str, limit: int) -> str:
     """Preserve ordinary IDs; disambiguate lossy sanitization or truncation."""
     # Rule identifiers can originate in scanner metadata; never export raw credentials.
-    sanitized = _RULE_CHARS.sub("_", redact_secrets(value))
+    sanitized = _RULE_CHARS.sub("_", _redact_export_text(value))
     if sanitized == value and len(value) <= limit and not _HASH_SUFFIX.search(value):
         return value
     suffix = "-" + hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
@@ -97,8 +104,8 @@ def build_verified_sarif(*, scan: object, findings: Iterable[object]) -> dict:
             raise SarifExportLimitExceeded("SARIF finding limit exceeded; export was not truncated.")
 
         rule_id = _rule_id(finding)
-        title = redact_secrets(str(finding.title or ""))[:256] or "Verified finding"
-        message = redact_secrets(str(finding.description or ""))[:1024] or title
+        title = _redact_export_text(str(finding.title or ""))[:256] or "Verified finding"
+        message = _redact_export_text(str(finding.description or ""))[:1024] or title
         level = _LEVELS.get(str(finding.severity).upper(), "warning")
         rules.setdefault(rule_id, {
             "id": rule_id,
