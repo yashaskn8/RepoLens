@@ -19,8 +19,9 @@ _SHA = re.compile(r"^[a-fA-F0-9]{40}(?:[a-fA-F0-9]{24})?$")
 _RULE_CHARS = re.compile(r"[^A-Za-z0-9_.:-]")
 # Reserve the digest suffix so a legitimate ID cannot impersonate a sanitized ID.
 _HASH_SUFFIX = re.compile(r"-[0-9a-f]{12}$")
-# Canonical redaction uses word boundaries; underscores can hide embedded GitHub tokens.
-_EMBEDDED_GITHUB_TOKEN = re.compile(r"(?:ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,})")
+# Canonical redaction uses word boundaries; underscores can hide embedded GitHub tokens,
+# including GitHub App and OAuth tokens.
+_EMBEDDED_GITHUB_TOKEN = re.compile(r"(?:ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|(?:ghs_|ghu_|ghr_)[A-Za-z0-9_.-]{10,})")
 _LEVELS = {"CRITICAL": "error", "HIGH": "error", "MEDIUM": "warning", "LOW": "note", "INFO": "note"}
 
 
