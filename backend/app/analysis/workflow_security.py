@@ -142,6 +142,7 @@ def _inspect_source(path: str, source: str) -> list[StaticFinding]:
     # A PR-head ref must be inside the same checkout step. An unrelated ref
     # elsewhere in the workflow is not enough evidence for this finding.
     checkout_step_indent: int | None = None
+    step_start_indent: int | None = None
     block_indent: int | None = None
     for index, raw_line in enumerate(lines, 1):
         indentation = len(raw_line) - len(raw_line.lstrip(" "))
@@ -157,6 +158,10 @@ def _inspect_source(path: str, source: str) -> list[StaticFinding]:
             continue
         if checkout_step_indent is not None and indentation <= checkout_step_indent:
             checkout_step_indent = None
+        if step_start_indent is not None and indentation <= step_start_indent:
+            step_start_indent = None
+        if re.match(r"^\s*-\s+", line):
+            step_start_indent = indentation
         if pull_request_target and checkout_step_indent is not None and indentation > checkout_step_indent and _HEAD_SHA.search(line):
             findings.append(_finding(
                 path, index, "github-actions.privileged-untrusted-checkout",
@@ -190,8 +195,8 @@ def _inspect_source(path: str, source: str) -> list[StaticFinding]:
             if len(action_parts) != 2 or "/" not in action_parts[0]:
                 continue
             immutable = bool(_SHA40.fullmatch(action_parts[1]))
-            if action_parts[0].lower() == "actions/checkout" and line.lstrip().startswith("-"):
-                checkout_step_indent = indentation
+            if action_parts[0].lower() == "actions/checkout" and step_start_indent is not None:
+                checkout_step_indent = step_start_indent
         if not immutable:
             findings.append(_finding(
                 path, index, "github-actions.mutable-action-reference",
