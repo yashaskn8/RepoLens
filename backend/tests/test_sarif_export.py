@@ -188,3 +188,16 @@ def test_sarif_redacts_credentials_in_rule_identifiers(client, db_session):
     ids = [item["ruleId"] for item in response.json()["runs"][0]["results"]]
     assert len(ids) == len(set(ids)) == 2
     assert all("REDACTED" in rule_id for rule_id in ids)
+
+
+def test_sarif_omits_credential_shaped_attested_paths(client, db_session):
+    """Canonical file evidence must not turn credential-shaped filenames into SARIF URIs."""
+    scan = _scan(db_session)
+    synthetic_tokens = ["ghp_" + "A" * 36, "sk-" + "B" * 20]
+    for token in synthetic_tokens:
+        _finding(db_session, scan, path=f"src/{token}.py")
+
+    response = client.get(f"/api/v1/scans/{scan.id}/report/sarif")
+    assert response.status_code == 200, response.text
+    assert response.json()["runs"][0]["results"] == []
+    assert all(token not in response.text for token in synthetic_tokens)
