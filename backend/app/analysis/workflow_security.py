@@ -197,7 +197,17 @@ def _inspect_source(path: str, source: str) -> list[StaticFinding]:
             step_start_indent = None
         if re.match(r"^\s*-\s+", line):
             step_start_indent = indentation
-        if pull_request_target and checkout_step_indent is not None and indentation > checkout_step_indent and _HEAD_SHA.search(line):
+        if (
+            pull_request_target
+            and checkout_step_indent is not None
+            and indentation > checkout_step_indent
+            and _HEAD_SHA.search(line)
+            # Only a direct `with.ref` input controls actions/checkout.
+            # An env.ref key in the same step is not a checkout ref.
+            and mapping_stack
+            and mapping_stack[-1][1] == "with"
+            and not any(key == "env" for _, key in mapping_stack)
+        ):
             findings.append(_finding(
                 path, index, "github-actions.privileged-untrusted-checkout",
                 "Privileged workflow may check out pull-request code",
