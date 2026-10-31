@@ -16,7 +16,9 @@ from app.services.finding_grounding import is_canonical_confirmed_finding
 MAX_SARIF_FINDINGS = 2_000
 MAX_SARIF_EVIDENCES = 10_000
 _SHA = re.compile(r"^[a-fA-F0-9]{40}(?:[a-fA-F0-9]{24})?$")
-_RULE_CHARS = re.compile(r"[^A-Za-z0-9_.:/-]")
+_RULE_CHARS = re.compile(r"[^A-Za-z0-9_.:-]")
+# Reserve the digest suffix so a legitimate ID cannot impersonate a sanitized ID.
+_HASH_SUFFIX = re.compile(r"-[0-9a-f]{12}$")
 _LEVELS = {"CRITICAL": "error", "HIGH": "error", "MEDIUM": "warning", "LOW": "note", "INFO": "note"}
 
 
@@ -43,7 +45,7 @@ def _rule_component(value: str, limit: int) -> str:
     """Preserve ordinary IDs; disambiguate lossy sanitization or truncation."""
     # Rule identifiers can originate in scanner metadata; never export raw credentials.
     sanitized = _RULE_CHARS.sub("_", redact_secrets(value))
-    if sanitized == value and len(value) <= limit:
+    if sanitized == value and len(value) <= limit and not _HASH_SUFFIX.search(value):
         return value
     suffix = "-" + hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
     return sanitized[:limit - len(suffix)] + suffix
