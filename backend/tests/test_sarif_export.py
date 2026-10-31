@@ -120,7 +120,6 @@ def test_sarif_is_stable_without_scan_or_finding_identifiers():
     assert json.dumps(first)
 
 
-
 def test_sarif_never_claims_github_source_line_hash_from_snippet_digest():
     """A stored snippet digest is not GitHub's source-line fingerprint."""
     finding = SimpleNamespace(
