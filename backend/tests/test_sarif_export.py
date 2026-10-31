@@ -167,3 +167,13 @@ def test_sarif_api_requires_login(client):
     client.cookies.clear()
     response = client.get(f"/api/v1/scans/{uuid4()}/sarif")
     assert response.status_code == 401
+
+
+def test_sarif_digest_is_namespaced_not_misrepresented_as_github_line_hash():
+    first = build_sarif_document([_finding()], commit_sha=COMMIT)
+    second = build_sarif_document([_finding()], commit_sha=COMMIT)
+    partial = first["runs"][0]["results"][0]["partialFingerprints"]
+    assert "primaryLocationLineHash" not in partial
+    assert set(partial) == {"repolens/v1"}
+    assert len(partial["repolens/v1"]) == 64
+    assert partial == second["runs"][0]["results"][0]["partialFingerprints"]
