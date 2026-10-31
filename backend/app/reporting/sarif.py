@@ -10,7 +10,7 @@ import re
 from typing import Iterable
 from urllib.parse import quote
 
-from app.security.redaction import redact_secrets
+from app.security.redaction import contains_secrets, redact_secrets
 from app.services.finding_grounding import is_canonical_confirmed_finding
 
 MAX_SARIF_FINDINGS = 2_000
@@ -26,7 +26,7 @@ class SarifExportLimitExceeded(ValueError):
 
 def _safe_path(raw: str) -> str | None:
     """Require exact repository-relative POSIX paths, then percent-encode for URI."""
-    if not raw or len(raw) > 512 or raw.startswith("/") or "\\" in raw or ":" in raw:
+    if not raw or len(raw) > 512 or raw.startswith("/") or "\\" in raw or ":" in raw or contains_secrets(raw):
         return None
     if any(part in ("", ".", "..") for part in raw.split("/")):
         return None
