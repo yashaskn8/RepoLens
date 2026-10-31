@@ -144,11 +144,11 @@ Hard disqualifiers: executes uploaded repository code; bypasses attestation/tena
 | Finalist | User value / 5 | Existing-fit / 5 | Safety / 5 | Delivery feasibility / 5 | Weighted score / 100 | Review verdict |
 |---|---:|---:|---:|---:|---:|---|
 | Verified findings SARIF export | 5 | 5 | 5 | 5 | **100** | **Select** |
-| Verified new-issues-only PR gate | 5 | 4 | 4 | 2 | 79 | Needs strict baseline authority |
-| Risk-delta baseline comparator | 5 | 4 | 4 | 3 | 84 | Follow-up candidate |
-| Dependency upgrade impact preview | 4 | 3 | 3 | 2 | 61 | Requires package metadata boundary |
-| Ownership-aware reviewer suggestion | 3 | 3 | 4 | 3 | 64 | Lower current priority |
-| Security posture visualization | 4 | 4 | 5 | 4 | 83 | Useful but less interoperable |
+| Verified new-issues-only PR gate | 5 | 4 | 4 | 2 | 78 | Needs strict baseline authority |
+| Risk-delta baseline comparator | 5 | 4 | 4 | 3 | 82 | Follow-up candidate |
+| Dependency upgrade impact preview | 4 | 3 | 3 | 2 | 62 | Requires package metadata boundary |
+| Ownership-aware reviewer suggestion | 3 | 3 | 4 | 3 | 65 | Lower current priority |
+| Security posture visualization | 4 | 4 | 5 | 4 | 85 | Useful but less interoperable |
 
 **Scoring rubric:** value 30%, architectural fit 25%, safety 25%, implementation feasibility 20%. Scores are illustrative comparative judgments; actual benefits need telemetry and user validation. No model voting or automated security verdicts.
 
@@ -174,7 +174,7 @@ Hard disqualifiers: executes uploaded repository code; bypasses attestation/tena
 ### Risks, limitations and follow-ups
 
 - SHA-based evidence attestation proves consistency with stored evidence, **not** a new re-read of source bytes; it inherits the canonical ingestion authority.
-- Fingerprints are based on rule, location and line; line moves may change identifiers. A future revision could use a stable semantic symbol identity.
+- Fingerprints are based on rule, location and line and expose the GitHub-recognized \`primaryLocationLineHash\` key; line moves may change identifiers. A future revision could use a stable semantic symbol identity.
 - Rules without line-anchored canonical evidence, resolved/suppressed findings and scans above the export budget are intentionally excluded or refused.
 - The export complements, but does not replace, existing production release blockers; a green CI result must not be advertised as host-safe production readiness.
 - Tests must be run by repository CI and reviewed before merge.
