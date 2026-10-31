@@ -33,18 +33,31 @@ class WorkflowInspectionIncomplete(Exception):
     """Source coverage is incomplete; callers must not report a clean scan."""
 
 
+def _unsafe_reparse_or_symlink(info: os.stat_result) -> bool:
+    """Reject Unix symlinks and Windows junction/reparse entries before reading."""
+    return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0) & 0x0400)
+
+
 def _workflow_contents(repo_dir: str) -> list[tuple[str, str]]:
     root = Path(repo_dir)
-    if root.is_symlink() or not root.is_dir():
+    try:
+        root_info = os.lstat(root)
+    except OSError as exc:
+        raise WorkflowInspectionIncomplete("Repository root cannot be inspected.") from exc
+    if _unsafe_reparse_or_symlink(root_info) or not stat.S_ISDIR(root_info.st_mode):
         raise WorkflowInspectionIncomplete("Repository root is not a safe directory.")
     workflows = root
     for segment in (".github", "workflows"):
         workflows = workflows / segment
-        if workflows.is_symlink():
-            raise WorkflowInspectionIncomplete("Workflow directory link is unsupported.")
-        if not workflows.exists():
+        try:
+            info = os.lstat(workflows)
+        except FileNotFoundError:
             return []
-        if not workflows.is_dir():
+        except OSError as exc:
+            raise WorkflowInspectionIncomplete("Workflow directory cannot be inspected.") from exc
+        if _unsafe_reparse_or_symlink(info):
+            raise WorkflowInspectionIncomplete("Workflow directory link or reparse point is unsupported.")
+        if not stat.S_ISDIR(info.st_mode):
             raise WorkflowInspectionIncomplete("Workflow path is not a directory.")
 
     try:
@@ -63,7 +76,8 @@ def _workflow_contents(repo_dir: str) -> list[tuple[str, str]]:
         contents: list[tuple[str, str]] = []
         total_bytes = 0
         for entry in paths:
-            if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+            entry_info = entry.stat(follow_symlinks=False)
+            if _unsafe_reparse_or_symlink(entry_info) or not stat.S_ISREG(entry_info.st_mode):
                 raise WorkflowInspectionIncomplete("Workflow source is not a regular file.")
             flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
             try:
@@ -72,7 +86,7 @@ def _workflow_contents(repo_dir: str) -> list[tuple[str, str]]:
                 raise WorkflowInspectionIncomplete("Workflow source could not be opened.") from exc
             with os.fdopen(fd, "rb") as stream:
                 info = os.fstat(stream.fileno())
-                if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_WORKFLOW_BYTES:
+                if _unsafe_reparse_or_symlink(info) or not stat.S_ISREG(info.st_mode) or info.st_size > MAX_WORKFLOW_BYTES:
                     raise WorkflowInspectionIncomplete("Workflow source is unsafe or too large.")
                 data = stream.read(MAX_WORKFLOW_BYTES + 1)
             if len(data) > MAX_WORKFLOW_BYTES:
