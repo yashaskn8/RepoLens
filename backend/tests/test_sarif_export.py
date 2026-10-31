@@ -135,7 +135,7 @@ def test_sarif_never_claims_github_source_line_hash_from_snippet_digest():
     fingerprints = result["partialFingerprints"]
     assert "primaryLocationLineHash" not in fingerprints
     expected = hashlib.sha256(
-        ("repolens/semgrep/rule-1\\0src/a.py\\0" + hashlib.sha256(b"alert()").hexdigest()).encode()
+        ("repolens/semgrep/rule-1\0src/a.py\0" + hashlib.sha256(b"alert()").hexdigest()).encode()
     ).hexdigest()
     assert fingerprints == {"repolens/v1": expected}
 
