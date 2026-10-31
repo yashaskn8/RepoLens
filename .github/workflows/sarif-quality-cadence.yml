@@ -1,0 +1,97 @@
+name: SARIF Quality Cadence
+
+on:
+  schedule:
+    # GitHub scheduled events run only from the default branch (UTC; best-effort).
+    - cron: '23 * * * *'
+    - cron: '17 10 31 10 *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Run hourly regression checks or the annual feature tournament'
+        required: true
+        default: 'hourly'
+        type: choice
+        options:
+          - hourly
+          - annual
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repolens-sarif-cadence-${{ github.workflow }}-${{ github.ref }}-${{ github.event.schedule || inputs.mode || 'manual' }}
+  cancel-in-progress: false
+
+jobs:
+  hourly-regression:
+    if: >-
+      (github.event_name == 'schedule' && github.event.schedule == '23 * * * *') ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'hourly')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Set up uv (locked)
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: 0.12.10
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Install test dependencies from lockfile
+        working-directory: backend
+        run: uv sync --locked --extra dev --extra observability
+      - name: Check exporter, route and focused regression tests
+        working-directory: backend
+        env:
+          TESTING: 'true'
+          ENVIRONMENT: development
+          GITHUB_DELIVERY_ENABLED: 'false'
+          GITHUB_PR_REVIEW_WRITE_ENABLED: 'false'
+        run: |
+          uv run --locked --extra dev --extra observability python -m compileall -q app/reporting/sarif.py app/api/routes/sarif.py
+          uv run --locked --extra dev --extra observability python -m pytest tests/test_sarif_export.py -q
+
+  regression-issue:
+    if: always() && needs.hourly-regression.result == 'failure'
+    needs: hourly-regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Open deduplicated investigation issue
+        env:
+          GH_ISSUE_TOKEN: ${{ github.token }}
+          GH_ISSUE_REPOSITORY: ${{ github.repository }}
+          GH_ISSUE_RUN_ID: ${{ github.run_id }}
+          GH_ISSUE_SHA: ${{ github.sha }}
+        run: python3 scripts/cadence_issues.py hourly-failure
+
+  annual-tournament:
+    if: >-
+      (github.event_name == 'schedule' && github.event.schedule == '17 10 31 10 *') ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'annual')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Create deduplicated yearly feature review issue
+        env:
+          GH_ISSUE_TOKEN: ${{ github.token }}
+          GH_ISSUE_REPOSITORY: ${{ github.repository }}
+          GH_ISSUE_RUN_ID: ${{ github.run_id }}
+          GH_ISSUE_SHA: ${{ github.sha }}
+        run: python3 scripts/cadence_issues.py annual
