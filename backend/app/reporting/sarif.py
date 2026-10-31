@@ -35,10 +35,19 @@ def _safe_path(raw: str) -> str | None:
     return quote(raw, safe="/-._~")
 
 
+def _rule_component(value: str, limit: int) -> str:
+    """Preserve ordinary IDs; disambiguate lossy sanitization or truncation."""
+    sanitized = _RULE_CHARS.sub("_", value)
+    if sanitized == value and len(value) <= limit:
+        return value
+    suffix = "-" + hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+    return sanitized[:limit - len(suffix)] + suffix
+
+
 def _rule_id(finding: object) -> str:
-    tool = _RULE_CHARS.sub("_", str(getattr(finding, "source_tool", None) or "repolens"))[:64]
+    tool = _rule_component(str(getattr(finding, "source_tool", None) or "repolens"), 64)
     detector = getattr(finding, "detector_id", None) or getattr(finding, "rule_id", None) or "verified-finding"
-    key = _RULE_CHARS.sub("_", str(detector))[:160]
+    key = _rule_component(str(detector), 160)
     return f"{tool}/{key}"
 
 
