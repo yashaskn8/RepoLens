@@ -10,15 +10,15 @@ import hashlib
 import json
 import re
 from typing import Any, Iterable
+from urllib.parse import quote
 
-from app.security.redaction import redact_secrets
+from app.security.redaction import contains_secrets, redact_secrets
 from app.services.finding_grounding import is_canonical_confirmed_finding
 
 MAX_SARIF_RESULTS = 5_000
 MAX_RELATED_LOCATIONS = 100
 _SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 _SAFE_PATH = re.compile(r"^[^\x00-\x1f\x7f]+$")
-_RULE_CHARS = re.compile(r"[^a-zA-Z0-9._/-]")
 
 
 class SarifTooLarge(ValueError):
@@ -35,6 +35,7 @@ def _safe_path(value: Any) -> str | None:
         or path.startswith("/")
         or path.startswith("./")
         or ":" in path
+        or contains_secrets(path)
         or any(part in ("", ".", "..") for part in path.split("/"))
     ):
         return None
@@ -42,17 +43,17 @@ def _safe_path(value: Any) -> str | None:
 
 
 def _rule_id(finding: Any) -> str:
+    """Opaque stable rule identity: never expose detector strings as SARIF IDs."""
     source = str(getattr(finding, "source_tool", "") or "repolens")
     detector = str(
         getattr(finding, "detector_id", None)
         or getattr(finding, "rule_id", None)
         or getattr(finding, "title", "finding")
     )
-    name = _RULE_CHARS.sub("_", f"{source}/{detector}").strip("._/")
-    # Keep the collision-resistant identity even when the display name is truncated.
-    digest = hashlib.sha256(f"{source}\\0{detector}".encode("utf-8")).hexdigest()[:12]
-    return f"RL-{name[:85]}-{digest}"
-
+    digest = hashlib.sha256(
+        (source + "\\0" + detector).encode("utf-8")
+    ).hexdigest()[:24]
+    return f"repolens/{digest}"
 
 def _level(severity: Any) -> str:
     normalized = str(getattr(severity, "value", severity) or "").upper()
@@ -79,7 +80,7 @@ def _location(evidence: Any) -> dict[str, Any] | None:
         return None
     return {
         "physicalLocation": {
-            "artifactLocation": {"uri": path},
+            "artifactLocation": {"uri": quote(path, safe="/-._~")},
             "region": {"startLine": start, "endLine": end},
         }
     }
@@ -106,12 +107,12 @@ def build_sarif_document(findings: Iterable[Any], *, commit_sha: str) -> dict[st
             continue
 
         evidences = list(getattr(finding, "evidences", ()) or ())
+        if len(evidences) > MAX_RELATED_LOCATIONS + 1:
+            raise SarifTooLarge("One finding exceeds the SARIF evidence location limit")
         locations = [_location(evidence) for evidence in evidences]
         # Refuse an ambiguous partial finding rather than emit a misleading alert.
         if not locations or any(location is None for location in locations):
             continue
-        if len(locations) > MAX_RELATED_LOCATIONS + 1:
-            raise SarifTooLarge("One finding exceeds the SARIF evidence location limit")
 
         rule_id = _rule_id(finding)
         title = redact_secrets(str(getattr(finding, "title", "") or "Finding"))[:256]
