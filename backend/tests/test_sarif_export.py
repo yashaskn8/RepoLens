@@ -92,7 +92,8 @@ def test_sarif_export_verified_findings_and_redaction(client, db_session):
     assert result["level"] == "error"
     assert result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == "src/lib%231.py"
     assert result["locations"][0]["physicalLocation"]["region"] == {"startLine": 3, "endLine": 3}
-    assert len(result["partialFingerprints"]["primaryLocationLineHash"]) == 64
+    assert len(result["partialFingerprints"]["repolens/v1"]) == 64
+    assert "primaryLocationLineHash" not in result["partialFingerprints"]
     assert "safe = True" not in response.text
 
 
@@ -117,6 +118,25 @@ def test_sarif_is_stable_without_scan_or_finding_identifiers():
     assert first == second
     assert first["runs"][0]["results"][0]["level"] == "warning"
     assert json.dumps(first)
+
+
+def test_sarif_never_claims_github_source_line_hash_from_snippet_digest():
+    """A stored snippet digest is not GitHub's source-line fingerprint."""
+    finding = SimpleNamespace(
+        title="Issue", description="Details", severity="HIGH", status="OPEN",
+        source_tool="semgrep", detector_id="rule-1",
+        evidences=[SimpleNamespace(
+            file_path="src/a.py", start_line=4, end_line=4,
+            code_snippet="alert()",
+        )],
+    )
+    result = build_sarif([finding], commit_sha=COMMIT)["runs"][0]["results"][0]
+    fingerprints = result["partialFingerprints"]
+    assert "primaryLocationLineHash" not in fingerprints
+    expected = hashlib.sha256(
+        ("repolens/semgrep/rule-1\0src/a.py\0" + hashlib.sha256(b"alert()").hexdigest()).encode()
+    ).hexdigest()
+    assert fingerprints == {"repolens/v1": expected}
 
 
 def test_sarif_does_not_expose_other_users_scan(client, db_session):
