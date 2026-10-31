@@ -88,7 +88,7 @@ def build_sarif(findings: Iterable[Any], *, commit_sha: str) -> dict[str, Any]:
         description = _safe_message(_field(finding, "description"), fallback=title, limit=1024)
         rules.setdefault(rule, {"id": rule, "shortDescription": {"text": title}})
 
-        # Stable across finding/scan UUID changes and source line shifts.
+        # RepoLens-specific identity: not GitHub's source-line-derived primaryLocationLineHash.
         snippet_hash = hashlib.sha256(
             str(_field(evidence, "code_snippet") or "").encode("utf-8")
         ).hexdigest()
@@ -105,14 +105,14 @@ def build_sarif(findings: Iterable[Any], *, commit_sha: str) -> dict[str, Any]:
                     "region": {"startLine": start, "endLine": end},
                 }
             }],
-            "partialFingerprints": {"primaryLocationLineHash": fingerprint},
+            "partialFingerprints": {"repolens/v1": fingerprint},
         })
 
     results.sort(key=lambda x: (
         x["ruleId"],
         x["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
         x["locations"][0]["physicalLocation"]["region"]["startLine"],
-        x["partialFingerprints"]["primaryLocationLineHash"],
+        x["partialFingerprints"]["repolens/v1"],
     ))
     return {
         "$schema": SARIF_SCHEMA,
