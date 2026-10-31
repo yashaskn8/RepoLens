@@ -31,6 +31,28 @@ def test_clean_absent_workflows_is_not_a_failure(tmp_path):
     assert result.findings == []
 
 
+
+def test_utf8_bom_does_not_hide_first_line_write_all(tmp_path):
+    workflow = _workflow(tmp_path, "permissions: write-all\n")
+    workflow.write_bytes(b"\xef\xbb\xbfpermissions: write-all\n")
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert _rules(result) == [("github-actions.write-all-token", 1)]
+
+
+def test_utf8_bom_does_not_hide_privileged_trigger(tmp_path):
+    source = (
+        "on: pull_request_target\njobs:\n  review:\n    steps:\n"
+        "      - uses: actions/checkout@" + "a" * 40
+        + "\n        with:\n          ref: ${{ github.event.pull_request.head.sha }}\n"
+    )
+    workflow = _workflow(tmp_path, source)
+    workflow.write_bytes(b"\xef\xbb\xbf" + source.encode("utf-8"))
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert _rules(result) == [("github-actions.privileged-untrusted-checkout", 7)]
+
+
 def test_immutable_actions_and_least_privilege_are_clean(tmp_path):
     pinned = "a" * 40
     digest = "b" * 64
