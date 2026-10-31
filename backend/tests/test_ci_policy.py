@@ -8,6 +8,8 @@ remain separate governance/live-evidence responsibilities.
 from pathlib import Path
 import re
 
+import pytest
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _WORKFLOWS = _REPO_ROOT / ".github" / "workflows"
 _SHA_REF = re.compile(r"^[0-9a-f]{40}$")
@@ -89,16 +91,33 @@ def test_release_documentation_does_not_claim_unverified_production_readiness():
     assert "not a current certification" in evidence_pack
 
 
+def _assert_locked_python_workflow(text: str) -> None:
+    """Require pinned uv only when a workflow installs/runs Python dependencies."""
+    assert "pip install -e" not in text
+    if "uv sync" in text or "uv run" in text:
+        assert "astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4" in text
+    if "uv sync" in text:
+        assert "uv sync --locked" in text
+
+
 def test_ci_uses_locked_python_resolution_and_rejects_floating_installs():
     backend = _REPO_ROOT / "backend"
     pyproject = (backend / "pyproject.toml").read_text(encoding="utf-8")
     assert 'required-version = "==0.12.10"' in pyproject
     assert (backend / "uv.lock").is_file()
     for path in sorted(_WORKFLOWS.glob("*.yml")):
-        text = path.read_text(encoding="utf-8")
-        assert "astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4" in text
-        assert "uv sync --locked" in text
-        assert "pip install -e" not in text
+        _assert_locked_python_workflow(path.read_text(encoding="utf-8"))
+
+
+def test_locked_python_policy_exempts_issue_only_workflows_but_rejects_floating_uv():
+    _assert_locked_python_workflow("run: gh issue create --title review")
+    with pytest.raises(AssertionError):
+        _assert_locked_python_workflow("run: uv sync")
+    with pytest.raises(AssertionError):
+        _assert_locked_python_workflow(
+            "uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4\\n"
+            "run: uv sync"
+        )
 
 
 def test_service_images_are_digest_pinned():
