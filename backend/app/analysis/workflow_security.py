@@ -232,9 +232,22 @@ def _inspect_source(path: str, source: str) -> list[StaticFinding]:
         match = _USES.match(line)
         if match is None:
             continue
-        # env/with mappings may contain a key named 'uses' as ordinary data.
-        # Only action/job uses declarations should produce action findings.
-        if any(key in {"env", "with"} for _, key in mapping_stack):
+        # Only jobs.<job_id>.uses and jobs.<job_id>.steps[*].uses
+        # reference actions/reusable workflows. Matrix and output data may
+        # also contain a key named 'uses' without invoking an action.
+        job_uses = (
+            len(mapping_stack) == 2
+            and mapping_stack[0] == (0, "jobs")
+            and indentation > mapping_stack[1][0]
+        )
+        step_uses = (
+            len(mapping_stack) == 3
+            and mapping_stack[0] == (0, "jobs")
+            and mapping_stack[2][1] == "steps"
+            and step_start_indent is not None
+            and indentation >= step_start_indent
+        )
+        if not (job_uses or step_uses):
             continue
         action = match.group(1).strip().strip("\"'")
         if action.startswith("./"):
