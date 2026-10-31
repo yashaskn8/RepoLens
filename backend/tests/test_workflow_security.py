@@ -296,6 +296,51 @@ def test_quoted_env_ref_is_not_checkout_ref(tmp_path, key):
     assert _rules(result) == []
 
 
+
+@pytest.mark.parametrize("repository_key", ["repository", "'repository'", '"repository"'])
+def test_privileged_checkout_of_pr_head_repository_is_contextual(tmp_path, repository_key):
+    _workflow(tmp_path, (
+        "on:\n  pull_request_target:\njobs:\n  review:\n    steps:\n"
+        "      - uses: actions/checkout@" + "a" * 40
+        + "\n        with:\n          " + repository_key
+        + ": " + "$" + "{{ github.event.pull_request.head.repo.full_name }}\n"
+    ))
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert _rules(result) == [("github-actions.privileged-untrusted-checkout", 8)]
+    assert result.findings[0].confidence == "MEDIUM"
+
+
+def test_checkout_environment_repository_is_not_a_checkout_input(tmp_path):
+    _workflow(tmp_path, (
+        "on:\n  pull_request_target:\njobs:\n  review:\n    steps:\n"
+        "      - uses: actions/checkout@" + "a" * 40
+        + "\n        env:\n          repository: "
+        + "$" + "{{ github.event.pull_request.head.repo.full_name }}\n"
+    ))
+    assert _rules(analyze_workflow_repository(str(tmp_path))) == []
+
+
+def test_checkout_of_pr_head_repository_on_unprivileged_event_is_not_flagged(tmp_path):
+    _workflow(tmp_path, (
+        "on: pull_request\njobs:\n  review:\n    steps:\n"
+        "      - uses: actions/checkout@" + "a" * 40
+        + "\n        with:\n          repository: "
+        + "$" + "{{ github.event.pull_request.head.repo.full_name }}\n"
+    ))
+    assert _rules(analyze_workflow_repository(str(tmp_path))) == []
+
+
+def test_checkout_of_base_repository_is_not_flagged_as_pr_head(tmp_path):
+    _workflow(tmp_path, (
+        "on:\n  pull_request_target:\njobs:\n  review:\n    steps:\n"
+        "      - uses: actions/checkout@" + "a" * 40
+        + "\n        with:\n          repository: "
+        + "$" + "{{ github.event.pull_request.base.repo.full_name }}\n"
+    ))
+    assert _rules(analyze_workflow_repository(str(tmp_path))) == []
+
+
 def test_privileged_pr_head_checkout_is_marked_contextual(tmp_path):
     _workflow(tmp_path, """on:
   pull_request_target:

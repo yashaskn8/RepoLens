@@ -27,6 +27,9 @@ _USES = re.compile(r"""^\s*(?:-\s*)?(?:uses|'uses'|"uses")\s*:\s*(.*?)\s*$""")
 _BLOCK_START = re.compile(r"^(?P<indent>\s*)(?:-\s*)?[^:#\s][^:]*:\s*[|>][-+0-9]*\s*(?:#.*)?$")
 _WRITE_ALL = re.compile(r"""^\s*(?:permissions|'permissions'|"permissions")\s*:\s*['"]?write-all['"]?\s*(?:#.*)?$""")
 _HEAD_SHA = re.compile(r"""^\s*(?:ref|'ref'|"ref")\s*:\s*['"]?\$\{\{\s*github\.event\.pull_request\.head\.(?:sha|ref)\s*\}\}""")
+_HEAD_REPO = re.compile(
+    r"""^\s*(?:repository|'repository'|"repository")\s*:\s*['"]?\$\{\{\s*github\.event\.pull_request\.head\.repo\.full_name\s*\}\}"""
+)
 
 
 class WorkflowInspectionIncomplete(Exception):
@@ -238,7 +241,7 @@ def _inspect_source(path: str, source: str) -> list[StaticFinding]:
             pull_request_target
             and checkout_step_indent is not None
             and indentation > checkout_step_indent
-            and _HEAD_SHA.search(line)
+            and (_HEAD_SHA.search(line) or _HEAD_REPO.search(line))
             # Only a direct `with.ref` input controls actions/checkout.
             # An env.ref key in the same step is not a checkout ref.
             and mapping_stack
@@ -248,9 +251,9 @@ def _inspect_source(path: str, source: str) -> list[StaticFinding]:
             findings.append(_finding(
                 path, index, "github-actions.privileged-untrusted-checkout",
                 "Privileged workflow may check out pull-request code",
-                "A pull_request_target workflow checks out a pull-request head in the same action step. This is a contextual risk, not proof of untrusted code execution.",
+                "A pull_request_target workflow may check out a pull-request head or fork repository in the same action step. This is a contextual risk, not proof of untrusted code execution.",
                 Severity.MEDIUM,
-                "Do not check out PR-head code in privileged workflows; isolate privileged operations from untrusted code.",
+                "Do not check out PR-head or fork-repository code in privileged workflows; isolate privileged operations from untrusted code.",
                 confidence="MEDIUM",
             ))
         # GitHub grants token permissions only at workflow or job scope.
