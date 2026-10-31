@@ -67,6 +67,52 @@ jobs:
     assert result.findings[1].severity is Severity.MEDIUM
 
 
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "on: push\nenv:\n  permissions: write-all\n",
+        "on: push\njobs:\n  test:\n    env:\n      permissions: write-all\n",
+        (
+            "on: push\njobs:\n  test:\n    steps:\n"
+            "      - name: Inspect\n        env:\n"
+            "          permissions: write-all\n        run: echo ok\n"
+        ),
+        (
+            "on: push\njobs:\n  test:\n    steps:\n"
+            "      - uses: example/action@" + "a" * 40 + "\n"
+            "        with:\n          permissions: write-all\n"
+        ),
+    ],
+)
+def test_nested_permissions_key_does_not_grant_token_write_all(tmp_path, source):
+    _workflow(tmp_path, source)
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert "github-actions.write-all-token" not in [
+        finding.detector_id for finding in result.findings
+    ]
+
+
+def test_job_write_all_still_detected_amid_environment_variables(tmp_path):
+    _workflow(tmp_path, """on: push
+env:
+  permissions: write-all
+jobs:
+  build:
+    permissions: write-all
+    env:
+      permissions: write-all
+    steps:
+      - name: Inspect
+        env:
+          permissions: write-all
+        run: echo ok
+""")
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert _rules(result) == [("github-actions.write-all-token", 6)]
+
 def test_privileged_pr_head_checkout_is_marked_contextual(tmp_path):
     _workflow(tmp_path, """on:
   pull_request_target:

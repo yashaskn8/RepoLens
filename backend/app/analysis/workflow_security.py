@@ -168,6 +168,9 @@ def _inspect_source(path: str, source: str) -> list[StaticFinding]:
     checkout_step_indent: int | None = None
     step_start_indent: int | None = None
     block_indent: int | None = None
+    # Track enclosing YAML mappings so env/with keys cannot impersonate
+    # workflow-level or jobs.<job_id> token permission declarations.
+    mapping_stack: list[tuple[int, str]] = []
     for index, raw_line in enumerate(lines, 1):
         indentation = len(raw_line) - len(raw_line.lstrip(" "))
         if block_indent is not None:
@@ -180,6 +183,14 @@ def _inspect_source(path: str, source: str) -> list[StaticFinding]:
         line = raw_line.split(" #", 1)[0]
         if not line.strip() or line.lstrip().startswith("#"):
             continue
+        while mapping_stack and mapping_stack[-1][0] >= indentation:
+            mapping_stack.pop()
+        mapping = re.match(
+            r"^\s*(?P<key>[A-Za-z_][\w.-]*|'[^']+'|\"[^\"]+\")\s*:\s*(?P<value>.*)$",
+            line,
+        )
+        if mapping and not mapping.group("value").strip():
+            mapping_stack.append((indentation, mapping.group("key").strip("'\"")))
         if checkout_step_indent is not None and indentation <= checkout_step_indent:
             checkout_step_indent = None
         if step_start_indent is not None and indentation <= step_start_indent:
@@ -195,7 +206,12 @@ def _inspect_source(path: str, source: str) -> list[StaticFinding]:
                 "Do not check out PR-head code in privileged workflows; isolate privileged operations from untrusted code.",
                 confidence="MEDIUM",
             ))
-        if _WRITE_ALL.fullmatch(raw_line):
+        # GitHub grants token permissions only at workflow or job scope.
+        if _WRITE_ALL.fullmatch(raw_line) and (
+            indentation == 0 or (
+                len(mapping_stack) == 2 and mapping_stack[0] == (0, "jobs")
+            )
+        ):
             findings.append(_finding(
                 path, index, "github-actions.write-all-token",
                 "GitHub Actions grants broad write permissions",
