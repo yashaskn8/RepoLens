@@ -131,7 +131,13 @@ def test_sarif_api_requires_completed_owned_scan_and_exact_attestation(client, d
     assert client.get(f"/api/v1/scans/{scan_id}/sarif").status_code == 409
 
     scan.commit_hash = COMMIT
-    scan.owner_user_id = str(uuid4())  # Simulates a scan owned by another identity.
+    other_user = UserModel(
+        id=str(uuid4()), email="different-owner@example.com",
+        password_hash="test-only", role="USER",
+    )
+    db_session.add(other_user)
+    db_session.flush()
+    scan.owner_user_id = other_user.id
     db_session.flush()
     assert client.get(f"/api/v1/scans/{scan_id}/sarif").status_code == 404
 
