@@ -17,7 +17,7 @@ from app.services.finding_grounding import is_canonical_confirmed_finding
 MAX_SARIF_RESULTS = 5_000
 MAX_RELATED_LOCATIONS = 100
 _SHA = re.compile(r"^[0-9a-fA-F]{40}$")
-_SAFE_PATH = re.compile(r"^[^\\x00-\\x1f\\x7f]+$")
+_SAFE_PATH = re.compile(r"^[^\x00-\x1f\x7f]+$")
 _RULE_CHARS = re.compile(r"[^a-zA-Z0-9._/-]")
 
 
@@ -79,7 +79,7 @@ def _location(evidence: Any) -> dict[str, Any] | None:
         return None
     return {
         "physicalLocation": {
-            "artifactLocation": {"uri": path, "uriBaseId": "%SRCROOT%"},
+            "artifactLocation": {"uri": path},
             "region": {"startLine": start, "endLine": end},
         }
     }
@@ -161,7 +161,6 @@ def build_sarif_document(findings: Iterable[Any], *, commit_sha: str) -> dict[st
                 "informationUri": "https://github.com/yashaskn8/RepoLens",
                 "rules": [rules[key] for key in sorted(rules)],
             }},
-            "originalUriBaseIds": {"%SRCROOT%": {"uri": "file:///"}},
             "results": [row[-1] for row in rows],
             "properties": {
                 "commitSha": commit_sha.lower(),
