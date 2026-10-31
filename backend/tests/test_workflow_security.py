@@ -743,3 +743,51 @@ def test_windows_reparse_directory_is_rejected(tmp_path, monkeypatch):
     result = scanner.analyze_workflow_repository(str(tmp_path))
     assert result.status is ToolStatus.INVALID_OUTPUT
     assert not result.findings
+
+
+@pytest.mark.parametrize("ref_kind", ["head", "merge"])
+@pytest.mark.parametrize("quote", ["", "'", '"'])
+def test_privileged_checkout_of_pull_request_ref_is_contextual(tmp_path, ref_kind, quote):
+    # Both pull-request head and merge refs are sensitive in privileged checkout.
+    _workflow(tmp_path, (
+        "on:\n  pull_request_target:\njobs:\n  review:\n    steps:\n"
+        "      - uses: actions/checkout@" + "a" * 40
+        + "\n        with:\n          ref: " + quote
+        + "refs/pull/" + "$" + "{{ github.event.pull_request.number }}/"
+        + ref_kind + quote + "\n"
+    ))
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert _rules(result) == [("github-actions.privileged-untrusted-checkout", 8)]
+    assert result.findings[0].confidence == "MEDIUM"
+
+
+def test_pull_request_merge_ref_in_checkout_env_is_not_a_checkout_input(tmp_path):
+    _workflow(tmp_path, (
+        "on:\n  pull_request_target:\njobs:\n  review:\n    steps:\n"
+        "      - uses: actions/checkout@" + "a" * 40
+        + "\n        env:\n          ref: refs/pull/"
+        + "$" + "{{ github.event.pull_request.number }}/merge\n"
+    ))
+    assert _rules(analyze_workflow_repository(str(tmp_path))) == []
+
+
+def test_pull_request_merge_ref_on_unprivileged_event_is_not_flagged(tmp_path):
+    _workflow(tmp_path, (
+        "on: pull_request\njobs:\n  review:\n    steps:\n"
+        "      - uses: actions/checkout@" + "a" * 40
+        + "\n        with:\n          ref: refs/pull/"
+        + "$" + "{{ github.event.pull_request.number }}/merge\n"
+    ))
+    assert _rules(analyze_workflow_repository(str(tmp_path))) == []
+
+
+def test_pull_request_merge_ref_in_different_step_is_not_checkout_input(tmp_path):
+    _workflow(tmp_path, (
+        "on:\n  pull_request_target:\njobs:\n  review:\n    steps:\n"
+        "      - uses: actions/checkout@" + "a" * 40
+        + "\n      - name: unrelated step\n        with:\n"
+        + "          ref: refs/pull/" + "$"
+        + "{{ github.event.pull_request.number }}/merge\n"
+    ))
+    assert _rules(analyze_workflow_repository(str(tmp_path))) == []
