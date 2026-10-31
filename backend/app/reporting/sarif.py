@@ -141,7 +141,8 @@ def build_sarif_document(findings: Iterable[Any], *, commit_sha: str) -> dict[st
             "level": _level(getattr(finding, "severity", "")),
             "message": {"text": safe_message},
             "locations": [primary],
-            "partialFingerprints": {"primaryLocationLineHash": fingerprint},
+            # The digest is RepoLens-specific, not GitHub's source-line fingerprint.
+            "partialFingerprints": {"repolens/v1": fingerprint},
         }
         if len(locations) > 1:
             result["relatedLocations"] = [
