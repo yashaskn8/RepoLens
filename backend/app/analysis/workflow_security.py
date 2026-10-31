@@ -127,6 +127,7 @@ def _has_privileged_pr_trigger(lines: list[str]) -> bool:
     This is conservative source inspection, not a complete YAML interpreter.
     """
     in_event_block = False
+    event_child_indent: int | None = None
     for raw in lines:
         cleaned = raw.split(" #", 1)[0]
         stripped = cleaned.strip()
@@ -135,6 +136,7 @@ def _has_privileged_pr_trigger(lines: list[str]) -> bool:
         indent = len(raw) - len(raw.lstrip(" "))
         if indent == 0:
             in_event_block = False
+            event_child_indent = None
             event = re.match(r"^(?:on|'on'|\"on\")\s*:\s*(.*)$", stripped)
             if event is None:
                 continue
@@ -144,8 +146,16 @@ def _has_privileged_pr_trigger(lines: list[str]) -> bool:
                     return True
             else:
                 in_event_block = True
-        elif in_event_block and re.match(r"^(?:['\"]?pull_request_target['\"]?\s*:|-\s*['\"]?pull_request_target['\"]?\s*$)", stripped):
-            return True
+        elif in_event_block:
+            # Only immediate children of 'on' declare events. Nested filters
+            # may contain branch names like 'pull_request_target'.
+            if event_child_indent is None:
+                event_child_indent = indent
+            if indent == event_child_indent and re.match(
+                r"^(?:['\"]?pull_request_target['\"]?\s*:|-\s*['\"]?pull_request_target['\"]?\s*$)",
+                stripped,
+            ):
+                return True
     return False
 
 

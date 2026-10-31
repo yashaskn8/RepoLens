@@ -242,6 +242,45 @@ jobs:
     assert "github-actions.privileged-untrusted-checkout" not in [finding.detector_id for finding in result.findings]
 
 
+def test_nested_push_branch_named_pull_request_target_is_not_an_event(tmp_path):
+    _workflow(tmp_path, """on:
+  push:
+    branches:
+      - pull_request_target
+jobs:
+  review:
+    steps:
+      - uses: actions/checkout@""" + "a" * 40 + """
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+""")
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert "github-actions.privileged-untrusted-checkout" not in [
+        finding.detector_id for finding in result.findings
+    ]
+
+
+def test_sibling_privileged_event_is_not_masked_by_nested_push_filter(tmp_path):
+    _workflow(tmp_path, """on:
+  push:
+    branches:
+      - pull_request_target
+  pull_request_target:
+jobs:
+  review:
+    steps:
+      - uses: actions/checkout@""" + "a" * 40 + """
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+""")
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert [finding.detector_id for finding in result.findings] == [
+        "github-actions.privileged-untrusted-checkout"
+    ]
+
+
 def test_non_event_pr_target_key_is_not_treated_as_trigger(tmp_path):
     _workflow(tmp_path, """on: push
 jobs:
