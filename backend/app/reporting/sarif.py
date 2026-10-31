@@ -98,7 +98,9 @@ def build_verified_sarif(*, scan: object, findings: Iterable[object]) -> dict:
             "level": level,
             "message": {"text": message},
             "locations": locations,
-            "partialFingerprints": {"repolens/v1": fingerprint, "primaryLocationLineHash": fingerprint},
+            # GitHub primaryLocationLineHash requires source-line content, not a location digest.
+            # Leave it unset so a later upload-sarif action can derive it from a checkout.
+            "partialFingerprints": {"repolens/v1": fingerprint},
         })
 
     return {

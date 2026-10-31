@@ -174,7 +174,7 @@ Hard disqualifiers: executes uploaded repository code; bypasses attestation/tena
 ### Risks, limitations and follow-ups
 
 - SHA-based evidence attestation proves consistency with stored evidence, **not** a new re-read of source bytes; it inherits the canonical ingestion authority.
-- Fingerprints are based on rule, location and line and expose the GitHub-recognized \`primaryLocationLineHash\` key; line moves may change identifiers. A future revision could use a stable semantic symbol identity.
+- The RepoLens-specific `repolens/v1` fingerprint is based on rule, location and line; line moves may change identifiers. The exporter deliberately omits GitHub's `primaryLocationLineHash`, which must be derived from source-line content rather than location metadata. A later `upload-sarif` action with a matching checkout can attempt to populate it; direct API uploads may have weaker alert deduplication.
 - Rules without line-anchored canonical evidence, resolved/suppressed findings and scans above the export budget are intentionally excluded or refused.
 - The export complements, but does not replace, existing production release blockers; a green CI result must not be advertised as host-safe production readiness.
 - Tests must be run by repository CI and reviewed before merge.
