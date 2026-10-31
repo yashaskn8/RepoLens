@@ -152,7 +152,7 @@ Score each criterion from 1–5, weighted **value 30%, differentiation 20%, exis
 | Finalist | Value | Differentiation | Fit | Safety | Shipability | Weighted / 5 |
 |---|---:|---:|---:|---:|---:|---:|
 | **F021 Verified SARIF export** | 5 | 4 | 5 | 5 | 5 | **4.8** |
-| F081 Repository policy as code | 5 | 5 | 3 | 4 | 3 | 4.1 |
+| F081 Repository policy as code | 5 | 5 | 3 | 4 | 3 | 4.2 |
 | F011 Deterministic PR quality gate | 5 | 4 | 4 | 4 | 4 | 4.3 |
 | F041 Evidence provenance diff | 4 | 5 | 3 | 4 | 3 | 3.9 |
 | F031 New dependency risk diffs | 4 | 4 | 3 | 3 | 3 | 3.5 |
