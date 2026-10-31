@@ -78,6 +78,27 @@ def test_sarif_never_exports_unverified_suppressed_or_stale_evidence():
     assert len(results) == 1
 
 
+def test_sarif_uri_escaping_and_secret_free_rule_id():
+    path = "src/a file#1.py"
+    finding = _finding(evidence=_evidence(path))
+    finding.detector_id = "ghp_" + "Z" * 36
+    finding.title = "Key ghp_" + "Z" * 36
+    report = build_sarif_document([finding], commit_sha=COMMIT)
+    result = report["runs"][0]["results"][0]
+    assert result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == "src/a%20file%231.py"
+    assert "ghp_" not in json.dumps(report)
+    assert "[REDACTED_GITHUB_TOKEN]" in result["message"]["text"]
+
+
+def test_sarif_control_characters_and_absolute_paths_fail_closed():
+    report = build_sarif_document([
+        _finding(evidence=_evidence("/etc/passwd")),
+        _finding(evidence=_evidence("src/a\\x00.py")),
+        _finding(evidence=_evidence("C:/Users/file.py")),
+    ], commit_sha=COMMIT)
+    assert report["runs"][0]["results"] == []
+
+
 def test_sarif_rejects_unknown_commit():
     with pytest.raises(ValueError):
         build_sarif_document([_finding()], commit_sha="unknown")
