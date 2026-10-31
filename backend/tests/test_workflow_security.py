@@ -94,6 +94,30 @@ def test_nested_permissions_key_does_not_grant_token_write_all(tmp_path, source)
     ]
 
 
+
+@pytest.mark.parametrize("key", ["'permissions'", '"permissions"'])
+@pytest.mark.parametrize("scope", ["workflow", "job"])
+def test_quoted_permissions_write_all_at_valid_scope(tmp_path, key, scope):
+    if scope == "workflow":
+        source = "on: push\n" + key + ": write-all\n"
+        expected_line = 2
+    else:
+        source = "on: push\njobs:\n  build:\n    " + key + ": write-all\n"
+        expected_line = 4
+    _workflow(tmp_path, source)
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert _rules(result) == [("github-actions.write-all-token", expected_line)]
+
+
+@pytest.mark.parametrize("key", ["'permissions'", '"permissions"'])
+def test_quoted_permissions_in_environment_is_not_token_scope(tmp_path, key):
+    _workflow(tmp_path, "on: push\nenv:\n  " + key + ": write-all\n")
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert _rules(result) == []
+
+
 def test_job_write_all_still_detected_amid_environment_variables(tmp_path):
     _workflow(tmp_path, """on: push
 env:
@@ -243,6 +267,33 @@ def test_quoted_checkout_uses_preserves_privileged_head_ref_detection(tmp_path):
     result = analyze_workflow_repository(str(tmp_path))
     assert result.status is ToolStatus.COMPLETED
     assert _rules(result) == [("github-actions.privileged-untrusted-checkout", 8)]
+
+
+
+@pytest.mark.parametrize("key", ["'ref'", '"ref"'])
+def test_quoted_checkout_with_ref_still_detects_privileged_pr_head(tmp_path, key):
+    _workflow(tmp_path, (
+        "on:\n  pull_request_target:\njobs:\n  review:\n    steps:\n"
+        "      - uses: actions/checkout@" + "a" * 40
+        + "\n        with:\n          " + key
+        + ": ${{ github.event.pull_request.head.sha }}\n"
+    ))
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert _rules(result) == [("github-actions.privileged-untrusted-checkout", 8)]
+
+
+@pytest.mark.parametrize("key", ["'ref'", '"ref"'])
+def test_quoted_env_ref_is_not_checkout_ref(tmp_path, key):
+    _workflow(tmp_path, (
+        "on:\n  pull_request_target:\njobs:\n  review:\n    steps:\n"
+        "      - uses: actions/checkout@" + "a" * 40
+        + "\n        env:\n          " + key
+        + ": ${{ github.event.pull_request.head.sha }}\n"
+    ))
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert _rules(result) == []
 
 
 def test_privileged_pr_head_checkout_is_marked_contextual(tmp_path):
