@@ -93,7 +93,7 @@ def test_sarif_uri_escaping_and_secret_free_rule_id():
 def test_sarif_control_characters_and_absolute_paths_fail_closed():
     report = build_sarif_document([
         _finding(evidence=_evidence("/etc/passwd")),
-        _finding(evidence=_evidence("src/a\\x00.py")),
+        _finding(evidence=_evidence("src/a" + chr(0) + ".py")),
         _finding(evidence=_evidence("C:/Users/file.py")),
     ], commit_sha=COMMIT)
     assert report["runs"][0]["results"] == []
