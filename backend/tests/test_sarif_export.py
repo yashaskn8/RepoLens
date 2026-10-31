@@ -142,3 +142,30 @@ def test_sarif_rejects_truncation(monkeypatch):
         assert False, "Expected refusal to truncate"
     except sarif.SarifExportLimitExceeded:
         pass
+
+
+def test_sarif_keeps_distinct_rule_ids_after_sanitization_and_truncation(client, db_session):
+    scan = _scan(db_session)
+    detectors = [
+        ("semgrep", "rule?x"),
+        ("semgrep", "rule#x"),
+        ("semgrep", "x" * 160 + "a"),
+        ("semgrep", "x" * 160 + "b"),
+        ("scan?tool", "simple"),
+        ("scan#tool", "simple"),
+    ]
+    for tool, detector in detectors:
+        finding = _finding(db_session, scan)
+        finding.source_tool = tool
+        finding.detector_id = detector
+    db_session.flush()
+
+    response = client.get(f"/api/v1/scans/{scan.id}/report/sarif")
+    assert response.status_code == 200, response.text
+    run = response.json()["runs"][0]
+    ids = [result["ruleId"] for result in run["results"]]
+    assert len(ids) == len(detectors)
+    assert len(set(ids)) == len(detectors)
+    assert {rule["id"] for rule in run["tool"]["driver"]["rules"]} == set(ids)
+    # Unmodified, safe detector identifiers keep their existing SARIF IDs.
+    assert "semgrep/example.rule" not in ids
