@@ -48,7 +48,7 @@ def _scan(db, *, status=ScanStatus.COMPLETED.value, owner=None):
     return scan
 
 
-def _finding(db, scan, *, status="OPEN", verdict="CONFIRMED", grounded=True, title="Risk"):
+def _finding(db, scan, *, status="OPEN", verdict="CONFIRMED", grounded=True, title="Risk", path="src/lib#1.py"):
     finding = FindingModel(
         id=str(uuid4()),
         scan_id=scan.id,
@@ -61,7 +61,7 @@ def _finding(db, scan, *, status="OPEN", verdict="CONFIRMED", grounded=True, tit
         source_tool="semgrep",
         verification_verdict=verdict,
     )
-    finding.evidences.append(_evidence(grounded=grounded))
+    finding.evidences.append(_evidence(grounded=grounded, path=path))
     db.add(finding)
     db.flush()
     return finding
@@ -178,3 +178,14 @@ def test_sarif_rejects_drive_and_uri_scheme_paths():
         report = build_sarif([finding], commit_sha=COMMIT)
         assert report["runs"][0]["results"] == [], unsafe_path
         assert unsafe_path not in json.dumps(report)
+
+
+def test_sarif_api_omits_attested_windows_host_path(client, db_session):
+    scan = _scan(db_session)
+    _finding(db_session, scan, path="C:/Users/example/private.py")
+    db_session.commit()
+
+    response = client.get(f"/api/v1/scans/{scan.id}/sarif")
+    assert response.status_code == 200
+    assert response.json()["runs"][0]["results"] == []
+    assert "Users/example/private.py" not in response.text
