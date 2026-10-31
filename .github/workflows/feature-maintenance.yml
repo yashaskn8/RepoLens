@@ -1,0 +1,75 @@
+name: RepoLens Feature Maintenance Gate
+
+# Push/dispatch work on the feature branch immediately. GitHub only runs
+# scheduled workflows after their workflow file reaches the default branch.
+on:
+  push:
+    branches:
+      - 'feature/evidence-first-sarif-export-*'
+  workflow_dispatch:
+  schedule:
+    - cron: '17 * * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repolens-feature-maintenance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verified-sarif-regression:
+    name: Verify SARIF export and Python imports
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      TESTING: 'true'
+      ENVIRONMENT: development
+      GITHUB_DELIVERY_ENABLED: 'false'
+      GITHUB_PR_REVIEW_WRITE_ENABLED: 'false'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Set up locked Python environment
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: 0.12.10
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Install locked dev dependencies
+        working-directory: backend
+        run: uv sync --locked --extra dev
+      - name: Verify imports and bytecode
+        working-directory: backend
+        run: |
+          uv run --locked --extra dev python -m compileall -q app
+          uv run --locked --extra dev python -c 'import app.api.routes.sarif; import app.reporting.sarif'
+      - name: Verify SARIF regression suite
+        working-directory: backend
+        run: uv run --locked --extra dev python -m pytest tests/test_sarif_export.py -q
+
+  frontend-regression:
+    name: Frontend type safety and lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install locked frontend packages
+        working-directory: frontend
+        run: npm ci
+      - name: Typecheck and lint
+        working-directory: frontend
+        run: |
+          npm run type-check
+          npm run lint
