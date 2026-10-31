@@ -26,7 +26,7 @@ _SHA256 = re.compile(r"sha256:[0-9a-fA-F]{64}\Z")
 _USES = re.compile(r"^\s*(?:-\s*)?uses\s*:\s*(.*?)\s*$")
 _BLOCK_START = re.compile(r"^(?P<indent>\s*)(?:-\s*)?[^:#\s][^:]*:\s*[|>][-+0-9]*\s*(?:#.*)?$")
 _WRITE_ALL = re.compile(r"^\s*permissions\s*:\s*['\"]?write-all['\"]?\s*(?:#.*)?$")
-_PR_TARGET = re.compile(r"^\s*(?:on\s*:\s*.*\bpull_request_target\b|pull_request_target\s*:)")
+_PR_TARGET = re.compile(r"^\s*(?:['\"]?on['\"]?\s*:\s*.*\bpull_request_target\b|['\"]?pull_request_target['\"]?\s*:)")
 _HEAD_SHA = re.compile(r"^\s*ref\s*:\s*['\"]?\$\{\{\s*github\.event\.pull_request\.head\.(?:sha|ref)\s*\}\}")
 
 
