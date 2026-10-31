@@ -154,6 +154,12 @@ def test_sarif_keeps_distinct_rule_ids_after_sanitization_and_truncation(client,
         ("semgrep", "x" * 160 + "b"),
         ("scan?tool", "simple"),
         ("scan#tool", "simple"),
+        # A slash inside either component previously blurred the tool/rule boundary.
+        ("scan/tool", "rule"),
+        ("scan", "tool/rule"),
+        # A valid ID ending in the generated hash suffix could impersonate a lossy ID.
+        ("semgrep", "rule_x-" + hashlib.sha256(b"rule?x").hexdigest()[:12]),
+        ("scan_tool-" + hashlib.sha256(b"scan?tool").hexdigest()[:12], "simple"),
     ]
     for tool, detector in detectors:
         finding = _finding(db_session, scan)
@@ -167,6 +173,7 @@ def test_sarif_keeps_distinct_rule_ids_after_sanitization_and_truncation(client,
     ids = [result["ruleId"] for result in run["results"]]
     assert len(ids) == len(detectors)
     assert len(set(ids)) == len(detectors)
+    assert all(rule_id.count("/") == 1 for rule_id in ids)
     assert {rule["id"] for rule in run["tool"]["driver"]["rules"]} == set(ids)
     # Unmodified, safe detector identifiers keep their existing SARIF IDs.
     assert "semgrep/example.rule" in ids
