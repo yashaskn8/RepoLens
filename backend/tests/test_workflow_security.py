@@ -309,7 +309,7 @@ jobs:
     )
     assert result.scanner_results["repolens-workflow-security"].status is ToolStatus.COMPLETED
     assert len(result.get_findings(tool="repolens-workflow-security")) == 2
-    assert result.get_summary()["tool_counts"]["repolens-workflow-security"] == 2
+    assert result.get_summary()["findings_by_tool"]["repolens-workflow-security"] == 2
 
 
 def test_unreadable_workflow_directory_is_not_a_clean_scan(tmp_path, monkeypatch):
