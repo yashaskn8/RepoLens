@@ -222,6 +222,10 @@ def _inspect_source(path: str, source: str) -> list[StaticFinding]:
         match = _USES.match(line)
         if match is None:
             continue
+        # env/with mappings may contain a key named 'uses' as ordinary data.
+        # Only action/job uses declarations should produce action findings.
+        if any(key in {"env", "with"} for _, key in mapping_stack):
+            continue
         action = match.group(1).strip().strip("\"'")
         if action.startswith("./"):
             continue

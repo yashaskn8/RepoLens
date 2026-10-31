@@ -113,6 +113,46 @@ jobs:
     assert result.status is ToolStatus.COMPLETED
     assert _rules(result) == [("github-actions.write-all-token", 6)]
 
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "on: push\nenv:\n  uses: example/action@v1\n",
+        (
+            "on: push\njobs:\n  build:\n    env:\n"
+            "      uses: example/action@v1\n"
+            "    steps:\n      - uses: actions/checkout@" + "a" * 40 + "\n"
+        ),
+        (
+            "on: push\njobs:\n  build:\n    steps:\n"
+            "      - name: Check\n        uses: actions/checkout@" + "a" * 40 + "\n"
+            "        with:\n          uses: example/action@v1\n"
+        ),
+    ],
+)
+def test_uses_data_in_env_or_with_is_not_an_action_reference(tmp_path, source):
+    _workflow(tmp_path, source)
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert "github-actions.mutable-action-reference" not in [
+        finding.detector_id for finding in result.findings
+    ]
+
+
+def test_real_mutable_action_after_env_uses_still_detected(tmp_path):
+    _workflow(tmp_path, """on: push
+env:
+  uses: example/action@v1
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+""")
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert _rules(result) == [("github-actions.mutable-action-reference", 7)]
+
+
 def test_privileged_pr_head_checkout_is_marked_contextual(tmp_path):
     _workflow(tmp_path, """on:
   pull_request_target:
