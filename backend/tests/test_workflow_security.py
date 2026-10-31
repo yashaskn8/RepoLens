@@ -835,3 +835,56 @@ def test_exact_quoted_checkout_inputs_remain_contextual_findings(
     result = analyze_workflow_repository(str(tmp_path))
     assert result.status is ToolStatus.COMPLETED
     assert _rules(result) == [("github-actions.privileged-untrusted-checkout", 8)]
+
+
+@pytest.mark.parametrize(
+    ("checkout_input", "checkout_value"),
+    [
+        ("ref", "$" + "{{ github.event.pull_request.head.sha }}"),
+        ("repository", "$" + "{{ github.event.pull_request.head.repo.full_name }}"),
+    ],
+)
+def test_checkout_with_before_uses_detects_privileged_pr_input(
+    tmp_path, checkout_input, checkout_value,
+):
+    # YAML mapping order must not determine whether the risk is detected.
+    _workflow(tmp_path, (
+        "on: pull_request_target\njobs:\n  review:\n    steps:\n"
+        "      - name: Checkout PR\n        with:\n          "
+        + checkout_input + ": " + checkout_value + "\n"
+        + "        uses: actions/checkout@" + "a" * 40 + "\n"
+    ))
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert _rules(result) == [("github-actions.privileged-untrusted-checkout", 7)]
+
+
+def test_with_before_uses_on_another_action_does_not_implicate_later_checkout(tmp_path):
+    _workflow(tmp_path, (
+        "on: pull_request_target\njobs:\n  review:\n    steps:\n"
+        "      - name: Other action\n        with:\n"
+        "          ref: $" + "{{ github.event.pull_request.head.sha }}\n"
+        + "        uses: example/action@" + "a" * 40 + "\n"
+        + "      - uses: actions/checkout@" + "a" * 40 + "\n"
+    ))
+    assert _rules(analyze_workflow_repository(str(tmp_path))) == []
+
+
+def test_env_ref_before_checkout_uses_is_not_an_action_input(tmp_path):
+    _workflow(tmp_path, (
+        "on: pull_request_target\njobs:\n  review:\n    steps:\n"
+        "      - name: Checkout PR\n        env:\n"
+        "          ref: $" + "{{ github.event.pull_request.head.sha }}\n"
+        + "        uses: actions/checkout@" + "a" * 40 + "\n"
+    ))
+    assert _rules(analyze_workflow_repository(str(tmp_path))) == []
+
+
+def test_with_before_uses_on_unprivileged_event_is_not_flagged(tmp_path):
+    _workflow(tmp_path, (
+        "on: pull_request\njobs:\n  review:\n    steps:\n"
+        "      - name: Checkout PR\n        with:\n"
+        "          ref: $" + "{{ github.event.pull_request.head.sha }}\n"
+        + "        uses: actions/checkout@" + "a" * 40 + "\n"
+    ))
+    assert _rules(analyze_workflow_repository(str(tmp_path))) == []
