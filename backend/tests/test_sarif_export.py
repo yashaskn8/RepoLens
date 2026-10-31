@@ -162,3 +162,19 @@ def test_sarif_byte_cap_fails_instead_of_truncating(client, db_session, monkeypa
     response = client.get(f"/api/v1/scans/{scan.id}/sarif")
     assert response.status_code == 413
     assert response.json()["detail"]["error_code"] == "SARIF_BYTE_LIMIT"
+
+
+def test_sarif_rejects_drive_and_uri_scheme_paths():
+    """Export must never expose host paths or URI-scheme evidence locations."""
+    for unsafe_path in ("C:/Users/example/private.py", "file:src/private.py"):
+        finding = SimpleNamespace(
+            title="Finding", description="Details", severity="HIGH", status="OPEN",
+            source_tool="semgrep", detector_id="rule-1",
+            evidences=[SimpleNamespace(
+                file_path=unsafe_path, start_line=1, end_line=1,
+                code_snippet="sample",
+            )],
+        )
+        report = build_sarif([finding], commit_sha=COMMIT)
+        assert report["runs"][0]["results"] == [], unsafe_path
+        assert unsafe_path not in json.dumps(report)
