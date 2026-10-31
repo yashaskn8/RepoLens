@@ -98,7 +98,7 @@ def build_verified_sarif(*, scan: object, findings: Iterable[object]) -> dict:
             "level": level,
             "message": {"text": message},
             "locations": locations,
-            "partialFingerprints": {"repolens/v1": fingerprint},
+            "partialFingerprints": {"repolens/v1": fingerprint, "primaryLocationLineHash": fingerprint},
         })
 
     return {
