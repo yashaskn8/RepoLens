@@ -84,6 +84,28 @@ jobs:
     assert result.findings[0].confidence == "MEDIUM"
 
 
+@pytest.mark.parametrize(
+    "event_declaration",
+    [
+        "'on': [pull_request_target]",
+        '"on":\n  "pull_request_target":',
+        "'on':\n  'pull_request_target':",
+    ],
+)
+def test_quoted_workflow_triggers_preserve_privileged_checkout_detection(tmp_path, event_declaration):
+    source = (
+        event_declaration
+        + "\njobs:\n  review:\n    steps:\n      - uses: actions/checkout@"
+        + "a" * 40
+        + "\n        with:\n          ref: ${{ github.event.pull_request.head.sha }}\n"
+    )
+    _workflow(tmp_path, source)
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert [finding.detector_id for finding in result.findings] == [
+        "github-actions.privileged-untrusted-checkout"
+    ]
+
 def test_non_privileged_pr_checkout_does_not_trigger_contextual_finding(tmp_path):
     _workflow(tmp_path, """on:
   pull_request:
