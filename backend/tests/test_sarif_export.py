@@ -147,6 +147,7 @@ def test_sarif_rejects_truncation(monkeypatch):
 def test_sarif_keeps_distinct_rule_ids_after_sanitization_and_truncation(client, db_session):
     scan = _scan(db_session)
     detectors = [
+        ("semgrep", "example.rule"),
         ("semgrep", "rule?x"),
         ("semgrep", "rule#x"),
         ("semgrep", "x" * 160 + "a"),
@@ -168,4 +169,4 @@ def test_sarif_keeps_distinct_rule_ids_after_sanitization_and_truncation(client,
     assert len(set(ids)) == len(detectors)
     assert {rule["id"] for rule in run["tool"]["driver"]["rules"]} == set(ids)
     # Unmodified, safe detector identifiers keep their existing SARIF IDs.
-    assert "semgrep/example.rule" not in ids
+    assert "semgrep/example.rule" in ids
