@@ -310,3 +310,40 @@ jobs:
     assert result.scanner_results["repolens-workflow-security"].status is ToolStatus.COMPLETED
     assert len(result.get_findings(tool="repolens-workflow-security")) == 2
     assert result.get_summary()["tool_counts"]["repolens-workflow-security"] == 2
+
+
+def test_unreadable_workflow_directory_is_not_a_clean_scan(tmp_path, monkeypatch):
+    import app.analysis.workflow_security as scanner
+
+    _workflow(tmp_path, "permissions: write-all\n")
+    real_lstat = scanner.os.lstat
+
+    def deny_workflow_dir(path, *args, **kwargs):
+        if str(path).replace("\\", "/").endswith("/.github/workflows"):
+            raise PermissionError("private file-system details")
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(scanner.os, "lstat", deny_workflow_dir)
+    result = scanner.analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.INVALID_OUTPUT
+    assert result.findings == []
+    assert "private" not in (result.error_message or "")
+
+
+def test_windows_reparse_directory_is_rejected(tmp_path, monkeypatch):
+    import stat
+    from types import SimpleNamespace
+    import app.analysis.workflow_security as scanner
+
+    _workflow(tmp_path, "permissions: write-all\n")
+    real_lstat = scanner.os.lstat
+
+    def simulate_reparse(path, *args, **kwargs):
+        if str(path).replace("\\", "/").endswith("/.github/workflows"):
+            return SimpleNamespace(st_mode=stat.S_IFDIR, st_file_attributes=0x0400)
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(scanner.os, "lstat", simulate_reparse)
+    result = scanner.analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.INVALID_OUTPUT
+    assert not result.findings
