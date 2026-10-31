@@ -188,3 +188,18 @@ def test_sarif_redacts_credentials_in_rule_identifiers(client, db_session):
     ids = [item["ruleId"] for item in response.json()["runs"][0]["results"]]
     assert len(ids) == len(set(ids)) == 2
     assert all("REDACTED" in rule_id for rule_id in ids)
+
+
+def test_sarif_omits_secret_bearing_paths_without_leaking_credentials(client, db_session):
+    scan = _scan(db_session)
+    tokens = ["ghp_" + "Z" * 36, "sk-" + "D" * 20]
+    for token in tokens:
+        _finding(db_session, scan, path=f"src/{token}/issue.py")
+    _finding(db_session, scan, path="src/safe.py")
+
+    response = client.get(f"/api/v1/scans/{scan.id}/report/sarif")
+    assert response.status_code == 200, response.text
+    assert all(token not in response.text for token in tokens)
+    results = response.json()["runs"][0]["results"]
+    assert len(results) == 1
+    assert results[0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == "src/safe.py"
