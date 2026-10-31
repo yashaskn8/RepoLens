@@ -98,7 +98,8 @@ def _workflow_contents(repo_dir: str) -> list[tuple[str, str]]:
             if total_bytes > MAX_TOTAL_BYTES:
                 raise WorkflowInspectionIncomplete("Total workflow byte limit exceeded.")
             try:
-                source = data.decode("utf-8", errors="strict")
+                # A leading UTF-8 BOM is valid YAML; do not let it hide the first key.
+                source = data.decode("utf-8-sig", errors="strict")
             except UnicodeDecodeError as exc:
                 raise WorkflowInspectionIncomplete("Workflow source is not valid UTF-8.") from exc
             if "\x00" in source:
