@@ -1,0 +1,48 @@
+name: Annual RepoLens Feature Tournament
+
+# Scheduled GitHub Actions trigger ONLY from the default branch after merge.
+# This creates a review issue; it does not impersonate engineers or auto-merge code.
+on:
+  schedule:
+    - cron: '30 9 31 10 *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  open-annual-review:
+    name: Open non-duplicated annual feature tournament
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Create annual review issue if absent
+        shell: bash
+        run: |
+          set -euo pipefail
+          year="$(date -u +%Y)"
+          title="RepoLens annual feature tournament ${year}"
+          existing="$(gh issue list --state all --limit 100 --json title --jq ".[] | select(.title == \"${title}\") | .title")"
+          if [[ -n "${existing}" ]]; then
+            echo "Annual tournament issue already exists: ${title}"
+            exit 0
+          fi
+          cat > annual-review.md <<'EOF'
+          ## Evidence-based annual feature tournament
+
+          1. Search official vendor documentation, user research, relevant standards, and relevant open-source project feature sets. Document source URLs and retrieval dates.
+          2. Build **100 distinct candidate features**, marking generated ideas as proposals rather than independently verified online features.
+          3. Score value, differentiation, engineering fit, security/safety, and feasibility. Simulate the AppSec, backend, SRE, frontend, and product perspectives, but do not present the simulation as interviews with actual engineers.
+          4. Debate at least three architecture alternatives and write an ADR with risks, threat model, rollout, rollback, and measurable acceptance criteria.
+          5. Implement the selected feature only in a fresh isolated branch and draft PR, with deterministic tests and CI evidence.
+          6. Require a human review before merging. Never execute code from analyzed untrusted repositories, weaken tenant isolation or verifier authority, or auto-approve a patch.
+
+          Prior cycle reference: `docs/feature-tournament-2026.md`.
+
+          **Workflow scope:** This recurring automation creates the tracked annual review issue. Research, implementation, production validation, and release remain separate review-gated work.
+          EOF
+          gh issue create --title "${title}" --body-file annual-review.md
