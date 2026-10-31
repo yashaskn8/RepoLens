@@ -37,7 +37,8 @@ def _safe_path(raw: str) -> str | None:
 
 def _rule_component(value: str, limit: int) -> str:
     """Preserve ordinary IDs; disambiguate lossy sanitization or truncation."""
-    sanitized = _RULE_CHARS.sub("_", value)
+    # Rule identifiers can originate in scanner metadata; never export raw credentials.
+    sanitized = _RULE_CHARS.sub("_", redact_secrets(value))
     if sanitized == value and len(value) <= limit:
         return value
     suffix = "-" + hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]

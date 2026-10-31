@@ -170,3 +170,21 @@ def test_sarif_keeps_distinct_rule_ids_after_sanitization_and_truncation(client,
     assert {rule["id"] for rule in run["tool"]["driver"]["rules"]} == set(ids)
     # Unmodified, safe detector identifiers keep their existing SARIF IDs.
     assert "semgrep/example.rule" in ids
+
+
+def test_sarif_redacts_credentials_in_rule_identifiers(client, db_session):
+    scan = _scan(db_session)
+    tokens = ["ghp_" + "A" * 36, "ghp_" + "B" * 36]
+    tool_token = "sk-" + "C" * 20
+    for token in tokens:
+        finding = _finding(db_session, scan)
+        finding.detector_id = token
+        finding.source_tool = tool_token
+    db_session.flush()
+
+    response = client.get(f"/api/v1/scans/{scan.id}/report/sarif")
+    assert response.status_code == 200, response.text
+    assert all(token not in response.text for token in [*tokens, tool_token])
+    ids = [item["ruleId"] for item in response.json()["runs"][0]["results"]]
+    assert len(ids) == len(set(ids)) == 2
+    assert all("REDACTED" in rule_id for rule_id in ids)
