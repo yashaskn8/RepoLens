@@ -209,6 +209,8 @@ def _inspect_source(path: str, source: str) -> list[StaticFinding]:
     findings: list[StaticFinding] = []
     lines = source.splitlines()
     pull_request_target = _has_privileged_pr_trigger(lines)
+    checkout_evidence_lines: list[int] = []
+    pending_step_inputs: list[int] = []
     # A PR-head ref must be inside the same checkout step. An unrelated ref
     # elsewhere in the workflow is not enough evidence for this finding.
     checkout_step_indent: int | None = None
@@ -241,27 +243,28 @@ def _inspect_source(path: str, source: str) -> list[StaticFinding]:
             checkout_step_indent = None
         if step_start_indent is not None and indentation <= step_start_indent:
             step_start_indent = None
-        if re.match(r"^\s*-\s+", line):
+            pending_step_inputs.clear()
+        if (re.match(r"^\s*-\s+", line) and len(mapping_stack) == 3
+                and mapping_stack[0] == (0, "jobs") and mapping_stack[2][1] == "steps"):
             step_start_indent = indentation
+            pending_step_inputs.clear()
         if (
             pull_request_target
-            and checkout_step_indent is not None
-            and indentation > checkout_step_indent
+            and step_start_indent is not None
+            and indentation > step_start_indent
             and (_HEAD_SHA.search(line) or _HEAD_REPO.search(line) or _HEAD_PR_REF.search(line))
             # Only direct `with.ref` or `with.repository` checkout inputs
             # count; same-named env keys do not control checkout.
-            and mapping_stack
-            and mapping_stack[-1][1] == "with"
-            and not any(key == "env" for _, key in mapping_stack)
+            and len(mapping_stack) == 4
+            and mapping_stack[0] == (0, "jobs")
+            and mapping_stack[2][1] == "steps"
+            and mapping_stack[3][1] == "with"
         ):
-            findings.append(_finding(
-                path, index, "github-actions.privileged-untrusted-checkout",
-                "Privileged workflow may check out pull-request code",
-                "A pull_request_target workflow may check out a pull-request head or fork repository in the same action step. This is a contextual risk, not proof of untrusted code execution.",
-                Severity.MEDIUM,
-                "Do not check out PR-head or fork-repository code in privileged workflows; isolate privileged operations from untrusted code.",
-                confidence="MEDIUM",
-            ))
+            # YAML mapping keys are unordered: with.ref may precede uses.
+            if checkout_step_indent == step_start_indent:
+                checkout_evidence_lines.append(index)
+            else:
+                pending_step_inputs.append(index)
         # GitHub grants token permissions only at workflow or job scope.
         if _WRITE_ALL.fullmatch(raw_line) and (
             indentation == 0 or (
@@ -310,6 +313,8 @@ def _inspect_source(path: str, source: str) -> list[StaticFinding]:
             immutable = bool(_SHA40.fullmatch(action_parts[1]))
             if action_parts[0].lower() == "actions/checkout" and step_start_indent is not None:
                 checkout_step_indent = step_start_indent
+                checkout_evidence_lines.extend(pending_step_inputs)
+                pending_step_inputs.clear()
         if not immutable:
             findings.append(_finding(
                 path, index, "github-actions.mutable-action-reference",
@@ -319,6 +324,15 @@ def _inspect_source(path: str, source: str) -> list[StaticFinding]:
                 "Pin remote GitHub Actions to their full 40-character commit SHA and container images to a sha256 digest.",
             ))
 
+    for evidence_line in checkout_evidence_lines:
+        findings.append(_finding(
+            path, evidence_line, "github-actions.privileged-untrusted-checkout",
+            "Privileged workflow may check out pull-request code",
+            "A pull_request_target workflow may check out a pull-request head or fork repository in the same action step. This is a contextual risk, not proof of untrusted code execution.",
+            Severity.MEDIUM,
+            "Do not check out PR-head or fork-repository code in privileged workflows; isolate privileged operations from untrusted code.",
+            confidence="MEDIUM",
+        ))
     return findings
 
 def analyze_workflow_repository(repo_dir: str) -> ScannerResult:
