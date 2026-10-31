@@ -26,7 +26,6 @@ _SHA256 = re.compile(r"sha256:[0-9a-fA-F]{64}\Z")
 _USES = re.compile(r"^\s*(?:-\s*)?uses\s*:\s*(.*?)\s*$")
 _BLOCK_START = re.compile(r"^(?P<indent>\s*)(?:-\s*)?[^:#\s][^:]*:\s*[|>][-+0-9]*\s*(?:#.*)?$")
 _WRITE_ALL = re.compile(r"^\s*permissions\s*:\s*['\"]?write-all['\"]?\s*(?:#.*)?$")
-_PR_TARGET = re.compile(r"^\s*(?:['\"]?on['\"]?\s*:\s*.*\bpull_request_target\b|['\"]?pull_request_target['\"]?\s*:)")
 _HEAD_SHA = re.compile(r"^\s*ref\s*:\s*['\"]?\$\{\{\s*github\.event\.pull_request\.head\.(?:sha|ref)\s*\}\}")
 
 
@@ -131,7 +130,7 @@ def _has_privileged_pr_trigger(lines: list[str]) -> bool:
                     return True
             else:
                 in_event_block = True
-        elif in_event_block and re.match(r"^(?:pull_request_target\s*:|-\s*pull_request_target\s*$)", stripped):
+        elif in_event_block and re.match(r"^(?:['\"]?pull_request_target['\"]?\s*:|-\s*['\"]?pull_request_target['\"]?\s*$)", stripped):
             return True
     return False
 
