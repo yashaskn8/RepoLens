@@ -791,3 +791,47 @@ def test_pull_request_merge_ref_in_different_step_is_not_checkout_input(tmp_path
         + "{{ github.event.pull_request.number }}/merge\n"
     ))
     assert _rules(analyze_workflow_repository(str(tmp_path))) == []
+
+
+@pytest.mark.parametrize(
+    ("checkout_input", "checkout_value"),
+    [
+        ("ref", "${{ github.event.pull_request.head.sha }}-suffix"),
+        ("ref", "${{ github.event.pull_request.head.ref }}-suffix"),
+        ("repository", "${{ github.event.pull_request.head.repo.full_name }}-suffix"),
+    ],
+)
+def test_composed_checkout_inputs_are_not_exact_pr_head_refs(
+    tmp_path, checkout_input, checkout_value,
+):
+    # The interpolated value is not itself the PR head SHA/ref or fork repo.
+    _workflow(tmp_path, (
+        "on:\n  pull_request_target:\njobs:\n  review:\n    steps:\n"
+        + "      - uses: actions/checkout@" + "a" * 40
+        + "\n        with:\n          " + checkout_input + ": " + checkout_value + "\n"
+    ))
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert "github-actions.privileged-untrusted-checkout" not in [
+        finding.detector_id for finding in result.findings
+    ]
+
+
+@pytest.mark.parametrize(
+    ("checkout_input", "checkout_value"),
+    [
+        ("ref", "'${{ github.event.pull_request.head.sha }}'"),
+        ("repository", '"${{ github.event.pull_request.head.repo.full_name }}"'),
+    ],
+)
+def test_exact_quoted_checkout_inputs_remain_contextual_findings(
+    tmp_path, checkout_input, checkout_value,
+):
+    _workflow(tmp_path, (
+        "on:\n  pull_request_target:\njobs:\n  review:\n    steps:\n"
+        + "      - uses: actions/checkout@" + "a" * 40
+        + "\n        with:\n          " + checkout_input + ": " + checkout_value + "\n"
+    ))
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert _rules(result) == [("github-actions.privileged-untrusted-checkout", 8)]
