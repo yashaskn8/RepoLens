@@ -81,6 +81,7 @@ const actionJs = ts.transpileModule(actionSource, {
 function makeActions({ confirmed = true, operator = true } = {}) {
   const actionGeneration = { current: 0 };
   const publishingRef = { current: false };
+  const publicationReadSequenceRef = { current: 0 };
   const recorded = { approvals: 0, publishes: 0, previews: [], messages: [] };
   let resolveApproval;
   let resolvePreview;
@@ -94,17 +95,17 @@ function makeActions({ confirmed = true, operator = true } = {}) {
     return { github_review_id: '100' };
   };
   const actions = new Function(
-    'actionGeneration', 'publishingRef', 'publication', 'isOperator', 'confirmedPublish',
+    'actionGeneration', 'publishingRef', 'publicationReadSequenceRef', 'publication', 'isOperator', 'confirmedPublish',
     'setIsPublishing', 'setPublishMessage', 'approveReviewPublication', 'publishReviewPublication',
     'fetchReviewPublication', 'setPublication', 'generateReviewPublicationPreview',
-    'getErrorMessage', 'analysisId',
+    'getErrorMessage', 'analysisId', 'setConfirmedPublish', 'withChangeDetailDeadline',
     actionJs + '\nreturn {handleGeneratePreview,handleApproveAndPublish};',
   )(
-    actionGeneration, publishingRef, { preview_digest: 'approved-digest' }, operator, confirmed,
+    actionGeneration, publishingRef, publicationReadSequenceRef, { preview_digest: 'approved-digest' }, operator, confirmed,
     () => {}, message => recorded.messages.push(message),
     approveReviewPublication, publishReviewPublication, async () => ({ preview_digest: 'new' }),
     preview => recorded.previews.push(preview), generateReviewPublicationPreview,
-    () => 'failed', 'analysis-one',
+    () => 'failed', 'analysis-one', () => {}, async (callback) => callback(),
   );
   return {
     actions, actionGeneration, recorded,
