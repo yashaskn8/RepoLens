@@ -153,6 +153,54 @@ jobs:
     assert _rules(result) == [("github-actions.mutable-action-reference", 7)]
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        (
+            "on: push\njobs:\n  build:\n    strategy:\n"
+            "      matrix:\n        include:\n"
+            "          - uses: example/action@v1\n"
+            "    steps:\n      - run: echo ok\n"
+        ),
+        (
+            "on: push\njobs:\n  build:\n    outputs:\n"
+            "      uses: example/action@v1\n"
+            "    steps:\n      - run: echo ok\n"
+        ),
+    ],
+)
+def test_uses_in_matrix_or_job_outputs_is_not_an_action(tmp_path, source):
+    _workflow(tmp_path, source)
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert "github-actions.mutable-action-reference" not in [
+        finding.detector_id for finding in result.findings
+    ]
+
+
+def test_job_reusable_workflow_and_step_uses_still_detected(tmp_path):
+    _workflow(tmp_path, """on: push
+jobs:
+  reusable:
+    uses: example/repo/.github/workflows/ci.yml@v1
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - uses: example/data@v1
+    steps:
+      - name: Run
+        uses: example/action@v2
+""")
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert _rules(result) == [
+        ("github-actions.mutable-action-reference", 4),
+        ("github-actions.mutable-action-reference", 13),
+    ]
+
+
 def test_privileged_pr_head_checkout_is_marked_contextual(tmp_path):
     _workflow(tmp_path, """on:
   pull_request_target:
