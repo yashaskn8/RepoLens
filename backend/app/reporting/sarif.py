@@ -11,7 +11,7 @@ import re
 from typing import Any, Iterable
 from urllib.parse import quote
 
-from app.security.redaction import redact_secrets
+from app.security.redaction import contains_secrets, redact_secrets
 
 SARIF_SCHEMA = "https://json.schemastore.org/sarif-2.1.0.json"
 
@@ -22,6 +22,9 @@ def _field(obj: Any, name: str, default: Any = None) -> Any:
 
 def _token(value: Any, fallback: str) -> str:
     raw = str(value or "").strip()
+    # Opaque rule IDs preserve stable identity without exporting credential-shaped labels.
+    if contains_secrets(raw):
+        return f"{fallback}-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:12]}"
     safe = re.sub(r"[^A-Za-z0-9._-]+", "-", raw).strip("-._")
     if not safe:
         return fallback
@@ -32,7 +35,7 @@ def _token(value: Any, fallback: str) -> str:
 
 def _safe_path(path: Any) -> str | None:
     """Reject ambiguous or absolute repository locations rather than correcting them."""
-    if not isinstance(path, str) or not path or path.startswith("/") or "\\" in path or ":" in path:
+    if not isinstance(path, str) or not path or path.startswith("/") or "\\" in path or ":" in path or contains_secrets(path):
         return None
     if any(part in ("", ".", "..") for part in path.split("/")):
         return None
