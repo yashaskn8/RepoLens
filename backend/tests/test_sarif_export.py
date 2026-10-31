@@ -255,6 +255,52 @@ def test_sarif_redacts_embedded_github_app_tokens_across_export_fields(client, d
     assert uris == {"src/safe-0.py", "src/safe-1.py", "src/safe-2.py", "src/ordinary.py"}
 
 
+def test_sarif_redacts_non_github_secrets_embedded_after_underscores(client, db_session):
+    # Canonical word-boundary redaction misses these known credential families
+    # when an underscore directly precedes the token or credential field.
+    scan = _scan(db_session)
+    tokens = [
+        "sk-" + "S" * 20,
+        "sk-or-v1-" + "V" * 20,
+        "hf_" + "H" * 20,
+        "gsk_" + "G" * 20,
+        "nvapi-" + "N" * 20,
+        "cfut_" + "F" * 20,
+        "cohere_" + "C" * 20,
+        "AIza" + "A" * 24,
+        "eyJ" + "A" * 12 + ".eyJ" + "B" * 12 + "." + "C" * 12,
+        "Bearer " + "D" * 20,
+        'api_key="syntheticvalue123"',
+    ]
+    for index, token in enumerate(tokens):
+        finding = _finding(
+            db_session, scan,
+            title=f"Finding prefix_{token}",
+            description=f"Detector prefix_{token}",
+            path=f"src/safe-{index}.py",
+        )
+        finding.source_tool = f"tool_{token}"
+        finding.detector_id = f"rule_{token}"
+        _finding(db_session, scan, path=f"src/prefix_{token}/issue.py")
+    _finding(db_session, scan, path="src/ordinary.py")
+    db_session.flush()
+
+    response = client.get(f"/api/v1/scans/{scan.id}/report/sarif")
+    assert response.status_code == 200, response.text
+    assert all(token not in response.text for token in tokens)
+    results = response.json()["runs"][0]["results"]
+    assert len(results) == len(tokens) + 1
+    assert sum("REDACTED" in result["ruleId"] for result in results) == len(tokens)
+    assert sum("REDACTED" in result["message"]["text"] for result in results) == len(tokens)
+    uris = {
+        location["physicalLocation"]["artifactLocation"]["uri"]
+        for result in results for location in result["locations"]
+    }
+    assert uris == {"src/ordinary.py"} | {
+        f"src/safe-{index}.py" for index in range(len(tokens))
+    }
+
+
 def test_sarif_omits_secret_bearing_paths_without_leaking_credentials(client, db_session):
     scan = _scan(db_session)
     tokens = ["ghp_" + "Z" * 36, "sk-" + "D" * 20]
