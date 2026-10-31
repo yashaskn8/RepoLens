@@ -201,6 +201,50 @@ jobs:
     ]
 
 
+@pytest.mark.parametrize("uses_key", ["'uses'", '"uses"'])
+def test_quoted_step_uses_key_still_flags_mutable_action(tmp_path, uses_key):
+    _workflow(tmp_path, (
+        "on: push\njobs:\n  build:\n    steps:\n"
+        f"      - {uses_key}: example/action@v1\n"
+    ))
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert _rules(result) == [("github-actions.mutable-action-reference", 5)]
+
+
+@pytest.mark.parametrize("uses_key", ["'uses'", '"uses"'])
+def test_quoted_reusable_job_uses_key_still_flags_mutable_reference(tmp_path, uses_key):
+    _workflow(tmp_path, (
+        "on: push\njobs:\n  reusable:\n"
+        f"    {uses_key}: example/repo/.github/workflows/ci.yml@v1\n"
+    ))
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert _rules(result) == [("github-actions.mutable-action-reference", 4)]
+
+
+def test_quoted_uses_key_in_environment_is_not_an_action(tmp_path):
+    _workflow(tmp_path, (
+        "on: push\nenv:\n  'uses': example/data@v1\n"
+        "jobs:\n  build:\n    steps:\n"
+        "      - uses: actions/checkout@" + "a" * 40 + "\n"
+    ))
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert result.findings == []
+
+
+def test_quoted_checkout_uses_preserves_privileged_head_ref_detection(tmp_path):
+    _workflow(tmp_path, (
+        "on:\n  pull_request_target:\njobs:\n  review:\n    steps:\n"
+        '      - "uses": actions/checkout@' + "a" * 40
+        + "\n        with:\n          ref: ${{ github.event.pull_request.head.sha }}\n"
+    ))
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert _rules(result) == [("github-actions.privileged-untrusted-checkout", 8)]
+
+
 def test_privileged_pr_head_checkout_is_marked_contextual(tmp_path):
     _workflow(tmp_path, """on:
   pull_request_target:
