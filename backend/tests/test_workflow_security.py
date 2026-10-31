@@ -213,3 +213,89 @@ def test_repository_scripts_are_never_executed(tmp_path):
 
 def test_missing_root_is_incomplete(tmp_path):
     assert analyze_workflow_repository(str(tmp_path / "nonexistent")).status is ToolStatus.INVALID_OUTPUT
+
+
+def test_pr_head_ref_in_another_step_does_not_trigger_checkout_finding(tmp_path):
+    _workflow(tmp_path, """on:
+  pull_request_target:
+jobs:
+  review:
+    steps:
+      - uses: actions/checkout@""" + "a" * 40 + """
+      - name: Configure something else
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+""")
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert "github-actions.privileged-untrusted-checkout" not in [finding.detector_id for finding in result.findings]
+
+
+def test_non_event_pr_target_key_is_not_treated_as_trigger(tmp_path):
+    _workflow(tmp_path, """on: push
+jobs:
+  pull_request_target:
+    steps:
+      - uses: actions/checkout@""" + "a" * 40 + """
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+""")
+    result = analyze_workflow_repository(str(tmp_path))
+    assert "github-actions.privileged-untrusted-checkout" not in [finding.detector_id for finding in result.findings]
+
+
+def test_inline_event_list_can_trigger_checkout_warning(tmp_path):
+    _workflow(tmp_path, """on: [push, pull_request_target]
+jobs:
+  review:
+    steps:
+      - uses: actions/checkout@""" + "a" * 40 + """
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+""")
+    result = analyze_workflow_repository(str(tmp_path))
+    assert ("github-actions.privileged-untrusted-checkout", 6) in _rules(result)
+
+
+@pytest.mark.asyncio
+async def test_findings_flow_through_existing_evidence_store(tmp_path, monkeypatch):
+    from app.analysis import service as intelligence_module
+    from app.analysis.schemas import ScannerResult
+    from app.ingestion.schemas import RepositoryManifest
+
+    _workflow(tmp_path, """on: push
+permissions: write-all
+jobs:
+  review:
+    steps:
+      - uses: actions/checkout@v4
+""")
+    manifest = RepositoryManifest(
+        repository_url="https://github.com/example/example",
+        commit_hash="a" * 40,
+    )
+    monkeypatch.setattr(intelligence_module, "build_manifest", lambda **kwargs: manifest)
+    monkeypatch.setattr(
+        intelligence_module, "analyze_core_repository",
+        lambda *args: ScannerResult(tool="repolens-core", status=ToolStatus.COMPLETED),
+    )
+    monkeypatch.setattr(
+        intelligence_module, "analyze_supply_chain_repository",
+        lambda *args: ScannerResult(tool="chainbrain", status=ToolStatus.COMPLETED),
+    )
+
+    class FakeScanner:
+        tool_name = "fake"
+        async def scan(self, _repo_dir):
+            return ScannerResult(tool=self.tool_name, status=ToolStatus.COMPLETED)
+
+    result = await intelligence_module.RepositoryIntelligenceService(
+        scanner_adapters=[FakeScanner()]
+    ).analyze_repository(
+        repo_dir=str(tmp_path),
+        repository_url=manifest.repository_url,
+        commit_hash=manifest.commit_hash,
+    )
+    assert result.scanner_results["repolens-workflow-security"].status is ToolStatus.COMPLETED
+    assert len(result.get_findings(tool="repolens-workflow-security")) == 2
+    assert result.get_summary()["tool_counts"]["repolens-workflow-security"] == 2
