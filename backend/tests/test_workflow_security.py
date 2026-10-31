@@ -84,6 +84,17 @@ jobs:
     assert result.findings[0].confidence == "MEDIUM"
 
 
+def test_named_checkout_step_detects_privileged_pr_head_ref(tmp_path):
+    _workflow(tmp_path, (
+        "on:\n  pull_request_target:\njobs:\n  review:\n    steps:\n"
+        "      - name: Fetch PR head\n        uses: actions/checkout@"
+        + "a" * 40
+        + "\n        with:\n          ref: ${{ github.event.pull_request.head.sha }}\n"
+    ))
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert _rules(result) == [("github-actions.privileged-untrusted-checkout", 9)]
+
 @pytest.mark.parametrize(
     "event_declaration",
     [
