@@ -22,6 +22,17 @@ _HASH_SUFFIX = re.compile(r"-[0-9a-f]{12}$")
 # Canonical redaction uses word boundaries; underscores can hide embedded GitHub tokens,
 # including GitHub App and OAuth tokens.
 _EMBEDDED_GITHUB_TOKEN = re.compile(r"(?:ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|(?:ghs_|ghu_|ghr_)[A-Za-z0-9_.-]{10,})")
+# Canonical \b boundaries miss other secret formats when preceded by an underscore.
+# Match the same known credential families at underscore/non-alphanumeric boundaries.
+_EMBEDDED_NON_GITHUB_SECRET = re.compile(
+    r"(?<![A-Za-z0-9])(?:"
+    r"(?:sk-or-v1-|sk-|gsk_|hf_|nvapi-|cfut_|cohere_)[A-Za-z0-9_-]{16,}"
+    r"|AIza[A-Za-z0-9_-]{20,}"
+    r"|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
+    r"|(?i:bearer\s+)[A-Za-z0-9_.-]{10,}"
+    r"|(?i:api[_-]?key|secret|password|auth[_-]?token)\s*[:=]\s*['\"][^\s'\"]{6,}['\"]"
+    r")"
+)
 _LEVELS = {"CRITICAL": "error", "HIGH": "error", "MEDIUM": "warning", "LOW": "note", "INFO": "note"}
 
 
@@ -31,7 +42,8 @@ class SarifExportLimitExceeded(ValueError):
 
 def _redact_export_text(value: str) -> str:
     """Cover GitHub tokens embedded in identifiers and prose after underscores."""
-    return _EMBEDDED_GITHUB_TOKEN.sub("[REDACTED_GITHUB_TOKEN]", redact_secrets(value))
+    redacted = _EMBEDDED_GITHUB_TOKEN.sub("[REDACTED_GITHUB_TOKEN]", redact_secrets(value))
+    return _EMBEDDED_NON_GITHUB_SECRET.sub("[REDACTED_API_TOKEN]", redacted)
 
 
 def _safe_path(raw: str) -> str | None:
@@ -44,7 +56,11 @@ def _safe_path(raw: str) -> str | None:
         return None
     # A credential in a path would otherwise survive URI encoding and leak in SARIF.
     # Do not redact paths in place: that would point consumers at a fictitious file.
-    if contains_secrets(raw) or _EMBEDDED_GITHUB_TOKEN.search(raw):
+    if (
+        contains_secrets(raw)
+        or _EMBEDDED_GITHUB_TOKEN.search(raw)
+        or _EMBEDDED_NON_GITHUB_SECRET.search(raw)
+    ):
         return None
     return quote(raw, safe="/-._~")
 
