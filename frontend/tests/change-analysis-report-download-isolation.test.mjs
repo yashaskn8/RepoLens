@@ -38,7 +38,7 @@ function fixture() {
     'activeAnalysis', 'analysisGenerationRef', 'downloadPendingRef', 'downloadAbortRef',
     'downloadChangeAnalysisMarkdown', 'setIsDownloading', 'setDownloadError',
     'Blob', 'URL', 'document', 'setTimeout', 'clearTimeout', 'AbortController',
-    handlerSource + '\\nreturn handleDownloadMarkdown;',
+    handlerSource + '\nreturn handleDownloadMarkdown;',
   )(
     { id: 'analysis-A', status: 'COMPLETED' }, generation, lock, abort,
     () => pending.promise, () => {}, () => {},
@@ -70,5 +70,5 @@ test('current analysis can still download its report', async () => {
 });
 
 test('workspace unmount invalidates pending generation-guarded callbacks and aborts download', () => {
-  assert.match(source, /useEffect\\(\\(\\) => \\(\\) => \\{[\\s\\S]*analysisGenerationRef\\.current \\+= 1;[\\s\\S]*downloadAbortRef\\.current\\?\\.abort\\(\\);[\\s\\S]*\\}, \\[\\]\\)/);
+  assert.match(source, /useEffect\(\(\) => \(\) => \{[\s\S]*analysisGenerationRef\.current \+= 1;[\s\S]*downloadAbortRef\.current\?\.abort\(\);[\s\S]*\}, \[\]\)/);
 });
