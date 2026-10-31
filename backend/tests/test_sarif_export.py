@@ -82,6 +82,7 @@ def test_export_only_grounded_open_findings_and_redacts(client, db_session):
     assert result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == "src/my%20file.py"
     assert result["locations"][0]["physicalLocation"]["region"]["startLine"] == 7
     assert len(result["partialFingerprints"]["repolens/v1"]) == 64
+    assert result["partialFingerprints"]["primaryLocationLineHash"] == result["partialFingerprints"]["repolens/v1"]
     assert "abcdefghijklmnopqrstuvwxyz" not in response.text
     assert "unsafe(value)" not in response.text
     assert response.text == client.get(f"/api/v1/scans/{scan.id}/report/sarif").text
