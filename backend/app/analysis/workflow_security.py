@@ -220,6 +220,7 @@ def _inspect_source(path: str, source: str) -> list[StaticFinding]:
                 "Pin remote GitHub Actions to their full 40-character commit SHA and container images to a sha256 digest.",
             ))
 
+    return findings
 
 def analyze_workflow_repository(repo_dir: str) -> ScannerResult:
     """Return evidence-backed findings or a truthful incomplete-coverage status."""
