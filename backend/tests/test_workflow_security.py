@@ -569,6 +569,34 @@ jobs:
     assert ("github-actions.privileged-untrusted-checkout", 7) in _rules(result)
 
 
+
+@pytest.mark.parametrize(
+    "event_declaration, expected",
+    [
+        ("on: {push: {branches: [pull_request_target]}}", False),
+        ("on: {push: {branches: [pull_request_target]}, pull_request_target: {}}", True),
+        ("on: {'pull_request_target': {}, push: {}}", True),
+        ('on: {"pull_request_target": {}, push: {}}', True),
+        ("on: [push, pull_request_target]", True),
+        ("on: 'unrelated pull_request_target text'", False),
+    ],
+)
+def test_inline_events_distinguish_direct_triggers_from_nested_values(
+    tmp_path, event_declaration, expected,
+):
+    _workflow(tmp_path, (
+        event_declaration
+        + "\njobs:\n  review:\n    steps:\n"
+        + "      - uses: actions/checkout@" + "a" * 40
+        + "\n        with:\n          ref: ${{ github.event.pull_request.head.sha }}\n"
+    ))
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert ("github-actions.privileged-untrusted-checkout" in [
+        finding.detector_id for finding in result.findings
+    ]) is expected
+
+
 @pytest.mark.asyncio
 async def test_findings_flow_through_existing_evidence_store(tmp_path, monkeypatch):
     from app.analysis import service as intelligence_module
