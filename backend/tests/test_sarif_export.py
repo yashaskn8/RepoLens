@@ -314,3 +314,36 @@ def test_sarif_omits_secret_bearing_paths_without_leaking_credentials(client, db
     results = response.json()["runs"][0]["results"]
     assert len(results) == 1
     assert results[0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == "src/safe.py"
+
+
+
+def test_sarif_redacts_structured_secrets_concatenated_to_identifier_text(client, db_session):
+    # Word-boundary detection misses a token directly following a letter.
+    # No repository source is executed; these credentials are synthetic.
+    scan = _scan(db_session)
+    tokens = ["sk-" + "S" * 20, "hf_" + "H" * 20]
+    for index, token in enumerate(tokens):
+        finding = _finding(
+            db_session, scan,
+            title=f"Finding prefix{token}",
+            description=f"Detector prefix{token}",
+            path=f"src/safe-{index}.py",
+        )
+        finding.source_tool = f"toolprefix{token}"
+        finding.detector_id = f"ruleprefix{token}"
+        _finding(db_session, scan, path=f"src/prefix{token}/issue.py")
+    _finding(db_session, scan, path="src/ordinary.py")
+    db_session.flush()
+
+    response = client.get(f"/api/v1/scans/{scan.id}/report/sarif")
+    assert response.status_code == 200, response.text
+    assert all(token not in response.text for token in tokens)
+    results = response.json()["runs"][0]["results"]
+    assert len(results) == len(tokens) + 1
+    assert sum("REDACTED" in result["ruleId"] for result in results) == len(tokens)
+    assert sum("REDACTED" in result["message"]["text"] for result in results) == len(tokens)
+    uris = {
+        location["physicalLocation"]["artifactLocation"]["uri"]
+        for result in results for location in result["locations"]
+    }
+    assert uris == {"src/ordinary.py", "src/safe-0.py", "src/safe-1.py"}
