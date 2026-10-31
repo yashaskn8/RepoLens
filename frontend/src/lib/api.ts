@@ -360,6 +360,21 @@ export async function fetchReport(reportId: string, signal?: AbortSignal): Promi
   return response.json();
 }
 
+export async function downloadScanSarif(scanId: string): Promise<Blob> {
+  const response = await apiFetch(
+    `/api/v1/scans/${encodeURIComponent(scanId)}/sarif`,
+    { cache: 'no-store' },
+  );
+  if (!response.ok) {
+    throw await apiErrorFromResponse(response, 'SARIF download failed');
+  }
+  const contentType = response.headers.get('content-type')?.toLowerCase() || '';
+  if (!contentType.startsWith('application/sarif+json')) {
+    throw new Error('The server returned an unexpected SARIF file type.');
+  }
+  return response.blob();
+}
+
 export async function downloadReportPdf(reportId: string): Promise<Blob> {
   const response = await apiFetch(`/api/v1/reports/${reportId}/download`, { cache: 'no-store' });
   if (!response.ok) {
