@@ -26,10 +26,11 @@ _SHA256 = re.compile(r"sha256:[0-9a-fA-F]{64}\Z")
 _USES = re.compile(r"""^\s*(?:-\s*)?(?:uses|'uses'|"uses")\s*:\s*(.*?)\s*$""")
 _BLOCK_START = re.compile(r"^(?P<indent>\s*)(?:-\s*)?[^:#\s][^:]*:\s*[|>][-+0-9]*\s*(?:#.*)?$")
 _WRITE_ALL = re.compile(r"""^\s*(?:permissions|'permissions'|"permissions")\s*:\s*['"]?write-all['"]?\s*(?:#.*)?$""")
-_HEAD_SHA = re.compile(r"""^\s*(?:ref|'ref'|"ref")\s*:\s*['"]?\$\{\{\s*github\.event\.pull_request\.head\.(?:sha|ref)\s*\}\}""")
+_HEAD_SHA = re.compile(r"""^\s*(?:ref|'ref'|"ref")\s*:\s*(['"]?)\$\{\{\s*github\.event\.pull_request\.head\.(?:sha|ref)\s*\}\}\1\s*$""")
 _HEAD_REPO = re.compile(
-    r"""^\s*(?:repository|'repository'|"repository")\s*:\s*['"]?\$\{\{\s*github\.event\.pull_request\.head\.repo\.full_name\s*\}\}"""
+    r"""^\s*(?:repository|'repository'|"repository")\s*:\s*(['"]?)\$\{\{\s*github\.event\.pull_request\.head\.repo\.full_name\s*\}\}\1\s*$"""
 )
+# Match complete checkout inputs, not expressions followed by unrelated suffixes.
 # GitHub documents refs/pull/<number>/{head,merge} as fork-checkout risks.
 _HEAD_PR_REF = re.compile(
     r"""^\s*(?:ref|'ref'|"ref")\s*:\s*['"]?refs/pull/\$\{\{\s*github\.event\.pull_request\.number\s*\}\}/(?:head|merge)['"]?\s*$"""
