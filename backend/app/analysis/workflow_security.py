@@ -30,6 +30,10 @@ _HEAD_SHA = re.compile(r"""^\s*(?:ref|'ref'|"ref")\s*:\s*['"]?\$\{\{\s*github\.e
 _HEAD_REPO = re.compile(
     r"""^\s*(?:repository|'repository'|"repository")\s*:\s*['"]?\$\{\{\s*github\.event\.pull_request\.head\.repo\.full_name\s*\}\}"""
 )
+# GitHub documents refs/pull/<number>/{head,merge} as fork-checkout risks.
+_HEAD_PR_REF = re.compile(
+    r"""^\s*(?:ref|'ref'|"ref")\s*:\s*['"]?refs/pull/\$\{\{\s*github\.event\.pull_request\.number\s*\}\}/(?:head|merge)['"]?\s*$"""
+)
 
 
 class WorkflowInspectionIncomplete(Exception):
@@ -242,7 +246,7 @@ def _inspect_source(path: str, source: str) -> list[StaticFinding]:
             pull_request_target
             and checkout_step_indent is not None
             and indentation > checkout_step_indent
-            and (_HEAD_SHA.search(line) or _HEAD_REPO.search(line))
+            and (_HEAD_SHA.search(line) or _HEAD_REPO.search(line) or _HEAD_PR_REF.search(line))
             # Only direct `with.ref` or `with.repository` checkout inputs
             # count; same-named env keys do not control checkout.
             and mapping_stack
