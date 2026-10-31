@@ -14,6 +14,7 @@ from app.api.routes import (
     reports,
     review_publication,
     scans,
+    sarif,
 )
 
 api_router = APIRouter()
@@ -22,6 +23,7 @@ api_router = APIRouter()
 api_router.include_router(health.router)
 api_router.include_router(auth.router)
 api_router.include_router(scans.router)
+api_router.include_router(sarif.router)
 api_router.include_router(jobs.router)
 api_router.include_router(reports.router)
 api_router.include_router(findings.router)
