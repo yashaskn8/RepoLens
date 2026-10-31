@@ -242,8 +242,8 @@ def _inspect_source(path: str, source: str) -> list[StaticFinding]:
             and checkout_step_indent is not None
             and indentation > checkout_step_indent
             and (_HEAD_SHA.search(line) or _HEAD_REPO.search(line))
-            # Only a direct `with.ref` input controls actions/checkout.
-            # An env.ref key in the same step is not a checkout ref.
+            # Only direct `with.ref` or `with.repository` checkout inputs
+            # count; same-named env keys do not control checkout.
             and mapping_stack
             and mapping_stack[-1][1] == "with"
             and not any(key == "env" for _, key in mapping_stack)
