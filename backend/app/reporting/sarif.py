@@ -32,7 +32,7 @@ def _token(value: Any, fallback: str) -> str:
 
 def _safe_path(path: Any) -> str | None:
     """Reject ambiguous or absolute repository locations rather than correcting them."""
-    if not isinstance(path, str) or not path or path.startswith("/") or "\\" in path:
+    if not isinstance(path, str) or not path or path.startswith("/") or "\\" in path or ":" in path:
         return None
     if any(part in ("", ".", "..") for part in path.split("/")):
         return None
