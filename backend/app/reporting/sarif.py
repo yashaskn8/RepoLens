@@ -30,7 +30,7 @@ _EMBEDDED_NON_GITHUB_SECRET = re.compile(
     r"|AIza[A-Za-z0-9_-]{20,}"
     r"|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
     # HTTP Basic authorization contains base64-encoded username/password material.
-    r"|(?i:basic\s+)[A-Za-z0-9._~+/-]{8,}=*"
+    r"|(?i:authorization\s*[:=]\s*basic\s+)[A-Za-z0-9+/]{8,}={0,2}"
     r"|(?i:bearer\s+)[A-Za-z0-9_.~+/-]{10,}=*"
     r"|(?i:aws[_-]?secret[_-]?access[_-]?key|api[_-]?key|secret[_-]?key|private[_-]?key|token|credential|passwd|secret|password|auth[_-]?token|access[_-]?token|refresh[_-]?token|authorization)\s*[:=]\s*(?:"
     r'"(?:\\[^\r\n]|[^"\\\r\n]){6,}"'
