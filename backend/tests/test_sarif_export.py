@@ -347,3 +347,40 @@ def test_sarif_redacts_structured_secrets_concatenated_to_identifier_text(client
         for result in results for location in result["locations"]
     }
     assert uris == {"src/ordinary.py", "src/safe-0.py", "src/safe-1.py"}
+
+def test_sarif_redacts_unquoted_credential_assignments(client, db_session):
+    # Unquoted credential values can be embedded after an identifier underscore.
+    # These synthetic assignments must not escape into SARIF text or artifact URIs.
+    scan = _scan(db_session)
+    assignments = [
+        "api_key=syntheticvalue123",
+        "password=syntheticvalue123",
+        "auth_token=syntheticvalue123",
+    ]
+    for index, assignment in enumerate(assignments):
+        finding = _finding(
+            db_session, scan,
+            title=f"Finding prefix_{assignment}",
+            description=f"Detector prefix_{assignment}",
+            path=f"src/safe-{index}.py",
+        )
+        finding.source_tool = f"tool_{assignment}"
+        finding.detector_id = f"rule_{assignment}"
+        _finding(db_session, scan, path=f"src/prefix_{assignment}/issue.py")
+    _finding(db_session, scan, path="src/ordinary.py")
+    db_session.flush()
+
+    response = client.get(f"/api/v1/scans/{scan.id}/report/sarif")
+    assert response.status_code == 200, response.text
+    assert all(assignment not in response.text for assignment in assignments)
+    results = response.json()["runs"][0]["results"]
+    assert len(results) == len(assignments) + 1
+    assert sum("REDACTED" in result["ruleId"] for result in results) == len(assignments)
+    assert sum("REDACTED" in result["message"]["text"] for result in results) == len(assignments)
+    uris = {
+        location["physicalLocation"]["artifactLocation"]["uri"]
+        for result in results for location in result["locations"]
+    }
+    assert uris == {"src/ordinary.py"} | {
+        f"src/safe-{index}.py" for index in range(len(assignments))
+    }
