@@ -32,8 +32,9 @@ _HEAD_REPO = re.compile(
 )
 # Match complete checkout inputs, not expressions followed by unrelated suffixes.
 # GitHub documents refs/pull/<number>/{head,merge} as fork-checkout risks.
+# Detect both numeric PR refs and expressions, with matching optional quotes.
 _HEAD_PR_REF = re.compile(
-    r"""^\s*(?:ref|'ref'|"ref")\s*:\s*['"]?refs/pull/\$\{\{\s*github\.event\.pull_request\.number\s*\}\}/(?:head|merge)['"]?\s*$"""
+    r"""^\s*(?:ref|'ref'|"ref")\s*:\s*(['"]?)refs/pull/(?:[0-9]+|\$\{\{\s*github\.event\.pull_request\.number\s*\}\})/(?:head|merge)\1\s*$"""
 )
 
 
