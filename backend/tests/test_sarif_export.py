@@ -370,6 +370,8 @@ def test_sarif_redacts_unquoted_credential_assignments(client, db_session):
         "aws-secret-access-key=syntheticvalue123",
         'password="synthetic phrase 123"',
         "api_key='synthetic phrase 123'",
+        'password:"synthetic phrase colon"',
+        "api_key:'synthetic phrase colon'",
         'password="synthetic\\"phrasevalue"',
         "api_key='synthetic\\'secretpart'",
     ]
@@ -390,6 +392,7 @@ def test_sarif_redacts_unquoted_credential_assignments(client, db_session):
     assert response.status_code == 200, response.text
     assert all(assignment not in response.text for assignment in assignments)
     # A partial quoted match must not expose the suffix after an escaped quote.
+    assert "synthetic phrase colon" not in response.text
     assert "phrasevalue" not in response.text
     assert "secretpart" not in response.text
     results = response.json()["runs"][0]["results"]
