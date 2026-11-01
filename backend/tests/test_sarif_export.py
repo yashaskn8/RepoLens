@@ -370,6 +370,8 @@ def test_sarif_redacts_unquoted_credential_assignments(client, db_session):
         "aws-secret-access-key=syntheticvalue123",
         'password="synthetic phrase 123"',
         "api_key='synthetic phrase 123'",
+        'password="synthetic\\"phrasevalue"',
+        "api_key='synthetic\\'secretpart'",
     ]
     for index, assignment in enumerate(assignments):
         finding = _finding(
@@ -387,6 +389,9 @@ def test_sarif_redacts_unquoted_credential_assignments(client, db_session):
     response = client.get(f"/api/v1/scans/{scan.id}/report/sarif")
     assert response.status_code == 200, response.text
     assert all(assignment not in response.text for assignment in assignments)
+    # A partial quoted match must not expose the suffix after an escaped quote.
+    assert "phrasevalue" not in response.text
+    assert "secretpart" not in response.text
     results = response.json()["runs"][0]["results"]
     assert len(results) == len(assignments) + 1
     assert sum("REDACTED" in result["ruleId"] for result in results) == len(assignments)
