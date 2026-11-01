@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 from app.analysis.adapters import OSVScannerAdapter, SemgrepAdapter, TrivyAdapter
 from app.analysis.base import BaseScannerAdapter
 from app.analysis.core import analyze_core_repository
+from app.analysis.workflow_security import analyze_workflow_repository
 from app.analysis.chainbrain import analyze_supply_chain_repository
 from app.analysis.schemas import ScannerResult, ToolStatus
 from app.analysis.store import EvidenceStore
@@ -90,6 +91,18 @@ class RepositoryIntelligenceService:
                 error_message="RepoLens core deterministic analysis failed.",
             )
         scanner_results[core_result.tool] = core_result
+
+        # Passive GitHub Actions workflow checks use bounded read-only source inspection.
+        # An incomplete workflow audit is never reported as a clean result.
+        try:
+            workflow_result = await asyncio.to_thread(analyze_workflow_repository, repo_dir)
+        except Exception:
+            logger.error("RepoLens workflow security inspection failed")
+            workflow_result = ScannerResult(
+                tool="repolens-workflow-security", status=ToolStatus.FAILED,
+                error_message="Workflow security inspection failed.",
+            )
+        scanner_results[workflow_result.tool] = workflow_result
 
         # ChainBrain is a RepoLens-owned, no-network package risk analyzer.
         # Keep its status separate: incomplete metadata is INVALID_OUTPUT,

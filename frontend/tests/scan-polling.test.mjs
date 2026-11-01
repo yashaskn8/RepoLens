@@ -53,7 +53,7 @@ test('logout and account changes clear the prior tenant scan before loading hist
   const effect = section.match(/useEffect\(\(\) => \{([\s\S]*?)\}, \[accountId, isAuthLoading\]\);/);
   assert.ok(effect, 'auth-scoped scan effect must track account identity');
   const runEffect = new Function(
-    'isAuthLoading', 'accountId', 'scanRequestGeneration', 'setActiveScan',
+    'isAuthLoading', 'accountId', 'scanRequestGeneration', 'scanSubmissionPendingRef', 'setActiveScan',
     'setRecentScans', 'setError', 'setIsSubmitting', 'listScans', effect[1],
   );
 
@@ -63,8 +63,9 @@ test('logout and account changes clear the prior tenant scan before loading hist
     let error = 'previous tenant error';
     let isSubmitting = true;
     const generation = { current: 7 };
+    const submissionGuard = { current: true };
     runEffect(
-      false, nextAccount, generation,
+      false, nextAccount, generation, submissionGuard,
       (value) => { activeScan = value; },
       (value) => { recentScans = value; },
       (value) => { error = value; },
@@ -76,6 +77,7 @@ test('logout and account changes clear the prior tenant scan before loading hist
     assert.equal(error, null);
     assert.equal(isSubmitting, false);
     assert.equal(generation.current, 8);
+    assert.equal(submissionGuard.current, false);
   }
 });
 
@@ -84,5 +86,5 @@ test('late scan submissions cannot restore results after account change', () => 
   const submit = page.slice(page.indexOf('const handleStartScan'), page.indexOf('const isScanning'));
   assert.match(submit, /const generation = \+\+scanRequestGeneration\.current/);
   assert.match(submit, /if \(generation !== scanRequestGeneration\.current\) return;/);
-  assert.match(submit, /if \(generation === scanRequestGeneration\.current\) setIsSubmitting\(false\);/);
+  assert.match(submit, /if \(generation === scanRequestGeneration\.current\) \{\s*scanSubmissionPendingRef\.current = scanStillRunning;\s*setIsSubmitting\(false\);\s*\}/);
 });
