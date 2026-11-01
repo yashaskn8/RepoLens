@@ -426,6 +426,10 @@ def test_sarif_redacts_basic_authorization_credentials(client, db_session):
         f"Authorization: Basic {credential}",
         f"authorization=Basic {credential}",
         f"AUTHORIZATION: BASIC {credential}",
+        # Even very short base64 credentials are valid HTTP Basic credentials.
+        "Authorization: Basic YTpi",
+        "authorization=Basic dTo=",
+        "Authorization: Basic Og==",
     ]
     for index, assignment in enumerate(assignments):
         finding = _finding(
@@ -440,6 +444,7 @@ def test_sarif_redacts_basic_authorization_credentials(client, db_session):
     response = client.get(f"/api/v1/scans/{scan.id}/report/sarif")
     assert response.status_code == 200, response.text
     assert credential not in response.text
+    assert all(secret not in response.text for secret in ("YTpi", "dTo=", "Og=="))
     # Ordinary prose must not be mistaken for an HTTP Basic credential.
     assert sarif._redact_export_text("Basic information about scanning") == "Basic information about scanning"
     results = response.json()["runs"][0]["results"]
