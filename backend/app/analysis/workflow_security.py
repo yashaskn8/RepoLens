@@ -233,12 +233,6 @@ def _inspect_source(path: str, source: str) -> list[StaticFinding]:
             continue
         while mapping_stack and mapping_stack[-1][0] >= indentation:
             mapping_stack.pop()
-        mapping = re.match(
-            r"^\s*(?P<key>[A-Za-z_][\w.-]*|'[^']+'|\"[^\"]+\")\s*:\s*(?P<value>.*)$",
-            line,
-        )
-        if mapping and not mapping.group("value").strip():
-            mapping_stack.append((indentation, mapping.group("key").strip("'\"")))
         if checkout_step_indent is not None and indentation <= checkout_step_indent:
             checkout_step_indent = None
         if step_start_indent is not None and indentation <= step_start_indent:
@@ -248,6 +242,14 @@ def _inspect_source(path: str, source: str) -> list[StaticFinding]:
                 and mapping_stack[0] == (0, "jobs") and mapping_stack[2][1] == "steps"):
             step_start_indent = indentation
             pending_step_inputs.clear()
+        mapping = re.match(
+            r"^\s*(?:-\s+)?(?P<key>[A-Za-z_][\w.-]*|'[^']+'|\"[^\"]+\")\s*:\s*(?P<value>.*)$",
+            line,
+        )
+        if mapping and not mapping.group("value").strip():
+            # For '- with:' the mapping key's column is after the list marker.
+            # Sibling keys such as 'uses' must close this mapping.
+            mapping_stack.append((mapping.start("key"), mapping.group("key").strip("'\"")))
         if (
             pull_request_target
             and step_start_indent is not None
