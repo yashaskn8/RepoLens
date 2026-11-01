@@ -1,12 +1,13 @@
 """Authenticated report-resource creation, status, recovery, and PDF download."""
 
+import json
 import re
 from typing import BinaryIO, Iterator
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.api.dependencies import get_current_user, verify_csrf
 from app.api.idempotency import idempotency_identity
@@ -18,6 +19,8 @@ from app.execution.errors import IdempotencyConflict
 from app.execution.types import RequestBudget, ResourceProfile, WorkKind
 from app.governance.events import AuditLedger
 from app.models.report import ReportModel
+from app.models.finding import FindingModel
+from app.reporting.sarif import build_verified_sarif, SarifExportLimitExceeded, MAX_SARIF_FINDINGS
 from app.reporting.schemas import ReportResource, ReportStatus
 from app.schemas.auth import CurrentUser
 from app.services.authorization_service import get_owned_report_or_404, get_owned_scan_or_404
@@ -305,4 +308,60 @@ def download_report(
             "X-Content-Type-Options": "nosniff",
         },
         background=BackgroundTask(spool.close),
+    )
+
+
+@router.get("/scans/{scan_id}/report/sarif")
+def download_scan_sarif(
+    scan_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Download a bounded, evidence-verified SARIF 2.1.0 report for an owned scan.
+
+    No repository code executes. No source snippets or LLM-authored evidence are exported.
+    """
+    scan = get_owned_scan_or_404(db, scan_id, current_user)
+    if scan.status != "COMPLETED":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error_code": "SCAN_NOT_COMPLETED", "message": "SARIF requires a completed scan."},
+        )
+    findings = (
+        db.query(FindingModel)
+        .options(selectinload(FindingModel.evidences))
+        .filter(
+            FindingModel.scan_id == scan.id,
+            FindingModel.status == "OPEN",
+            FindingModel.verification_verdict == "CONFIRMED",
+        )
+        .order_by(FindingModel.id)
+        .limit(MAX_SARIF_FINDINGS + 1)
+        .all()
+    )
+    if len(findings) > MAX_SARIF_FINDINGS:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail={"error_code": "SARIF_LIMIT_EXCEEDED", "message": "Too many candidate findings for a complete export."},
+        )
+    try:
+        sarif = build_verified_sarif(scan=scan, findings=findings)
+    except SarifExportLimitExceeded as exc:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail={"error_code": "SARIF_LIMIT_EXCEEDED", "message": str(exc)},
+        ) from None
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error_code": "SCAN_COMMIT_UNAVAILABLE", "message": "Verified immutable scan commit is unavailable."},
+        ) from None
+    return Response(
+        content=json.dumps(sarif, sort_keys=True, separators=(",", ":")),
+        media_type="application/sarif+json",
+        headers={
+            "Content-Disposition": f'attachment; filename="repolens-scan-{scan.id}.sarif"',
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
     )

@@ -372,6 +372,19 @@ export async function downloadReportPdf(reportId: string): Promise<Blob> {
   return response.blob();
 }
 
+/** Download verified, open findings as a read-only SARIF 2.1.0 artifact. */
+export async function downloadScanSarif(scanId: string): Promise<Blob> {
+  const response = await apiFetch(`/api/v1/scans/${encodeURIComponent(scanId)}/report/sarif`, {
+    cache: 'no-store',
+  });
+  if (!response.ok) throw await apiErrorFromResponse(response, 'SARIF export failed');
+  const contentType = response.headers.get('content-type')?.toLowerCase() || '';
+  if (!contentType.startsWith('application/sarif+json')) {
+    throw new Error('The scan server returned an unexpected SARIF file type.');
+  }
+  return response.blob();
+}
+
 export async function fetchScanFindings(scanId: string): Promise<Finding[]> {
   // The server caps a page at 500. A single default request (100 findings)
   // silently discarded later verified results on large scans.
