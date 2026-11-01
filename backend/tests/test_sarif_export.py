@@ -403,3 +403,17 @@ def test_sarif_redacts_unquoted_credential_assignments(client, db_session):
     assert uris == {"src/ordinary.py"} | {
         f"src/safe-{index}.py" for index in range(len(assignments))
     }
+
+def test_sarif_escaped_quoted_assignments_redact_entire_value():
+    """Keep escaped quotes inside a quoted credential from exposing its suffix."""
+    assignments = (
+        'password="synthetic\\\"phrasevalue"',
+        "api_key='synthetic\\'secretpart'",
+    )
+    for assignment in assignments:
+        redacted = sarif._redact_export_text(f"prefix_{assignment} trailing-safe-text")
+        assert redacted == "prefix_[REDACTED_API_TOKEN] trailing-safe-text"
+        assert "synthetic" not in redacted
+        assert "phrasevalue" not in redacted
+        assert "secretpart" not in redacted
+
