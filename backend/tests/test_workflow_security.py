@@ -927,3 +927,44 @@ def test_step_leading_with_mapping_does_not_leak_across_steps(tmp_path):
         "      - uses: actions/checkout@" + "a" * 40 + "\n"
     ))
     assert _rules(analyze_workflow_repository(str(tmp_path))) == []
+
+
+@pytest.mark.parametrize("ref_kind", ["head", "merge"])
+def test_literal_pull_request_ref_in_privileged_checkout(tmp_path, ref_kind):
+    # A fixed refs/pull/<number> ref can still fetch untrusted PR code.
+    _workflow(tmp_path, (
+        "on: pull_request_target\njobs:\n  review:\n    steps:\n"
+        + "      - uses: actions/checkout@" + "a" * 40
+        + "\n        with:\n          ref: refs/pull/123/" + ref_kind + "\n"
+    ))
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert _rules(result) == [("github-actions.privileged-untrusted-checkout", 7)]
+    assert result.findings[0].confidence == "MEDIUM"
+
+
+def test_literal_pull_request_ref_with_suffix_is_not_exact(tmp_path):
+    _workflow(tmp_path, (
+        "on: pull_request_target\njobs:\n  review:\n    steps:\n"
+        + "      - uses: actions/checkout@" + "a" * 40
+        + "\n        with:\n          ref: refs/pull/123/head-suffix\n"
+    ))
+    assert _rules(analyze_workflow_repository(str(tmp_path))) == []
+
+
+def test_literal_pull_request_ref_in_env_is_not_checkout_input(tmp_path):
+    _workflow(tmp_path, (
+        "on: pull_request_target\njobs:\n  review:\n    steps:\n"
+        + "      - uses: actions/checkout@" + "a" * 40
+        + "\n        env:\n          ref: refs/pull/123/merge\n"
+    ))
+    assert _rules(analyze_workflow_repository(str(tmp_path))) == []
+
+
+def test_literal_pull_request_ref_without_privileged_trigger_is_not_flagged(tmp_path):
+    _workflow(tmp_path, (
+        "on: pull_request\njobs:\n  review:\n    steps:\n"
+        + "      - uses: actions/checkout@" + "a" * 40
+        + "\n        with:\n          ref: refs/pull/123/head\n"
+    ))
+    assert _rules(analyze_workflow_repository(str(tmp_path))) == []
