@@ -888,3 +888,42 @@ def test_with_before_uses_on_unprivileged_event_is_not_flagged(tmp_path):
         + "        uses: actions/checkout@" + "a" * 40 + "\n"
     ))
     assert _rules(analyze_workflow_repository(str(tmp_path))) == []
+
+@pytest.mark.parametrize(
+    ("checkout_input", "checkout_value"),
+    [
+        ("ref", "$" + "{{ github.event.pull_request.head.sha }}"),
+        ("repository", "$" + "{{ github.event.pull_request.head.repo.full_name }}"),
+    ],
+)
+def test_step_leading_with_mapping_detects_checkout_input(
+    tmp_path, checkout_input, checkout_value,
+):
+    # A valid step may start with '- with:' before its 'uses' sibling.
+    _workflow(tmp_path, (
+        "on: pull_request_target\njobs:\n  review:\n    steps:\n"
+        "      - with:\n          " + checkout_input + ": " + checkout_value
+        + "\n        uses: actions/checkout@" + "a" * 40 + "\n"
+    ))
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert _rules(result) == [("github-actions.privileged-untrusted-checkout", 6)]
+
+
+def test_step_leading_env_mapping_is_not_checkout_input(tmp_path):
+    _workflow(tmp_path, (
+        "on: pull_request_target\njobs:\n  review:\n    steps:\n"
+        "      - env:\n          ref: $" + "{{ github.event.pull_request.head.sha }}\n"
+        "        uses: actions/checkout@" + "a" * 40 + "\n"
+    ))
+    assert _rules(analyze_workflow_repository(str(tmp_path))) == []
+
+
+def test_step_leading_with_mapping_does_not_leak_across_steps(tmp_path):
+    _workflow(tmp_path, (
+        "on: pull_request_target\njobs:\n  review:\n    steps:\n"
+        "      - with:\n          ref: $" + "{{ github.event.pull_request.head.sha }}\n"
+        "        uses: example/action@" + "a" * 40 + "\n"
+        "      - uses: actions/checkout@" + "a" * 40 + "\n"
+    ))
+    assert _rules(analyze_workflow_repository(str(tmp_path))) == []
