@@ -425,7 +425,7 @@ def test_sarif_redacts_basic_authorization_credentials(client, db_session):
     assignments = [
         f"Authorization: Basic {credential}",
         f"authorization=Basic {credential}",
-        f"Basic {credential}",
+        f"AUTHORIZATION: BASIC {credential}",
     ]
     for index, assignment in enumerate(assignments):
         finding = _finding(
@@ -440,6 +440,8 @@ def test_sarif_redacts_basic_authorization_credentials(client, db_session):
     response = client.get(f"/api/v1/scans/{scan.id}/report/sarif")
     assert response.status_code == 200, response.text
     assert credential not in response.text
+    # Ordinary prose must not be mistaken for an HTTP Basic credential.
+    assert sarif._redact_export_text("Basic information about scanning") == "Basic information about scanning"
     results = response.json()["runs"][0]["results"]
     assert len(results) == len(assignments)
     assert all("REDACTED" in result["ruleId"] for result in results)
