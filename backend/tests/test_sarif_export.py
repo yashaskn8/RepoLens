@@ -368,6 +368,8 @@ def test_sarif_redacts_unquoted_credential_assignments(client, db_session):
         "passwd=syntheticvalue123",
         "AWS_SECRET_ACCESS_KEY=syntheticvalue123",
         "aws-secret-access-key=syntheticvalue123",
+        'password="synthetic phrase 123"',
+        "api_key='synthetic phrase 123'",
     ]
     for index, assignment in enumerate(assignments):
         finding = _finding(

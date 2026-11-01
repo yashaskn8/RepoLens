@@ -30,7 +30,7 @@ _EMBEDDED_NON_GITHUB_SECRET = re.compile(
     r"|AIza[A-Za-z0-9_-]{20,}"
     r"|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
     r"|(?i:bearer\s+)[A-Za-z0-9_.-]{10,}"
-    r"|(?i:aws[_-]?secret[_-]?access[_-]?key|api[_-]?key|secret[_-]?key|private[_-]?key|token|credential|passwd|secret|password|auth[_-]?token|access[_-]?token|refresh[_-]?token|authorization)\s*[:=]\s*(?:['\"][^\s'\"]{6,}['\"]|[^\s\x22\x27]{6,})"
+    r"|(?i:aws[_-]?secret[_-]?access[_-]?key|api[_-]?key|secret[_-]?key|private[_-]?key|token|credential|passwd|secret|password|auth[_-]?token|access[_-]?token|refresh[_-]?token|authorization)\s*[:=]\s*(?:['\"][^\r\n'\"]{6,}['\"]|[^\s\x22\x27]{6,})"
     r")"
 )
 _LEVELS = {"CRITICAL": "error", "HIGH": "error", "MEDIUM": "warning", "LOW": "note", "INFO": "note"}
