@@ -361,6 +361,11 @@ def test_sarif_redacts_unquoted_credential_assignments(client, db_session):
         "authorization=syntheticvalue123",
         "password=p@ssword!123",
         "api_key=@synthetic!value",
+        "token=syntheticvalue123",
+        "secret_key=syntheticvalue123",
+        "private_key=syntheticvalue123",
+        "credential=syntheticvalue123",
+        "passwd=syntheticvalue123",
     ]
     for index, assignment in enumerate(assignments):
         finding = _finding(
