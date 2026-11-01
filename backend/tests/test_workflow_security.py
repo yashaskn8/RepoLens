@@ -968,3 +968,40 @@ def test_literal_pull_request_ref_without_privileged_trigger_is_not_flagged(tmp_
         + "\n        with:\n          ref: refs/pull/123/head\n"
     ))
     assert _rules(analyze_workflow_repository(str(tmp_path))) == []
+
+@pytest.mark.parametrize("style", ["|", ">"])
+def test_multiline_step_name_does_not_hide_mutable_action(tmp_path, style):
+    # A block scalar step name must not swallow a sibling 'uses' declaration.
+    _workflow(tmp_path, (
+        "jobs:\n  review:\n    steps:\n"
+        "      - name: " + style + "\n"
+        "          Review action\n"
+        "        uses: example/action@v1\n"
+    ))
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert _rules(result) == [("github-actions.mutable-action-reference", 6)]
+
+
+def test_multiline_step_name_does_not_hide_privileged_checkout(tmp_path):
+    _workflow(tmp_path, (
+        "on: pull_request_target\njobs:\n  review:\n    steps:\n"
+        "      - name: |\n          Review checkout\n"
+        + "        uses: actions/checkout@" + "a" * 40
+        + "\n        with:\n          ref: refs/pull/123/head\n"
+    ))
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert _rules(result) == [("github-actions.privileged-untrusted-checkout", 9)]
+
+
+def test_multiline_step_name_body_is_not_an_action_reference(tmp_path):
+    _workflow(tmp_path, (
+        "jobs:\n  review:\n    steps:\n"
+        "      - name: |\n"
+        "          uses: example/unsafe@v1\n"
+        "        uses: actions/checkout@" + "a" * 40 + "\n"
+    ))
+    result = analyze_workflow_repository(str(tmp_path))
+    assert result.status is ToolStatus.COMPLETED
+    assert _rules(result) == []

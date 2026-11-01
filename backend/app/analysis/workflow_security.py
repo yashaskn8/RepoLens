@@ -24,7 +24,7 @@ MAX_FINDINGS = 256
 _SHA40 = re.compile(r"[0-9a-fA-F]{40}\Z")
 _SHA256 = re.compile(r"sha256:[0-9a-fA-F]{64}\Z")
 _USES = re.compile(r"""^\s*(?:-\s*)?(?:uses|'uses'|"uses")\s*:\s*(.*?)\s*$""")
-_BLOCK_START = re.compile(r"^(?P<indent>\s*)(?:-\s*)?[^:#\s][^:]*:\s*[|>][-+0-9]*\s*(?:#.*)?$")
+_BLOCK_START = re.compile(r"^(?P<indent>\s*)(?:-\s*)?(?P<key>[^:#\s][^:]*):\s*[|>][-+0-9]*\s*(?:#.*)?$")
 _WRITE_ALL = re.compile(r"""^\s*(?:permissions|'permissions'|"permissions")\s*:\s*['"]?write-all['"]?\s*(?:#.*)?$""")
 _HEAD_SHA = re.compile(r"""^\s*(?:ref|'ref'|"ref")\s*:\s*(['"]?)\$\{\{\s*github\.event\.pull_request\.head\.(?:sha|ref)\s*\}\}\1\s*$""")
 _HEAD_REPO = re.compile(
@@ -226,9 +226,6 @@ def _inspect_source(path: str, source: str) -> list[StaticFinding]:
             if not raw_line.strip() or indentation > block_indent:
                 continue
             block_indent = None
-        if block := _BLOCK_START.match(raw_line):
-            block_indent = len(block.group("indent"))
-            continue
         line = raw_line.split(" #", 1)[0]
         if not line.strip() or line.lstrip().startswith("#"):
             continue
@@ -243,6 +240,11 @@ def _inspect_source(path: str, source: str) -> list[StaticFinding]:
                 and mapping_stack[0] == (0, "jobs") and mapping_stack[2][1] == "steps"):
             step_start_indent = indentation
             pending_step_inputs.clear()
+        if block := _BLOCK_START.match(raw_line):
+            # A list-item block scalar ('- name: |') starts at the key column.
+            # Preserve same-step sibling keys and skip only scalar body lines.
+            block_indent = block.start("key")
+            continue
         mapping = re.match(
             r"^\s*(?:-\s+)?(?P<key>[A-Za-z_][\w.-]*|'[^']+'|\"[^\"]+\")\s*:\s*(?P<value>.*)$",
             line,
