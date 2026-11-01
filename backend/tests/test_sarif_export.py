@@ -516,3 +516,33 @@ def test_sarif_redacts_unquoted_credential_assignments(client, db_session):
     assert uris == {"src/ordinary.py"} | {
         f"src/safe-{index}.py" for index in range(len(assignments))
     }
+
+def test_sarif_redacts_short_credential_assignments_in_all_export_fields(client, db_session):
+    # Explicit credential assignments can contain valid values shorter than six
+    # characters. Redact them even when canonical redaction does not recognize them.
+    scan = _scan(db_session)
+    assignments = ['password="abc"', "api_key='xy'", "auth_token=xyz", "secret=x"]
+    for index, assignment in enumerate(assignments):
+        finding = _finding(
+            db_session, scan, title=f"Finding {assignment}",
+            description=f"Detector {assignment}", path=f"src/safe-{index}.py",
+        )
+        finding.source_tool = f"tool_{assignment}"
+        finding.detector_id = f"rule_{assignment}"
+        _finding(db_session, scan, path=f"src/unsafe_{assignment}/issue.py")
+    db_session.flush()
+
+    response = client.get(f"/api/v1/scans/{scan.id}/report/sarif")
+    assert response.status_code == 200, response.text
+    run = response.json()["runs"][0]
+    results = run["results"]
+    assert len(results) == len(assignments)
+    assert all("REDACTED" in result["ruleId"] for result in results)
+    assert all("REDACTED" in result["message"]["text"] for result in results)
+    assert all("REDACTED" in rule["shortDescription"]["text"] for rule in run["tool"]["driver"]["rules"])
+    uris = {
+        location["physicalLocation"]["artifactLocation"]["uri"]
+        for result in results for location in result["locations"]
+    }
+    assert uris == {f"src/safe-{index}.py" for index in range(len(assignments))}
+    assert sarif._redact_export_text("Password policy is configured") == "Password policy is configured"
