@@ -356,6 +356,9 @@ def test_sarif_redacts_unquoted_credential_assignments(client, db_session):
         "api_key=syntheticvalue123",
         "password=syntheticvalue123",
         "auth_token=syntheticvalue123",
+        "access_token=syntheticvalue123",
+        "refresh_token=syntheticvalue123",
+        "authorization=syntheticvalue123",
         "password=p@ssword!123",
         "api_key=@synthetic!value",
     ]
