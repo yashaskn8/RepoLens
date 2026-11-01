@@ -30,7 +30,7 @@ _EMBEDDED_NON_GITHUB_SECRET = re.compile(
     r"|AIza[A-Za-z0-9_-]{20,}"
     r"|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
     r"|(?i:bearer\s+)[A-Za-z0-9_.-]{10,}"
-    r"|(?i:aws[_-]?secret[_-]?access[_-]?key|api[_-]?key|secret[_-]?key|private[_-]?key|token|credential|passwd|secret|password|auth[_-]?token|access[_-]?token|refresh[_-]?token|authorization)\s*[:=]\s*(?:['\"][^\r\n'\"]{6,}['\"]|[^\s\x22\x27]{6,})"
+    r"|(?i:aws[_-]?secret[_-]?access[_-]?key|api[_-]?key|secret[_-]?key|private[_-]?key|token|credential|passwd|secret|password|auth[_-]?token|access[_-]?token|refresh[_-]?token|authorization)\s*[:=]\s*(?:"(?:\\[^\r\n]|[^"\\\r\n]){6,}"|'(?:\\[^\r\n]|[^'\\\r\n]){6,}'|[^\s\x22\x27]{6,})"
     r")"
 )
 _LEVELS = {"CRITICAL": "error", "HIGH": "error", "MEDIUM": "warning", "LOW": "note", "INFO": "note"}
@@ -42,8 +42,11 @@ class SarifExportLimitExceeded(ValueError):
 
 def _redact_export_text(value: str) -> str:
     """Cover GitHub tokens embedded in identifiers and prose after underscores."""
-    redacted = _EMBEDDED_GITHUB_TOKEN.sub("[REDACTED_GITHUB_TOKEN]", redact_secrets(value))
-    return _EMBEDDED_NON_GITHUB_SECRET.sub("[REDACTED_API_TOKEN]", redacted)
+    # Match full quoted assignments first: canonical redaction can otherwise
+    # consume only the prefix before an escaped quote and expose the suffix.
+    redacted = _EMBEDDED_NON_GITHUB_SECRET.sub("[REDACTED_API_TOKEN]", value)
+    redacted = redact_secrets(redacted)
+    return _EMBEDDED_GITHUB_TOKEN.sub("[REDACTED_GITHUB_TOKEN]", redacted)
 
 
 def _safe_path(raw: str) -> str | None:
