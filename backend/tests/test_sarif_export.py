@@ -382,6 +382,40 @@ def test_sarif_redacts_complete_bearer_values_in_assignments(client, db_session)
     assert uris == {f"src/safe-{index}.py" for index in range(len(assignments))}
 
 
+
+def test_sarif_redacts_complete_bearer_tokens_with_b64token_punctuation(client, db_session):
+    # RFC 6750 bearer tokens may include +, /, ~ and = padding.
+    # Redacting only the alphanumeric prefix would expose a credential suffix.
+    scan = _scan(db_session)
+    tokens = [
+        "Bearer ABCDEFGHIJKLM+NOPQRSTUVWXYZ/12345==",
+        "Bearer ABCDEFGHIJKLM~QRSTUVWXYZ12345",
+    ]
+    for index, token in enumerate(tokens):
+        finding = _finding(
+            db_session, scan, title=f"Finding {token}",
+            description=f"Detector {token}", path=f"src/safe-{index}.py",
+        )
+        finding.source_tool = f"tool_{token}"
+        finding.detector_id = f"rule_{token}"
+        _finding(db_session, scan, path=f"src/prefix_{token}/issue.py")
+    db_session.flush()
+
+    response = client.get(f"/api/v1/scans/{scan.id}/report/sarif")
+    assert response.status_code == 200, response.text
+    for suffix in ("NOPQRSTUVWXYZ/12345==", "QRSTUVWXYZ12345"):
+        assert suffix not in response.text
+    results = response.json()["runs"][0]["results"]
+    assert len(results) == len(tokens)
+    assert all("REDACTED" in result["ruleId"] for result in results)
+    assert all("REDACTED" in result["message"]["text"] for result in results)
+    uris = {
+        location["physicalLocation"]["artifactLocation"]["uri"]
+        for result in results for location in result["locations"]
+    }
+    assert uris == {"src/safe-0.py", "src/safe-1.py"}
+
+
 def test_sarif_redacts_unquoted_credential_assignments(client, db_session):
     # Unquoted credential values can be embedded after an identifier underscore.
     # These synthetic assignments must not escape into SARIF text or artifact URIs.
